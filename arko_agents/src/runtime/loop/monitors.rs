@@ -32,7 +32,7 @@ impl AgentLoop {
             .usage_history
             .iter()
             .enumerate()
-            .skip(self.task.conversation_usage_start)
+            .skip(self.task.cache_monitor_start())
             .filter(|(index, _)| !self.task.fallback_calls.contains(index))
             .map(|(_, usage)| usage.clone())
             .collect();

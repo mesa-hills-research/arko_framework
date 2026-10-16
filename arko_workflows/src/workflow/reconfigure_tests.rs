@@ -9,9 +9,12 @@ use super::*;
 use crate::persistence::PersistenceConfig;
 use crate::test_support::{ProbeTool, ResponsesServer, Workspace, agent_config, text_turn};
 
-/// The agent as a chat: offered no tools, its reply in text ends its task.
+/// The agent as a chat (`AgentToolConfig::chat`): offered no tools, its
+/// reply in text ends its task.
 fn chat() -> AgentConfig {
     let mut config = agent_config("Main");
+    config.tool_config.chat = true;
+    config.tool_config.available_tool_names.clear();
     config.tool_config.text_reply_ends_task = true;
     config.instructions = "Chat with the user.".into();
     config
@@ -20,6 +23,7 @@ fn chat() -> AgentConfig {
 /// The agent as an agent: offered the probe.
 fn agent() -> AgentConfig {
     let mut config = chat();
+    config.tool_config.chat = false;
     config.tool_config.available_tool_names = vec!["probe".into()];
     config.instructions = "Work on the user's task.".into();
     config
@@ -122,4 +126,44 @@ async fn a_run_is_reconfigured_with_its_model() {
         "{error}"
     );
     assert_eq!(server.requests(), 1);
+}
+
+/// Only an agent set as a chat goes without the workflow's tools: one that
+/// lists no tools of its own (its reply in text ending its task) still gets
+/// the tools registered for it, as before.
+#[tokio::test]
+async fn only_a_chat_goes_without_the_workflow_s_tools() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let mut quiet = chat();
+    quiet.tool_config.chat = false;
+    let workflow = Workflow::builder()
+        .name("chat-flag-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("quiet", quiet)
+        .agent("chat", chat())
+        .agent_tool("quiet", ProbeTool::new("probe", false))
+        .agent_tool("chat", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    workflow.run_agent("quiet", "Hello.").await.unwrap();
+    workflow.run_agent("chat", "Hello.").await.unwrap();
+    let bodies: Vec<Value> = server
+        .bodies()
+        .iter()
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    // The workflow's tools: the one registered for it, and messaging.
+    let quiet_tools = tool_names(&bodies[0]);
+    assert!(
+        quiet_tools.contains(&"probe".to_string()),
+        "{quiet_tools:?}"
+    );
+    assert!(
+        quiet_tools.contains(&"send_message".to_string()),
+        "{quiet_tools:?}"
+    );
+    assert!(tool_names(&bodies[1]).is_empty());
 }

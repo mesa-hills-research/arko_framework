@@ -45,26 +45,13 @@ impl Task {
     /// tool results are left out. Messages before a handover are not in
     /// the conversation any more.
     pub fn user_turns(&self) -> Vec<UserTurn> {
-        let reminder = self
-            .agent_config
-            .user_reminder
-            .as_ref()
-            .map(|reminder| reminder.content.as_str());
         self.conversation
             .messages
             .iter()
             .enumerate()
             .filter(|(index, message)| self.is_user_turn(*index, message))
             .map(|(index, message)| {
-                let text: String = message
-                    .content
-                    .iter()
-                    .filter_map(Content::as_text)
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                let text =
-                    text[..super::refusal::runtime_sections_start(&text, reminder)].to_string();
+                let text = self.host_text(message);
                 let kind = if text.starts_with(CONTEXT_UPDATE) {
                     UserTurnKind::ContextUpdate
                 } else if index == 0 {
@@ -84,6 +71,23 @@ impl Task {
                 }
             })
             .collect()
+    }
+
+    /// The text of a message the host sent, without the environment details
+    /// and reminder the runtime added after it.
+    pub(crate) fn host_text(&self, message: &Message) -> String {
+        let reminder = self
+            .agent_config
+            .user_reminder
+            .as_ref()
+            .map(|reminder| reminder.content.as_str());
+        let text = message
+            .content
+            .iter()
+            .filter_map(Content::as_text)
+            .next()
+            .unwrap_or_default();
+        text[..super::refusal::runtime_sections_start(text, reminder)].to_string()
     }
 
     fn is_user_turn(&self, index: usize, message: &Message) -> bool {
@@ -161,6 +165,7 @@ impl Task {
         }
         branch.conversation_usage_start = 0;
         branch.conversation_model_call_start = 0;
+        branch.cache_window_start = 0;
         // A task still to fork its session (a branch that hasn't run) is
         // branched from the same session.
         if let Some(own) = branch.claude_code_session.take() {
@@ -190,8 +195,17 @@ impl Task {
         self.pending_context_injections.clear();
         self.pending_context_images.clear();
         self.handover_requested = None;
-        self.conversation_usage_start = self.usage_history.len();
-        self.conversation_model_call_start = self.model_call_usage_history.len();
+        if index == 0 {
+            // A new conversation: its usage starts here.
+            self.conversation_usage_start = self.usage_history.len();
+            self.conversation_model_call_start = self.model_call_usage_history.len();
+            self.context_size_unknown = false;
+        } else {
+            // The same conversation, shorter: its first call (which decides
+            // whether it can hand over) stays, and its size is unknown until
+            // the next call.
+            self.context_size_unknown = true;
+        }
         self.user_message_count = self
             .conversation
             .messages

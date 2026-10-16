@@ -1370,12 +1370,7 @@ fn roster_section(ctx: &SharedContext, agent_name: &str, task: &Task, shown: boo
         &recipients,
         ctx.paused.load(std::sync::atomic::Ordering::Acquire),
     );
-    let chat = task
-        .agent_config
-        .tool_config
-        .offered_tool_names()
-        .is_empty();
-    if !shown || chat {
+    if !shown || task.agent_config.tool_config.chat {
         return String::new();
     }
     format!("{ROSTER_HEADING}{}", render_recipients(ctx, &roster))
@@ -1611,14 +1606,9 @@ impl HandoverHook for WorkflowHandover {
             context.push_str(ROSTER_HEADING);
             context.push_str(&render_recipients(ctx, &roster));
         }
-        // A chat (an agent offered no tools) goes on from the user's latest
-        // input, not from its first message.
-        let task_prompt = if task
-            .agent_config
-            .tool_config
-            .offered_tool_names()
-            .is_empty()
-        {
+        // A chat goes on from the user's latest input, not from its first
+        // message.
+        let task_prompt = if task.agent_config.tool_config.chat {
             HandoverSeed::for_chat(task).task_prompt
         } else {
             task_part(prompt).to_string()
@@ -2667,9 +2657,9 @@ impl WorkflowEngine {
         role: RunRole,
     ) -> AgentConfig {
         let mut config = base_config.clone();
-        // A chat (an agent offered no tools of its own) stays one: it gets
-        // none of the workflow's tools either.
-        if config.tool_config.offered_tool_names().is_empty() {
+        // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
+        // workflow's tools.
+        if config.tool_config.chat {
             return config;
         }
 

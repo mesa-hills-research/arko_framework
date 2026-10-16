@@ -264,13 +264,18 @@ configured model (or the refusal fallback) doesn't accept
 (`Model::supports_forced_tool_choice`) fails validation, at build and when a task starts.
 
 An agent offered no tools at all (an empty `available_tool_names` with `text_reply_ends_task`
-on, so it isn't offered `complete_task` either) is a plain chat: its requests carry no tool
-configuration, its system prompt has no section about tools, and each reply ends the task.
-On a Claude Code model it runs with Claude Code's built-in tools off. A handover set on it
-asks for the report as a reply in text, so its requests stay without tools (see
-[Conversation handover](#conversation-handover)). A request without tools sends earlier tool
-calls and results as text (`arko_ai::Conversation::tool_history_as_text`), so a conversation
-that used tools goes on as a chat.
+on, so it isn't offered `complete_task` either) makes requests with no tool configuration,
+and its system prompt has no section about tools. On a Claude Code model it runs with Claude
+Code's built-in tools off. A request without tools sends earlier tool calls and results as
+text (`arko_ai::Conversation::tool_history_as_text`), so a conversation that used tools goes
+on without them.
+
+A chat is an agent set as one: `AgentToolConfig::chat()` (the `chat` field, off by default).
+It is offered no tools, its reply in text ends its task, a host gives it none of its own
+tools (a workflow adds no messaging, memory, subagent or registered tools, and lists no
+agents to message), and a handover asks it for a summary in text and answers the user's
+latest message from it (see [Conversation handover](#conversation-handover)). An agent that
+only lists no tools isn't a chat: it keeps what its host gives every agent.
 
 ### Several calls in one response
 
@@ -1512,8 +1517,8 @@ let config = AgentConfig::builder(id, name, llm_config)
 `Task::handover_requested` and hands over when it runs again; continuing a completed task
 clears it.
 
-**Chats.** An agent offered no tools (see [Tool calling modes](#tool-calling-modes)) hands
-over without a tool, so its requests stay without tools. It is never offered
+**Chats.** A chat (`AgentToolConfig::chat`, see [Tool calling modes](#tool-calling-modes))
+hands over without a tool, so its requests stay without tools. It is never offered
 `handover_report`, even with `handover` set, and replies with the report in text. The
 report request is `DEFAULT_CHAT_REPORT_REQUEST` (or `report_request`, read through
 `HandoverConfig::chat_report_request`): a summary of the conversation that leaves the
@@ -1523,7 +1528,10 @@ model's last reply (`handover::unanswered_user_messages`), followed by the summa
 their images go into the same first message. The model then answers that message from the
 summary, and its reply ends the task as usual. The workflow engine's hook does the same for
 these agents. A host turns it on as for any agent: `handover` with a threshold, a
-`HandoverThreshold`, or `UserCommand::RequestHandover`.
+`HandoverThreshold`, or `UserCommand::RequestHandover`. A chat on a Claude Code model writes
+its summary at the start of its next run, before the host's new message: its turns end with
+a reply and no tool call, so the report request can't reach it during one. The new message
+waits for the fresh session, which answers it.
 
 **Hosts.** `AgentRuntime::with_handover_hook` takes a `HandoverHook`, whose
 `on_handover(task, report)` is called while the task still holds the old conversation and

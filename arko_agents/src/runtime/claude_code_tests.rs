@@ -619,10 +619,13 @@ async fn a_reconfigured_task_resumes_its_session_with_the_new_prompt_and_tools()
     assert!(task.claude_code_prompt_changed);
 }
 
-/// A cc agent whose replies in text end its task (a chat).
+/// A cc chat (`AgentToolConfig::chat`): no tools, its replies in text end
+/// its task.
 fn chat_config(fake: &Fake) -> crate::agent_config::AgentConfig {
     let mut config = config(fake, &[]);
+    config.tool_config.available_tool_names.clear();
     config.tool_config.text_reply_ends_task = true;
+    config.tool_config.chat = true;
     config
 }
 
@@ -801,6 +804,97 @@ async fn a_cache_refresh_pings_a_fork_that_isn_t_saved() {
         "{history:?}"
     );
     assert_eq!(texts(&task).last().map(String::as_str), Some("Again."));
+}
+
+/// A chat over the handover size hands over at its next message: the
+/// report request goes alone first (a chat's turns end with a reply, so it
+/// can't go during one), the summary replaces the conversation, and the
+/// fresh session answers the message that was waiting.
+#[tokio::test]
+async fn a_chat_over_the_handover_size_hands_over_at_its_next_message() {
+    let fake = Fake::new(json!([
+        [{"text": "Answer one.", "input_tokens": 500}],
+        [{"text": "Answer two.", "input_tokens": 1500}],
+        [{"text": "SUMMARY: questions one and two, answered.", "input_tokens": 1600}],
+        [{"text": "Answer three.", "input_tokens": 300}],
+    ]));
+    let mut config = chat_config(&fake);
+    config.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let task = Task::new(config, "Question one.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    task.prepare_for_resumption_from_completed("Question two.".into())
+        .unwrap();
+    let (mut task, _) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Answer two.")
+    );
+    assert!(task.handovers.is_empty());
+    task.prepare_for_resumption_from_completed("Question three.".into())
+        .unwrap();
+    let (task, events) = start(task).finish().await;
+
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Answer three."),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(
+        task.handovers[0].report,
+        "SUMMARY: questions one and two, answered."
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { input_tokens: 1500 }))
+    );
+    let sent = user_texts(&fake);
+    assert!(
+        sent[2].starts_with(crate::handover::DEFAULT_CHAT_REPORT_REQUEST),
+        "{}",
+        sent[2]
+    );
+    assert!(!sent[2].contains("Question three."));
+    assert!(sent[3].starts_with("Question three."), "{}", sent[3]);
+    assert!(sent[3].contains("SUMMARY: questions one and two, answered."));
+    // The fresh session is a new conversation.
+    assert_eq!(histories(&fake)[3].len(), 0);
+}
+
+/// A conversation cut back while over the handover size still hands over:
+/// the cut keeps the conversation's first request (under the size) as it
+/// was.
+#[tokio::test]
+async fn a_cut_back_over_the_handover_size_still_hands_over() {
+    let fake = Fake::new(json!([
+        [{"text": "One.", "input_tokens": 500}],
+        [{"text": "Two.", "input_tokens": 1100}],
+        [
+            {"tool": "Grep", "input": {"pattern": "x"}, "input_tokens": 1200},
+            {"text": "REPORT: one, and two again."},
+        ],
+        [{"text": "Two, again.", "input_tokens": 300}],
+    ]));
+    let mut config = replying(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let task = Task::new(config, "First.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    task.prepare_for_resumption_from_completed("Second.".into())
+        .unwrap();
+    let (mut task, _) = start(task).finish().await;
+    task.cut_back(2).unwrap();
+    task.prepare_for_resumption_from_completed("Second, once more.".into())
+        .unwrap();
+    let (task, events) = start(task).finish().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { input_tokens: 1200 }))
+    );
+    assert_eq!(task.handovers.len(), 1, "{:?}", task.current_state);
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Two, again.")
+    );
 }
 
 /// Records what a tool image sink is given: the call's ID, name and images.

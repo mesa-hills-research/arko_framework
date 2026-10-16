@@ -450,6 +450,10 @@ fn agent_config(
         // a reply in plain text the final reply, which ends the task, and
         // complete_task is no longer offered.
         text_reply_ends_task: false,
+        // Default false: an agent with tools. True makes it a chat: no tools
+        // at all (the workflow adds none either), and its reply in text ends
+        // its task.
+        chat: false,
     };
     let mut builder = AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())

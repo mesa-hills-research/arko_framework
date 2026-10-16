@@ -362,9 +362,7 @@ impl AgentLoop {
         if self.current_request_is_fallback {
             self.prepare_fallback_response(&mut generation_response);
         }
-        self.task
-            .usage_history
-            .push(generation_response.usage.clone());
+        self.task.record_usage(generation_response.usage.clone());
         // The request was answered: its usage calibrates
         // the estimate of the next one.
         self.answered_request = self.sent_request.take();

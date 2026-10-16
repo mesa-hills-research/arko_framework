@@ -467,6 +467,18 @@ pub struct Task {
     /// The same index in `model_call_usage_history`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conversation_model_call_start: usize,
+    /// The conversation was cut back ([`Task::cut_back`]) since its latest
+    /// model call, so that call's size is no longer the conversation's:
+    /// [`current_conversation_context_size`](Self::current_conversation_context_size)
+    /// is `None` until the next call. The conversation's first call stays
+    /// where it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_size_unknown: bool,
+    /// Index in `usage_history` of the first call the cache monitor judges:
+    /// the conversation's first, or the first after a change of the prompt
+    /// prefix ([`Task::reconfigure`]), whose full cache write is expected.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_window_start: usize,
     /// The Claude Code session holding the conversation of a task whose
     /// model runs in Claude Code, resumed when the task runs again. A
     /// handover starts a new one.
@@ -680,6 +692,8 @@ impl Task {
             handovers: Vec::new(),
             conversation_usage_start: 0,
             conversation_model_call_start: 0,
+            context_size_unknown: false,
+            cache_window_start: 0,
             claude_code_session: None,
             claude_code_synced: 0,
             claude_code_prompt_changed: false,
@@ -800,6 +814,9 @@ impl Task {
         self.agent_config = config;
         self.conversation.system_message = None;
         self.reconfigured = true;
+        // The new prompt prefix is written to the cache afresh: the cache
+        // monitor judges the calls from here.
+        self.cache_window_start = self.usage_history.len();
         if self.claude_code_session.is_some() {
             self.claude_code_prompt_changed = true;
         }
@@ -984,11 +1001,31 @@ impl Task {
     /// [`current_context_size`](Self::current_context_size), but `None`
     /// after a handover until the fresh conversation's first call.
     pub fn current_conversation_context_size(&self) -> Option<usize> {
-        if self.usage_history.len() > self.conversation_usage_start {
-            self.current_context_size()
-        } else {
-            None
+        self.latest_conversation_usage()
+            .map(|usage| usage.input_tokens)
+    }
+
+    /// The usage of the current conversation's latest model call: `None`
+    /// before its first, and after a cut back until the next call.
+    pub fn latest_conversation_usage(&self) -> Option<&UsageInfo> {
+        if self.context_size_unknown {
+            return None;
         }
+        self.usage_history
+            .get(self.conversation_usage_start..)
+            .and_then(<[UsageInfo]>::last)
+    }
+
+    /// The first call the cache monitor judges: the conversation's first,
+    /// or the first after a reconfiguration.
+    pub fn cache_monitor_start(&self) -> usize {
+        self.conversation_usage_start.max(self.cache_window_start)
+    }
+
+    /// Records a model call's usage: the conversation's size is known again.
+    pub fn record_usage(&mut self, usage: UsageInfo) {
+        self.usage_history.push(usage);
+        self.context_size_unknown = false;
     }
 
     /// Replaces the conversation with an empty one that keeps the system

@@ -26,14 +26,16 @@ pub(super) fn replying_agent(
     agent_for(task, registry, Arc::new(ai::LLMClient::new()))
 }
 
-/// A native agent offered nothing: no tools, and its reply in text ends
-/// the task.
+/// A native chat (`AgentToolConfig::chat`): no tools, and its reply in
+/// text ends the task.
 pub(super) fn chat_agent() -> (
     AgentLoop,
     mpsc::Receiver<AgentEvent>,
     mpsc::Sender<UserCommand>,
 ) {
-    replying_agent(&[])
+    let (mut agent, events, commands) = replying_agent(&[]);
+    agent.task.agent_config.tool_config.chat = true;
+    (agent, events, commands)
 }
 
 pub(super) fn push(agent: &mut AgentLoop, replies: &[&str]) {

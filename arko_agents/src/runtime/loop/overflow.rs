@@ -107,11 +107,7 @@ impl AgentLoop {
         }
         let whole =
             result_budget::request_bytes(&self.task.conversation, &self.build_generation_config());
-        let latest = self
-            .task
-            .usage_history
-            .get(self.task.conversation_usage_start..)
-            .and_then(<[ai::UsageInfo]>::last);
+        let latest = self.task.latest_conversation_usage();
         if least {
             return result_budget::least_tokens(whole)
                 .max(latest.map_or(0, |usage| usage.input_tokens));

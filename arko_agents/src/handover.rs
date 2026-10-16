@@ -440,15 +440,19 @@ impl HandoverSeed {
     /// [`for_task`](Self::for_task) when there are none. Their images go
     /// into the fresh conversation's first message too.
     pub fn for_chat(task: &Task) -> Self {
+        // Each message as the host sent it, without the environment details
+        // and reminder the runtime added (the fresh conversation's first
+        // message gets its own); a message of images alone says so.
         let text = unanswered_user_messages(task)
             .into_iter()
             .map(|message| {
-                message
-                    .content
-                    .iter()
-                    .filter_map(arko_ai::Content::as_text)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                let text = task.host_text(message);
+                match (text.trim().is_empty(), message.image_count()) {
+                    (false, _) => text,
+                    (true, 0) => String::new(),
+                    (true, 1) => "(The user sent the image below.)".to_string(),
+                    (true, _) => "(The user sent the images below.)".to_string(),
+                }
             })
             .filter(|text| !text.trim().is_empty())
             .collect::<Vec<_>>()
@@ -702,6 +706,28 @@ mod tests {
         let task_images = seed_images(&task, false);
         assert_eq!(task_images.len(), 1);
         assert_eq!(task_images[0].as_image(), Some(&chart));
+
+        // The runtime's environment details aren't restated (the fresh
+        // first message gets its own), and a message of an image alone
+        // says so instead of answering the task's first prompt.
+        let mut task = Task::new(
+            task.agent_config.clone(),
+            "Hello.".into(),
+            "/w".into(),
+            None,
+        );
+        let conversation = &mut task.conversation;
+        conversation.add_user_message("Hello.");
+        conversation.add_assistant_message("Hi.");
+        conversation.add_user_message(
+            "Look.\n\n# Current Environment Information (updated this turn)\ncwd: /w",
+        );
+        conversation.add_user_message_with_contents(vec![arko_ai::Content::Image(chart.clone())]);
+        assert_eq!(
+            HandoverSeed::for_chat(&task).task_prompt,
+            "Look.\n\n(The user sent the image below.)"
+        );
+        assert_eq!(seed_images(&task, true).len(), 1);
     }
 
     #[test]

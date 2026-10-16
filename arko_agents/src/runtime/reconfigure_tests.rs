@@ -8,13 +8,16 @@ use super::*;
 
 fn chat_config() -> AgentConfig {
     let mut config = super::tests::test_config();
-    config.tool_config.available_tool_names.clear();
-    config.tool_config.text_reply_ends_task = true;
+    config.tool_config = crate::agent_config::AgentToolConfig {
+        tool_calling_mode: config.tool_config.tool_calling_mode,
+        ..crate::agent_config::AgentToolConfig::chat()
+    };
     config
 }
 
 fn agent_config(tools: &[&str]) -> AgentConfig {
     let mut config = chat_config();
+    config.tool_config.chat = false;
     config.tool_config.available_tool_names = tools.iter().map(|tool| tool.to_string()).collect();
     config
 }
@@ -144,4 +147,95 @@ fn a_task_is_reconfigured_between_turns_with_its_model() {
     .unwrap();
     assert!(fresh.get("reconfigured").is_none());
     assert!(fresh.get("claude_code_prompt_changed").is_none());
+}
+
+/// A cut back past the first message keeps the conversation's first call
+/// as it was: a conversation that went over the handover size and was cut
+/// back (an edit, a regenerate) still hands over once its next call is
+/// over the size again. Its size is unknown until that call.
+#[tokio::test]
+async fn a_cut_back_over_the_handover_size_still_hands_over() {
+    let (agent, _events, _commands) = replying_agent(&["plain_text"]);
+    let mut task = agent.task;
+    task.agent_config.handover = Some(crate::handover::HandoverConfig::at_input_tokens(1000));
+    let usage = |input| ai::UsageInfo::new(input, 10);
+    task.conversation.add_user_message("First.");
+    task.record_usage(usage(500));
+    task.conversation.add_assistant_message("One.");
+    task.conversation.add_user_message("Second.");
+    task.record_usage(usage(1100));
+    task.conversation.add_assistant_message("Two.");
+    task.set_state(TaskState::Completed {
+        summary: "Two.".into(),
+    });
+
+    task.cut_back(2).unwrap();
+    assert_eq!(task.conversation_usage_start, 0);
+    assert_eq!(task.current_conversation_context_size(), None);
+    task.prepare_for_resumption_from_completed("Second, again.".into())
+        .unwrap();
+    // The next call is over the size: the handover starts before the one
+    // after it.
+    task.record_usage(usage(1200));
+    assert_eq!(task.current_conversation_context_size(), Some(1200));
+    task.conversation.add_assistant_message("Two, again.");
+    task.conversation.add_user_message("Third.");
+    let (mut agent, _events, _commands) =
+        agent_for(task, registry(), Arc::new(ai::LLMClient::new()));
+    agent.start_handover_if_due().await.unwrap();
+    assert!(agent.task.handover_requested.is_some());
+}
+
+/// A reconfiguration starts the cache monitor's window over: the new
+/// prefix's full cache write isn't held against the conversation.
+#[test]
+fn a_reconfiguration_starts_the_cache_window_over() {
+    let mut task = Task::new(chat_config(), "Hi.".into(), std::env::temp_dir(), None);
+    task.record_usage(ai::UsageInfo::new(100, 10));
+    task.set_state(TaskState::Completed {
+        summary: "Hello.".into(),
+    });
+    assert_eq!(task.cache_monitor_start(), 0);
+    task.reconfigure(agent_config(&["plain_text"])).unwrap();
+    assert_eq!(task.cache_monitor_start(), 1);
+    assert_eq!(task.conversation_usage_start, 0);
+}
+
+/// A chat is what says so: `AgentToolConfig::chat()` is offered nothing and
+/// ends its task with text; an agent that merely lists no tools isn't one.
+/// A chat can't list tools, run output-based, or send replies as messages.
+#[test]
+fn a_chat_is_explicit() {
+    use crate::agent_config::{AgentToolConfig, ToolCallingMode};
+    let chat = AgentToolConfig::chat();
+    assert!(chat.chat && chat.offered_tool_names().is_empty() && chat.ends_task_with_text());
+    let quiet = AgentToolConfig {
+        available_tool_names: Vec::new(),
+        text_reply_ends_task: true,
+        ..AgentToolConfig::default()
+    };
+    assert!(!quiet.chat);
+    let mut config = chat_config();
+    config.validate().unwrap();
+    let refused = |change: fn(&mut AgentToolConfig)| {
+        let mut config = chat_config();
+        change(&mut config.tool_config);
+        config.validate().unwrap_err().to_string()
+    };
+    assert!(
+        refused(|tools| tools.available_tool_names = vec!["read_file".into()])
+            .contains("offered no tools")
+    );
+    assert!(
+        refused(|tools| tools.tool_calling_mode = ToolCallingMode::OutputBased)
+            .contains("native mode")
+    );
+    assert!(refused(|tools| tools.text_reply_as_message = true).contains("text_reply_as_message"));
+    // Saved without the field unless it is on, and older configurations
+    // load without it.
+    config.tool_config.chat = false;
+    let saved = serde_json::to_value(&config.tool_config).unwrap();
+    assert!(saved.get("chat").is_none(), "{saved}");
+    let loaded: AgentToolConfig = serde_json::from_value(saved).unwrap();
+    assert!(!loaded.chat);
 }

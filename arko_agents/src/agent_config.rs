@@ -575,6 +575,21 @@ pub struct AgentToolConfig {
     /// the same reply another meaning.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_reply_ends_task: bool,
+    /// The agent is a chat (off by default; the `AgentToolConfig::chat()`
+    /// constructor makes one): it is offered no tools, not even `complete_task`, and its
+    /// reply in text ends its task, as with
+    /// [`text_reply_ends_task`](Self::text_reply_ends_task). Hosts give it
+    /// none of their own tools either: a workflow adds neither its
+    /// messaging, memory and subagent tools nor its workflow-wide and
+    /// agent tools, and lists no agents to message. A handover asks it for
+    /// a summary in text, and the fresh conversation answers the user's
+    /// latest message ([`HandoverSeed::for_chat`](crate::handover::HandoverSeed::for_chat)).
+    /// Native mode only, with no `available_tool_names` (other than
+    /// `complete_task`) and without `text_reply_as_message`. An agent is a
+    /// chat only when this is set: one that merely lists no tools keeps the
+    /// tools and behaviour its host gives every agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
 }
 
 /// The terminal tool that starts a command; an agent offered it has a
@@ -613,6 +628,8 @@ struct AgentToolConfigRepr {
     text_reply_as_message: bool,
     #[serde(default)]
     text_reply_ends_task: bool,
+    #[serde(default)]
+    chat: bool,
     /// Removed: every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
@@ -641,6 +658,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             read_file_line_ranges: repr.read_file_line_ranges,
             text_reply_as_message: repr.text_reply_as_message,
             text_reply_ends_task: repr.text_reply_ends_task,
+            chat: repr.chat,
         }
     }
 }
@@ -650,11 +668,26 @@ fn default_auto_approve_tool_use_false() -> bool {
 }
 
 impl AgentToolConfig {
+    /// A chat's tool configuration: no tools, and a reply in text ends the
+    /// task; see the `chat` field.
+    pub fn chat() -> Self {
+        Self {
+            available_tool_names: Vec::new(),
+            text_reply_ends_task: true,
+            chat: true,
+            ..Self::default()
+        }
+    }
+
     /// The names of the tools the agent is offered and can run:
     /// `available_tool_names` and `complete_task`, without `complete_task`
     /// for an agent whose reply in text ends the task
-    /// ([`ends_task_with_text`](Self::ends_task_with_text)).
+    /// ([`ends_task_with_text`](Self::ends_task_with_text)), and none for a
+    /// chat (the `chat` field).
     pub fn offered_tool_names(&self) -> HashSet<String> {
+        if self.chat {
+            return HashSet::new();
+        }
         let complete_task = crate::tool::builtins::COMPLETE_TASK_TOOL_NAME;
         let offers_complete_task = !self.ends_task_with_text();
         self.available_tool_names
@@ -670,7 +703,8 @@ impl AgentToolConfig {
     /// (output-based mode ignores it). Such an agent is not offered
     /// `complete_task`.
     pub fn ends_task_with_text(&self) -> bool {
-        self.text_reply_ends_task && self.tool_calling_mode == ToolCallingMode::Native
+        (self.text_reply_ends_task || self.chat)
+            && self.tool_calling_mode == ToolCallingMode::Native
     }
 
     /// The host-side time limit of a call to `tool_name`: its
@@ -718,6 +752,32 @@ impl AgentToolConfig {
     }
 
     fn validate(&self) -> Result<(), ArkoAgentsError> {
+        if self.chat {
+            let complete_task = crate::tool::builtins::COMPLETE_TASK_TOOL_NAME;
+            let problem = if self.tool_calling_mode != ToolCallingMode::Native {
+                Some("a chat runs in native mode".to_string())
+            } else if self.text_reply_as_message {
+                Some(
+                    "a chat's reply ends its task, so text_reply_as_message can't be on"
+                        .to_string(),
+                )
+            } else {
+                self.available_tool_names
+                    .iter()
+                    .find(|name| *name != complete_task)
+                    .map(|name| {
+                        format!(
+                            "a chat is offered no tools, but available_tool_names lists '{name}'"
+                        )
+                    })
+            };
+            if let Some(problem) = problem {
+                return Err(ArkoAgentsError::BuilderError {
+                    struct_name: "AgentToolConfig".into(),
+                    message: format!("{problem}; turn chat off to offer tools."),
+                });
+            }
+        }
         if self.text_reply_ends_task && self.text_reply_as_message {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
@@ -772,6 +832,7 @@ impl Default for AgentToolConfig {
             read_file_line_ranges: false,
             text_reply_as_message: false,
             text_reply_ends_task: false,
+            chat: false,
         }
     }
 }

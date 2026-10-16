@@ -23,10 +23,11 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
   reply instead: it completes the task with the text as the summary, and the agent isn't
   offered `complete_task`. It works in native mode and on Claude Code models, and is
   refused together with `text_reply_as_message` and on agents a completion verifier
-  reviews or runs on. See [Tools](reference-map.md#tools-arko_agents). With no
-  `available_tool_names` as well, the agent is a chat: its requests carry no tools, a
-  workflow adds none of its own tools to it (messaging, memory, subagents, workflow-wide
-  tools), and a handover asks for a summary in text.
+  reviews or runs on. See [Tools](reference-map.md#tools-arko_agents).
+- `AgentToolConfig::chat` (`false`) makes the agent a chat: no tools, its reply in text ends
+  its task, a workflow adds none of its own tools (messaging, memory, subagents, registered
+  tools) and no list of recipients, and a handover asks for a summary in text. Only an agent
+  set this way is a chat: one that merely lists no tools keeps the workflow's tools.
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
 

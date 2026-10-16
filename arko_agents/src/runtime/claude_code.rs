@@ -1392,7 +1392,7 @@ impl ClaudeCodeRun {
             self.compaction = Some(Compaction::Due);
             return Ok(());
         }
-        let input_tokens = self.context_size.unwrap_or(0);
+        let input_tokens = self.latest_size();
         self.task.handover_requested = Some(HandoverRequest {
             report_requested: true,
             ..HandoverRequest::new(input_tokens)
@@ -1425,7 +1425,7 @@ impl ClaudeCodeRun {
 
     fn report_request(&self) -> String {
         let handover = self.task.agent_config.handover.as_ref();
-        if self.offers_no_tools() {
+        if self.is_chat() {
             return handover
                 .map_or(crate::handover::DEFAULT_CHAT_REPORT_REQUEST, |config| {
                     config.chat_report_request()
@@ -1439,8 +1439,13 @@ impl ClaudeCodeRun {
             .to_string()
     }
 
+    /// The agent is a chat (`AgentToolConfig::chat`).
+    fn is_chat(&self) -> bool {
+        self.task.agent_config.tool_config.chat
+    }
+
     /// The agent is offered nothing: neither arko's tools nor Claude Code's
-    /// built-ins, and a reply in text ends its task (a chat).
+    /// built-ins.
     fn offers_no_tools(&self) -> bool {
         self.task
             .agent_config
@@ -1838,9 +1843,49 @@ impl ClaudeCodeRun {
         if self.task.claude_code_synced == 0 && self.compaction == Some(Compaction::Due) {
             self.compaction = None;
         }
+        // A chat over the handover size (or asked to hand over) writes its
+        // summary first. Its turns end with a reply and no tool call, so the
+        // report request can't reach it during a turn: it goes alone at the
+        // start of the next one, and the host's messages since the last reply
+        // wait for the fresh conversation, which answers them
+        // (`HandoverSeed::for_chat`).
+        let chat_reports = self.is_chat()
+            && self.compaction.is_none()
+            && !self.compacts()
+            && self.task.claude_code_synced > 0
+            && !self.report_delivered;
+        if chat_reports
+            && !self.handover_due()
+            && let Some(size) = self.over_threshold(self.latest_size())
+        {
+            log::info!(
+                "Task {}: Handover due at {size} input tokens.",
+                self.task.id
+            );
+            self.note_handover_request().await?;
+        }
         let input = if self.compaction == Some(Compaction::Due) {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
+        } else if chat_reports && self.handover_due() {
+            self.report_delivered = true;
+            let request = self.report_request();
+            self.add_user_message(&request)?;
+            self.task.claude_code_synced = self.task.conversation.messages.len();
+            Value::String(
+                self.task
+                    .conversation
+                    .messages
+                    .last()
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(ai::Content::as_text)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default(),
+            )
         } else {
             self.unsent_input()?
         };
@@ -3357,7 +3402,7 @@ impl ClaudeCodeRun {
         if thread.is_some() {
             self.subagent_calls.push(self.task.usage_history.len());
         }
-        self.task.usage_history.push(info.clone());
+        self.task.record_usage(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
         let served = pending.model.unwrap_or_else(|| model.id.clone());
         let mut call = ai::ModelCallUsage::new(
@@ -3482,7 +3527,7 @@ impl ClaudeCodeRun {
             .usage_history
             .iter()
             .enumerate()
-            .skip(self.task.conversation_usage_start)
+            .skip(self.task.cache_monitor_start())
             .filter(|(index, _)| !self.subagent_calls.contains(index))
             .map(|(_, usage)| usage.clone())
             .collect();
@@ -4345,7 +4390,7 @@ impl ClaudeCodeRun {
     /// report, in the same task.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
-        let chat = self.offers_no_tools();
+        let chat = self.is_chat();
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
             None if chat => HandoverSeed::for_chat(&self.task),

@@ -144,11 +144,11 @@ impl AgentLoop {
         request.report_requested = true;
         let input_tokens = request.input_tokens;
         let completes = !self.task.agent_config.tool_config.ends_task_with_text();
-        let report_request = match (&config, self.offers_tools()) {
-            (Some(config), true) => config.report_request_for(with_tool, completes),
-            (None, true) => crate::handover::default_report_request_for(with_tool, completes),
-            (Some(config), false) => config.chat_report_request(),
-            (None, false) => crate::handover::DEFAULT_CHAT_REPORT_REQUEST,
+        let report_request = match (&config, self.task.agent_config.tool_config.chat) {
+            (Some(config), false) => config.report_request_for(with_tool, completes),
+            (None, false) => crate::handover::default_report_request_for(with_tool, completes),
+            (Some(config), true) => config.chat_report_request(),
+            (None, true) => crate::handover::DEFAULT_CHAT_REPORT_REQUEST,
         };
         if std::mem::take(&mut self.step_left_out) {
             self.task.conversation.add_user_message(&format!(
@@ -199,7 +199,7 @@ impl AgentLoop {
     /// report, and resets what the loop keeps about the old one.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
-        let chat = !self.offers_tools();
+        let chat = self.task.agent_config.tool_config.chat;
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
             None if chat => HandoverSeed::for_chat(&self.task),
