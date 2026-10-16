@@ -115,6 +115,19 @@ fn options_become_cli_arguments() {
         "mcp__math__add"
     );
     assert!(!joined.contains("--system-prompt-snapshot"), "{joined}");
+    let fork = ClaudeOptions {
+        session: SessionStart::Fork {
+            session: "abc".into(),
+            at: Some("m1".into()),
+            new_session: "def".into(),
+        },
+        ..ClaudeOptions::default()
+    };
+    assert!(
+        fork.arguments()
+            .join(" ")
+            .contains("--resume=abc --fork-session --session-id=def --resume-session-at=m1")
+    );
     let unrecorded = ClaudeOptions {
         system_prompt_snapshot: Some(false),
         ..ClaudeOptions::default()

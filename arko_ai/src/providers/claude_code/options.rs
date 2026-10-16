@@ -28,6 +28,15 @@ pub enum SessionStart {
         fork: bool,
         at: Option<String>,
     },
+    /// A copy of an earlier conversation under the new session ID
+    /// `new_session` (a UUID), up to the message with UUID `at` when given
+    /// (`--resume --fork-session --session-id --resume-session-at`). The
+    /// original is left unchanged.
+    Fork {
+        session: String,
+        at: Option<String>,
+        new_session: String,
+    },
     /// The most recent conversation in the working directory.
     Continue,
 }
@@ -323,6 +332,20 @@ impl ClaudeOptions {
                 if *fork {
                     push(&["--fork-session"]);
                 }
+                if let Some(at) = at {
+                    push(&[&format!("--resume-session-at={at}")]);
+                }
+            }
+            SessionStart::Fork {
+                session,
+                at,
+                new_session,
+            } => {
+                push(&[
+                    &format!("--resume={session}"),
+                    "--fork-session",
+                    &format!("--session-id={new_session}"),
+                ]);
                 if let Some(at) = at {
                     push(&[&format!("--resume-session-at={at}")]);
                 }
