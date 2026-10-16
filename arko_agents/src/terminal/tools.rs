@@ -225,6 +225,7 @@ impl Tool for TerminalTool {
                             terminal: boolean(&params, "terminal", true)?,
                             detect_prompts: boolean(&params, "detect_prompts", true)?,
                             timeout: number(&params, "timeout_ms")?.map(Duration::from_millis),
+                            ..Default::default()
                         },
                     )
                     .map_err(tool_error)?,
@@ -258,7 +259,7 @@ impl Tool for TerminalTool {
                     let jobs = self.manager.jobs.lock().unwrap();
                     Value::Array(jobs.values().filter_map(|job| {
                         let data = job.data.lock().unwrap();
-                        (data.record.owner == context.task_id).then(|| json!({"job_id":data.record.job_id,"state":data.record.state,"revision":data.record.revision}))
+                        (data.record.owner == context.task_id && !data.record.held).then(|| json!({"job_id":data.record.job_id,"state":data.record.state,"revision":data.record.revision}))
                     }).collect())
                 } else {
                     let id = Uuid::parse_str(string(&params, "job_id")?).map_err(tool_error)?;

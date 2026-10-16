@@ -166,7 +166,7 @@ async fn explicit_requests_work_without_visible_prompts_and_repeated_questions_h
 {
     for terminal in [true, false] {
         let f = Fixture::new(|_| {});
-        let job = f.python("fd=os.open(os.environ['ARKO_INPUT_REQUEST_PATH'],os.O_WRONLY|os.O_APPEND)\nreplies=Replies()\nfor n in range(2):\n request=json.dumps({'type':'input_request','request_id':str(n),'prompt':'Proceed?'})+'\\n'\n os.write(fd,request.encode()); os.write(fd,request.encode())\n value=json.loads(replies.readline()); assert value['request_id']==str(n); assert value['text']=='Y\\n'\nprint('ANSWERS_RECEIVED',flush=True)", StartOptions { terminal, detect_prompts:false, timeout:None });
+        let job = f.python("fd=os.open(os.environ['ARKO_INPUT_REQUEST_PATH'],os.O_WRONLY|os.O_APPEND)\nreplies=Replies()\nfor n in range(2):\n request=json.dumps({'type':'input_request','request_id':str(n),'prompt':'Proceed?'})+'\\n'\n os.write(fd,request.encode()); os.write(fd,request.encode())\n value=json.loads(replies.readline()); assert value['request_id']==str(n); assert value['text']=='Y\\n'\nprint('ANSWERS_RECEIVED',flush=True)", StartOptions { terminal, detect_prompts:false, ..Default::default() });
         let first = f.until(job.job_id, |s| matches!(s.input.as_ref().map(|n|&n.source),Some(InputSource::Program{request_id}) if request_id=="0")).await;
         assert_eq!(first.input.as_ref().unwrap().prompt, "Proceed?");
         assert!(!first.output.text.contains("Proceed?"));
@@ -442,6 +442,7 @@ async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
             terminal: true,
             output_end: 0,
             log_truncated: false,
+            held: false,
         },
     )
     .unwrap();
@@ -605,12 +606,12 @@ async fn custom_prompt_rules_are_configurable_and_jobs_are_not_limited() {
     let pipes = StartOptions {
         terminal: false,
         detect_prompts: false,
-        timeout: None,
+        ..Default::default()
     };
     let others: Vec<_> = (0..65)
         .map(|_| {
             f.manager
-                .start(&f.context(), "exit 0", pipes)
+                .start(&f.context(), "exit 0", pipes.clone())
                 .unwrap()
                 .job_id
         })
@@ -656,7 +657,7 @@ async fn failed_spawns_are_recorded() {
 #[tokio::test]
 async fn control_stream_handles_partial_utf8_frames_and_rejects_overflow_or_truncation() {
     let f = Fixture::new(|_| {});
-    let job = f.python("fd=os.open(os.environ['ARKO_INPUT_REQUEST_PATH'],os.O_WRONLY|os.O_APPEND)\nframe=(json.dumps({'type':'input_request','request_id':'split','prompt':'Café?'},ensure_ascii=False)+'\\n').encode()\nfor byte in frame: os.write(fd,bytes([byte])); time.sleep(.001)\nvalue=json.loads(Replies().readline()); assert value['request_id']=='split'", StartOptions { terminal:false, detect_prompts:false, timeout:None });
+    let job = f.python("fd=os.open(os.environ['ARKO_INPUT_REQUEST_PATH'],os.O_WRONLY|os.O_APPEND)\nframe=(json.dumps({'type':'input_request','request_id':'split','prompt':'Café?'},ensure_ascii=False)+'\\n').encode()\nfor byte in frame: os.write(fd,bytes([byte])); time.sleep(.001)\nvalue=json.loads(Replies().readline()); assert value['request_id']=='split'", StartOptions { terminal:false, detect_prompts:false, ..Default::default() });
     let prompt = f.until(job.job_id, |s| s.input.is_some()).await;
     assert_eq!(prompt.input.as_ref().unwrap().prompt, "Café?");
     f.input(f.owner, job.job_id, prompt.revision, "yes".into())
@@ -699,7 +700,7 @@ async fn pty_jobs_get_a_quiet_environment_unless_turned_off() {
     let pipes = StartOptions {
         terminal: false,
         detect_prompts: false,
-        timeout: None,
+        ..Default::default()
     };
     let f = Fixture::new(|_| {});
     let pty = f.python(&show, Default::default());
@@ -738,6 +739,7 @@ fn stripped_windows_keep_raw_offsets() {
             terminal: true,
             output_end: raw.len() as u64,
             log_truncated: false,
+            held: false,
         },
         output: raw.iter().copied().collect(),
         last_event: None,
@@ -861,4 +863,161 @@ async fn outside_access_can_change_while_the_manager_runs() {
     // A guard configured with outside access starts with it.
     let f = Fixture::new(|config| config.command_guard.allow_outside_workspace = true);
     assert!(f.manager.allows_outside_workspace());
+}
+
+/// The jobs the terminal tools list, as `terminal_control list` gives them.
+async fn listed(f: &Fixture) -> Vec<Uuid> {
+    let list = TerminalTool::all(f.manager.clone())[3]
+        .execute(
+            &f.context(),
+            serde_json::from_value(json!({"action": "list"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_str::<Vec<serde_json::Value>>(&list)
+        .unwrap()
+        .iter()
+        .map(|job| job["job_id"].as_str().unwrap().parse().unwrap())
+        .collect()
+}
+
+/// The terminal update a runtime got, as its JSON.
+async fn update(receiver: &mut mpsc::Receiver<UserCommand>) -> serde_json::Value {
+    let UserCommand::InjectContext { content } = timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("not a terminal update")
+    };
+    serde_json::from_str(content.strip_prefix("Terminal update:\n").unwrap()).unwrap()
+}
+
+/// A held job (a command its host waits for) sends no updates and isn't
+/// listed. Released, it is listed, the event it has goes out at once, and
+/// its end is an update and a finished notice.
+#[tokio::test]
+async fn a_held_job_tells_nothing_until_it_is_released() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+    let job = f.python(
+        "fd=os.open(os.environ['ARKO_INPUT_REQUEST_PATH'],os.O_WRONLY|os.O_APPEND)\nos.write(fd,(json.dumps({'type':'input_request','request_id':'one','prompt':'Go on?'})+'\\n').encode())\nvalue=json.loads(Replies().readline()); print('ANSWER='+value['text'],flush=True)",
+        StartOptions {
+            terminal: false,
+            detect_prompts: false,
+            held: true,
+            ..Default::default()
+        },
+    );
+    let asked = f.until(job.job_id, |s| s.input.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(receiver.try_recv().is_err(), "a held job sends no update");
+    assert!(listed(&f).await.is_empty());
+
+    let released = f.manager.release(f.owner, job.job_id).unwrap();
+    assert_eq!(released.state, JobState::Running);
+    assert_eq!(listed(&f).await, [job.job_id]);
+    assert_eq!(update(&mut receiver).await["input"]["prompt"], "Go on?");
+    f.input(f.owner, job.job_id, asked.revision, "yes".into())
+        .await
+        .unwrap();
+    assert_eq!(f.finished(job.job_id).await.state, JobState::Succeeded);
+    let done = update(&mut receiver).await;
+    assert_eq!(done["state"], "succeeded");
+    assert!(
+        done["output"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ANSWER=yes")
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), finished.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        JobFinished {
+            owner: f.owner,
+            job_id: job.job_id,
+            state: JobState::Succeeded
+        }
+    );
+}
+
+/// A held job that finished stays held: its host has the result, and the
+/// agent gets no update for it.
+#[tokio::test]
+async fn a_finished_held_job_stays_held() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+    let job = f.python(
+        "print('done',flush=True)",
+        StartOptions {
+            terminal: false,
+            held: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(f.finished(job.job_id).await.state, JobState::Succeeded);
+    assert!(matches!(
+        f.manager.release(f.owner, job.job_id),
+        Err(TerminalError::Finished)
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(receiver.try_recv().is_err());
+    assert!(finished.try_recv().is_err());
+    assert!(listed(&f).await.is_empty());
+    // Its host forgets it as it does any job.
+    f.manager.forget(f.owner, job.job_id).unwrap();
+}
+
+/// An update reaches the owner once: the runtime of its next turn (a new
+/// command channel) isn't sent it again.
+#[tokio::test]
+async fn an_update_sent_is_not_sent_again_to_the_next_runtime() {
+    let f = Fixture::new(|_| {});
+    let (first, mut first_receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, first.downgrade());
+    let job = f.python("print('done',flush=True)", Default::default());
+    assert_eq!(f.finished(job.job_id).await.state, JobState::Succeeded);
+    assert_eq!(update(&mut first_receiver).await["state"], "succeeded");
+    drop((first, first_receiver));
+    let (next, mut next_receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, next.downgrade());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(next_receiver.try_recv().is_err());
+
+    // One that found no runtime goes to the next one bound.
+    drop((next, next_receiver));
+    let job = f.python("print('later',flush=True)", Default::default());
+    assert_eq!(f.finished(job.job_id).await.state, JobState::Succeeded);
+    let (last, mut last_receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, last.downgrade());
+    let done = update(&mut last_receiver).await;
+    assert_eq!(done["job_id"], job.job_id.to_string());
+    assert!(last_receiver.try_recv().is_err());
+}
+
+/// A job can start with its own shell arguments.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_job_can_have_its_own_shell_arguments() {
+    let f = Fixture::new(|_| {});
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            "hello",
+            StartOptions {
+                terminal: false,
+                shell_args: Some(vec!["-c".into(), "echo \"own $0\"".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.output.text.trim(), "own hello");
 }
