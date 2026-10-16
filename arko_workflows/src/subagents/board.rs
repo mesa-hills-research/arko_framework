@@ -1038,6 +1038,39 @@ impl Board {
         to: &str,
         text: &str,
     ) -> Result<String, String> {
+        self.send(ctx, from, to, text, None)
+    }
+
+    /// Sends the host's `text` (its user's, say) to subagent `to` as a
+    /// message from the subagent's lead goes, under `heading`, with a copy
+    /// for the lead under `copy_heading` (a copy doesn't start a turn of
+    /// it).
+    pub(crate) fn host_message(
+        &self,
+        ctx: &Arc<SharedContext>,
+        to: &str,
+        text: &str,
+        heading: &str,
+        copy_heading: &str,
+    ) -> Result<String, String> {
+        let lead = {
+            let state = self.state.lock();
+            find(&state, to).map(|run| run.caller_run_id)
+        };
+        let lead = lead.ok_or_else(|| format!("there is no agent run {}", to.trim()))?;
+        self.send(ctx, lead, to, text, Some((heading, copy_heading)))
+    }
+
+    /// [`message`](Self::message), or with `host`'s headings
+    /// [`host_message`](Self::host_message).
+    fn send(
+        &self,
+        ctx: &Arc<SharedContext>,
+        from: Uuid,
+        to: &str,
+        text: &str,
+        host: Option<(&str, &str)>,
+    ) -> Result<String, String> {
         let config = self.config.as_ref().ok_or("subagents are off")?;
         let text = text.trim();
         if text.is_empty() {
@@ -1080,10 +1113,10 @@ impl Board {
                     }
                     _ => {}
                 }
-                let heading = if run.asking {
-                    "Your lead answers your question:".to_string()
-                } else {
-                    "Your lead sent you a message:".to_string()
+                let heading = match host {
+                    Some((heading, _)) => heading.to_string(),
+                    None if run.asking => "Your lead answers your question:".to_string(),
+                    None => "Your lead sent you a message:".to_string(),
                 };
                 (run.run_id, heading, run.clone())
             }
@@ -1176,6 +1209,16 @@ impl Board {
                     ),
                     text.to_string(),
                 )),
+                Recipient::Subagent(_) => host.map(|(_, copy_heading)| {
+                    self.add_mail(
+                        &mut state,
+                        from,
+                        MailSender::Host,
+                        MailKind::Copy,
+                        copy_heading.to_string(),
+                        text.to_string(),
+                    )
+                }),
                 _ => None,
             };
             (item, copy)

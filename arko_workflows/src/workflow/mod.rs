@@ -397,6 +397,25 @@ impl Workflow {
             .stop_subagent(&self.context, run_id, request)
     }
 
+    /// Sends the host's `text` (its user's, say) to background subagent
+    /// `to` (its short id, such as `r1`, or its run id) as a message from
+    /// its lead goes, under `heading`: a running subagent reads it at its
+    /// next step, and one that ended goes on with it. Its lead gets a copy
+    /// under `copy_heading` with its next mail, which doesn't start a turn
+    /// of it. Returns what became of the message, as `message_agent`'s
+    /// result says it, or why it couldn't be sent.
+    pub fn message_subagent(
+        &self,
+        to: &str,
+        text: &str,
+        heading: &str,
+        copy_heading: &str,
+    ) -> Result<String, String> {
+        self.context
+            .subagents
+            .host_message(&self.context, to, text, heading, copy_heading)
+    }
+
     /// Background subagent events: starts, reports, failures, stops,
     /// messages, deliveries, and
     /// [`NewsWaiting`](crate::subagents::SubagentEventKind::NewsWaiting) for

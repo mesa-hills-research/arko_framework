@@ -510,6 +510,65 @@ async fn messages_go_both_ways_and_a_finished_subagent_continues() {
     assert_eq!(records[0].report.as_deref(), Some("Painted it red."));
 }
 
+/// The host's message goes as the lead's would, under the host's heading:
+/// a finished subagent continues with it. The lead gets a copy with its
+/// news, after the report before it and before the report it brings.
+#[tokio::test]
+async fn the_hosts_message_continues_a_subagent_and_its_lead_gets_a_copy() {
+    let server = serve(vec![
+        ("lead", vec![start("Paint it."), complete("Started it.")]),
+        (
+            "r1",
+            vec![complete("Painted it blue."), complete("Painted it red.")],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    let send = |to: &str| {
+        workflow.message_subagent(
+            to,
+            "Now make it red.",
+            "The user sent you a message:",
+            "The user messaged r1 (a copy for you):",
+        )
+    };
+    assert!(send("r9").is_err());
+    let sent = send("r1").unwrap();
+    assert!(sent.contains("continues its task"), "{sent}");
+    until(|| workflow.subagents()[0].report.as_deref() == Some("Painted it red.")).await;
+    let continued = bodies_of(&server, "r1").pop().unwrap();
+    assert!(
+        continued.contains("The user sent you a message:\\n  Now make it red."),
+        "{continued}"
+    );
+    let news = workflow.pending_news(lead.agent_run_id);
+    let kinds: Vec<(MailKind, &str)> = news
+        .iter()
+        .map(|item| (item.kind, item.heading.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (
+                MailKind::Report,
+                "r1 (agent `worker`) finished. Its report:"
+            ),
+            (MailKind::Copy, "The user messaged r1 (a copy for you):"),
+            (
+                MailKind::Report,
+                "r1 (agent `worker`) finished. Its report:"
+            ),
+        ]
+    );
+}
+
 /// Over the cap a start is queued, and starts when a place frees up.
 #[tokio::test]
 async fn starts_over_the_cap_wait_in_a_queue() {
