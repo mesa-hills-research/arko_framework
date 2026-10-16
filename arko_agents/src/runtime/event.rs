@@ -208,6 +208,14 @@ pub enum AgentEvent {
         requested_model: String,
         served_model: String,
     },
+    /// The provider refused the reasoning summaries the run's configuration
+    /// asks for ([`ModelCallUsage::reasoning_summaries_refused`]: an OpenAI
+    /// organization that isn't verified for them), and the request was sent
+    /// again without them. The run asks for none from then on (its saved
+    /// configuration too), nor does any request of that provider's client,
+    /// so the model's thinking no longer streams. Emitted after
+    /// `ModelCallUsageReported`. A host can tell the user once.
+    ReasoningSummariesRefused { provider: String, model: String },
     /// The conversation's prompt-cache efficiency after a model call (opt-in
     /// [`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)):
     /// cache reads divided by the most that could have been read, for the

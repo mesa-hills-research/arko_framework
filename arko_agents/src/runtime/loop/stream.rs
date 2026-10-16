@@ -119,7 +119,26 @@ impl AgentLoop {
             self.emit_event(AgentEvent::ModelRerouted {
                 provider: usage.provider.clone(),
                 requested_model,
-                served_model: usage.served_model.clone().unwrap_or(usage.model),
+                served_model: usage.served_model.clone().unwrap_or(usage.model.clone()),
+            })
+            .await?;
+        }
+        if usage.reasoning_summaries_refused {
+            // The run asks for none again, also once resumed.
+            if let Some(ai::ReasoningConfig::OpenAI {
+                include_summaries, ..
+            }) = &mut self
+                .task
+                .agent_config
+                .llm_config
+                .generation_config
+                .reasoning
+            {
+                *include_summaries = false;
+            }
+            self.emit_event(AgentEvent::ReasoningSummariesRefused {
+                provider: usage.provider.clone(),
+                model: usage.model.clone(),
             })
             .await?;
         }
