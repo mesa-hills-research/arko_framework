@@ -81,20 +81,40 @@ impl RequestSizes {
         sizes
     }
 
+    /// [`of_messages`](Self::of_messages) without the images' tokens
+    /// (`image_tokens` stays 0; `images` counts them): for what needs only
+    /// the text, without reading each image's header.
+    pub fn text_of_messages(
+        conversation: &Conversation,
+        messages: &[Message],
+        tools: Option<&ToolConfig>,
+    ) -> Self {
+        let mut sizes = Self::new(conversation.system_message.as_deref(), tools);
+        for message in messages {
+            sizes.add(message, false);
+        }
+        sizes
+    }
+
     /// Adds a message's size to its sections.
     pub fn add_message(&mut self, message: &Message) {
+        self.add(message, true);
+    }
+
+    /// Adds a message's size, with its images' tokens when `image_tokens`.
+    fn add(&mut self, message: &Message, image_tokens: bool) {
         for content in &message.content {
             match content {
                 Content::Text(text) if message.role == Role::Assistant => {
                     self.assistant_text += text.len()
                 }
                 Content::Text(text) => self.user_text += text.len(),
-                Content::Image(image) => self.add_image(image),
+                Content::Image(image) => self.add_image(image, image_tokens),
                 Content::ToolResult(result) => {
                     self.tool_results += result.name.len() + result.output.len();
                     for image in &result.images {
                         self.tool_results += image.label.len();
-                        self.add_image(&image.image);
+                        self.add_image(&image.image, image_tokens);
                     }
                 }
             }
@@ -104,9 +124,11 @@ impl RequestSizes {
         }
     }
 
-    fn add_image(&mut self, image: &Image) {
+    fn add_image(&mut self, image: &Image, tokens: bool) {
         self.images += 1;
-        self.image_tokens += image.estimated_tokens();
+        if tokens {
+            self.image_tokens += image.estimated_tokens();
+        }
     }
 
     /// The bytes of text in every section, the system prompt and the tool
@@ -214,6 +236,16 @@ mod tests {
             grown.add_message(message);
         }
         assert_eq!(grown, sizes);
+        // The text alone: the same text, the images counted, no tokens.
+        let text =
+            RequestSizes::text_of_messages(&conversation, &conversation.messages, Some(&tools));
+        assert_eq!(
+            text,
+            RequestSizes {
+                image_tokens: 0,
+                ..sizes
+            }
+        );
         // No tools, or an empty list, count nothing.
         assert_eq!(RequestSizes::of(&conversation, None).tool_definitions, 0);
         assert_eq!(

@@ -132,7 +132,7 @@ pub(crate) fn request_bytes_of(
     messages: &[ai::Message],
     generation_config: &ai::GenerationConfig,
 ) -> usize {
-    ai::RequestSizes::of_messages(conversation, messages, generation_config.offered_tools())
+    ai::RequestSizes::text_of_messages(conversation, messages, generation_config.offered_tools())
         .text_bytes()
 }
 

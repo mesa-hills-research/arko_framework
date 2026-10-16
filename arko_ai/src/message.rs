@@ -82,30 +82,20 @@ impl Image {
     }
 
     /// The image's width and height in pixels, read from the header of
-    /// inline PNG, JPEG, GIF or WebP data (only as much of the data is
-    /// decoded as the header needs). `None` for a URL or data whose size
-    /// can't be read.
+    /// inline PNG, JPEG, GIF or WebP data. Only the bytes a header needs are
+    /// decoded: the first 48, and for a JPEG each segment's header up to its
+    /// frame header, however much metadata comes before it. `None` for a
+    /// URL or data whose size can't be read.
     pub fn dimensions(&self) -> Option<(u32, u32)> {
-        use base64::Engine as _;
         let Image::Base64 { data, .. } = self else {
             return None;
         };
-        // Most headers are in the first bytes; a JPEG's size can follow
-        // large metadata, so more is decoded until it is found.
-        let mut chars = 64;
-        loop {
-            let end = chars.min(MAX_HEADER_CHARS).min(data.len()) / 4 * 4;
-            let prefix = base64::engine::general_purpose::STANDARD
-                .decode(&data.as_bytes()[..end])
-                .ok()?;
-            if let Some(size) = image_size(&prefix) {
-                return Some(size);
-            }
-            if end == data.len() / 4 * 4 || chars >= MAX_HEADER_CHARS {
-                return None;
-            }
-            chars *= 8;
+        let data = data.as_bytes();
+        let head = decode_range(data, 0, 48)?;
+        if head.starts_with(&[0xff, 0xd8]) {
+            return jpeg_size(data);
         }
+        image_size(&head)
     }
 
     /// An estimate of the input tokens the image takes in a request: its
@@ -126,14 +116,60 @@ impl Image {
     }
 }
 
-/// The most base64 characters [`Image::dimensions`] decodes looking for a
-/// header (768 KiB of data).
-const MAX_HEADER_CHARS: usize = 1 << 20;
+/// Bytes `start..end` of the base64 `data` (fewer at its end), decoding
+/// only the characters that hold them: base64 decodes in groups of 4
+/// characters from any multiple of 4. `None` when they aren't valid
+/// standard base64.
+fn decode_range(data: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let first = start / 3 * 4;
+    let last = end.div_ceil(3).saturating_mul(4).min(data.len() / 4 * 4);
+    if first >= last {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&data[first..last])
+        .ok()?;
+    let offset = start - first / 4 * 3;
+    let end = (end - first / 4 * 3).min(decoded.len());
+    decoded.get(offset..end).map(<[u8]>::to_vec)
+}
 
-/// Width and height from an image file's first bytes: PNG, GIF, WebP, or a
-/// JPEG's first frame header.
+/// The most JPEG segments [`jpeg_size`] walks before giving up.
+const MAX_JPEG_SEGMENTS: usize = 1024;
+
+/// A JPEG's width and height from its frame header, walking the segments
+/// before it and decoding only each segment's header.
+fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
+    let mut at = 2;
+    for _ in 0..MAX_JPEG_SEGMENTS {
+        let header = decode_range(data, at, at + 9)?;
+        if header.len() < 4 || header[0] != 0xff {
+            return None;
+        }
+        let marker = header[1];
+        if marker == 0xff {
+            // Fill byte.
+            at += 1;
+            continue;
+        }
+        let start_of_frame = matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+        if start_of_frame {
+            let height = u16::from_be_bytes(header.get(5..7)?.try_into().ok()?);
+            let width = u16::from_be_bytes(header.get(7..9)?.try_into().ok()?);
+            return Some((u32::from(width), u32::from(height)));
+        }
+        if marker == 0xda {
+            // The scan's data starts: no frame header came before it.
+            return None;
+        }
+        at += 2 + usize::from(u16::from_be_bytes([header[2], header[3]]));
+    }
+    None
+}
+
+/// Width and height from an image file's first bytes: PNG, GIF or WebP.
 fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    let u16_be = |at: usize| Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
     let u16_le = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
     let u24_le = |at: usize| {
         let b = bytes.get(at..at + 3)?;
@@ -160,27 +196,6 @@ fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
             b"VP8X" => Some((u24_le(24)? + 1, u24_le(27)? + 1)),
             _ => None,
         };
-    }
-    if bytes.starts_with(&[0xff, 0xd8]) {
-        let mut at = 2;
-        while at + 4 <= bytes.len() {
-            if bytes[at] != 0xff {
-                return None;
-            }
-            let marker = bytes[at + 1];
-            if marker == 0xff {
-                // Fill byte.
-                at += 1;
-                continue;
-            }
-            let length = usize::from(u16_be(at + 2)?);
-            let start_of_frame =
-                matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
-            if start_of_frame {
-                return Some((u32::from(u16_be(at + 7)?), u32::from(u16_be(at + 5)?)));
-            }
-            at += 2 + length;
-        }
     }
     None
 }
@@ -430,6 +445,30 @@ mod tests {
         jpeg.extend(1080u16.to_be_bytes());
         jpeg.extend(1920u16.to_be_bytes());
         assert_eq!(image(jpeg).dimensions(), Some((1920, 1080)));
+
+        // Segments of every length modulo 3 (each header at another place
+        // in a base64 group), and fill bytes.
+        let mut jpeg = vec![0xff, 0xd8];
+        for length in [7u16, 8, 9, 10] {
+            jpeg.extend([0xff, 0xe0]);
+            jpeg.extend(length.to_be_bytes());
+            jpeg.extend(vec![0xaa; usize::from(length) - 2]);
+            jpeg.push(0xff);
+        }
+        jpeg.extend([0xff, 0xc2, 0, 17, 8]);
+        jpeg.extend(600u16.to_be_bytes());
+        jpeg.extend(800u16.to_be_bytes());
+        jpeg.extend(vec![0x55; 100]);
+        assert_eq!(image(jpeg.clone()).dimensions(), Some((800, 600)));
+        // The scan starting before any frame header, or data cut short.
+        let mut scan_first = vec![0xff, 0xd8, 0xff, 0xda, 0, 4, 0, 0];
+        scan_first.extend(&jpeg[2..]);
+        assert_eq!(image(scan_first).dimensions(), None);
+        assert_eq!(image(jpeg[..40].to_vec()).dimensions(), None);
+        // A format the reader doesn't know.
+        let mut heic = b"\0\0\0\x18ftypheic".to_vec();
+        heic.extend(vec![0; 1000]);
+        assert_eq!(image(heic).dimensions(), None);
 
         assert_eq!(image(b"not an image".to_vec()).dimensions(), None);
         assert_eq!(Image::new_url("https://x/y.png").dimensions(), None);
