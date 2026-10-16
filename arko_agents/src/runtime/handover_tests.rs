@@ -668,3 +668,67 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert!(task.handovers.is_empty());
 }
+
+/// A threshold with a cap per run: runs that share the host's threshold
+/// each hand over at no more than the cap their own configuration gets
+/// (as runs on models of different sizes), whichever threshold they go by.
+#[tokio::test]
+async fn a_capped_threshold_holds_each_run_under_its_own_cap() {
+    // The cap for the configurations named "small"; none for the others.
+    let threshold = HandoverThreshold::new(Some(5_000))
+        .with_most(|config| (config.name == "small").then_some(1_000));
+    let handed_over = |responses: Vec<ScriptedStreamResult>, name: &str, threshold| {
+        let (mut agent, mut events, commands) = tool_harness();
+        agent.task.agent_config.name = name.into();
+        agent.handover_threshold = threshold;
+        push(&mut agent, responses);
+        async move {
+            let (task, events) = run(agent, &mut events).await;
+            drop(commands);
+            assert!(
+                matches!(task.current_state, TaskState::Completed { .. }),
+                "{:?}: {events:#?}",
+                task.current_state
+            );
+            task.handovers
+                .iter()
+                .map(|handover| handover.input_tokens)
+                .collect::<Vec<_>>()
+        }
+    };
+    let capped = || {
+        vec![
+            native_call("plain_text", 500),
+            native_call("plain_text", 1_500),
+            native_report(&[], "Done: read the fixture.", 1_600),
+            native_call("plain_text", 200),
+            native_complete(),
+        ]
+    };
+    let uncapped = || {
+        vec![
+            native_call("plain_text", 500),
+            native_call("plain_text", 2_500),
+            native_complete(),
+        ]
+    };
+    // The host's 5,000, held at the small run's 1,000.
+    assert_eq!(
+        handed_over(capped(), "small", threshold.clone()).await,
+        [1_500]
+    );
+    // Another run of the same threshold goes by the host's 5,000.
+    assert!(
+        handed_over(uncapped(), "large", threshold.clone())
+            .await
+            .is_empty()
+    );
+    // Unset, the configured 1,000,000 is held at the cap too.
+    threshold.set(None);
+    assert_eq!(threshold.get(), None);
+    assert_eq!(
+        handed_over(capped(), "small", threshold.clone()).await,
+        [1_500]
+    );
+    assert!(handed_over(uncapped(), "large", threshold).await.is_empty());
+}

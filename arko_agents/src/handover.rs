@@ -261,9 +261,26 @@ pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static 
 /// stay as they are, and a task run later without it hands over as
 /// configured. Clones share the setting. The runtime doesn't cap it at the
 /// model's input limit: the host keeps it under that limit, with room for
-/// the report.
-#[derive(Clone, Debug, Default)]
-pub struct HandoverThreshold(Arc<AtomicUsize>);
+/// the report, or gives each run its cap with [`with_most`](Self::with_most)
+/// when one threshold serves runs on models of different sizes.
+#[derive(Clone, Default)]
+pub struct HandoverThreshold {
+    tokens: Arc<AtomicUsize>,
+    most: Option<HandoverCap>,
+}
+
+/// The largest threshold a run of a configuration goes by, if any: see
+/// [`HandoverThreshold::with_most`].
+type HandoverCap = Arc<dyn Fn(&AgentConfig) -> Option<usize> + Send + Sync>;
+
+impl std::fmt::Debug for HandoverThreshold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandoverThreshold")
+            .field("tokens", &self.get())
+            .field("capped", &self.most.is_some())
+            .finish()
+    }
+}
 
 impl HandoverThreshold {
     /// A threshold of `input_tokens`, or unset (`None`).
@@ -273,27 +290,45 @@ impl HandoverThreshold {
         threshold
     }
 
+    /// This threshold, capped for each run at what `most` gives for the
+    /// run's configuration (`None`: no cap), whichever threshold the run
+    /// goes by, the host's or its configuration's. One threshold then
+    /// serves runs on models of different sizes, each kept under its own
+    /// model's limit. `most` is asked at every check. Clones made from it
+    /// share the cap.
+    pub fn with_most(
+        mut self,
+        most: impl Fn(&AgentConfig) -> Option<usize> + Send + Sync + 'static,
+    ) -> Self {
+        self.most = Some(Arc::new(most));
+        self
+    }
+
     /// Changes the threshold for every clone: `Some(tokens)` hands over at
     /// `tokens` of input, and `None` (or `Some(0)`) goes back to the
     /// configuration's.
     pub fn set(&self, input_tokens: Option<usize>) {
-        self.0.store(input_tokens.unwrap_or(0), Ordering::Release);
+        self.tokens
+            .store(input_tokens.unwrap_or(0), Ordering::Release);
     }
 
     /// The threshold the host set, if any.
     pub fn get(&self) -> Option<usize> {
-        Some(self.0.load(Ordering::Acquire)).filter(|tokens| *tokens > 0)
+        Some(self.tokens.load(Ordering::Acquire)).filter(|tokens| *tokens > 0)
     }
 
     /// The threshold a run of `config` goes by: the host's, else the
-    /// configuration's.
+    /// configuration's, up to the cap for `config` (see
+    /// [`with_most`](Self::with_most)).
     pub(crate) fn of(&self, config: &AgentConfig) -> Option<usize> {
-        self.get().or_else(|| {
+        let threshold = self.get().or_else(|| {
             config
                 .handover
                 .as_ref()?
                 .threshold(config.llm_config.model.max_input_tokens)
-        })
+        })?;
+        let most = self.most.as_ref().and_then(|most| most(config));
+        Some(most.map_or(threshold, |most| threshold.min(most)))
     }
 }
 
