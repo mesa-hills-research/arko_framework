@@ -815,6 +815,127 @@ async fn notes_survive_a_checkpoint_and_resume() {
     assert!(!continued.contains("Only now."), "{continued}");
 }
 
+/// The files under `dir` whose bytes contain `text`.
+fn files_containing(dir: &std::path::Path, text: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_containing(&path, text));
+        } else if std::fs::read(&path)
+            .unwrap()
+            .windows(text.len())
+            .any(|window| window == text.as_bytes())
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// A note's images are saved once, as files in the run directory's
+/// `images` folder, when the note is posted: the notes, the checkpoints and
+/// the event log name them. A resumed workflow reads them back when it
+/// gives the note, and the task files of the conversation that took them
+/// name them too.
+#[tokio::test]
+async fn note_images_are_saved_once_and_named_everywhere_else() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let worker = first.run_agent("worker", "Do it.").await.unwrap();
+    let bytes = b"\x89PNG\r\n\x1a\n not quite the pixels of a screenshot";
+    let image = arko_ai::Image::from_bytes(bytes, "image/png");
+    let arko_ai::Image::Base64 { data, .. } = &image else {
+        unreachable!()
+    };
+    // For the run that finished: it gets the note when it is continued.
+    let posted = first
+        .post_note(
+            Note::new("See these.")
+                .once()
+                .images([image.clone(), image.clone()]),
+        )
+        .unwrap();
+    assert!(posted.note.images.is_empty());
+    let [NoteImage::Stored { name, mime_type }, again] = &posted.images[..] else {
+        panic!("{posted:?}")
+    };
+    assert_eq!(again, &posted.images[0]);
+    assert_eq!(mime_type, "image/png");
+    let images = run_dir(&workspace).join("images");
+    assert_eq!(std::fs::read(images.join(name)).unwrap(), bytes);
+    assert_eq!(first.note_image(&posted.images[0]).unwrap(), image);
+    first.checkpoint().await.unwrap();
+    drop(first);
+    let holders = files_containing(&run_dir(&workspace), data);
+    assert!(holders.is_empty(), "{holders:?}");
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    assert_eq!(resumed.notes()[0].images, posted.images);
+    assert_eq!(resumed.note_image(&posted.images[1]).unwrap(), image);
+    let worker = resumed.agent_result(worker.agent_run_id).unwrap();
+    let continued = resumed.continue_agent(&worker, "Carry on.").await.unwrap();
+    assert_eq!(continued.status, AgentRunStatus::Completed);
+    let body = server.bodies().last().unwrap().clone();
+    assert_eq!(body.matches(data.as_str()).count(), 2, "{body}");
+    // The conversation holds them now; its saved versions name them.
+    let held = continued
+        .task
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|content| matches!(content, arko_ai::Content::Image(_)))
+        .count();
+    assert_eq!(held, 2);
+    resumed.checkpoint().await.unwrap();
+    let holders = files_containing(&run_dir(&workspace), data);
+    assert!(holders.is_empty(), "{holders:?}");
+    assert_eq!(std::fs::read_dir(&images).unwrap().count(), 1);
+    // And read back with them.
+    let state =
+        crate::persistence::PersistenceManager::load_checkpoint(&latest_checkpoint(&workspace))
+            .await
+            .unwrap();
+    let saved = state.agent_results_in(&run_dir(&workspace)).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved[0].task.conversation.messages).unwrap(),
+        serde_json::to_value(&continued.task.conversation.messages).unwrap()
+    );
+}
+
+/// A checkpoint written while notes held their images still restores them:
+/// they move out of the notes as a posted note's do.
+#[test]
+fn notes_saved_with_their_images_keep_them_when_restored() {
+    let image = png("b2xk");
+    let mut old = posted(1, "Old.");
+    old.note.kind = NoteKind::Once;
+    old.note.images = vec![image.clone()];
+    let board = NoteBoard::new(
+        Some(NotesSnapshot {
+            notes: vec![old],
+            ..NotesSnapshot::default()
+        }),
+        BTreeSet::new(),
+        None,
+        None,
+    );
+    let restored = board.snapshot().unwrap().notes.remove(0);
+    assert!(restored.note.images.is_empty());
+    assert_eq!(restored.images.len(), 1);
+    assert_eq!(board.image(&restored.images[0]).unwrap(), image);
+    assert!(item(&restored).contains("(With an image, shown after this update.)"));
+}
+
 /// A run recovered from its task as last saved (here after a crash during
 /// the request that followed a note) is given again the notes its saved
 /// task doesn't hold, once, as a message would be.
@@ -1097,6 +1218,7 @@ fn posted(seq: u64, text: &str) -> PostedNote {
         seq,
         posted_at: Utc::now(),
         note: Note::new(text),
+        images: Vec::new(),
     }
 }
 

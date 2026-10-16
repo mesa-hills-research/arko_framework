@@ -1161,6 +1161,16 @@ impl Workflow {
         self.context.notes.notes(&self.context)
     }
 
+    /// An image of a posted note ([`PostedNote::images`](crate::notes::PostedNote::images)),
+    /// read from the run's image files or, in a run that isn't persisted,
+    /// from memory.
+    pub fn note_image(
+        &self,
+        image: &crate::notes::NoteImage,
+    ) -> Result<arko_ai::Image, WorkflowError> {
+        self.notes_handle().image(image)
+    }
+
     /// A handle that posts notes from any task while the workflow runs.
     pub fn notes_handle(&self) -> crate::notes::NotesHandle {
         crate::notes::NotesHandle::new(&self.context)
@@ -2398,7 +2408,11 @@ impl WorkflowBuilder {
         let resume_state = match &self.resume_from {
             Some(path) => {
                 let json = std::fs::read_to_string(path)?;
-                let state: crate::persistence::state::WorkflowState = serde_json::from_str(&json)?;
+                let images = crate::persistence::images::ImageFiles::in_run_dir(
+                    path.parent().unwrap_or(std::path::Path::new(".")),
+                );
+                let state: crate::persistence::state::WorkflowState =
+                    images.with(|| serde_json::from_str(&json))?;
                 if state.workflow_name != name {
                     return Err(WorkflowError::BuilderInvalid(format!(
                         "checkpoint is for workflow '{}', not '{}'",

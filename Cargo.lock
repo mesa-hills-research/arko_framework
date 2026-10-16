@@ -261,6 +261,7 @@ dependencies = [
  "arko_agents",
  "arko_ai",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "env_logger",

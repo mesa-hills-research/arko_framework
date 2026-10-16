@@ -185,11 +185,15 @@ impl WorkflowState {
     ) -> Result<(Vec<AgentResult>, Vec<String>), crate::WorkflowError> {
         let mut results = self.agent_results.clone();
         let mut warnings = Vec::new();
+        // The tasks' images are in the run directory's image files.
+        let images = super::images::ImageFiles::in_run_dir(run_dir);
         for record in &self.agent_runs {
             let path = run_dir.join(&record.task_file);
             let task = std::fs::read_to_string(&path)
                 .map_err(crate::WorkflowError::from)
-                .and_then(|json| Ok(serde_json::from_str::<arko_agents::Task>(&json)?))
+                .and_then(|json| {
+                    Ok(images.with(|| serde_json::from_str::<arko_agents::Task>(&json))?)
+                })
                 .map_err(|error| {
                     crate::WorkflowError::Persistence(format!(
                         "the checkpoint's task file {} for agent '{}' can't be loaded: {error}",

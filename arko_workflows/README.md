@@ -913,7 +913,9 @@ workflow.checkpoint().await?;
 
 A run directory holds the checkpoints, the agent runs' task versions
 (`agents/<task id>/<content hash>.json`, each with its full conversation), the event
-log (`events.jsonl`), and the durable-step journal. A checkpoint contains the workflow
+log (`events.jsonl`), the durable-step journal, and the images of the conversations
+and the notes (`images/<SHA-256>.<type>`), each saved once and named by every file
+that holds it. A checkpoint contains the workflow
 and run identity, metadata, memory, pending messages, the cost ledger, freshness
 versions, each agent result with a reference to the version of its task the
 checkpoint saw, verification and distillation records, the operator notes, and, once

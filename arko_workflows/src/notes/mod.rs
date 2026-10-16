@@ -27,7 +27,7 @@
 
 pub mod control;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
@@ -39,6 +39,7 @@ use uuid::Uuid;
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
 use crate::persistence::PersistenceManager;
+use arko_ai::image_store::ImageStore as _;
 
 /// The longest note accepted, in bytes of its trimmed text: 16 KiB. A note
 /// that is really a document belongs in a file or a memory tier.
@@ -124,7 +125,8 @@ pub struct Note {
     /// note ([`NoteKind::Once`]) may carry images, and only to agents whose
     /// models take them ([`arko_ai::Model::image_refusal`]); with images, the
     /// text may be empty. A Claude Code agent gets them with its next input,
-    /// not during a turn.
+    /// not during a turn. Once the note is posted, the workflow keeps them
+    /// apart from the notes: [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
 }
@@ -187,7 +189,27 @@ pub struct PostedNote {
     pub seq: u64,
     /// When it was posted, or written to the control folder.
     pub posted_at: DateTime<Utc>,
+    /// The note as posted, without its images (`note.images` is empty).
     pub note: Note,
+    /// The note's images, kept apart from the notes, so that the notes stay
+    /// small however many images they carry: checkpoints and the event log
+    /// name them. [`Workflow::note_image`](crate::Workflow::note_image)
+    /// reads one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<NoteImage>,
+}
+
+/// An image of a posted note ([`PostedNote::images`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteImage {
+    /// An image at a URL.
+    Url(String),
+    /// An image the workflow keeps, by name: `<SHA-256 of its bytes>.<type>`.
+    /// A persisted run keeps it in a file of that name in its directory's
+    /// `images` folder, written when the note is posted; a run that isn't
+    /// persisted keeps it in memory.
+    Stored { name: String, mime_type: String },
 }
 
 /// The notes as a checkpoint saves them:
@@ -256,6 +278,9 @@ pub(crate) struct NoteBoard {
     events: Option<PersistenceManager>,
     /// The agents a leak through messaging was warned about.
     warned: Mutex<HashSet<String>>,
+    /// The notes' images by name, in a run that isn't persisted (a
+    /// persisted run's are in its image files).
+    images: Mutex<HashMap<String, String>>,
     /// Bumped when a note is posted, for the waits that end on one.
     posted: tokio::sync::watch::Sender<u64>,
 }
@@ -267,7 +292,7 @@ impl NoteBoard {
         control: Option<PathBuf>,
         events: Option<PersistenceManager>,
     ) -> Self {
-        Self {
+        let board = Self {
             state: Mutex::new(restored.unwrap_or_default()),
             by_name_only,
             control,
@@ -275,8 +300,88 @@ impl NoteBoard {
             read_error: Mutex::new(None),
             events,
             warned: Mutex::new(HashSet::new()),
+            images: Mutex::new(HashMap::new()),
             posted: tokio::sync::watch::Sender::new(0),
+        };
+        // A checkpoint written before the images were kept apart holds them
+        // in the notes.
+        let mut state = board.state.lock();
+        for posted in &mut state.notes {
+            if posted.note.images.is_empty() {
+                continue;
+            }
+            match board.keep_images(&mut posted.note) {
+                Ok(images) => posted.images.extend(images),
+                Err(error) => log::warn!(
+                    "The images of note {} could not be kept, so its recipients won't see them: {error}",
+                    posted.seq
+                ),
+            }
         }
+        drop(state);
+        board
+    }
+
+    /// Takes `note`'s images and keeps them: in the run's image files, or in
+    /// memory for a run that isn't persisted.
+    fn keep_images(&self, note: &mut Note) -> Result<Vec<NoteImage>, String> {
+        std::mem::take(&mut note.images)
+            .into_iter()
+            .map(|image| match image {
+                arko_ai::Image::Url(url) => Ok(NoteImage::Url(url)),
+                arko_ai::Image::Base64 { data, mime_type } => {
+                    let name = match &self.events {
+                        Some(persistence) => persistence.images().save(&data, &mime_type)?,
+                        None => {
+                            let (name, _) =
+                                crate::persistence::images::image_file(&data, &mime_type);
+                            self.images.lock().insert(name.clone(), data);
+                            name
+                        }
+                    };
+                    Ok(NoteImage::Stored { name, mime_type })
+                }
+            })
+            .collect()
+    }
+
+    /// Note image `image`.
+    pub(crate) fn image(&self, image: &NoteImage) -> Result<arko_ai::Image, String> {
+        let (name, mime_type) = match image {
+            NoteImage::Url(url) => return Ok(arko_ai::Image::Url(url.clone())),
+            NoteImage::Stored { name, mime_type } => (name, mime_type),
+        };
+        let data = match (self.images.lock().get(name).cloned(), &self.events) {
+            (Some(data), _) => data,
+            (None, Some(persistence)) => persistence.images().load(name, mime_type)?,
+            (None, None) => return Err(format!("this run doesn't keep an image named {name}")),
+        };
+        Ok(arko_ai::Image::Base64 {
+            data,
+            mime_type: mime_type.clone(),
+        })
+    }
+
+    /// The images of `notes` (each note's number and images), each labelled
+    /// with its note. One that can't be read is left out, with a warning.
+    fn context_images(&self, notes: &[(u64, Vec<NoteImage>)]) -> Vec<arko_agents::ContextImage> {
+        let mut images = Vec::new();
+        for (seq, note_images) in notes {
+            for (index, image) in note_images.iter().enumerate() {
+                let label = if note_images.len() == 1 {
+                    format!("The image of note {seq}:")
+                } else {
+                    format!("Image {} of note {seq}:", index + 1)
+                };
+                match self.image(image) {
+                    Ok(image) => images.push(arko_agents::ContextImage::new(label, image)),
+                    Err(error) => log::warn!(
+                        "An image of note {seq} can't be read, so it isn't given: {error}"
+                    ),
+                }
+            }
+        }
+        images
     }
 
     /// Changes when a note is posted.
@@ -330,8 +435,11 @@ impl NoteBoard {
         ctx: &SharedContext,
         note: Note,
     ) -> Result<PostedNote, WorkflowError> {
-        let (note, recipients) = self.check(ctx, note)?;
-        let posted = insert(&mut self.state.lock(), note, None, None);
+        let (mut note, recipients) = self.check(ctx, note)?;
+        let images = self.keep_images(&mut note).map_err(|error| {
+            WorkflowError::Persistence(format!("could not keep the note's images: {error}"))
+        })?;
+        let posted = insert(&mut self.state.lock(), note, images, None, None);
         self.announce(ctx, &posted, &recipients);
         self.posted
             .send_modify(|count| *count = count.wrapping_add(1));
@@ -432,12 +540,15 @@ impl NoteBoard {
                 notes[..shown].iter().map(|posted| posted.seq).collect(),
                 notes[..shown]
                     .iter()
-                    .flat_map(|posted| images(posted))
-                    .collect(),
+                    .filter(|posted| !posted.images.is_empty())
+                    .map(|posted| (posted.seq, posted.images.clone()))
+                    .collect::<Vec<_>>(),
             )
         });
         state.seen.insert(task_id, given);
-        text
+        drop(state);
+        // Read outside the lock: an image may come from its file.
+        text.map(|(text, seqs, images)| (text, seqs, self.context_images(&images)))
     }
 
     /// Run `task` of `agent` is recovered from its task as last saved (after
@@ -703,9 +814,13 @@ impl NoteBoard {
             let checked = entry
                 .map_err(|error| format!("it isn't a note ({error})"))
                 .and_then(|entry| {
-                    self.check(ctx, entry.note)
-                        .map(|(note, recipients)| (entry.id, entry.at, note, recipients))
-                        .map_err(|error| error.to_string())
+                    let (mut note, recipients) = self
+                        .check(ctx, entry.note)
+                        .map_err(|error| error.to_string())?;
+                    let images = self
+                        .keep_images(&mut note)
+                        .map_err(|error| format!("its images could not be kept ({error})"))?;
+                    Ok((entry.id, entry.at, note, images, recipients))
                 });
             match checked {
                 Ok(checked) => accepted.push(checked),
@@ -721,11 +836,11 @@ impl NoteBoard {
         let posted = {
             let mut state = self.state.lock();
             let mut posted = Vec::new();
-            for (id, at, note, recipients) in accepted {
+            for (id, at, note, images, recipients) in accepted {
                 if id.is_some_and(|id| state.notes.iter().any(|posted| posted.id == id)) {
                     continue;
                 }
-                posted.push((insert(&mut state, note, id, at), recipients));
+                posted.push((insert(&mut state, note, images, id, at), recipients));
             }
             state.control_offset = batch.end;
             posted
@@ -741,10 +856,11 @@ impl NoteBoard {
     }
 }
 
-/// Adds `note` as the next note.
+/// Adds `note`, with its kept `images`, as the next note.
 fn insert(
     state: &mut NotesSnapshot,
     note: Note,
+    images: Vec<NoteImage>,
     id: Option<Uuid>,
     at: Option<DateTime<Utc>>,
 ) -> PostedNote {
@@ -753,6 +869,7 @@ fn insert(
         seq: state.notes.last().map_or(0, |note| note.seq) + 1,
         posted_at: at.unwrap_or_else(Utc::now),
         note,
+        images,
     };
     state.notes.push(posted.clone());
     posted
@@ -835,7 +952,7 @@ fn cut(text: &str, max: usize) -> &str {
 /// of a note can pass for a heading of the prompt.
 fn item(posted: &PostedNote) -> String {
     let mut text = posted.note.text.replace('\n', "\n  ");
-    let with_images = match posted.note.images.len() {
+    let with_images = match posted.images.len() {
         0 => None,
         1 => Some("(With an image, shown after this update.)".to_string()),
         count => Some(format!("(With {count} images, shown after this update.)")),
@@ -853,24 +970,6 @@ fn item(posted: &PostedNote) -> String {
         posted.posted_at.format("%Y-%m-%d %H:%M UTC"),
         text
     )
-}
-
-/// The images of a note, each labelled with its note.
-fn images(posted: &PostedNote) -> impl Iterator<Item = arko_agents::ContextImage> + '_ {
-    let count = posted.note.images.len();
-    posted
-        .note
-        .images
-        .iter()
-        .enumerate()
-        .map(move |(index, image)| {
-            let label = if count == 1 {
-                format!("The image of note {}:", posted.seq)
-            } else {
-                format!("Image {} of note {}:", index + 1, posted.seq)
-            };
-            arko_agents::ContextImage::new(label, image.clone())
-        })
 }
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
@@ -991,6 +1090,19 @@ impl NotesHandle {
             .upgrade()
             .map(|context| context.notes.notes(&context))
             .unwrap_or_default()
+    }
+
+    /// A posted note's image; see
+    /// [`Workflow::note_image`](crate::Workflow::note_image).
+    pub fn image(&self, image: &NoteImage) -> Result<arko_ai::Image, WorkflowError> {
+        let context = self
+            .context
+            .upgrade()
+            .ok_or_else(|| WorkflowError::BuilderInvalid("the workflow was dropped".to_string()))?;
+        context
+            .notes
+            .image(image)
+            .map_err(WorkflowError::Persistence)
     }
 }
 

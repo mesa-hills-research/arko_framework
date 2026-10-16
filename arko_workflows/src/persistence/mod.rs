@@ -10,6 +10,7 @@ use crate::context::SharedContext;
 use crate::error::WorkflowError;
 use crate::workflow::result::AgentRunStatus;
 
+pub mod images;
 pub mod state;
 
 /// What the event log (`events.jsonl` in the run directory) records.
@@ -133,6 +134,8 @@ pub struct PersistenceManager {
     durable_store: Arc<crate::durable::DurableStore>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
     events: Arc<EventWriter>,
+    /// The run's images, saved once each; what it writes refers to them.
+    images: Arc<images::ImageFiles>,
     /// The saved versions of the recorded results' tasks, by task ID:
     /// written by this manager, or loaded on resume. Changed only with the
     /// write lock held, together with the results.
@@ -436,10 +439,14 @@ const TASKS_DIR: &str = "agents";
 /// (`agents/<task id>/<content hash>.json`), and its content. The same
 /// content has the same file, so a task that didn't change isn't written
 /// again.
-fn task_version(task: &arko_agents::Task) -> Result<(String, Vec<u8>), WorkflowError> {
+fn task_version(
+    task: &arko_agents::Task,
+    images: &Arc<images::ImageFiles>,
+) -> Result<(String, Vec<u8>), WorkflowError> {
     // Through a JSON value, whose maps keep their keys in order: the same
-    // task gives the same bytes (a `HashMap` field's order varies).
-    let content = serde_json::to_vec_pretty(&serde_json::to_value(task)?)?;
+    // task gives the same bytes (a `HashMap` field's order varies). Its
+    // images are saved apart and named.
+    let content = serde_json::to_vec_pretty(&images.with(|| serde_json::to_value(task))?)?;
     let hash = crate::digest::sha256_hex(&content);
     Ok((
         format!("{TASKS_DIR}/{}/{}.json", task.id, &hash[..32]),
@@ -481,11 +488,13 @@ impl PersistenceManager {
             workflow_run_id,
             config.checkpoint_dir.clone(),
         ));
+        let images = images::ImageFiles::in_run_dir(&config.checkpoint_dir);
         let events = Arc::new(EventWriter::new(
             config.checkpoint_dir.join("events.jsonl"),
             workflow_run_id,
             config.event_log,
             config.event_flush_interval,
+            images.clone(),
         ));
         // The live files the live checkpoint on disk (an earlier process's)
         // refers to are kept until this manager's live checkpoint replaces
@@ -500,6 +509,7 @@ impl PersistenceManager {
             durable_store,
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             events,
+            images,
             saved_tasks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             written: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             live: Arc::new(parking_lot::Mutex::new(live)),
@@ -523,6 +533,11 @@ impl PersistenceManager {
 
     pub fn durable_store(&self) -> Arc<crate::durable::DurableStore> {
         self.durable_store.clone()
+    }
+
+    /// The run's image files: what it saves refers to its images by name.
+    pub fn images(&self) -> &Arc<images::ImageFiles> {
+        &self.images
     }
 
     /// Records that the recorded results' tasks were loaded from these task
@@ -614,7 +629,7 @@ impl PersistenceManager {
             .config
             .checkpoint_dir
             .join(format!("checkpoint-{}.json", ws.checkpoint_id));
-        let json = serde_json::to_string_pretty(ws)?;
+        let json = self.images.with(|| serde_json::to_string_pretty(ws))?;
         self.write_file(&path, json.as_bytes(), true).await?;
         self.point_latest_at(&path, built.build, built.running, None)
             .await?;
@@ -715,19 +730,21 @@ impl PersistenceManager {
         let plan_budget = ctx.budget.plan_state();
         let notes = ctx.notes.snapshot();
         let subagents = ctx.subagents.snapshot();
-        let shared = fingerprint(&(
-            &memory_snapshot,
-            &message_queues,
-            &freshness_snapshot,
-            &verification_records,
-            &distillation_records,
-            &cancellation,
-            &agent_registry,
-            &budget_limits,
-            &plan_budget,
-            &notes,
-            &subagents,
-        ));
+        let shared = self.images.with(|| {
+            fingerprint(&(
+                &memory_snapshot,
+                &message_queues,
+                &freshness_snapshot,
+                &verification_records,
+                &distillation_records,
+                &cancellation,
+                &agent_registry,
+                &budget_limits,
+                &plan_budget,
+                &notes,
+                &subagents,
+            ))
+        });
 
         let mut agent_runs = Vec::new();
         let mut missing_task_states = Vec::new();
@@ -1140,7 +1157,7 @@ impl PersistenceManager {
                 "injected task write failure".to_string(),
             ));
         }
-        let (file, content) = task_version(task)?;
+        let (file, content) = task_version(task, &self.images)?;
         let path = self.config.checkpoint_dir.join(&file);
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(file);
@@ -1332,14 +1349,16 @@ impl PersistenceManager {
         let rewritten = task.is_some();
         let result = match task {
             Some(task) => {
-                let pretty = self.config.pretty_json;
+                let (pretty, images) = (self.config.pretty_json, self.images.clone());
                 // Off the async threads: a long conversation takes a while.
                 let json = tokio::task::spawn_blocking(move || {
-                    if pretty {
-                        serde_json::to_vec_pretty(&*task)
-                    } else {
-                        serde_json::to_vec(&*task)
-                    }
+                    images.with(|| {
+                        if pretty {
+                            serde_json::to_vec_pretty(&*task)
+                        } else {
+                            serde_json::to_vec(&*task)
+                        }
+                    })
                 })
                 .await;
                 match json {
@@ -1450,13 +1469,16 @@ impl PersistenceManager {
             }
             Some(built) => {
                 let (pretty, state) = (self.config.pretty_json, built.state);
+                let images = self.images.clone();
                 // Off the async threads: the cost ledger can be long.
                 let json = tokio::task::spawn_blocking(move || {
-                    if pretty {
-                        serde_json::to_vec_pretty(&state)
-                    } else {
-                        serde_json::to_vec(&state)
-                    }
+                    images.with(|| {
+                        if pretty {
+                            serde_json::to_vec_pretty(&state)
+                        } else {
+                            serde_json::to_vec(&state)
+                        }
+                    })
                 })
                 .await
                 .map_err(std::io::Error::other)??;
@@ -1562,7 +1584,8 @@ impl PersistenceManager {
     /// [`WorkflowState::agent_results_in`](state::WorkflowState::agent_results_in).
     pub async fn load_checkpoint(path: &Path) -> Result<state::WorkflowState, WorkflowError> {
         let content = tokio::fs::read_to_string(path).await?;
-        let ws: state::WorkflowState = serde_json::from_str(&content)?;
+        let images = images::ImageFiles::in_run_dir(parent_directory(path));
+        let ws: state::WorkflowState = images.with(|| serde_json::from_str(&content))?;
         Ok(ws)
     }
 }
@@ -1761,7 +1784,12 @@ fn sweep_run_directory(directory: &Path) -> HashSet<uuid::Uuid> {
             .is_some_and(|name| name.to_string_lossy().ends_with(TEMPORARY_SUFFIX))
             && path.is_file()
     };
-    for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir(directory)
+        .into_iter()
+        .chain(std::fs::read_dir(directory.join(images::IMAGES_DIR)))
+        .flatten()
+        .flatten()
+    {
         if temporary(&entry.path()) {
             remove(&entry.path());
         }
@@ -1888,6 +1916,8 @@ struct EventWriter {
     workflow_run_id: uuid::Uuid,
     policy: EventLog,
     interval: Duration,
+    /// The run's images: a line names an image, not hold it.
+    images: Arc<images::ImageFiles>,
     pending: parking_lot::Mutex<PendingEvents>,
     /// The open file; held while writing, so writes keep their order.
     file: tokio::sync::Mutex<Option<tokio::fs::File>>,
@@ -1911,12 +1941,14 @@ impl EventWriter {
         workflow_run_id: uuid::Uuid,
         policy: EventLog,
         interval: Duration,
+        images: Arc<images::ImageFiles>,
     ) -> Self {
         Self {
             path,
             workflow_run_id,
             policy,
             interval,
+            images,
             pending: parking_lot::Mutex::new(PendingEvents::default()),
             file: tokio::sync::Mutex::new(None),
             timer: AtomicBool::new(false),
@@ -1941,12 +1973,14 @@ impl EventWriter {
         if !self.policy.records(event) {
             return;
         }
-        let mut line = match serde_json::to_vec(&PersistedEvent {
-            timestamp: chrono::Utc::now(),
-            workflow_run_id: self.workflow_run_id,
-            agent_name,
-            agent_run_id,
-            event,
+        let mut line = match self.images.with(|| {
+            serde_json::to_vec(&PersistedEvent {
+                timestamp: chrono::Utc::now(),
+                workflow_run_id: self.workflow_run_id,
+                agent_name,
+                agent_run_id,
+                event,
+            })
         }) {
             Ok(line) => line,
             Err(error) => {
@@ -1978,7 +2012,7 @@ impl EventWriter {
     /// in a warning), to be written at once when a Tokio runtime is running
     /// and otherwise with the next write.
     fn append_record(self: &Arc<Self>, record: &impl serde::Serialize, what: &str) {
-        let mut line = match serde_json::to_vec(record) {
+        let mut line = match self.images.with(|| serde_json::to_vec(record)) {
             Ok(line) => line,
             Err(error) => {
                 log::warn!("Could not serialize {what} for the event log: {error}");
