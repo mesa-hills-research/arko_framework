@@ -133,6 +133,8 @@ fn texts(task: &Task) -> Vec<String> {
 async fn a_conversation_over_the_threshold_is_handed_over_in_place() {
     let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
     agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    let chart = ai::Image::new_base64("Y2hhcnQ=", "image/png");
+    agent.task.initial_task_images = vec![chart.clone()];
     let task_id = agent.task.id;
     push(
         &mut agent,
@@ -161,6 +163,13 @@ async fn a_conversation_over_the_threshold_is_handed_over_in_place() {
     assert_eq!(task.conversation_usage_start, 3);
     assert_eq!(task.usage_history.len(), 5);
 
+    // The task's image restated with it, held once.
+    assert_eq!(
+        task.conversation.messages[0].content[1].as_image(),
+        Some(&chart)
+    );
+    assert!(task.initial_task_images.is_empty());
+    assert_eq!(task.initial_images(), [chart]);
     let texts = texts(&task);
     let first = &texts[0];
     assert!(first.starts_with("Inspect fixture image\n\n"), "{first}");

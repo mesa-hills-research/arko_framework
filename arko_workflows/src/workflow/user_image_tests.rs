@@ -75,7 +75,9 @@ async fn a_run_and_its_continuation_send_their_images_with_their_prompts() {
         )
         .await
         .unwrap();
-    assert_eq!(first.task.initial_task_images, [png("Zmlyc3Q=")]);
+    // Held once, in the first message.
+    assert!(first.task.initial_task_images.is_empty());
+    assert_eq!(first.task.initial_images(), [png("Zmlyc3Q=")]);
     assert_text_then_image(
         &last_user_content(&server.bodies()[0]),
         "Describe this.",

@@ -531,9 +531,8 @@ pub(crate) fn seed_images(task: &Task, chat: bool) -> Vec<arko_ai::Content> {
     if chat {
         unanswered_images(task)
     } else {
-        task.initial_task_images
-            .iter()
-            .cloned()
+        task.initial_images()
+            .into_iter()
             .map(arko_ai::Content::Image)
             .collect()
     }

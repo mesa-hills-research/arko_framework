@@ -1135,6 +1135,8 @@ async fn the_task_s_images_go_with_its_first_input() {
         "{sent}"
     );
     assert_eq!(blocks[1], image_block());
+    assert!(task.initial_task_images.is_empty());
+    assert_eq!(task.initial_images(), [pixels()]);
 }
 
 /// Context with an image, once the model has been asked for context

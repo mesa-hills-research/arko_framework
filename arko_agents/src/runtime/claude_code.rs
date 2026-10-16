@@ -933,8 +933,9 @@ impl ClaudeCodeRun {
             let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
             let first =
                 builder.format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
+            // Moved: the first message holds them from now on.
             let content =
-                crate::task::with_images(first, self.task.initial_task_images.iter().cloned());
+                crate::task::with_images(first, std::mem::take(&mut self.task.initial_task_images));
             self.task
                 .conversation
                 .add_user_message_with_contents(content);

@@ -141,9 +141,10 @@ impl AgentLoop {
             {
                 let initial_user_prompt = prompt_builder
                     .format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
+                // Moved: the first message holds them from now on.
                 let content = crate::task::with_images(
                     initial_user_prompt,
-                    self.task.initial_task_images.iter().cloned(),
+                    std::mem::take(&mut self.task.initial_task_images),
                 );
                 self.task
                     .conversation

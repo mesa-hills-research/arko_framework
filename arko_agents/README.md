@@ -912,8 +912,9 @@ details and reminder schedule as an ordinary user message. Pending context is de
 once at the next safe turn boundary, including file-tree changes, without duplication.
 
 **User images.** A user's images go into the same message as the text they come with,
-after it. `Task::initial_task_images` holds the task prompt's (set before the task first
-runs), `prepare_for_resumption_from_completed_with_images` and
+after it. `Task::initial_task_images` holds the task prompt's until the first message is
+written (set them before the task first runs, the runtime then moves them into that message,
+and `Task::initial_images` gives them either way), `prepare_for_resumption_from_completed_with_images` and
 `prepare_for_resumption_with_user_response_and_images` take a follow-up's or an answer's,
 and `TurnContext::images` a context update's (below). Both runtimes send them, and a
 Claude Code agent receives them as image blocks of its input. A request with an image
@@ -1508,7 +1509,7 @@ let config = AgentConfig::builder(id, name, llm_config)
    and the task's usage. Its first message is the seed's text, framed as a task prompt
    (with the initial environment details and reminder): by default the task's
    `initial_task_prompt`, then `# Handover report`, a sentence saying the conversation
-   was replaced, and the report, followed by the task's `initial_task_images`. The
+   was replaced, and the report, followed by the task's images (`Task::initial_images`). The
    runtime then resets what it tracks about the old
    conversation: tools observing the conversation start over
    (`Tool::reset_context`), the file tree is sent in full again, and the cache monitor

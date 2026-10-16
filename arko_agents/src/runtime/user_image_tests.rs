@@ -18,7 +18,8 @@ fn images(message: &ai::Message) -> Vec<&ai::Image> {
 }
 
 /// The task's images follow its prompt in its first message, and the
-/// request is made with them.
+/// request is made with them. They move there: the task holds them once,
+/// and `initial_images` still gives them.
 #[tokio::test]
 async fn the_first_message_holds_the_task_s_images_after_its_prompt() {
     let (mut agent, mut events, _commands) = chat_agent();
@@ -31,6 +32,8 @@ async fn the_first_message_holds_the_task_s_images_after_its_prompt() {
     assert!(matches!(&first.content[0], ai::Content::Text(_)));
     assert_eq!(images(first), [&pixels(), &pixels()]);
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.initial_task_images.is_empty());
+    assert_eq!(task.initial_images(), [pixels(), pixels()]);
 }
 
 /// A source that gives one context update, at its first call.

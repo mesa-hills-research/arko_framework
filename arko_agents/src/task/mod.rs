@@ -341,8 +341,10 @@ pub struct Task {
     #[serde(deserialize_with = "crate::agent_config::deserialize_task_agent_config")]
     pub agent_config: AgentConfig,
     pub initial_task_prompt: String,
-    /// Images that go with the initial prompt: the task's first message
-    /// holds them after its text. Set before the task first runs.
+    /// Images that go with the initial prompt. Set before the task first
+    /// runs: the runtime moves them into the task's first message, after
+    /// its text, so a task holds them once. [`Task::initial_images`] gives
+    /// them either way.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initial_task_images: Vec<arko_ai::Image>,
     pub conversation: arko_ai::Conversation,
@@ -552,6 +554,27 @@ fn is_zero(value: &usize) -> bool {
 }
 
 /// A user message's content: `text`, then `images`.
+impl Task {
+    /// The images that go with the initial prompt: `initial_task_images`
+    /// before the first message is written, then the images right after the
+    /// text of the conversation's first message (a fresh conversation's
+    /// first message after a handover restates the task with them).
+    pub fn initial_images(&self) -> Vec<arko_ai::Image> {
+        if !self.initial_task_images.is_empty() {
+            return self.initial_task_images.clone();
+        }
+        let Some(first) = self.conversation.messages.first() else {
+            return Vec::new();
+        };
+        first
+            .content
+            .iter()
+            .skip_while(|content| content.as_text().is_some())
+            .map_while(|content| content.as_image().cloned())
+            .collect()
+    }
+}
+
 pub(crate) fn with_images(
     text: impl Into<String>,
     images: impl IntoIterator<Item = arko_ai::Image>,
