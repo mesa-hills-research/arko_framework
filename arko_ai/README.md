@@ -250,7 +250,12 @@ is available where `Model::supports_disabling_parallel_tool_calls` is true (Open
 Anthropic, OpenRouter); for Gemini the request fails with `Error::UnsupportedFeature`.
 A `ToolConfig` with no tools is sent as no tool configuration at all, on every provider: no
 tool list, tool choice or parallel-call setting (`GenerationConfig::offered_tools` is what
-a request sends).
+a request sends). To go on without tools in a conversation that used them (an agent
+switched to a chat), send `Conversation::tool_history_as_text()`, a copy in which each call
+is a line `[Tool call NAME: ARGUMENTS]` in its assistant message, without the reasoning that
+led to it, and each result is `[Result of NAME]` (or `[NAME failed]`) and its output,
+followed by its images. The original conversation keeps its calls, and one without calls is
+returned as it is.
 
 A call's `arguments` are parsed JSON; arguments that are not valid JSON are kept as text
 in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and
@@ -1254,6 +1259,7 @@ session.close().await?;
 | --- | --- |
 | Turns | One process per conversation; `send` starts a turn, `receive_turn` collects it up to its `Result` |
 | Model and effort | `--model` and `--effort` per process; `set_model` switches the model mid-session. To change effort, start a new session with `SessionStart::Resume` |
+| System prompt | `system_prompt` (`--system-prompt` or `--append-system-prompt`). Claude Code records a conversation's prompt at its first request and sends that record on every later request and resume, until a compaction. `system_prompt_snapshot: Some(false)` (`--system-prompt-snapshot off`) sends the prompt the launch passes instead, for a resumed conversation whose prompt changed; each later launch needs it too |
 | Conversation history | Claude Code keeps the transcript. Hold on to `session_id()` and resume with `SessionStart::Resume { session, fork, at }`, where `at` goes on from an earlier message: the UUID `send` returns, or a message's `uuid`. `SessionStart::WithId` names a new session |
 | Approvals | `permission_handler` answers the CLI's `can_use_tool` requests (`--permission-prompt-tool stdio`) |
 | Hooks | `hooks` registers host callbacks for events such as `PreToolUse`; `Hook::deny_tool` blocks a call |

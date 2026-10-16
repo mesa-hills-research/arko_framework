@@ -99,6 +99,131 @@ fn an_empty_tool_list_sends_no_tool_fields() {
     }
 }
 
+/// A conversation that called a tool, continued without tools (an agent
+/// switched to a chat): the ask, a reply with its reasoning, text and a
+/// call, the call's result with an image and the user's next words beside
+/// it, and the reply after.
+fn conversation_with_tool_history(model: Model) -> Conversation {
+    use crate::message::{Content, Image, Message};
+    use crate::reasoning::ReasoningArtifact;
+    use crate::tool::{ToolCall, ToolResult, ToolResultImage};
+
+    let mut conversation = conversation(model);
+    let call = ToolCall::from_argument_text(
+        Some("call_a".into()),
+        "read_file".into(),
+        r#"{"path":"a.rs"}"#,
+    );
+    let mut reply = Message::new_assistant("Reading it.");
+    reply.tool_calls = vec![call.clone()];
+    // An OpenAI response's output items replay the call itself.
+    if conversation.model.provider == Provider::OpenAI {
+        reply.reasoning_artifact = Some(ReasoningArtifact::OpenAIOutputItems {
+            items: vec![serde_json::json!({
+                "type": "function_call", "id": "fc_a", "call_id": "call_a",
+                "name": "read_file", "arguments": "{\"path\":\"a.rs\"}",
+            })],
+        });
+    }
+    conversation.messages.push(reply);
+    let result =
+        ToolResult::from_tool_call(&call, "fn main() {}").with_images(vec![ToolResultImage::new(
+            "a.png, 1 KB",
+            Image::new_base64("cGl4ZWxz", "image/png"),
+        )]);
+    conversation.add_user_message_with_contents(vec![
+        Content::ToolResult(result),
+        Content::Text("Thanks.".into()),
+    ]);
+    conversation.add_assistant_message("It is an empty program.");
+    conversation.add_user_message("Explain it.");
+    conversation
+}
+
+fn body_of(conversation: &Conversation, config: &GenerationConfig, oauth: bool) -> String {
+    match conversation.model.provider {
+        Provider::OpenAI => OpenAIClient::new("test").request_body(conversation, config, oauth),
+        Provider::Anthropic => AnthropicClient::new("test").request_body(conversation, config),
+        Provider::Google => GoogleClient::new("test").request_body(conversation, config),
+        Provider::OpenRouter => OpenRouterClient::new("test")
+            .build_request(conversation, config)
+            .map(|prepared| serde_json::to_string(&prepared.body).unwrap()),
+        Provider::ClaudeCode => unreachable!("Claude Code models are run by the CLI"),
+    }
+    .unwrap()
+}
+
+/// Written as text, a conversation that called tools goes to every
+/// provider without tools: no call or result items, and no reasoning of the
+/// turn that made the call (an OpenAI output item replays the call itself).
+/// The result's image follows its text.
+#[test]
+fn tool_history_as_text_sends_no_call_or_result_items() {
+    for (model, oauth) in routes() {
+        let conversation = conversation_with_tool_history(model.clone());
+        let sent = body_of(&conversation.tool_history_as_text(), &base(&model), oauth);
+        for item in [
+            "tool_use",
+            "tool_result",
+            "\"function_call\"",
+            "function_call_output",
+            "function_result",
+            "tool_calls",
+            "\"role\":\"tool\"",
+            "fc_a",
+        ] {
+            assert!(!sent.contains(item), "{} {item}: {sent}", model.id);
+        }
+        for text in [
+            "Reading it.",
+            r#"[Tool call read_file: {\"path\":\"a.rs\"}]"#,
+            r#"[Result of read_file]\nfn main() {}"#,
+            "a.png, 1 KB",
+            "cGl4ZWxz",
+            "Thanks.",
+        ] {
+            assert!(sent.contains(text), "{} {text}: {sent}", model.id);
+        }
+    }
+}
+
+/// Only the copy is written as text; a conversation without tool calls is
+/// used as it is.
+#[test]
+fn tool_history_as_text_leaves_the_conversation_as_it_is() {
+    let model = Model::get(Provider::OpenAI, "gpt-6-astra").unwrap();
+    let with_calls = conversation_with_tool_history(model.clone());
+    let flattened = with_calls.tool_history_as_text().into_owned();
+    assert_eq!(with_calls.messages[1].tool_calls.len(), 1);
+    assert!(with_calls.messages[1].reasoning_artifact.is_some());
+    let reply = &flattened.messages[1];
+    assert!(reply.tool_calls.is_empty());
+    assert!(reply.reasoning_artifact.is_none());
+    let texts: Vec<_> = reply
+        .content
+        .iter()
+        .filter_map(crate::message::Content::as_text)
+        .collect();
+    assert_eq!(
+        texts,
+        ["Reading it.", r#"[Tool call read_file: {"path":"a.rs"}]"#]
+    );
+    assert!(matches!(
+        &flattened.messages[2].content[..],
+        [
+            crate::message::Content::Text(output),
+            crate::message::Content::Text(label),
+            crate::message::Content::Image(_),
+            crate::message::Content::Text(thanks),
+        ] if output == "[Result of read_file]\nfn main() {}" && label == "a.png, 1 KB" && thanks == "Thanks."
+    ));
+    let plain = conversation(model);
+    assert!(matches!(
+        plain.tool_history_as_text(),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 /// `offered_tools` is the configuration only while it lists a tool.
 #[test]
 fn offered_tools_needs_a_tool() {

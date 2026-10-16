@@ -202,6 +202,14 @@ pub struct ClaudeOptions {
     pub fallback_model: Option<String>,
     pub effort: Option<Effort>,
     pub system_prompt: SystemPrompt,
+    /// `--system-prompt-snapshot on|off`; `None` leaves the CLI's default
+    /// (on). Claude Code records a conversation's system prompt at its first
+    /// request and sends that record on every later request and resume, even
+    /// when a later launch passes another prompt, until the conversation is
+    /// compacted. `Some(false)` sends the prompt this launch passes instead,
+    /// for a resumed conversation whose prompt changed; each later launch
+    /// needs it too, since off records nothing.
+    pub system_prompt_snapshot: Option<bool>,
     pub built_in_tools: BuiltInTools,
     /// Tools that run without asking (`Read`, `Bash(git diff *)`,
     /// `mcp__server__tool`).
@@ -269,6 +277,12 @@ impl ClaudeOptions {
             SystemPrompt::ClaudeCode => {}
             SystemPrompt::Append(text) => push(&["--append-system-prompt", text]),
             SystemPrompt::Replace(text) => push(&["--system-prompt", text]),
+        }
+        if let Some(snapshot) = self.system_prompt_snapshot {
+            push(&[
+                "--system-prompt-snapshot",
+                if snapshot { "on" } else { "off" },
+            ]);
         }
         match &self.built_in_tools {
             BuiltInTools::Default => {}

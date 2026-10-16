@@ -114,6 +114,17 @@ fn options_become_cli_arguments() {
         ToolServer::new("math").qualified_name("add"),
         "mcp__math__add"
     );
+    assert!(!joined.contains("--system-prompt-snapshot"), "{joined}");
+    let unrecorded = ClaudeOptions {
+        system_prompt_snapshot: Some(false),
+        ..ClaudeOptions::default()
+    };
+    assert!(
+        unrecorded
+            .arguments()
+            .join(" ")
+            .contains("--system-prompt-snapshot off")
+    );
 }
 
 #[tokio::test]
