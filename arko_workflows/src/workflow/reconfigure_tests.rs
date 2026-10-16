@@ -63,6 +63,7 @@ async fn a_chat_continued_as_an_agent_keeps_its_conversation_and_gets_tools() {
         ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
     let workflow = builder(&server, &workspace).build().unwrap();
     let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let mut events = workflow.subscribe_events();
     let second = workflow
         .continue_agent_with(
             &first,
@@ -73,6 +74,14 @@ async fn a_chat_continued_as_an_agent_keeps_its_conversation_and_gets_tools() {
         .unwrap();
     assert_eq!(second.agent_run_id, first.agent_run_id);
     assert!(second.task.reconfigured);
+    // Reported as the run goes on, before its own events.
+    assert!(matches!(
+        events.try_recv().unwrap().event,
+        arko_agents::AgentEvent::Reconfigured {
+            chat: false,
+            tools: 1
+        }
+    ));
 
     let bodies: Vec<Value> = server
         .bodies()

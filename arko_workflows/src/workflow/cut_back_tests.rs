@@ -188,3 +188,129 @@ async fn a_branch_goes_on_apart_from_the_original() {
     running.set_state(arko_agents::TaskState::InProgress);
     assert!(error(workflow.import_agent_run("main", running)).contains("only a completed task"));
 }
+
+/// A cut back is reported as the run goes on: `ConversationCutBack` names
+/// the message and how many went, before the run's own events.
+#[tokio::test]
+async fn a_cut_back_is_reported_in_the_events() {
+    let workspace = Workspace::new();
+    let server = server().await;
+    let workflow = workflow(&server, &workspace);
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let second = workflow
+        .continue_agent(&first, "Tell me a joke.")
+        .await
+        .unwrap();
+    let mut events = workflow.subscribe_events();
+    workflow
+        .continue_agent_with(&second, "A riddle.", ContinueOptions::new().cut_back_to(2))
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event.event);
+    }
+    let cut = seen
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                arko_agents::AgentEvent::ConversationCutBack {
+                    message_index: 2,
+                    removed_messages: 2
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("{seen:#?}"));
+    assert_eq!(cut, 0, "before the run's own events");
+}
+
+/// A run cut back no longer holds what it read in the removed messages: it
+/// isn't told what changed since then (it reads again what it needs).
+#[tokio::test]
+async fn a_cut_back_forgets_what_the_removed_messages_read() {
+    use crate::freshness::{ActorId, ContextFreshnessConfig, ResourceId};
+    use crate::test_support::{complete_turn, tool_call_turn};
+    let workspace = Workspace::new();
+    std::fs::write(workspace.0.join("a.txt"), "first").unwrap();
+    let server = ResponsesServer::start(|index, _| {
+        Some(match index {
+            0 => tool_call_turn("r", "read_file", serde_json::json!({"path": "a.txt"})),
+            _ => complete_turn(&format!("done{index}"), "done"),
+        })
+    })
+    .await;
+    let mut reader = agent_config("Reader");
+    reader
+        .tool_config
+        .available_tool_names
+        .push("read_file".into());
+    let workflow = Workflow::builder()
+        .name("cut-back-freshness-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("reader", reader)
+        .context_freshness(ContextFreshnessConfig::default())
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("reader", "Read a.txt.").await.unwrap();
+    let file = arko_agents::utils::resolve_path("a.txt", &workflow.context().workspace).unwrap();
+    workflow
+        .mark_resource_dirty(
+            ActorId::new(uuid::Uuid::new_v4(), "writer"),
+            ResourceId::File(file),
+        )
+        .await
+        .unwrap();
+    workflow
+        .continue_agent_with(&first, "Start over.", ContinueOptions::new().cut_back_to(0))
+        .await
+        .unwrap();
+    let last = server.bodies().last().unwrap().clone();
+    assert!(last.contains("Start over."), "{last}");
+    assert!(!last.contains("Changed since you last read them"), "{last}");
+}
+
+/// A run can go on in another directory: it works there from then
+/// on, and its prompt is written again. A Claude Code run with a session
+/// can't move (Claude Code finds a session only from its directory).
+#[tokio::test]
+async fn a_run_goes_on_in_another_directory() {
+    let workspace = Workspace::new();
+    std::fs::create_dir(workspace.0.join("project")).unwrap();
+    let server = server().await;
+    let workflow = workflow(&server, &workspace);
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let moved = workflow
+        .continue_agent_with(
+            &first,
+            "Now the project.",
+            ContinueOptions::new().workspace("project"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        moved.task.current_working_directory,
+        std::path::absolute(workspace.0.join("project")).unwrap()
+    );
+    let refused = workflow
+        .continue_agent_with(&moved, "x", ContinueOptions::new().workspace("missing"))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("does not exist"), "{refused}");
+
+    let mut in_claude_code = moved.clone();
+    in_claude_code.task.agent_config.llm_config.model =
+        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
+    in_claude_code.task.claude_code_session = Some("s1".into());
+    let refused = workflow
+        .continue_agent_with(&in_claude_code, "x", ContinueOptions::new().workspace("."))
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("stays in the directory its session started in"),
+        "{refused}"
+    );
+}

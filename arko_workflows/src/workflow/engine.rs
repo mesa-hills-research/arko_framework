@@ -1342,6 +1342,9 @@ pub(crate) struct UserInput<'a> {
     /// The message the conversation is cut back to first (see
     /// [`ContinueOptions::cut_back_to`](super::ContinueOptions::cut_back_to)).
     pub cut_back_to: Option<usize>,
+    /// The directory the run goes on in (see
+    /// [`ContinueOptions::workspace`](super::ContinueOptions::workspace)).
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 impl<'a> From<&'a str> for UserInput<'a> {
@@ -1351,6 +1354,7 @@ impl<'a> From<&'a str> for UserInput<'a> {
             images: Vec::new(),
             config: None,
             cut_back_to: None,
+            workspace: None,
         }
     }
 }
@@ -3310,7 +3314,8 @@ impl WorkflowEngine {
                 }
             )
         {
-            if !options.images.is_empty() || options.config.is_some() {
+            if !options.images.is_empty() || options.config.is_some() || options.workspace.is_some()
+            {
                 return Err(WorkflowError::BuilderInvalid(
                     "a run whose completion a verifier could not review continues with its message alone: continue it without images or a new configuration, then send them".to_string(),
                 ));
@@ -3330,6 +3335,7 @@ impl WorkflowEngine {
             images: options.images,
             config: options.config,
             cut_back_to: options.cut_back_to,
+            workspace: options.workspace,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
     }
@@ -3368,8 +3374,31 @@ impl WorkflowEngine {
         let agent_name = &previous.agent_name;
         let mut task = previous.task.clone();
         task.parent = parent;
+        // What changed in the task, reported as the run goes on.
+        let mut lifecycle = Vec::new();
         if let Some(index) = input.cut_back_to {
+            let before = task.conversation.messages.len();
             task.cut_back(index).map_err(builder_invalid)?;
+            lifecycle.push(AgentEvent::ConversationCutBack {
+                message_index: index,
+                removed_messages: before.saturating_sub(index),
+            });
+        }
+        if let Some(workspace) = &input.workspace {
+            let directory = super::options::run_workspace(&ctx.workspace, workspace)?;
+            if directory != task.current_working_directory {
+                if task.agent_config.runs_in_claude_code() && task.claude_code_session.is_some() {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "agent run {} runs in Claude Code, whose conversation stays in the directory its session started in ({}); continue it there, or start a new run in '{}'",
+                        task.id,
+                        task.current_working_directory.display(),
+                        directory.display()
+                    )));
+                }
+                task.current_working_directory = directory;
+                // The prompt may state the directory: it is written again.
+                task.conversation.system_message = None;
+            }
         }
         if let Some(config) = input.config {
             // A configuration given now is checked as one given at a start
@@ -3387,6 +3416,10 @@ impl WorkflowEngine {
                 RunRole::of(ctx, depth, task.id),
             );
             task.reconfigure(prepared).map_err(builder_invalid)?;
+            lifecycle.push(AgentEvent::Reconfigured {
+                chat: task.agent_config.tool_config.chat,
+                tools: task.agent_config.tool_config.offered_tool_names().len(),
+            });
         }
         refuse_unsendable_images(agent_name, &task.agent_config, &input.images)?;
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
@@ -3414,11 +3447,16 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
-        // Cut back, the notes and mail the removed messages gave it are
-        // given again (not the one-time notes, which went with them).
-        if input.cut_back_to.is_some_and(|index| index > 0) {
-            ctx.notes.cut_back(agent_name, &task, review);
-            ctx.subagents.recovered(&task);
+        // Cut back: the standing notes the removed messages gave it are
+        // given again (one-time notes went with them; a cut to the first
+        // message gets its notes in its prompt). The subagents it started in
+        // the removed messages are detached: their mail is withheld. The
+        // mail of the others the removed messages held is given again.
+        if let Some(index) = input.cut_back_to {
+            if index > 0 {
+                ctx.notes.cut_back(agent_name, &task, review);
+            }
+            ctx.subagents.cut_back(&task);
         }
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
@@ -3435,6 +3473,14 @@ impl WorkflowEngine {
         // The resources it read that changed since, when freshness is on.
         // It counts as finished (no notices) until it is registered below.
         let actor = ActorId::new(task.id, agent_name.as_str());
+        // Cut back, it no longer holds what it read in the removed messages
+        // (and can't tell which reads were kept): it reads again what it
+        // needs, as after a handover.
+        if input.cut_back_to.is_some()
+            && let Some(tracker) = &ctx.resource_tracker
+        {
+            tracker.clear_actor(&actor);
+        }
         let changed = ctx
             .resource_tracker
             .as_ref()
@@ -3469,6 +3515,9 @@ impl WorkflowEngine {
         if let Err(error) = prepared {
             ctx.registry.abandon(task.id);
             return Err(error.into());
+        }
+        for event in &lifecycle {
+            publish_event(agent_name, task.id, event, ctx, self.persistence.as_ref()).await;
         }
         let run = self.launch(
             agent_name,
@@ -3753,7 +3802,8 @@ impl WorkflowEngine {
         options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        if options.config.is_some() || options.cut_back_to.is_some() {
+        if options.config.is_some() || options.cut_back_to.is_some() || options.workspace.is_some()
+        {
             return Err(WorkflowError::BuilderInvalid(
                 "a reopened run keeps its configuration and conversation: cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));

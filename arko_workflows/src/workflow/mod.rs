@@ -816,7 +816,8 @@ impl Workflow {
             Restart::Recover
                 if !options.images.is_empty()
                     || options.config.is_some()
-                    || options.cut_back_to.is_some() =>
+                    || options.cut_back_to.is_some()
+                    || options.workspace.is_some() =>
             {
                 Err(WorkflowError::BuilderInvalid(format!(
                     "agent run {} is recovered, which takes no message: send the images, or the new configuration, with the message after it",

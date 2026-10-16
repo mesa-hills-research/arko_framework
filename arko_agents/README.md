@@ -840,6 +840,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
 | `HandoverRequested`, `ConversationHandedOver` | A handover started (the agent was asked for its report), then the conversation was replaced; see [Conversation handover](#conversation-handover). |
 | `ConversationCompacted { input_tokens, compacted_tokens }` | Claude Code compacted a Claude Code agent's conversation, with its size before and after. See [Claude Code models](#claude-code-models). |
+| `ConversationCutBack { message_index, removed_messages }`, `Reconfigured { chat, tools }` | The host cut the conversation back (`Task::cut_back`) or continued the task under another configuration (`Task::reconfigure`). The runtime doesn't emit them: a host that changes a task this way reports them, as a workflow does before the run's own events. |
 | `ContextInjected { ids, bytes }` | A `# Workflow context update` went into the conversation: `bytes` is its size, and `ids` names what it held, as the turn-context source identifies it (below). |
 | `TaskStreamEnd` | The run ended. |
 

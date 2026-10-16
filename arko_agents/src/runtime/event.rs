@@ -350,6 +350,22 @@ pub enum AgentEvent {
         /// Its size after, as Claude Code reported it, when it did.
         compacted_tokens: Option<usize>,
     },
+    /// The host cut the conversation back to just before message
+    /// `message_index` ([`Task::cut_back`](crate::task::Task::cut_back)),
+    /// and `removed_messages` messages went: an edit or a regenerate. A
+    /// workflow reports it as the run goes on
+    /// (`ContinueOptions::cut_back_to`), before the run's own events.
+    ConversationCutBack {
+        message_index: usize,
+        removed_messages: usize,
+    },
+    /// The host continued the task under another configuration
+    /// ([`Task::reconfigure`](crate::task::Task::reconfigure)), such as a
+    /// switch between a chat and an agent: `chat` says whether it is a chat
+    /// now, and `tools` how many tools of its own it is offered. A workflow
+    /// reports it as the run goes on (`ContinueOptions::reconfigure`),
+    /// before the run's own events.
+    Reconfigured { chat: bool, tools: usize },
 }
 
 /// Why a tool result was shortened ([`AgentEvent::ToolResultShortened`]).

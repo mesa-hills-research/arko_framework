@@ -1524,3 +1524,68 @@ fn a_snapshot_loads_with_defaults() {
     assert!(excerpt.contains("the whole text is in /tmp/mail-3.md"));
     let _ = AgentRunStatus::Completed;
 }
+
+/// A lead cut back to before the message whose turn started a subagent
+/// (`ContinueOptions::cut_back_to`) abandoned that timeline: the subagent
+/// is detached, and its report, waiting for the lead, isn't given to the
+/// cut conversation. It stays in the subagent's record.
+#[tokio::test]
+async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
+    let server = ResponsesServer::start(|_, body| {
+        let id = format!("{}_{}", role(body), turn(body));
+        Some(match (role(body).as_str(), turn(body)) {
+            ("lead", _) if body.contains("Something else.") => tool_call_turn(
+                &id,
+                "complete_task",
+                json!({ "summary": "lead done again" }),
+            ),
+            ("lead", 1) => {
+                let (tool, arguments) = start("Count the files.");
+                tool_call_turn(&id, tool, arguments)
+            }
+            ("lead", _) => tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" })),
+            (_, _) => tool_call_turn(
+                &id,
+                "complete_task",
+                json!({ "summary": "There are 3 files." }),
+            ),
+        })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "First.")).await.unwrap();
+    let delegated = within(workflow.continue_agent(&first, "Delegate the count."))
+        .await
+        .unwrap();
+    until(|| {
+        workflow
+            .subagents()
+            .first()
+            .is_some_and(|record| record.state == SubagentState::Finished)
+    })
+    .await;
+    let index = delegated
+        .task
+        .user_turns()
+        .iter()
+        .find(|turn| turn.text.starts_with("Delegate the count."))
+        .unwrap()
+        .index;
+    let again = within(workflow.continue_agent_with(
+        &delegated,
+        "Something else.",
+        crate::ContinueOptions::new().cut_back_to(index),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(again.summary, "lead done again");
+    let last = bodies_of(&server, "lead").last().unwrap().clone();
+    assert!(!last.contains("There are 3 files."), "{last}");
+    assert!(!last.contains("Count the files."), "{last}");
+    let records = workflow.subagents();
+    assert!(records[0].detached);
+    assert_eq!(records[0].report.as_deref(), Some("There are 3 files."));
+}

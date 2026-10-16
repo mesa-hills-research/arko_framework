@@ -446,6 +446,12 @@ pub struct SubagentRecord {
     /// It waits for its lead's answer to a question.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,
+    /// Its lead's conversation was cut back to before the call that started
+    /// it (`ContinueOptions::cut_back_to`), so that conversation never
+    /// started it: its mail stays here, withheld from its lead
+    /// ([`MailItem::withheld`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
 }
 
 /// Who sent a mailbox item.
@@ -507,6 +513,12 @@ pub struct MailItem {
     /// [`MAX_MAIL_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
+    /// Not given to its recipient: it is from a subagent the recipient's
+    /// conversation no longer started ([`SubagentRecord::detached`]). It
+    /// stays in the records for the host to show; `delivered_at` is when it
+    /// was set aside.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withheld: bool,
 }
 
 impl MailItem {

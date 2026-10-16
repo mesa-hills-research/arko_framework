@@ -303,6 +303,13 @@ impl Board {
         let file = (body.trim().len() > super::MAX_MAIL_BYTES)
             .then(|| self.save_mail(id, &heading, &body))
             .flatten();
+        // Mail from a subagent its lead's conversation no longer started
+        // is set aside, not given.
+        let withheld = matches!(from, MailSender::Run(sender) if state
+            .runs
+            .iter()
+            .any(|record| record.run_id == sender && record.detached && record.caller_run_id == to));
+        let now = Utc::now();
         let item = MailItem {
             id,
             to,
@@ -310,9 +317,10 @@ impl Board {
             kind,
             heading,
             body,
-            at: Utc::now(),
-            delivered_at: None,
+            at: now,
+            delivered_at: withheld.then_some(now),
             file,
+            withheld,
         };
         state.mail.push(item.clone());
         item
@@ -509,6 +517,40 @@ impl Board {
         }
     }
 
+    /// Run `task.id` was cut back (`ContinueOptions::cut_back_to`). The
+    /// subagents it started in the removed messages belong to a timeline the
+    /// conversation abandoned: they are detached, and their mail (given or
+    /// not, and any still to come) is withheld, kept in the records for the
+    /// host to show. The mail of the subagents it still started that the
+    /// removed messages held is given again.
+    pub(crate) fn cut_back(&self, task: &Task) {
+        let mut state = self.state.lock();
+        let mut detached = Vec::new();
+        for record in &mut state.runs {
+            if record.caller_run_id == task.id
+                && !record.detached
+                && !holds_start(task, &record.handle)
+            {
+                record.detached = true;
+                detached.push(record.run_id);
+            }
+        }
+        let now = Utc::now();
+        for item in &mut state.mail {
+            if item.to != task.id || item.withheld {
+                continue;
+            }
+            if matches!(item.from, MailSender::Run(sender) if detached.contains(&sender)) {
+                item.withheld = true;
+                item.delivered_at.get_or_insert(now);
+            } else if item.delivered_at.is_some() && !task_holds(task, item) {
+                item.delivered_at = None;
+            }
+        }
+        drop(state);
+        self.bump();
+    }
+
     /// Run `task.id` is recovered from its task as last saved, which may
     /// lack mail it was given after that save: that mail is given again.
     pub(crate) fn recovered(&self, task: &Task) {
@@ -618,6 +660,7 @@ impl Board {
             stopped_by_caller: None,
             stop_requested: None,
             asking: false,
+            detached: false,
         };
         // The host's changes are checked before a workspace is made for the
         // run, or the run is recorded.
@@ -2195,6 +2238,7 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             at: Utc::now(),
             delivered_at: None,
             file: None,
+            withheld: false,
         });
     }
 }
@@ -2260,6 +2304,23 @@ pub(crate) fn split_ids(text: &str) -> Vec<String> {
 /// Whether `task` holds `item`: in its conversation (a context update, a
 /// prompt or a tool result), in context it took and hasn't added, or given
 /// before its latest handover (its report covers it).
+/// Whether `task`'s conversation holds the result of the call that started
+/// subagent `handle` (`start_agent`'s "Started r1 (agent ..." or "Queued r1
+/// (agent ...").
+fn holds_start(task: &Task, handle: &str) -> bool {
+    let started = format!("Started {handle} (agent ");
+    let queued = format!("Queued {handle} (agent ");
+    task.conversation.messages.iter().any(|message| {
+        message.content.iter().any(|content| match content {
+            arko_ai::Content::ToolResult(result) => {
+                result.output.contains(&started) || result.output.contains(&queued)
+            }
+            arko_ai::Content::Text(text) => text.contains(&started) || text.contains(&queued),
+            arko_ai::Content::Image(_) => false,
+        })
+    })
+}
+
 fn task_holds(task: &Task, item: &MailItem) -> bool {
     if let (Some(handover), Some(delivered)) = (task.handovers.last(), item.delivered_at)
         && handover.at >= delivered

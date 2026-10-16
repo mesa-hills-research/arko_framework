@@ -73,6 +73,9 @@ pub struct ContinueOptions {
     /// The message the run's conversation is cut back to first, by its
     /// index (see [`ContinueOptions::cut_back_to`]).
     pub cut_back_to: Option<usize>,
+    /// The working directory the run goes on in (see
+    /// [`ContinueOptions::workspace`]).
+    pub workspace: Option<PathBuf>,
 }
 
 impl ContinueOptions {
@@ -127,6 +130,23 @@ impl ContinueOptions {
     /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
     pub fn cut_back_to(mut self, index: usize) -> Self {
         self.cut_back_to = Some(index);
+        self
+    }
+
+    /// Continues the run in `workspace` instead of its working directory,
+    /// such as a chat that becomes an agent working on a folder: its tools
+    /// work there, its path checks allow it, and skills load from it, as
+    /// [`RunOptions::workspace`] sets for a new run (resolved the same way,
+    /// against the workflow's workspace, and it must exist). A run that
+    /// moves gets its system prompt written again, since the prompt may
+    /// state the directory. A Claude Code agent's conversation stays in the
+    /// directory its session started in (Claude Code finds a session only
+    /// from that directory), so moving one with a session is refused
+    /// (`BuilderInvalid`). Only [`Workflow::continue_agent_with`] takes it.
+    ///
+    /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
+    pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
+        self.workspace = Some(workspace.into());
         self
     }
 }
