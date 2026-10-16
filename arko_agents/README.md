@@ -1229,13 +1229,20 @@ conversation's TTL, so a stop of more than about 4½ minutes loses their caches.
 **Keeping a cache warm.** `AgentRuntime::refresh_prompt_cache(task, registry,
 skill_prompt_context)` keeps a waiting task's cache from expiring: it sends the task's next
 request (system prompt, tools, conversation) with a short ping after it, the output capped
-where the provider allows (one token on Anthropic, OpenAI's minimum of 16; the ChatGPT
-backend takes no cap, and the ping asks for one word), discards the reply, and returns the
-request's usage in `CacheRefresh`. A Claude Code task pings a fork of its session that
-Claude Code doesn't save (`--fork-session --no-session-persistence`). Nothing is added to the
-task. Gemini, OpenRouter models other than Anthropic's, a manual Anthropic thinking budget
-and a task that has made no request with its current prompt return
-`arko_ai::Error::UnsupportedFeature`.
+where the provider allows (one token on Anthropic, OpenAI's minimum of 16, none on the
+ChatGPT backend, and the ping asks for one word), discards the reply, and returns
+`CacheRefresh`: the request's usage and output limit. A task waiting with calls that have
+no results yet (paused for an approval) can't take a message after them, so its last request
+goes again unchanged (`resent_last_request`). A provider that refuses the limit gets the
+request once more with 1,024, and `refused_cap` holds its error. Thinking settings stay as the
+task's requests have them, so the refresh reads the cached conversation. A Claude Code task
+pings a fork of its session that Claude Code doesn't save
+(`--fork-session --no-session-persistence`). Nothing is added to the task. Gemini, OpenRouter
+models other than Anthropic's, Anthropic's on OpenRouter with reasoning on (OpenRouter derives
+the thinking budget from the output limit), a manual Anthropic thinking budget, and a task
+that has made no request with its current prompt return `arko_ai::Error::UnsupportedFeature`.
+Opt-in live tests check each route (`cargo test -p arko_agents keep_warm_live -- --ignored`,
+with the route's API key set).
 
 | Situation | Action | Cache effect |
 | --- | --- | --- |

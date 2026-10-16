@@ -15,6 +15,8 @@ enum Answer {
     Complete,
     /// A whole (not streamed) response of text, with cache reads.
     Text,
+    /// A 400 refusing the request's output limit.
+    RefuseCap,
 }
 
 /// Serves `answers` to consecutive requests; returns the base URL and the
@@ -50,6 +52,20 @@ async fn serve(answers: Vec<Answer>) -> (String, Arc<std::sync::Mutex<Vec<Value>
                 .lock()
                 .unwrap()
                 .push(serde_json::from_slice(&body).unwrap());
+            if let Answer::RefuseCap = answer {
+                let error = serde_json::json!({"error": {
+                    "message": "Invalid 'max_output_tokens': integer below minimum value.",
+                    "type": "invalid_request_error", "param": "max_output_tokens",
+                    "code": "integer_below_min_value",
+                }})
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{error}",
+                    error.len()
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                continue;
+            }
             if let Answer::Text = answer {
                 let message = serde_json::json!({
                     "type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
@@ -77,7 +93,7 @@ async fn serve(answers: Vec<Answer>) -> (String, Arc<std::sync::Mutex<Vec<Value>
                     socket.write_all(b": thinking\n\n").await.unwrap();
                     stalled.push(socket);
                 }
-                Answer::Text => unreachable!("answered above"),
+                Answer::Text | Answer::RefuseCap => unreachable!("answered above"),
                 Answer::Complete => {
                     let call = serde_json::json!({
                         "type": "function_call", "id": "fc_1", "call_id": "call_1",
@@ -209,7 +225,10 @@ async fn a_cache_refresh_sends_the_next_request_with_a_ping() {
         summary: "Done.".into(),
     });
     let key = agent.task.conversation.prompt_cache_key.clone();
-    let usage = agent.refresh_prompt_cache().await.unwrap();
+    let refresh = agent.refresh_prompt_cache().await.unwrap();
+    assert!(!refresh.resent_last_request);
+    assert_eq!(refresh.output_cap, Some(16));
+    let usage = refresh.usage;
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.cached_tokens, Some(1100));
     let body = bodies.lock().unwrap()[0].clone();
@@ -241,4 +260,41 @@ async fn a_cache_refresh_is_refused_where_it_can_t_help() {
         ai::Model::get(ai::Provider::Google, "gemini-3.5-flash").unwrap();
     gemini.task.agent_config.llm_config.model = gemini.task.conversation.model.clone();
     assert!(unsupported(gemini).await.contains("can't be kept warm"));
+
+    // OpenRouter derives Claude's thinking budget from the output limit.
+    let (mut openrouter, _events, _commands) =
+        agent("http://127.0.0.1:9", LLMRetryConfig::default());
+    openrouter.task.conversation.system_message = Some("prompt".into());
+    openrouter.task.conversation.add_user_message("Finish.");
+    openrouter.task.conversation.model = ai::Model::openrouter("anthropic/claude-sonnet-5");
+    let llm = &mut openrouter.task.agent_config.llm_config;
+    llm.model = openrouter.task.conversation.model.clone();
+    llm.generation_config.reasoning = Some(ai::ReasoningConfig::openrouter_effort(
+        ai::ReasoningEffort::High,
+    ));
+    assert!(
+        unsupported(openrouter)
+            .await
+            .contains("change the thinking parameters")
+    );
+}
+
+/// A provider that refuses the output limit gets the request once more
+/// with a larger one, and the refresh says so.
+#[tokio::test]
+async fn a_refused_output_limit_is_raised_once_and_reported() {
+    let (url, bodies) = serve(vec![Answer::RefuseCap, Answer::Text]).await;
+    let (mut agent, _events, _commands) = agent(&url, LLMRetryConfig::default());
+    agent.task.conversation.system_message = Some("You are a test agent.".into());
+    agent.task.conversation.add_user_message("Finish.");
+    agent.task.conversation.add_assistant_message("Done.");
+    let refresh = agent.refresh_prompt_cache().await.unwrap();
+    assert_eq!(refresh.output_cap, Some(1_024));
+    let refused = refresh.refused_cap.unwrap();
+    assert!(refused.contains("max_output_tokens"), "{refused}");
+    assert_eq!(refresh.usage.cached_tokens, Some(1100));
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies[0]["max_output_tokens"], 16);
+    assert_eq!(bodies[1]["max_output_tokens"], 1_024);
+    assert_eq!(bodies[1]["input"], bodies[0]["input"]);
 }

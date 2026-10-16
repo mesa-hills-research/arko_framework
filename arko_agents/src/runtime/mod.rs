@@ -27,6 +27,9 @@ mod retry;
 mod tool_run;
 pub mod turn_context;
 
+#[cfg(test)]
+mod keep_warm_live_tests;
+
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 
 /// What a prompt-cache refresh asks after the conversation: a one-word
@@ -34,12 +37,35 @@ const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 pub(crate) const CACHE_PING: &str =
     "Reply with the single word ok. This message only checks the connection.";
 
-/// What a prompt-cache refresh cost; see [`AgentRuntime::refresh_prompt_cache`].
+/// What a prompt-cache refresh sent and cost; see
+/// [`AgentRuntime::refresh_prompt_cache`].
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CacheRefresh {
     /// The refresh request's usage: its cache reads show what it kept.
     pub usage: arko_ai::UsageInfo,
+    /// The output limit the request was sent with: `None` where the
+    /// provider takes none (ChatGPT OAuth) or Claude Code chooses it.
+    pub output_cap: Option<usize>,
+    /// The task's last request went again unchanged, instead of a ping
+    /// after its conversation: the task waits with calls of the model's
+    /// that have no results yet (paused for an approval).
+    pub resent_last_request: bool,
+    /// Why the provider refused the smaller output limit tried first, when
+    /// the request went again with `output_cap`.
+    pub refused_cap: Option<String>,
+}
+
+impl CacheRefresh {
+    /// A refresh that cost `usage`.
+    pub fn new(usage: arko_ai::UsageInfo) -> Self {
+        Self {
+            usage,
+            output_cap: None,
+            resent_last_request: false,
+            refused_cap: None,
+        }
+    }
 }
 const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
 
@@ -166,17 +192,23 @@ impl AgentRuntime {
     /// Keeps `task`'s prompt cache warm while it waits between turns: its
     /// next request (system prompt, tools, conversation) with a short ping
     /// after it, the output capped where the provider allows (one token on
-    /// Anthropic, OpenAI's minimum of 16; the ChatGPT backend takes no cap)
+    /// Anthropic, OpenAI's minimum of 16, the ChatGPT backend takes no cap)
     /// and the reply discarded, so the provider reads the cached prefix and
-    /// its lifetime starts over. A Claude Code task pings a fork of its
-    /// session that isn't saved. Nothing is added to the task. Returns the
-    /// request's usage. Unsupported (`arko_ai::Error::UnsupportedFeature`)
-    /// for Gemini, OpenRouter models other than Anthropic's, a manual
-    /// Anthropic thinking budget, and a task that has made no request with
-    /// its current prompt. `tool_registry` and `skill_prompt_context` are
-    /// the task's own, as for [`run_task`](Self::run_task), so the request
-    /// offers the same tools. The host refreshes a task its runtime isn't
-    /// running.
+    /// its lifetime starts over. A task waiting with calls of the model's
+    /// that have no results yet (paused for an approval) sends its last
+    /// request again unchanged instead, which ends where the cache entry the
+    /// next request reads ends. A provider that refuses the cap gets the
+    /// request once more with 1,024 (see [`CacheRefresh::refused_cap`]). A
+    /// Claude Code task pings a fork of its session that isn't saved.
+    /// Nothing is added to the task. Unsupported
+    /// (`arko_ai::Error::UnsupportedFeature`) for Gemini, OpenRouter models
+    /// other than Anthropic's and Anthropic's with reasoning on (OpenRouter
+    /// derives the thinking budget from the cap, so a capped request would
+    /// miss the cached conversation), a manual Anthropic thinking budget,
+    /// and a task that has made no request with its current prompt.
+    /// `tool_registry` and `skill_prompt_context` are the task's own, as for
+    /// [`run_task`](Self::run_task), so the request offers the same tools.
+    /// The host refreshes a task its runtime isn't running.
     pub async fn refresh_prompt_cache(
         &self,
         task: Task,
@@ -185,8 +217,8 @@ impl AgentRuntime {
     ) -> Result<CacheRefresh, ArkoAgentsError> {
         let (event_sender, _events) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (_commands, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
-        let usage = if task.agent_config.runs_in_claude_code() {
-            claude_code::ClaudeCodeRun::new(
+        let refresh = if task.agent_config.runs_in_claude_code() {
+            let usage = claude_code::ClaudeCodeRun::new(
                 task,
                 tool_registry,
                 event_sender,
@@ -196,7 +228,8 @@ impl AgentRuntime {
                 None,
             )
             .refresh_prompt_cache()
-            .await?
+            .await?;
+            CacheRefresh::new(usage)
         } else {
             AgentLoop::new(
                 task,
@@ -213,7 +246,7 @@ impl AgentRuntime {
             .refresh_prompt_cache()
             .await?
         };
-        Ok(CacheRefresh { usage })
+        Ok(refresh)
     }
 
     /// Runs a task with the given agent configuration and tool registry.
