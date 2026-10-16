@@ -363,6 +363,35 @@ pub(crate) fn reports_exceeded(
     }
 }
 
+/// The error for a request agent `agent_name` may not make because a budget
+/// is exceeded (the workflow's, the agent's, or a plan window's), whatever
+/// the policy: for a request no run waits on, such as a prompt cache
+/// refresh.
+fn budget_refusal(ctx: &SharedContext, agent_name: &str) -> Option<WorkflowError> {
+    let budget = &ctx.budget;
+    if budget.is_exceeded() {
+        return Some(WorkflowError::BudgetExceeded {
+            spent: budget.total_spent(),
+            limit: budget.limit().unwrap_or(0.0),
+        });
+    }
+    if budget.is_agent_exceeded(agent_name) {
+        return Some(WorkflowError::AgentBudgetExceeded {
+            agent: agent_name.to_string(),
+            spent: budget.agent_spent(agent_name),
+            limit: budget.agent_limit(agent_name).unwrap_or(0.0),
+        });
+    }
+    budget
+        .plan_exceeded()
+        .map(|crossing| WorkflowError::PlanBudgetExceeded {
+            plan: crossing.plan.map(|plan| plan.label().to_string()),
+            window: crossing.window.label().to_string(),
+            used: crossing.used,
+            limit: crossing.limit,
+        })
+}
+
 /// Whether the budget cancels agents over it.
 fn budget_cancels(ctx: &SharedContext) -> bool {
     ctx.budget.exceeded_policy() == BudgetExceededPolicy::Cancel
@@ -3765,7 +3794,7 @@ impl WorkflowEngine {
     ) -> Result<arko_agents::CacheRefresh, WorkflowError> {
         if ctx.registry.is_running(previous.agent_run_id) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running: its own requests keep its cache warm",
+                "agent run {} is running (a run waiting in a host handler, for a tool approval or an answer, counts as running): only a run that isn't running is refreshed",
                 previous.agent_run_id
             )));
         }
@@ -3773,9 +3802,24 @@ impl WorkflowEngine {
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
         let agent_name = current.agent_name;
         let mut task = current.task;
+        // The depth its next request runs at, which decides its tools.
+        let depth = match ctx.subagents.record(task.id) {
+            Some(record) => record.depth,
+            None if task.parent.is_some() => {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "agent run {} was started inside another run's tool call, which continues it: it isn't refreshed on its own",
+                    previous.agent_run_id
+                )));
+            }
+            None => 0,
+        };
+        if let Some(error) = budget_refusal(ctx, &agent_name) {
+            return Err(error);
+        }
         // The tools and skills the run is offered when it goes on, so the
         // request has its prefix.
-        let mut registry = self.build_tool_registry(&agent_name, ctx, RunRole::of(ctx, 0, task.id));
+        let mut registry =
+            self.build_tool_registry(&agent_name, ctx, RunRole::of(ctx, depth, task.id));
         let skill_prompt_context = Self::setup_skills(
             &mut task.agent_config,
             &mut registry,
@@ -3784,7 +3828,27 @@ impl WorkflowEngine {
         let refresh = AgentRuntime::new(self.llm_client.clone())
             .refresh_prompt_cache(task, Arc::new(registry), skill_prompt_context)
             .await?;
-        ctx.budget.add_agent_cost(&agent_name, &refresh.usage);
+        charge_usage(
+            &agent_name,
+            previous.agent_run_id,
+            &refresh.usage,
+            ctx,
+            self.persistence.as_ref(),
+        );
+        // Saved now: an idle workflow has no running agent to save it with.
+        if let Some(persistence) = &self.persistence {
+            let saved = if persistence.journals_tasks() {
+                persistence.write_live_checkpoint(ctx, false).await
+            } else {
+                Box::pin(persistence.auto_checkpoint(ctx)).await
+            };
+            if let Err(error) = saved {
+                log::warn!(
+                    "Workflow '{}': could not save the cost of agent '{agent_name}''s prompt cache refresh: {error}. The next checkpoint saves it.",
+                    ctx.workflow_name
+                );
+            }
+        }
         Ok(refresh)
     }
 

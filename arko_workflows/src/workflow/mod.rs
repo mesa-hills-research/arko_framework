@@ -340,19 +340,28 @@ impl Workflow {
             .cloned()
     }
 
-    /// Keeps the prompt cache of `run`, an agent run the host started that
-    /// isn't running (waiting for the user's next message), warm: its next
+    /// Keeps the prompt cache of `run`, an agent run that isn't running
+    /// (waiting for the user's next message, or paused), warm: its next
     /// request with a short ping after it, the output capped where the
     /// provider allows, the reply discarded, so the provider reads the cached
-    /// conversation and its cache lifetime starts over. A Claude Code agent
-    /// pings a fork of its session that isn't saved. Nothing is added to the
-    /// run's task or the event log; the cost is charged to the agent in the
-    /// workflow's budget and ledger. Returns the request's usage (its cache
-    /// reads show what it kept). See
+    /// conversation and its cache lifetime starts over. A run paused with
+    /// calls that have no results yet (for a tool approval) sends its last
+    /// request again unchanged instead. A Claude Code agent pings a fork of
+    /// its session that isn't saved. A subagent's run is offered the tools of
+    /// its depth, as when it goes on. Nothing is added to the run's task or
+    /// the event log. The cost is charged to the agent like a model call's
+    /// (with `OnBudgetWarning` and `OnBudgetExceeded`) and saved at once: in
+    /// the live checkpoint with the task journal, else by an automatic
+    /// checkpoint. Returns what was sent and its usage (its cache reads show
+    /// what it kept). See
     /// [`AgentRuntime::refresh_prompt_cache`](arko_agents::AgentRuntime::refresh_prompt_cache)
     /// for the routes it supports; others return
     /// `WorkflowError::Agent(ArkoAgentsError::LLM(Error::UnsupportedFeature))`.
-    /// A running run returns `BuilderInvalid`.
+    /// A running run (one waiting in a host handler counts as running) and a
+    /// run started inside another run's tool call return `BuilderInvalid`,
+    /// and with a budget exceeded (the workflow's, the agent's, or a plan
+    /// window's) nothing is sent: `BudgetExceeded`, `AgentBudgetExceeded` or
+    /// `PlanBudgetExceeded`.
     pub async fn refresh_prompt_cache(
         &self,
         run: &AgentResult,

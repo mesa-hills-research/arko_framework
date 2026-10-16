@@ -1589,3 +1589,71 @@ async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
     assert!(records[0].detached);
     assert_eq!(records[0].report.as_deref(), Some("There are 3 files."));
 }
+
+/// A subagent's prompt cache is refreshed with the tools of its own
+/// requests, which its depth decides: a subagent that may itself start
+/// subagents is offered no `start_agent` at the deepest level, and neither
+/// is its refresh.
+#[tokio::test]
+async fn a_subagent_s_refresh_offers_the_tools_of_its_depth() {
+    use crate::test_support::Reply;
+    let scripts = HashMap::from([
+        ("lead".to_string(), vec![start("Count the files."), wait()]),
+        ("r1".to_string(), vec![complete("There are 3 files.")]),
+    ]);
+    let server = ResponsesServer::start_async(move |_, body| {
+        let request: Value = serde_json::from_str(&body).unwrap();
+        let reply = if request["stream"] == json!(false) {
+            Reply::Status {
+                status: 200,
+                retry_after: None,
+                body: json!({
+                    "id": "resp_r", "object": "response", "created_at": 0,
+                    "status": "completed", "model": "gpt-5.6-luna",
+                    "output": [{"type": "message", "id": "m1", "status": "completed",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "ok",
+                                             "annotations": []}]}],
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                })
+                .to_string(),
+            }
+        } else {
+            let (role, turn) = (role(&body), turn(&body));
+            let id = format!("{role}_{turn}");
+            Reply::Stream(match scripts.get(&role).and_then(|steps| steps.get(turn)) {
+                Some((tool, arguments)) => tool_call_turn(&id, tool, arguments.clone()),
+                None => tool_call_turn(&id, "complete_task", json!({"summary": "done"})),
+            })
+        };
+        Box::pin(async move { Some(reply) })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = Workflow::builder()
+        .name("subagents-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Lead"))
+        .agent("worker", agent_config("Worker"))
+        .workflow_services(
+            WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_caller("worker")
+                .allow_target("worker"),
+        )
+        .subagents(SubagentsConfig::default())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate the count."))
+        .await
+        .unwrap();
+    let run = workflow.subagents()[0].run_id;
+    let result = workflow.agent_result(run).unwrap();
+    workflow.refresh_prompt_cache(&result).await.unwrap();
+    let worker = bodies_of(&server, "r1");
+    let (own, refresh) = (&worker[worker.len() - 2], &worker[worker.len() - 1]);
+    assert!(refresh.contains("\"stream\":false"), "{refresh}");
+    assert!(!offered(own).contains(&"start_agent".to_string()));
+    assert_eq!(offered(refresh), offered(own));
+}
