@@ -24,7 +24,7 @@ ignore.workspace = true
 regex = "1.10.4"
 shellexpand = "3.1.0"
 rmcp = { version = "1.1.0", features = ["client", "transport-child-process"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # The CLI example's own tests (its argument parsing) run with the crate's.
 [[example]]

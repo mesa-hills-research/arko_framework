@@ -267,7 +267,16 @@ fn attempt_load_bundle_skill(
             continue;
         }
 
-        let name = zip_file.name().replace('\\', "/");
+        let name = match zip_file.name() {
+            Ok(name) => name.replace('\\', "/"),
+            Err(e) => {
+                let err = SkillLoadError::ZipError {
+                    path: file_path.to_string_lossy().to_string(),
+                    message: format!("Failed to read the name of zip entry {}: {}", i, e),
+                };
+                return handle_skill_error(err, policy);
+            }
+        };
         let mut content = String::new();
         if let Err(e) = zip_file.read_to_string(&mut content) {
             log::debug!(
