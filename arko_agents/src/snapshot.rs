@@ -88,8 +88,27 @@ impl TaskSnapshots {
 }
 
 /// A hash of the task's serialized form: equal for a task that did not
-/// change. `None` if it can't be serialized (the sink will say why).
+/// change. `None` if it can't be serialized (the sink will say why). Each
+/// image counts by its identity (where its data is, its length and a sample
+/// of it), not by all its data: hashing the screenshots of a conversation
+/// at every safe point would cost more than the rest of the task. An image
+/// isn't changed in place: one replaced by another is in another place.
 fn fingerprint(task: &Task) -> Option<u64> {
+    /// Names each image by its identity.
+    struct Identities;
+    impl arko_ai::image_store::ImageStore for Identities {
+        fn save(&self, data: &str, _mime_type: &str) -> Result<String, String> {
+            Ok(format!(
+                "{:p}-{}-{:x}",
+                data.as_ptr(),
+                data.len(),
+                arko_ai::image_store::sample_hash(data)
+            ))
+        }
+        fn load(&self, _reference: &str, _mime_type: &str) -> Result<String, String> {
+            Err("image identities can't be read".to_string())
+        }
+    }
     struct HashWriter(std::collections::hash_map::DefaultHasher);
     impl std::io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -101,6 +120,59 @@ fn fingerprint(task: &Task) -> Option<u64> {
         }
     }
     let mut writer = HashWriter(Default::default());
-    serde_json::to_writer(&mut writer, task).ok()?;
+    arko_ai::image_store::with_image_store(Arc::new(Identities), || {
+        serde_json::to_writer(&mut writer, task)
+    })
+    .ok()?;
     Some(writer.0.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_config::{AgentConfig, AgentLLMConfig};
+    use arko_ai::{Content, Image, Message};
+
+    fn task() -> Task {
+        let config = AgentConfig::builder(
+            "worker".into(),
+            "Worker".into(),
+            AgentLLMConfig {
+                model: arko_ai::Model::anthropic_claude_opus_5_5(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("r".into())
+        .instructions("i".into())
+        .build()
+        .unwrap();
+        Task::new(config, "Look.".into(), "/w".into(), None)
+    }
+
+    /// The fingerprint tells a task that changed from one that didn't, also
+    /// by its images, which count by identity, not by all their data.
+    #[test]
+    fn the_fingerprint_sees_images_change_without_hashing_their_data() {
+        let mut task = task();
+        let image = |fill: u8| Image::from_bytes(&vec![fill; 1 << 20], "image/png");
+        task.conversation
+            .messages
+            .push(Message::new_user_with_contents(vec![Content::Image(
+                image(1),
+            )]));
+        let first = fingerprint(&task).unwrap();
+        assert_eq!(fingerprint(&task), Some(first));
+        // Another image of the same size in its place.
+        let last = task.conversation.messages.last_mut().unwrap();
+        last.content = vec![Content::Image(image(2))];
+        let second = fingerprint(&task).unwrap();
+        assert_ne!(second, first);
+        let last = task.conversation.messages.last_mut().unwrap();
+        last.content.push(Content::Image(image(2)));
+        assert_ne!(fingerprint(&task).unwrap(), second);
+        // A copy of the task, its images elsewhere, counts as changed: at
+        // worst it is reported once more.
+        let copy = task.clone();
+        assert_ne!(fingerprint(&copy), fingerprint(&task));
+    }
 }
