@@ -146,7 +146,14 @@ impl AgentLoop {
             Some(config) => config.report_request_for(with_tool, completes),
             None => crate::handover::default_report_request_for(with_tool, completes),
         };
-        self.task.conversation.add_user_message(report_request);
+        if std::mem::take(&mut self.step_left_out) {
+            self.task.conversation.add_user_message(&format!(
+                "{}\n\n{report_request}",
+                crate::handover::STEP_LEFT_OUT
+            ));
+        } else {
+            self.task.conversation.add_user_message(report_request);
+        }
         self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
         log::info!(

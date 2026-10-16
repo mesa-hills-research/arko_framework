@@ -262,9 +262,13 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 /// If the provider still answers that the request is over the model's
 /// input limit ([`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)),
 /// the largest tool result added since the last successful request is
-/// shortened further and the request sent again, at most twice; then the
-/// task stops on the error, its kind recorded. A handover can't help here:
-/// its report request would be over the limit too.
+/// shortened further and the request sent again, at most twice. Then an
+/// agent that hands over (with `handover`, or a host's
+/// [`HandoverThreshold`](crate::handover::HandoverThreshold)) leaves out the
+/// step that request added (the reply and its results) and hands over from
+/// the conversation of the last answered request, told that the step was
+/// left out ([`STEP_LEFT_OUT`](crate::handover::STEP_LEFT_OUT)). Otherwise
+/// the task stops on the error, its kind recorded.
 ///
 /// The guard covers native tool calling in arko's own runtime. Output-based
 /// (legacy) tool calling and Claude Code agents are not guarded: Claude

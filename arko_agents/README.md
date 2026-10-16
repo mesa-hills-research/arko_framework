@@ -367,9 +367,13 @@ that, and changes nothing while the request may fit:
   request is shortened and the request is sent again, at most twice: to a preview when
   it is larger than one, otherwise (or when it was shortened before) to its notice alone.
   After that, or at once when that result is under about 500 tokens (it is then left
-  alone), the error ends recovery like any error that retrying can't fix, recorded as
-  `ContextOverflow`. A handover can't help: its report request would be over the limit
-  too.
+  alone), an agent that hands over (with `handover`, or a host's `HandoverThreshold`)
+  leaves out the step that request added, the model's reply and its results, and hands
+  over from the conversation as it was at the last answered request, which fit. Its
+  report request starts with `STEP_LEFT_OUT`, which says the step was left out and asks
+  the report to say what it was for, so the fresh conversation can do it in smaller
+  parts. Context updates added since stay. Without a handover, the error ends recovery
+  like any error that retrying can't fix, recorded as `ContextOverflow`.
 - `ToolResultShortened` reports each shortened result, with its estimated size and the
   reason; the `ToolResult` event before it has the whole output.
 

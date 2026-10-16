@@ -168,6 +168,10 @@ pub struct AgentLoop {
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// The host's handover threshold, in place of the configuration's.
     pub(super) handover_threshold: crate::handover::HandoverThreshold,
+    /// The step that took a request over the model's input limit was left
+    /// out: the next report request says so
+    /// ([`hand_over_without_the_step`](Self::hand_over_without_the_step)).
+    pub(super) step_left_out: bool,
     /// Receives the task at its safe points; see [`report_task`](Self::report_task).
     pub(super) snapshots: crate::snapshot::TaskSnapshots,
     /// The host's stop signal for the task's calls; see
@@ -277,6 +281,7 @@ impl AgentLoop {
             context_receipts: Vec::new(),
             handover_hook: None,
             handover_threshold: Default::default(),
+            step_left_out: false,
             snapshots: Default::default(),
             host_stop: crate::stop::StopSignal::never(),
             calls_stop: crate::stop::StopSource::new(),
