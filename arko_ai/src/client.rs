@@ -306,6 +306,18 @@ impl LLMClient {
         }
     }
 
+    /// Whether OpenAI requests go to the ChatGPT backend with an account's
+    /// OAuth login, which takes no output limit
+    /// ([`with_openai_chatgpt_oauth`](Self::with_openai_chatgpt_oauth),
+    /// [`with_chatgpt_accounts`](Self::with_chatgpt_accounts)). `false`
+    /// without an OpenAI client.
+    pub async fn openai_uses_chatgpt_oauth(&self) -> bool {
+        match self.openai() {
+            Some(client) => client.is_chatgpt_oauth().await,
+            None => false,
+        }
+    }
+
     /// Applies the OpenAI settings made on this `LLMClient`. Settings left
     /// unset keep the OpenAI client's own, so a client installed with
     /// [`with_openai_client`](Self::with_openai_client) keeps its trace,
@@ -950,6 +962,17 @@ mod tests {
 
     fn client(vars: &[(&str, &str)]) -> LLMClient {
         try_client(vars).unwrap()
+    }
+
+    /// Whether OpenAI requests go to the ChatGPT backend, which takes no
+    /// output limit.
+    #[tokio::test]
+    async fn the_client_tells_a_chatgpt_login_from_an_api_key() {
+        assert!(!LLMClient::new().openai_uses_chatgpt_oauth().await);
+        let api = LLMClient::new().with_openai_api_key("sk-test");
+        assert!(!api.openai_uses_chatgpt_oauth().await);
+        let oauth = LLMClient::new().with_openai_chatgpt_oauth("token", None, "account");
+        assert!(oauth.openai_uses_chatgpt_oauth().await);
     }
 
     #[tokio::test]
