@@ -2828,6 +2828,62 @@ async fn a_turn_that_ends_with_text_completes_the_task() {
     assert!(system.contains("is your final reply"), "{system}");
 }
 
+/// Each request Claude Code makes is reported when its response starts,
+/// with the conversation's size (its arko tools included) and the bytes
+/// per token the previous request's reported input calibrated.
+#[tokio::test]
+async fn each_request_is_reported_when_its_response_starts() {
+    let fake = Fake::new(json!([[
+        {"text": "Working on it.", "input_tokens": 1200},
+        complete("All done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &[]),
+        "Do the thing.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted {
+                model,
+                subagent,
+                sizes,
+                bytes_per_token,
+            } => Some((model.clone(), subagent.clone(), *sizes, *bytes_per_token)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 2, "{events:#?}");
+    let (model, subagent, first, ratio) = &started[0];
+    assert_eq!(model, "claude-opus-5-5");
+    assert_eq!(subagent, &None);
+    assert_eq!(*ratio, crate::runtime::DEFAULT_BYTES_PER_TOKEN);
+    let first = first.unwrap();
+    assert_eq!(
+        first.system_prompt,
+        task.conversation.system_message.as_ref().unwrap().len()
+    );
+    // complete_task, served as arko's tool.
+    assert!(first.tool_definitions > 0);
+    assert!(first.user_text > 0);
+    let (_, _, second, ratio) = &started[1];
+    assert_eq!(
+        Some(*ratio),
+        crate::runtime::calibrated_bytes_per_token(first.text_bytes(), 1200)
+    );
+    assert!(second.unwrap().assistant_text > 0);
+    // Every call is the conversation's own.
+    assert!(
+        task.model_call_usage_history
+            .iter()
+            .all(|call| call.subagent.is_none())
+    );
+}
+
 /// An agent offered nothing (no tools, and a reply in text ends the task)
 /// runs with Claude Code's built-ins off and a system prompt that says
 /// nothing about tools, and its reply ends the task.

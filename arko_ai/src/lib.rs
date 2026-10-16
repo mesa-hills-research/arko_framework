@@ -11,6 +11,7 @@ pub mod pricing;
 pub mod prompt_cache;
 pub mod providers;
 pub mod reasoning;
+pub mod request_size;
 pub mod retry;
 pub mod stop;
 pub mod tool;
@@ -42,6 +43,7 @@ pub use reasoning::{
     OpenAIReasoningMode, OpenRouterReasoning, ReasoningArtifact, ReasoningConfig, ReasoningContext,
     ReasoningEffort, ReasoningSummary,
 };
+pub use request_size::RequestSizes;
 pub use retry::BackoffPolicy;
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult, ToolResultImage};

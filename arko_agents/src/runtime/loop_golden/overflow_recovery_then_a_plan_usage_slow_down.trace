@@ -1,6 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
 R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":100,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=74779bc6b21b6ce7
@@ -10,14 +11,17 @@ E {"ToolResult":{"output":"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 
 S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f917af4c95054f8b
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=42266266bbb4a7b0
 R msgs=3 model=gpt-5.6-luna request=dff68275bf4771ab
+E {"ModelRequestStarted":{"bytes_per_token":4.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":400004,"user_text":11}}}
 E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit, so the result of step was shortened and the request is sent again (1/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"ToolResultShortened":{"call_id":"huge","kept_tokens":16008,"original_tokens":100000,"reason":"overflow_recovery","tool_name":"step"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a51f909931151521
 R msgs=3 model=gpt-5.6-luna request=68df8a1bea8ee2e2
+E {"ModelRequestStarted":{"bytes_per_token":4.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":64307,"user_text":11}}}
 E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit, so the result of step was shortened and the request is sent again (2/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"ToolResultShortened":{"call_id":"huge","kept_tokens":0,"original_tokens":16008,"reason":"overflow_recovery","tool_name":"step"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9f57c2cedbd3747f
 R msgs=3 model=gpt-5.6-luna request=ba7ede1e2a84acc8
+E {"ModelRequestStarted":{"bytes_per_token":4.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":244,"user_text":11}}}
 E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"non_retryable","error_kind":"context_overflow","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model."}}}
 E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":true,"tool_call_id":null}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"non_retryable","error_kind":"context_overflow","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model."}} task=d52cd0bad78d139c
@@ -31,6 +35,7 @@ M {"content":[{"ToolResult":{"call_id":"huge","is_error":false,"name":"step","ou
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5a6d937287fecacf
 R msgs=1 model=gpt-5.6-luna request=0531dc4429f7ef03
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"plan","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"m","output_tokens":0,"plan_usage":{"plan_type":"pro","primary":{"resets_at":4102444800,"used_percent":95.0,"window_minutes":300}},"provider":"openai"}}
 E {"PlanUsageReported":{"plan_type":"pro","primary":{"resets_at":4102444800,"used_percent":95.0,"window_minutes":300}}}
@@ -41,6 +46,7 @@ S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 inje
 E {"PlanUsageThresholdReached":{"action":{"SlowDown":{"delay_ms":10000}},"resets_at_unix_ms":"<time>","threshold_percent":90.0,"used_percent":95.0,"window":"primary"}}
 E {"ContextInjected":{"bytes":26}}
 R msgs=4 model=gpt-5.6-luna request=b266b62aac6540bb
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":14,"tool_definitions":605,"tool_results":49,"user_text":64}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c9dd166463ad9c35

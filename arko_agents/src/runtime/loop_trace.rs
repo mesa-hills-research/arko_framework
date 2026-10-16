@@ -583,7 +583,7 @@ mod tests {
         ));
         let lines = trace.lines();
         let kinds: String = lines.iter().map(|line| &line[..1]).collect();
-        assert_eq!(kinds, "ESREESESEESSE", "{lines:#?}");
+        assert_eq!(kinds, "ESREEESESEESSE", "{lines:#?}");
         assert_eq!(lines[0], r#"E {"TaskStateChanged":"InProgress"}"#);
         assert!(lines[1].starts_with("S durable=0 msgs=1 native_results=0 "));
         assert_eq!(lines.last().unwrap(), r#"E "TaskStreamEnd""#);

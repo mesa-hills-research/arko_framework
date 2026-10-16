@@ -30,7 +30,7 @@ use super::event::ShortenReason;
 
 /// Bytes per token before a task's own usage calibrates it: about right
 /// for code and English with current tokenizers.
-pub(crate) const DEFAULT_BYTES_PER_TOKEN: f64 = 3.0;
+pub const DEFAULT_BYTES_PER_TOKEN: f64 = 3.0;
 /// The calibrated ratio's bounds: dense text (JSON, non-Latin scripts) has
 /// fewer bytes per token, prose more.
 pub(crate) const MIN_BYTES_PER_TOKEN: f64 = 2.0;
@@ -117,7 +117,7 @@ pub(crate) fn message_bytes(message: &ai::Message) -> usize {
 }
 
 /// The bytes of a request: the system message, the messages, and the tool
-/// definitions.
+/// definitions ([`ai::RequestSizes::text_bytes`]).
 pub(crate) fn request_bytes(
     conversation: &ai::Conversation,
     generation_config: &ai::GenerationConfig,
@@ -132,12 +132,21 @@ pub(crate) fn request_bytes_of(
     messages: &[ai::Message],
     generation_config: &ai::GenerationConfig,
 ) -> usize {
-    let system = conversation.system_message.as_ref().map_or(0, String::len);
-    let messages: usize = messages.iter().map(message_bytes).sum();
-    let tools = generation_config.tool_config.as_ref().map_or(0, |config| {
-        serde_json::to_string(&config.tools).map_or(0, |json| json.len())
-    });
-    system + messages + tools
+    ai::RequestSizes::of_messages(conversation, messages, generation_config.offered_tools())
+        .text_bytes()
+}
+
+/// The bytes per token a request of `request_bytes` bytes of text (see
+/// [`ai::RequestSizes::text_bytes`]) that the provider counted as
+/// `input_tokens` input tokens shows, clamped to 2..4 (dense text such as
+/// JSON has fewer bytes per token, prose more; images and replayed
+/// reasoning count in the tokens only, which lowers it). `None` when either
+/// is zero. The ratio arko's runtime estimates requests by, and what
+/// [`AgentEvent::ModelRequestStarted`](crate::runtime::event::AgentEvent::ModelRequestStarted)
+/// reports; [`DEFAULT_BYTES_PER_TOKEN`] before a task's first answered
+/// request.
+pub fn calibrated_bytes_per_token(request_bytes: usize, input_tokens: usize) -> Option<f64> {
+    calibrated_ratio(request_bytes, input_tokens)
 }
 
 /// What happens to one result.

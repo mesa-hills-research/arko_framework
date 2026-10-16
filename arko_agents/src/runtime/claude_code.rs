@@ -609,6 +609,12 @@ pub(super) struct ClaudeCodeRun {
     /// The main conversation's prompt-cache lifetime, as Claude Code's cache
     /// writes show it (1 hour or 5 minutes).
     cache_lifetime: Option<Duration>,
+    /// The tools served to Claude Code as arko's MCP server, for the
+    /// request sizes `ModelRequestStarted` reports.
+    served_tools: Option<ai::ToolConfig>,
+    /// The bytes per token of the conversation's requests so far, as the
+    /// sizes reported for them and their input show it.
+    bytes_per_token: f64,
     /// The plan-usage threshold's `SlowDown` delay, while usage is over it.
     slow_down: Option<Duration>,
     /// Allowed calls the `SlowDown` holds until their deadline: the request
@@ -732,6 +738,8 @@ impl ClaudeCodeRun {
             plan_usage: None,
             limit_reached: None,
             cache_lifetime: None,
+            served_tools: None,
+            bytes_per_token: super::result_budget::DEFAULT_BYTES_PER_TOKEN,
             slow_down: None,
             slowed: VecDeque::new(),
             cache_warned: false,
@@ -1505,6 +1513,7 @@ impl ClaudeCodeRun {
         let mut server = cc::ToolServer::new(ARKO_TOOL_SERVER);
         let mut names = self.registry.list_tool_names();
         names.sort();
+        let mut served = Vec::new();
         for name in names {
             let Some(tool) = self.registry.get(&name) else {
                 continue;
@@ -1512,6 +1521,7 @@ impl ClaudeCodeRun {
             let definition = config
                 .offered_tool_definition(tool.definition())
                 .to_arko_ai_tool_definition();
+            served.push(definition.clone());
             server = server.tool(Arc::new(ServedTool {
                 name: definition.name,
                 description: definition.description,
@@ -1519,6 +1529,7 @@ impl ClaudeCodeRun {
                 host: host.clone(),
             }));
         }
+        self.served_tools = Some(ai::ToolConfig::new(served));
         let session = match &self.task.claude_code_session {
             Some(session) => cc::SessionStart::Resume {
                 session: session.clone(),
@@ -2675,6 +2686,7 @@ impl ClaudeCodeRun {
             } => match event["type"].as_str() {
                 Some("message_start") => {
                     let message = &event["message"];
+                    self.request_started(message, &parent_tool_use_id).await?;
                     if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
                     {
                         self.streamed.insert(key.to_string());
@@ -2972,6 +2984,40 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
+    /// A request's response started (`message_start`, as early as Claude
+    /// Code shows a request): reported with the conversation's size for its
+    /// own requests, which, with the input the response reports, calibrates
+    /// the bytes per token reported with the next.
+    async fn request_started(
+        &mut self,
+        message: &Value,
+        subagent: &Option<String>,
+    ) -> Result<(), ArkoAgentsError> {
+        let sizes = subagent
+            .is_none()
+            .then(|| ai::RequestSizes::of(&self.task.conversation, self.served_tools.as_ref()));
+        let model = message["model"].as_str().map_or_else(
+            || self.task.agent_config.llm_config.model.id.clone(),
+            str::to_string,
+        );
+        self.emit(AgentEvent::ModelRequestStarted {
+            model,
+            subagent: subagent.clone(),
+            sizes,
+            bytes_per_token: self.bytes_per_token,
+        })
+        .await?;
+        if let (Some(sizes), Some(usage)) = (sizes, message.get("usage"))
+            && let Some(ratio) = super::result_budget::calibrated_bytes_per_token(
+                sizes.text_bytes(),
+                PendingUsage::input(usage),
+            )
+        {
+            self.bytes_per_token = ratio;
+        }
+        Ok(())
+    }
+
     /// Records every thread's pending usage.
     async fn flush_usage(&mut self) -> Result<(), ArkoAgentsError> {
         let threads: Vec<Option<String>> = self.pending_usage.keys().cloned().collect();
@@ -3061,6 +3107,7 @@ impl ClaudeCodeRun {
         .with_plan_usage(self.plan_usage.clone());
         call.stop_reason = pending.stop_reason;
         call.stop_details = pending.stop_details;
+        call.subagent = thread.clone();
         let call = self.task.record_model_call_usage(call);
         self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
         if thread.is_none() {

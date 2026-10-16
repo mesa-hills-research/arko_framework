@@ -179,13 +179,21 @@ impl AgentLoop {
         let (conversation, gen_config) = self.next_request();
         #[cfg(test)]
         self.trace.request(&conversation, &gen_config);
+        let sizes = ai::RequestSizes::of_request(&conversation, &gen_config);
         // What this request's usage is compared with, to estimate the
         // next one (not for the refusal fallback's model).
         self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {
             messages: conversation.messages.len(),
-            bytes: result_budget::request_bytes(&conversation, &gen_config),
+            bytes: sizes.text_bytes(),
             conversation: self.task.conversation_usage_start,
         });
+        self.emit_event(AgentEvent::ModelRequestStarted {
+            model: conversation.model.id.clone(),
+            subagent: None,
+            sizes: Some(sizes),
+            bytes_per_token: self.bytes_per_token,
+        })
+        .await?;
         #[cfg(test)]
         let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
         let request = async move {

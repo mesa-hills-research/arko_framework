@@ -621,11 +621,18 @@ impl Task {
     /// Returns the usage with `input_delta_from_previous_call` populated.
     pub fn record_model_call_usage(&mut self, mut usage: ModelCallUsage) -> ModelCallUsage {
         // The first call of a conversation that replaced another has no
-        // previous call to compare with.
+        // previous call to compare with. A subagent's call (Claude Code's
+        // `Agent` tool) is compared with that subagent's, and the
+        // conversation's own calls with each other.
         let previous = self
             .model_call_usage_history
             .get(self.conversation_model_call_start..)
-            .and_then(|calls| calls.last());
+            .and_then(|calls| {
+                calls
+                    .iter()
+                    .rev()
+                    .find(|call| call.subagent == usage.subagent)
+            });
         if let Some(previous) = previous {
             let delta = usage.input_tokens as isize - previous.input_tokens as isize;
             usage = usage.with_input_delta(delta);

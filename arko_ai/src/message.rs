@@ -76,6 +76,109 @@ impl Image {
             mime_type: mime_type.to_string(),
         }
     }
+
+    /// The image's width and height in pixels, read from the header of
+    /// inline PNG, JPEG, GIF or WebP data (only as much of the data is
+    /// decoded as the header needs). `None` for a URL or data whose size
+    /// can't be read.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        use base64::Engine as _;
+        let Image::Base64 { data, .. } = self else {
+            return None;
+        };
+        // Most headers are in the first bytes; a JPEG's size can follow
+        // large metadata, so more is decoded until it is found.
+        let mut chars = 64;
+        loop {
+            let end = chars.min(MAX_HEADER_CHARS).min(data.len()) / 4 * 4;
+            let prefix = base64::engine::general_purpose::STANDARD
+                .decode(&data.as_bytes()[..end])
+                .ok()?;
+            if let Some(size) = image_size(&prefix) {
+                return Some(size);
+            }
+            if end == data.len() / 4 * 4 || chars >= MAX_HEADER_CHARS {
+                return None;
+            }
+            chars *= 8;
+        }
+    }
+
+    /// An estimate of the input tokens the image takes in a request: its
+    /// pixels over 750, after scaling it down to fit 1,568 pixels on its
+    /// long side and 1.15 megapixels (Anthropic's rule; other providers
+    /// count tiles or patches, to similar totals). 1,600 when its size is
+    /// unknown, about the most an image takes after scaling.
+    pub fn estimated_tokens(&self) -> usize {
+        const UNKNOWN: usize = 1_600;
+        let Some((width, height)) = self.dimensions().filter(|(w, h)| *w > 0 && *h > 0) else {
+            return UNKNOWN;
+        };
+        let (width, height) = (f64::from(width), f64::from(height));
+        let scale = (1_568.0 / width.max(height))
+            .min((1_150_000.0 / (width * height)).sqrt())
+            .min(1.0);
+        (width * height * scale * scale / 750.0).ceil().max(1.0) as usize
+    }
+}
+
+/// The most base64 characters [`Image::dimensions`] decodes looking for a
+/// header (768 KiB of data).
+const MAX_HEADER_CHARS: usize = 1 << 20;
+
+/// Width and height from an image file's first bytes: PNG, GIF, WebP, or a
+/// JPEG's first frame header.
+fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let u16_be = |at: usize| Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let u16_le = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+    let u24_le = |at: usize| {
+        let b = bytes.get(at..at + 3)?;
+        Some(u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16))
+    };
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        return Some((width, height));
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some((u32::from(u16_le(6)?), u32::from(u16_le(8)?)));
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return match bytes.get(12..16)? {
+            b"VP8 " => Some((
+                u32::from(u16_le(26)? & 0x3fff),
+                u32::from(u16_le(28)? & 0x3fff),
+            )),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            b"VP8X" => Some((u24_le(24)? + 1, u24_le(27)? + 1)),
+            _ => None,
+        };
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        let mut at = 2;
+        while at + 4 <= bytes.len() {
+            if bytes[at] != 0xff {
+                return None;
+            }
+            let marker = bytes[at + 1];
+            if marker == 0xff {
+                // Fill byte.
+                at += 1;
+                continue;
+            }
+            let length = usize::from(u16_be(at + 2)?);
+            let start_of_frame =
+                matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+            if start_of_frame {
+                return Some((u32::from(u16_be(at + 7)?), u32::from(u16_be(at + 5)?)));
+            }
+            at += 2 + length;
+        }
+    }
+    None
 }
 
 /// A request setting changed from a point in the conversation onward,
@@ -272,5 +375,79 @@ mod tests {
         assert!(message.content[2].as_text().is_some());
         assert_eq!(message.remove_images(), 0);
         assert!(!Message::new_user("hi").has_images());
+    }
+
+    /// The size is read from each format's header; a JPEG's after the
+    /// segments before its frame header, also far into the data.
+    #[test]
+    fn image_dimensions_come_from_the_header() {
+        let image = |bytes: Vec<u8>| Image::from_bytes(&bytes, "image/x");
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(640u32.to_be_bytes());
+        png.extend(480u32.to_be_bytes());
+        assert_eq!(image(png).dimensions(), Some((640, 480)));
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend(320u16.to_le_bytes());
+        gif.extend(200u16.to_le_bytes());
+        assert_eq!(image(gif).dimensions(), Some((320, 200)));
+
+        let webp = |chunk: &[u8], payload: &[u8]| {
+            let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+            bytes.extend(chunk);
+            bytes.extend([0; 4]);
+            bytes.extend(payload);
+            bytes
+        };
+        let mut lossy = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+        lossy.extend(100u16.to_le_bytes());
+        lossy.extend(50u16.to_le_bytes());
+        assert_eq!(image(webp(b"VP8 ", &lossy)).dimensions(), Some((100, 50)));
+        let bits: u32 = 99 | (49 << 14);
+        let mut lossless = vec![0x2f];
+        lossless.extend(bits.to_le_bytes());
+        assert_eq!(
+            image(webp(b"VP8L", &lossless)).dimensions(),
+            Some((100, 50))
+        );
+        let extended = [0, 0, 0, 0, 99, 0, 0, 49, 0, 0];
+        assert_eq!(
+            image(webp(b"VP8X", &extended)).dimensions(),
+            Some((100, 50))
+        );
+
+        // A JPEG with 200 KB of metadata before its frame header.
+        let mut jpeg = vec![0xff, 0xd8];
+        for _ in 0..4 {
+            jpeg.extend([0xff, 0xe1, 0xc3, 0x50]);
+            jpeg.extend(vec![0; 0xc350 - 2]);
+        }
+        jpeg.extend([0xff, 0xc0, 0, 17, 8]);
+        jpeg.extend(1080u16.to_be_bytes());
+        jpeg.extend(1920u16.to_be_bytes());
+        assert_eq!(image(jpeg).dimensions(), Some((1920, 1080)));
+
+        assert_eq!(image(b"not an image".to_vec()).dimensions(), None);
+        assert_eq!(Image::new_url("https://x/y.png").dimensions(), None);
+        assert_eq!(Image::new_url("https://x/y.png").estimated_tokens(), 1_600);
+    }
+
+    /// Tokens follow the pixels, after scaling down to 1,568 pixels on the
+    /// long side and 1.15 megapixels.
+    #[test]
+    fn image_tokens_follow_the_scaled_pixels() {
+        let png = |width: u32, height: u32| {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            bytes.extend(width.to_be_bytes());
+            bytes.extend(height.to_be_bytes());
+            Image::from_bytes(&bytes, "image/png")
+        };
+        assert_eq!(png(750, 100).estimated_tokens(), 100);
+        assert_eq!(png(1, 1).estimated_tokens(), 1);
+        // Both at the cap of 1.15 megapixels.
+        assert_eq!(png(1500, 1000).estimated_tokens(), 1534);
+        assert_eq!(png(4000, 3000).estimated_tokens(), 1534);
+        // A long strip is scaled to 1,568 pixels long.
+        assert_eq!(png(3136, 100).estimated_tokens(), 105);
     }
 }

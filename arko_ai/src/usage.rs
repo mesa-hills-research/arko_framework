@@ -72,6 +72,12 @@ pub struct ModelCallUsage {
     /// summaries. The provider's client asks for none from then on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_summaries_refused: bool,
+    /// The subagent whose call this was, when the model runs its own
+    /// subagents (Claude Code's `Agent` tool): the id of the tool call that
+    /// started it. `None` for a call of the conversation itself, the one
+    /// whose size and prompt cache a host shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<String>,
 }
 
 /// How much of a subscription plan's usage limits is used, as the ChatGPT
@@ -286,6 +292,7 @@ impl ModelCallUsage {
             plan_usage: None,
             account: None,
             reasoning_summaries_refused: false,
+            subagent: None,
         }
     }
 

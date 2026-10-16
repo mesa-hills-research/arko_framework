@@ -173,6 +173,40 @@ pub enum AgentEvent {
     UnavailableToolAttempted { tool_name: String },
     /// The task stream has ended.
     TaskStreamEnd,
+    /// A model request of the task is going out. In arko's own runtime it
+    /// is emitted just before each request is sent: every attempt, a retry
+    /// and a refusal fallback's request included. A Claude Code model's
+    /// requests are made by Claude Code, which shows one when its response
+    /// starts (its `message_start`), so it is emitted then, for the
+    /// conversation's own requests and its subagents'. A prompt cache is
+    /// refreshed by each request that reads or writes it, so a host times
+    /// the cache's lifetime from the latest one (its
+    /// `WorkflowEvent::timestamp` in arko_workflows); the
+    /// `ModelCallUsageReported` that follows tells whether it read or
+    /// wrote the cache.
+    ModelRequestStarted {
+        /// The model the request goes to: the configured model's id, or the
+        /// refusal fallback's, or the model Claude Code reports.
+        model: String,
+        /// For a request of a subagent the model runs itself (Claude Code's
+        /// `Agent` tool): the id of the tool call that started it. `None`
+        /// for the conversation's own requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<String>,
+        /// The request's size by section, as the runtime knows it: what it
+        /// sends in arko's own runtime; for a Claude Code model, the task's
+        /// conversation, system prompt and arko tools, without what Claude
+        /// Code adds of its own. `None` for a subagent's request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sizes: Option<arko_ai::RequestSizes>,
+        /// The bytes per token of the task's earlier requests (their text
+        /// bytes over the input tokens the provider reported, see
+        /// [`calibrated_bytes_per_token`](crate::runtime::calibrated_bytes_per_token)),
+        /// which turns `sizes` into estimated tokens;
+        /// [`DEFAULT_BYTES_PER_TOKEN`](crate::runtime::DEFAULT_BYTES_PER_TOKEN)
+        /// until one was answered.
+        bytes_per_token: f64,
+    },
     /// LLM usage information for a turn (cost and raw token counts).
     UsageReported(UsageInfo),
     /// Unified model call usage metrics for a turn.

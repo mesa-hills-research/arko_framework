@@ -739,6 +739,34 @@ charge, such as [OpenRouter](#usage-and-cost-1)). `UsageInfo` implements `AddAss
 `Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed
 amounts added. Workflow budgets count `billed()`.
 
+`ModelCallUsage::subagent` names the subagent a call was made for when the model runs
+subagents of its own (Claude Code's `Agent` tool), so a host showing a conversation's size
+or prompt cache can leave those calls out. It is `None` for the conversation's own calls.
+
+### Request size by section
+
+Providers report a request's input as one number. `RequestSizes` splits a request into
+sections a host can show: bytes of the system prompt, the tool definitions, user text,
+assistant text, tool calls and tool results, and the images with their estimated tokens.
+
+```rust
+use arko_ai::RequestSizes;
+
+let sizes = RequestSizes::of_request(&conversation, &config);
+// Bytes per token from an earlier request of the same conversation, or about 3.
+let tokens = RequestSizes::tokens(sizes.tool_results, 3.2);
+let total = sizes.estimated_tokens(3.2);
+```
+
+The text sections add up to `text_bytes()`, the request's text as this crate sends it,
+before each provider's framing. `add_message` updates the sizes one message at a time, so
+a host can keep them as a conversation grows. `Image::estimated_tokens` reads an inline
+image's size from its header (`Image::dimensions`: PNG, JPEG, GIF, WebP) and counts its
+pixels over 750 after scaling it to fit 1,568 pixels on its long side and 1.15
+megapixels, Anthropic's rule. An image of unknown size counts as 1,600 tokens.
+arko_agents reports these sizes, with a bytes-per-token ratio calibrated from the
+conversation's own requests, before each request (`AgentEvent::ModelRequestStarted`).
+
 ## Errors and retries
 
 `Error::retry_class()` returns `Permanent`, `Transient`, `Capacity` or `UsageLimit` (a

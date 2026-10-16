@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use self::command::UserCommand;
 use self::event::AgentEvent;
 use self::r#loop::AgentLoop;
+pub use self::result_budget::{DEFAULT_BYTES_PER_TOKEN, calibrated_bytes_per_token};
 pub use self::turn_context::{TurnContext, TurnContextSource};
 use crate::error::ArkoAgentsError;
 use crate::handover::{HandoverHook, HandoverThreshold};

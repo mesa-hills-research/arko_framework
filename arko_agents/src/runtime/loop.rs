@@ -535,3 +535,7 @@ mod text_reply_tests;
 #[cfg(test)]
 #[path = "tool_less_tests.rs"]
 mod tool_less_tests;
+
+#[cfg(test)]
+#[path = "request_started_tests.rs"]
+mod request_started_tests;
