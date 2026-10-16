@@ -909,15 +909,8 @@ impl ClaudeCodeRun {
     }
 
     fn system_prompt(&self) -> Result<String, ArkoAgentsError> {
-        // Offered nothing (neither arko's tools nor Claude Code's built-ins,
-        // and a reply in text ends the task), the agent is told nothing
-        // about tools.
-        let offers_tools = !self
-            .task
-            .agent_config
-            .tool_config
-            .offered_tool_names()
-            .is_empty();
+        // Offered nothing, the agent is told nothing about tools.
+        let offers_tools = !self.offers_no_tools();
         let builder = PromptBuilder::new(
             &self.task.agent_config,
             vec![],
@@ -1380,14 +1373,29 @@ impl ClaudeCodeRun {
     }
 
     fn report_request(&self) -> String {
-        self.task
-            .agent_config
-            .handover
-            .as_ref()
+        let handover = self.task.agent_config.handover.as_ref();
+        if self.offers_no_tools() {
+            return handover
+                .map_or(crate::handover::DEFAULT_CHAT_REPORT_REQUEST, |config| {
+                    config.chat_report_request()
+                })
+                .to_string();
+        }
+        handover
             .map_or(DEFAULT_TEXT_REPORT_REQUEST, |config| {
                 config.report_request(false)
             })
             .to_string()
+    }
+
+    /// The agent is offered nothing: neither arko's tools nor Claude Code's
+    /// built-ins, and a reply in text ends its task (a chat).
+    fn offers_no_tools(&self) -> bool {
+        self.task
+            .agent_config
+            .tool_config
+            .offered_tool_names()
+            .is_empty()
     }
 
     /// The context waiting for the model (taken from the channel, and the
@@ -4019,9 +4027,18 @@ impl ClaudeCodeRun {
     /// report, in the same task.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
+        let chat = self.offers_no_tools();
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
+            None if chat => HandoverSeed::for_chat(&self.task),
             None => HandoverSeed::for_task(&self.task),
+        };
+        // A chat's fresh conversation answers the user's latest input, with
+        // the images it held.
+        let images = if chat {
+            crate::handover::unanswered_images(&self.task)
+        } else {
+            Vec::new()
         };
         let input_tokens = self
             .task
@@ -4037,7 +4054,11 @@ impl ClaudeCodeRun {
         });
         let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
         let first = builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
-        self.task.conversation.add_user_message(&first);
+        let mut content = vec![ai::Content::Text(first)];
+        content.extend(images);
+        self.task
+            .conversation
+            .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
         // The next session is a new Claude Code conversation.
         self.task.claude_code_session = None;

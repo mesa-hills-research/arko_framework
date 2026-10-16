@@ -266,7 +266,9 @@ configured model (or the refusal fallback) doesn't accept
 An agent offered no tools at all (an empty `available_tool_names` with `text_reply_ends_task`
 on, so it isn't offered `complete_task` either) is a plain chat: its requests carry no tool
 configuration, its system prompt has no section about tools, and each reply ends the task.
-On a Claude Code model it runs with Claude Code's built-in tools off.
+On a Claude Code model it runs with Claude Code's built-in tools off. A handover set on it
+asks for the report as a reply in text, so its requests stay without tools (see
+[Conversation handover](#conversation-handover)).
 
 ### Several calls in one response
 
@@ -1445,6 +1447,19 @@ let config = AgentConfig::builder(id, name, llm_config)
 `Task::initial_task_prompt` is not changed. A task saved during the report turn keeps
 `Task::handover_requested` and hands over when it runs again; continuing a completed task
 clears it.
+
+**Chats.** An agent offered no tools (see [Tool calling modes](#tool-calling-modes)) hands
+over without a tool, so its requests stay without tools. It is never offered
+`handover_report`, even with `handover` set, and replies with the report in text. The
+report request is `DEFAULT_CHAT_REPORT_REQUEST` (or `report_request`, read through
+`HandoverConfig::chat_report_request`): a summary of the conversation that leaves the
+user's latest message unanswered. The fresh conversation starts from that message instead
+of the task's first one: `HandoverSeed::for_chat` restates the user's messages since the
+model's last reply (`handover::unanswered_user_messages`), followed by the summary, and
+their images go into the same first message. The model then answers that message from the
+summary, and its reply ends the task as usual. The workflow engine's hook does the same for
+these agents. A host turns it on as for any agent: `handover` with a threshold, a
+`HandoverThreshold`, or `UserCommand::RequestHandover`.
 
 **Hosts.** `AgentRuntime::with_handover_hook` takes a `HandoverHook`, whose
 `on_handover(task, report)` is called while the task still holds the old conversation and

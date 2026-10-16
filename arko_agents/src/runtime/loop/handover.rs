@@ -28,9 +28,11 @@ impl AgentLoop {
 
     /// Whether the agent gives its report with the `handover_report` tool,
     /// which its native requests then offer: native tool calling with
-    /// `handover` set. Otherwise the report is a reply without a tool call.
+    /// `handover` set, for an agent offered other tools. Otherwise the report
+    /// is a reply without a tool call, so an agent without tools keeps
+    /// making requests without tools.
     pub(super) fn offers_report_tool(&self) -> bool {
-        self.is_native_mode() && self.task.agent_config.handover.is_some()
+        self.is_native_mode() && self.task.agent_config.handover.is_some() && self.offers_tools()
     }
 
     /// Whether a call to `tool_name` is rejected because the handover report
@@ -142,9 +144,11 @@ impl AgentLoop {
         request.report_requested = true;
         let input_tokens = request.input_tokens;
         let completes = !self.task.agent_config.tool_config.ends_task_with_text();
-        let report_request = match &config {
-            Some(config) => config.report_request_for(with_tool, completes),
-            None => crate::handover::default_report_request_for(with_tool, completes),
+        let report_request = match (&config, self.offers_tools()) {
+            (Some(config), true) => config.report_request_for(with_tool, completes),
+            (None, true) => crate::handover::default_report_request_for(with_tool, completes),
+            (Some(config), false) => config.chat_report_request(),
+            (None, false) => crate::handover::DEFAULT_CHAT_REPORT_REQUEST,
         };
         if std::mem::take(&mut self.step_left_out) {
             self.task.conversation.add_user_message(&format!(
@@ -195,9 +199,18 @@ impl AgentLoop {
     /// report, and resets what the loop keeps about the old one.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
+        let chat = !self.offers_tools();
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
+            None if chat => HandoverSeed::for_chat(&self.task),
             None => HandoverSeed::for_task(&self.task),
+        };
+        // A chat's fresh conversation answers the user's latest input, with
+        // the images it held.
+        let images = if chat {
+            crate::handover::unanswered_images(&self.task)
+        } else {
+            Vec::new()
         };
         let input_tokens = self
             .task
@@ -214,7 +227,11 @@ impl AgentLoop {
         let prompt_builder = self.prompts();
         let first_message =
             prompt_builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
-        self.task.conversation.add_user_message(&first_message);
+        let mut content = vec![ai::Content::Text(first_message)];
+        content.extend(images);
+        self.task
+            .conversation
+            .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
 
         // What the loop keeps about the replaced conversation: tools that

@@ -93,6 +93,12 @@ pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
     report_contents!()
 );
 
+/// What the runtime asks an agent offered no tools (a chat: no tools, and a
+/// reply in text ends its task) for when its conversation is handed over.
+/// The fresh conversation starts from the user's latest message and this
+/// summary (see [`HandoverSeed::for_chat`]).
+pub const DEFAULT_CHAT_REPORT_REQUEST: &str = "This conversation is getting long, so it will continue in a fresh one that starts from a summary you write now. Reply with that summary as plain text. Cover what the user wants and asked, what you answered, the facts, preferences and decisions to keep, and anything still open. The user's latest message comes before this request, and you haven't answered it yet: don't answer it here. The fresh conversation answers it from your summary, and will have only that message and the summary, so be complete.";
+
 /// Said before the report request when the step that took a request over
 /// the model's input limit was left out of the conversation (see the
 /// [module docs](self)).
@@ -194,6 +200,14 @@ impl HandoverConfig {
         self.report_request
             .as_deref()
             .unwrap_or(default_report_request_for(with_tool, completes))
+    }
+
+    /// The request an agent offered no tools (a chat) receives:
+    /// `report_request`, or by default [`DEFAULT_CHAT_REPORT_REQUEST`].
+    pub fn chat_report_request(&self) -> &str {
+        self.report_request
+            .as_deref()
+            .unwrap_or(DEFAULT_CHAT_REPORT_REQUEST)
     }
 
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
@@ -419,6 +433,35 @@ impl HandoverSeed {
         }
     }
 
+    /// The default for an agent offered no tools (a chat): the user's
+    /// messages the conversation hasn't answered yet (see
+    /// [`unanswered_user_messages`]), which the fresh conversation answers,
+    /// in place of the task's initial prompt. Falls back to
+    /// [`for_task`](Self::for_task) when there are none. Their images go
+    /// into the fresh conversation's first message too.
+    pub fn for_chat(task: &Task) -> Self {
+        let text = unanswered_user_messages(task)
+            .into_iter()
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.is_empty() {
+            return Self::for_task(task);
+        }
+        Self {
+            task_prompt: text,
+            context: None,
+        }
+    }
+
     /// The message text: the task prompt, the report under
     /// [`REPORT_HEADING`], then the context.
     pub fn message(&self, report: &str) -> String {
@@ -433,6 +476,48 @@ impl HandoverSeed {
         }
         message
     }
+}
+
+/// The user's messages since the model's last reply before the handover's
+/// report request, oldest first: the input the conversation hasn't answered
+/// yet, which a chat's fresh conversation answers. Messages the runtime
+/// added (the report request, notes on errors) and tool results don't
+/// count; context updates (notes from the user, mail) do.
+pub fn unanswered_user_messages(task: &Task) -> Vec<&arko_ai::Message> {
+    let messages = &task.conversation.messages;
+    // The report request, and the report after it, if it came.
+    let mut end = messages.len();
+    while end > 0
+        && (messages[end - 1].role == arko_ai::Role::Assistant
+            || task.runtime_messages.contains(&(end - 1)))
+    {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && messages[start - 1].role == arko_ai::Role::User {
+        start -= 1;
+    }
+    (start..end)
+        .filter(|index| {
+            !task.runtime_messages.contains(index)
+                && messages[*index]
+                    .content
+                    .iter()
+                    .all(|content| content.as_tool_result().is_none())
+        })
+        .map(|index| &messages[index])
+        .collect()
+}
+
+/// The images of the user's messages a chat's fresh conversation answers
+/// ([`unanswered_user_messages`]), for its first message.
+pub(crate) fn unanswered_images(task: &Task) -> Vec<arko_ai::Content> {
+    unanswered_user_messages(task)
+        .into_iter()
+        .flat_map(|message| &message.content)
+        .filter(|content| content.as_image().is_some())
+        .cloned()
+        .collect()
 }
 
 /// Called by the runtime at the moment a task's conversation is replaced,
@@ -553,6 +638,46 @@ mod tests {
         .unwrap();
         assert_eq!(loaded.report, None);
         assert!(loaded.report_requested);
+    }
+
+    /// A chat's seed restates the user's messages since the model's last
+    /// reply (context updates included, the runtime's report request and
+    /// the report itself left out), with their images; without any, the
+    /// task's initial prompt.
+    #[test]
+    fn a_chat_seed_restates_the_unanswered_messages() {
+        let config = crate::agent_config::AgentConfig::builder(
+            "chat".into(),
+            "Chat".into(),
+            crate::agent_config::AgentLLMConfig {
+                model: arko_ai::Model::anthropic_claude_opus_5_5(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("r".into())
+        .instructions("i".into())
+        .build()
+        .unwrap();
+        let mut task = Task::new(config, "Hello.".into(), "/w".into(), None);
+        assert_eq!(HandoverSeed::for_chat(&task).task_prompt, "Hello.");
+        let conversation = &mut task.conversation;
+        conversation.add_user_message("Hello.");
+        conversation.add_assistant_message("Hi.");
+        conversation.add_user_message_with_image(
+            "What is this?",
+            arko_ai::Image::new_base64("cGl4", "image/png"),
+        );
+        conversation.add_user_message("# Workflow context update\n\nAlso this.");
+        conversation.add_user_message(DEFAULT_CHAT_REPORT_REQUEST);
+        task.runtime_messages.insert(4);
+        task.conversation.add_assistant_message("The summary.");
+        let seed = HandoverSeed::for_chat(&task);
+        assert_eq!(
+            seed.task_prompt,
+            "What is this?\n\n# Workflow context update\n\nAlso this."
+        );
+        assert_eq!(unanswered_user_messages(&task).len(), 2);
+        assert_eq!(unanswered_images(&task).len(), 1);
     }
 
     #[test]

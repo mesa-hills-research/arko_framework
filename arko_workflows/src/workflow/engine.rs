@@ -1524,8 +1524,20 @@ impl HandoverHook for WorkflowHandover {
             context.push_str(ROSTER_HEADING);
             context.push_str(&render_recipients(ctx, &roster));
         }
+        // A chat (an agent offered no tools) goes on from the user's latest
+        // input, not from its first message.
+        let task_prompt = if task
+            .agent_config
+            .tool_config
+            .offered_tool_names()
+            .is_empty()
+        {
+            HandoverSeed::for_chat(task).task_prompt
+        } else {
+            task_part(prompt).to_string()
+        };
         HandoverSeed {
-            task_prompt: task_part(prompt).to_string(),
+            task_prompt,
             context: (!context.is_empty()).then_some(context),
         }
     }
