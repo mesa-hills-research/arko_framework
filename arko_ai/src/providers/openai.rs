@@ -45,6 +45,9 @@ mod trace_tests;
 #[cfg(test)]
 mod codex_parity_tests;
 
+#[cfg(test)]
+mod reasoning_stream_tests;
+
 mod request_hook;
 pub use request_hook::OpenAIRequestHook;
 

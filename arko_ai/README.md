@@ -158,6 +158,18 @@ Each provider takes its own `ReasoningConfig` variant:
 3 Flash and 3.1 Pro, dynamic on 2.5) and returns no thought summaries; an explicit level
 is validated against the model.
 
+**Reasoning summaries.** A model's reasoning text reaches a stream as
+`StreamEvent::ReasoningChunk`, separately from the reply's `TextChunk`, where the request
+asks for it:
+
+| Provider | Asking for it | Streamed from |
+| --- | --- | --- |
+| OpenAI (API key and ChatGPT OAuth) | `ReasoningConfig::openai(effort, true)`: `reasoning.summary: "auto"`. An organization not verified for summaries gets the request sent again without them, and none are asked for again | `response.reasoning_summary_text.delta` |
+| Anthropic | Thinking on (`anthropic_adaptive()` or a budget) and `GenerationConfig::with_anthropic_summarized_thinking(true)`: `thinking.display: "summarized"`, for the models that leave thinking text out by default (a no-op where it is the default) | `thinking_delta` (redacted thinking never) |
+| Gemini | `ReasoningConfig::gemini(level, true)` or `google(budget, true)`: `thinking_summaries: "auto"` | thought summaries |
+| OpenRouter | Reasoning text comes unless `exclude: true` (see [Reasoning](#reasoning)) | `delta.reasoning`, `reasoning.text` and `reasoning.summary` details |
+| Claude Code | Claude Code's own thinking blocks, as it sends them | `thinking_delta` of its partial messages |
+
 One config can serve models of several providers. Settings the model's provider has no
 use for are dropped from the request, with a warning logged once per provider and
 setting: another provider's `ReasoningConfig` variant (the model's default reasoning then

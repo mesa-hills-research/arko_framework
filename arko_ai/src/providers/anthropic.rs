@@ -2059,6 +2059,39 @@ mod tests {
         assert_eq!(call.replay_arguments(), json!({}));
     }
 
+    /// Thinking (summarized, where the model omits it by default and the
+    /// request asks for it) streams as reasoning chunks as it comes, apart
+    /// from the reply's text, and its signed block is kept for the next turn.
+    #[tokio::test]
+    async fn thinking_deltas_stream_as_reasoning_chunks() {
+        let mut events = vec![
+            message_start(),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Adding two "}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"and two."}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        events.extend(text_block(1, "Four."));
+        events.push(message_delta("end_turn", Value::Null));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ReasoningChunk(chunk) => Some(chunk.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, ["Adding two ", "and two."]);
+        let response = end(&events);
+        assert_eq!(response.text(), "Four.");
+        assert!(matches!(
+            &response.message.reasoning_artifact,
+            Some(crate::ReasoningArtifact::AnthropicReasoning { fragments }) if fragments.len() == 1
+        ));
+    }
+
     #[tokio::test]
     async fn redacted_thinking_is_kept_but_never_streamed_as_reasoning() {
         let events = vec![

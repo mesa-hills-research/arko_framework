@@ -200,3 +200,40 @@ async fn an_agent_offered_a_tool_still_says_how_to_use_it() {
     let system = task.conversation.system_message.unwrap();
     assert!(system.contains("## Tool Usage"), "{system}");
 }
+
+/// Reasoning the provider streams (summaries, thinking) reaches the host as
+/// `ReasoningChunk` events, in order and before the reply's text.
+#[tokio::test]
+async fn streamed_reasoning_reaches_the_host() {
+    let (mut agent, mut events, _commands) = chat_agent();
+    let Ok(end) = response(ai::Message::new_assistant("Four.")) else {
+        unreachable!()
+    };
+    let chunks = [
+        Ok(ai::StreamEvent::ReasoningChunk("Adding two ".into())),
+        Ok(ai::StreamEvent::ReasoningChunk("and two.".into())),
+        Ok(ai::StreamEvent::TextChunk("Four.".into())),
+    ];
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter(chunks).chain(end).boxed()));
+    let (_, received) = run(agent, &mut events).await;
+    let streamed: Vec<_> = received
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ReasoningChunk(chunk) => Some(("reasoning", chunk.as_str())),
+            AgentEvent::AssistantResponseChunk(chunk) => Some(("text", chunk.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streamed,
+        [
+            ("reasoning", "Adding two "),
+            ("reasoning", "and two."),
+            ("text", "Four.")
+        ]
+    );
+}
