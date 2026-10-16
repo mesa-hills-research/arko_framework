@@ -573,6 +573,8 @@ pub(super) struct ClaudeCodeRun {
     context_receipts: Vec<AgentEvent>,
     pub(super) host_decisions: super::HostDecisions,
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    /// The host's handover threshold, in place of the configuration's.
+    pub(super) handover_threshold: crate::handover::HandoverThreshold,
     middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     interceptor: Option<InterceptorConfig>,
     skill_prompt_context: Option<SkillPromptContext>,
@@ -690,6 +692,7 @@ impl ClaudeCodeRun {
             context_receipts: Vec::new(),
             host_decisions: super::HostDecisions::default(),
             handover_hook: None,
+            handover_threshold: Default::default(),
             middleware,
             interceptor,
             skill_prompt_context,
@@ -3127,11 +3130,7 @@ impl ClaudeCodeRun {
     /// starts over the threshold would start over it again after another
     /// handover or compaction.
     fn over_threshold(&mut self, size: usize) -> Option<usize> {
-        let config = &self.task.agent_config;
-        let threshold = config
-            .handover
-            .as_ref()?
-            .threshold(config.llm_config.model.max_input_tokens)?;
+        let threshold = self.handover_threshold.of(&self.task.agent_config)?;
         if size < threshold {
             return None;
         }

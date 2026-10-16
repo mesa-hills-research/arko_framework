@@ -166,6 +166,8 @@ pub struct AgentLoop {
     pub(super) context_receipts: Vec<AgentEvent>,
     /// Called when the conversation is handed over.
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    /// The host's handover threshold, in place of the configuration's.
+    pub(super) handover_threshold: crate::handover::HandoverThreshold,
     /// Receives the task at its safe points; see [`report_task`](Self::report_task).
     pub(super) snapshots: crate::snapshot::TaskSnapshots,
     /// The host's stop signal for the task's calls; see
@@ -274,6 +276,7 @@ impl AgentLoop {
             context_ids: Vec::new(),
             context_receipts: Vec::new(),
             handover_hook: None,
+            handover_threshold: Default::default(),
             snapshots: Default::default(),
             host_stop: crate::stop::StopSignal::never(),
             calls_stop: crate::stop::StopSource::new(),

@@ -11,7 +11,8 @@
 //!
 //! [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover) turns
 //! it on at a context size; a host can also ask for one at any time with
-//! [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover).
+//! [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover),
+//! and change the size while the task runs with a [`HandoverThreshold`].
 //! A [`HandoverHook`] lets the host adjust the fresh conversation's first
 //! message and update its own records at the moment the conversation is
 //! replaced.
@@ -31,9 +32,13 @@
 //! session, and the agent goes on in the same session from Claude Code's
 //! summary of the conversation. See [`crate::claude_code`].
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_config::AgentConfig;
 use crate::error::ArkoAgentsError;
 use crate::task::Task;
 use crate::tool::{ToolDefinition, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
@@ -222,6 +227,59 @@ pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static 
         (true, true) => DEFAULT_REPORT_REQUEST,
         (true, false) => DEFAULT_REPORT_REQUEST_NO_COMPLETION,
         (false, _) => DEFAULT_TEXT_REPORT_REQUEST,
+    }
+}
+
+/// A handover threshold a host sets for the runs it starts, in place of
+/// their configuration's ([`HandoverConfig::threshold`]): a run hands over
+/// (or compacts, see [`HandoverConfig::compact_in_claude_code`]) once a
+/// request's input reaches it, as at
+/// [`at_input_tokens`](HandoverConfig::at_input_tokens), also for an agent
+/// without [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover).
+/// Unset, the configuration's threshold applies. Set with
+/// [`AgentRuntime::with_handover_threshold`](crate::runtime::AgentRuntime::with_handover_threshold).
+///
+/// The host may change it while the runs run, larger or smaller: each
+/// check reads it, so the next one goes by the new threshold. A run-level
+/// setting, like [`HostDecisions`](crate::runtime::HostDecisions): it is
+/// not part of the task or its configuration and is not saved, so the
+/// tools, the instructions and the conversation (and their prompt cache)
+/// stay as they are, and a task run later without it hands over as
+/// configured. Clones share the setting. The runtime doesn't cap it at the
+/// model's input limit: the host keeps it under that limit, with room for
+/// the report.
+#[derive(Clone, Debug, Default)]
+pub struct HandoverThreshold(Arc<AtomicUsize>);
+
+impl HandoverThreshold {
+    /// A threshold of `input_tokens`, or unset (`None`).
+    pub fn new(input_tokens: Option<usize>) -> Self {
+        let threshold = Self::default();
+        threshold.set(input_tokens);
+        threshold
+    }
+
+    /// Changes the threshold for every clone: `Some(tokens)` hands over at
+    /// `tokens` of input, and `None` (or `Some(0)`) goes back to the
+    /// configuration's.
+    pub fn set(&self, input_tokens: Option<usize>) {
+        self.0.store(input_tokens.unwrap_or(0), Ordering::Release);
+    }
+
+    /// The threshold the host set, if any.
+    pub fn get(&self) -> Option<usize> {
+        Some(self.0.load(Ordering::Acquire)).filter(|tokens| *tokens > 0)
+    }
+
+    /// The threshold a run of `config` goes by: the host's, else the
+    /// configuration's.
+    pub(crate) fn of(&self, config: &AgentConfig) -> Option<usize> {
+        self.get().or_else(|| {
+            config
+                .handover
+                .as_ref()?
+                .threshold(config.llm_config.model.max_input_tokens)
+        })
     }
 }
 

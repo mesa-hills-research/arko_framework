@@ -1401,6 +1401,7 @@ pub struct WorkflowBuilder {
     agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
     agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
+    handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
     completion_verifiers: Vec<CompletionVerifierConfig>,
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
@@ -1447,6 +1448,7 @@ impl WorkflowBuilder {
             agent_tools: HashMap::new(),
             global_interceptors: Vec::new(),
             agent_interceptors: HashMap::new(),
+            handover_thresholds: HashMap::new(),
             completion_verifiers: Vec::new(),
             distillation_configs: Vec::new(),
             services_config: None,
@@ -1710,6 +1712,21 @@ impl WorkflowBuilder {
             .entry(agent_name.into())
             .or_default()
             .push(interceptor);
+        self
+    }
+
+    /// Hands `agent_name`'s runs over at `threshold` in place of their
+    /// configuration's threshold. The host keeps a clone and may change it
+    /// at any time, also while the runs run. It isn't saved with the
+    /// workflow: a host that resumes the workflow gives it again. See
+    /// [`HandoverThreshold`](arko_agents::HandoverThreshold).
+    pub fn agent_handover_threshold(
+        mut self,
+        agent_name: impl Into<String>,
+        threshold: arko_agents::HandoverThreshold,
+    ) -> Self {
+        self.handover_thresholds
+            .insert(agent_name.into(), threshold);
         self
     }
 
@@ -1980,6 +1997,7 @@ impl WorkflowBuilder {
             .agent_tools
             .keys()
             .chain(self.agent_interceptors.keys())
+            .chain(self.handover_thresholds.keys())
         {
             if !agent_names.contains(referenced_agent) {
                 return Err(WorkflowError::BuilderInvalid(format!(
@@ -2461,6 +2479,7 @@ impl WorkflowBuilder {
             agent_results: parking_lot::RwLock::new(resumed_results.clone()),
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
+            handover_thresholds: self.handover_thresholds,
             interception_failure_policy: self.interception_failure_policy.unwrap_or_default(),
             completion_verifiers: self.completion_verifiers,
             verification_attempts: parking_lot::Mutex::new(HashMap::new()),

@@ -84,8 +84,8 @@ impl AgentLoop {
     /// conversation when the agent gave its report with `handover_report`
     /// and the turn's results are in; otherwise asks the agent for its
     /// handover report when a host asked for a handover or the current
-    /// conversation reached the configured threshold, and a user message can
-    /// go into the conversation.
+    /// conversation reached the threshold (the host's, else the configured
+    /// one), and a user message can go into the conversation.
     pub(super) async fn start_handover_if_due(&mut self) -> Result<(), ArkoAgentsError> {
         let received = self
             .task
@@ -104,9 +104,7 @@ impl AgentLoop {
         let context_size = self.task.current_conversation_context_size();
         let config = self.task.agent_config.handover.clone();
         if self.task.handover_requested.is_none() {
-            let threshold = config.as_ref().and_then(|config| {
-                config.threshold(self.task.agent_config.llm_config.model.max_input_tokens)
-            });
+            let threshold = self.handover_threshold.of(&self.task.agent_config);
             let Some((threshold, size)) = threshold.zip(context_size) else {
                 return Ok(());
             };

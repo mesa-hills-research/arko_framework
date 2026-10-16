@@ -647,6 +647,62 @@ async fn a_handover_continues_in_a_fresh_session() {
     assert!(users[1]["text"].as_str().unwrap().contains(REPORT_HEADING));
 }
 
+/// The host's threshold replaces the configured one, larger or smaller.
+#[tokio::test]
+async fn the_hosts_threshold_moves_the_handover_both_ways() {
+    let with_threshold = |tokens| {
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_threshold(crate::handover::HandoverThreshold::new(Some(tokens)))
+    };
+    // Raised over the configured 1,000: no handover at 1,500.
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+        {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+        complete("Searched a and b"),
+    ]]));
+    let mut raised = config(&fake, &["Grep"]);
+    raised.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let task = Task::new(raised, "Search a and b.".into(), fake.workspace(), None);
+    let (task, events) = start_with(task, with_threshold(5000)).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.handovers.is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+    );
+
+    // Lowered under the configured 1,000,000: a handover at 1,500.
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "REPORT: searched a and b; next, c."},
+        ],
+        [complete("Searched c")],
+    ]));
+    let mut lowered = config(&fake, &["Grep"]);
+    lowered.handover = Some(HandoverConfig::at_input_tokens(1_000_000));
+    let task = Task::new(lowered, "Search a, b and c.".into(), fake.workspace(), None);
+    let (task, events) = start_with(task, with_threshold(1000)).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].input_tokens, 1500);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { input_tokens: 1500 }))
+    );
+}
+
 #[tokio::test]
 async fn a_crash_pauses_and_continuing_resumes_the_session() {
     let fake = Fake::new(json!([

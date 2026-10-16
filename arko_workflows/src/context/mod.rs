@@ -38,6 +38,9 @@ pub struct SharedContext {
     pub global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
     /// Interceptors applied only to a specific agent's tool results.
     pub agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
+    /// The host's handover thresholds, by agent: in place of the
+    /// configuration's (`WorkflowBuilder::agent_handover_threshold`).
+    pub(crate) handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
     /// Failure policy used when composing interceptors for agent runs.
     pub interception_failure_policy: InterceptionFailurePolicy,
     pub completion_verifiers: Vec<crate::verification::CompletionVerifierConfig>,

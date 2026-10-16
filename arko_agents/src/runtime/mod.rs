@@ -8,7 +8,7 @@ use self::event::AgentEvent;
 use self::r#loop::AgentLoop;
 pub use self::turn_context::{TurnContext, TurnContextSource};
 use crate::error::ArkoAgentsError;
-use crate::handover::HandoverHook;
+use crate::handover::{HandoverHook, HandoverThreshold};
 use crate::skill::SkillPromptContext;
 use crate::snapshot::{TaskSnapshotSink, TaskSnapshots};
 use crate::stop::StopSignal;
@@ -68,6 +68,7 @@ pub struct AgentRuntime {
     turn_context: Option<Arc<dyn TurnContextSource>>,
     host_decisions: HostDecisions,
     handover_hook: Option<Arc<dyn HandoverHook>>,
+    handover_threshold: HandoverThreshold,
     task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
     stop_signal: StopSignal,
 }
@@ -80,6 +81,7 @@ impl AgentRuntime {
             turn_context: None,
             host_decisions: HostDecisions::default(),
             handover_hook: None,
+            handover_threshold: HandoverThreshold::default(),
             task_snapshots: None,
             stop_signal: StopSignal::never(),
         }
@@ -104,6 +106,14 @@ impl AgentRuntime {
     /// over, or Claude Code compacts it. See [`HandoverHook`].
     pub fn with_handover_hook(mut self, hook: Arc<dyn HandoverHook>) -> Self {
         self.handover_hook = Some(hook);
+        self
+    }
+
+    /// Hands the tasks this runtime runs over at `threshold`, which the
+    /// host may change while they run, in place of their configuration's
+    /// threshold. See [`HandoverThreshold`].
+    pub fn with_handover_threshold(mut self, threshold: HandoverThreshold) -> Self {
+        self.handover_threshold = threshold;
         self
     }
 
@@ -176,6 +186,7 @@ impl AgentRuntime {
             run.turn_context = self.turn_context.clone();
             run.host_decisions = self.host_decisions.clone();
             run.handover_hook = self.handover_hook.clone();
+            run.handover_threshold = self.handover_threshold.clone();
             run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
             run.host_stop = self.stop_signal.clone();
             run.bind_tools(&command_sender);
@@ -197,6 +208,7 @@ impl AgentRuntime {
         agent_loop.turn_context = self.turn_context.clone();
         agent_loop.host_decisions = self.host_decisions.clone();
         agent_loop.handover_hook = self.handover_hook.clone();
+        agent_loop.handover_threshold = self.handover_threshold.clone();
         agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
         agent_loop.host_stop = self.stop_signal.clone();
         agent_loop.bind_tools(&command_sender);

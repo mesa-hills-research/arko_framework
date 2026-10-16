@@ -297,7 +297,7 @@ The engine gives every run a `HandoverHook`. When the conversation is replaced, 
 - forgets the run's reads in the freshness tracker (with context freshness on), since the fresh conversation holds none of their content: files it reads again are tracked again;
 - starts the fresh conversation from the run's prompt without the messages it delivered and without its recipient list, then the report, then a current `# Agents you can message` list (when the prompt had one), which also counts as the list the run has seen for start and finish notices.
 
-`Task::initial_task_prompt` is kept, so a completion verifier still reviews against the original task. `ConversationHandedOver` is written to the event journal at once. A caller can also ask a running agent to hand over by sending `arko_agents::UserCommand::RequestHandover` on the command channel of an `AgentHandle::into_parts` run.
+`Task::initial_task_prompt` is kept, so a completion verifier still reviews against the original task. `ConversationHandedOver` is written to the event journal at once. A caller can also ask a running agent to hand over by sending `arko_agents::UserCommand::RequestHandover` on the command channel of an `AgentHandle::into_parts` run. `WorkflowBuilder::agent_handover_threshold(agent, threshold)` gives an agent's runs an `arko_agents::HandoverThreshold` in place of the configured threshold. The host keeps a clone and changes the size with it at any time, larger or smaller, also while the runs run. It isn't saved with the checkpoint, so a host that resumes the workflow gives it again.
 
 ### Claude Code agents
 

@@ -26,7 +26,9 @@ pub use agent_config::{
 };
 pub use claude_code::{ClaudeCodeSettings, ClaudeCodeTools};
 pub use error::ArkoAgentsError;
-pub use handover::{HandoverConfig, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed};
+pub use handover::{
+    HandoverConfig, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed, HandoverThreshold,
+};
 pub use mcp::{McpConfig, McpManager, McpServerConfig};
 pub use parsing::{
     ParsedToolCall, RawParserEvent, ToolAssemblyError, ToolCallGroup, ToolCallParser,

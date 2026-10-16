@@ -4,7 +4,8 @@
 use super::image_tests::{call, harness};
 use super::*;
 use crate::handover::{
-    DEFAULT_REPORT_REQUEST, DEFAULT_TEXT_REPORT_REQUEST, HandoverConfig, REPORT_HEADING,
+    DEFAULT_REPORT_REQUEST, DEFAULT_TEXT_REPORT_REQUEST, HandoverConfig, HandoverThreshold,
+    REPORT_HEADING,
 };
 use futures::StreamExt;
 
@@ -603,4 +604,67 @@ async fn no_handover_loop_when_the_first_request_is_over_the_threshold() {
             .iter()
             .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
     );
+}
+
+/// The host's threshold replaces the configured one, larger or smaller,
+/// and unset, the configured one applies again.
+#[tokio::test]
+async fn the_hosts_threshold_moves_the_handover_both_ways() {
+    // Raised over the configured 1,000: no handover at 2,500.
+    let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    let threshold = HandoverThreshold::new(Some(5_000));
+    agent.handover_threshold = threshold.clone();
+    push(
+        &mut agent,
+        vec![
+            native_call("plain_text", 500),
+            native_call("plain_text", 2_500),
+            native_complete(),
+        ],
+    );
+    let (task, _) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.handovers.is_empty());
+
+    // Lowered under the configured 1,000,000: a handover at 1,500.
+    let (mut agent, mut events, _commands) = tool_harness();
+    threshold.set(Some(1_000));
+    agent.handover_threshold = threshold.clone();
+    push(
+        &mut agent,
+        vec![
+            native_call("plain_text", 500),
+            native_call("plain_text", 1_500),
+            native_report(&[], "Done: read the fixture.", 1_600),
+            native_call("plain_text", 200),
+            native_complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].input_tokens, 1_500);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::HandoverRequested {
+            input_tokens: 1_500
+        }
+    )));
+
+    // Unset: the configured 1,000,000 again, so no handover at 1,500.
+    let (mut agent, mut events, _commands) = tool_harness();
+    threshold.set(None);
+    agent.handover_threshold = threshold;
+    push(
+        &mut agent,
+        vec![
+            native_call("plain_text", 500),
+            native_call("plain_text", 1_500),
+            native_complete(),
+        ],
+    );
+    let (task, _) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.handovers.is_empty());
 }

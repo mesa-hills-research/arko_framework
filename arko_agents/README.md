@@ -1441,6 +1441,13 @@ the task without material the report covers and add context after the report. It
 conversation, and returns context the agent gets again with its next input. The
 arko_workflows engine does both for every agent it runs.
 
+`AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
+keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces
+the configured threshold from the next check on, and `set(None)` goes back to it. The
+task, its configuration and its conversation stay as they are, so the prompt cache does
+too, and the threshold isn't saved with the task. The host keeps it under the model's
+input limit, with room for the report.
+
 ## Refusals
 
 A refusal is never retried unchanged. The runtime emits `RefusalReceived` with the

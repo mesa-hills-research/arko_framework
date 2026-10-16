@@ -2834,6 +2834,9 @@ impl WorkflowEngine {
                 prompt_message_ids: pending_message_ids.clone(),
                 review,
             }));
+        if let Some(threshold) = ctx.handover_thresholds.get(agent_name) {
+            runtime = runtime.with_handover_threshold(threshold.clone());
+        }
         // Saved as it runs, with the usage it has been charged for so far.
         let journal = self
             .persistence
