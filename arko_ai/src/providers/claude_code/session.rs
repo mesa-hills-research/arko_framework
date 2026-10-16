@@ -247,20 +247,25 @@ impl ClaudeSession {
     }
 
     /// Sends a user message, starting a turn (or queueing it behind the
-    /// running one).
-    pub async fn send(&self, text: impl Into<String>) -> Result<(), ClaudeError> {
+    /// running one). Returns its UUID, which names it in the session's
+    /// transcript (for [`SessionStart::Resume`](super::SessionStart::Resume)'s
+    /// `at`).
+    pub async fn send(&self, text: impl Into<String>) -> Result<String, ClaudeError> {
         self.send_content(Value::String(text.into())).await
     }
 
-    /// Sends a user message with content blocks (text, images).
-    pub async fn send_content(&self, content: Value) -> Result<(), ClaudeError> {
+    /// Sends a user message with content blocks (text, images), and returns
+    /// its UUID as [`send`](Self::send) does.
+    pub async fn send_content(&self, content: Value) -> Result<String, ClaudeError> {
+        let uuid = uuid::Uuid::new_v4().to_string();
         let message = json!({
             "type": "user",
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": null,
             "session_id": self.session_id().unwrap_or_else(|| "default".into()),
+            "uuid": uuid,
         });
-        self.write(&message).await
+        self.write(&message).await.map(|()| uuid)
     }
 
     /// The next message; `None` once the CLI has exited.

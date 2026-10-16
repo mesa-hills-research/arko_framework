@@ -156,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session: SessionStart::Resume {
             session: session_id,
             fork: false,
+            at: None,
         },
         ..options
     })

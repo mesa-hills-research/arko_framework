@@ -26,13 +26,21 @@ the next turn's index). Steps:
                                          2.1 reports it (not signed in:
                                          status null): its own message
                                          with the error's kind, then an
-                                         error result
+                                         error result ("terminal_reason":
+                                         "api_error" unless given)
   {"system": {"subtype": ...}}           a system message
   {"refused": {"category": ...}}         a response the API refused: its
                                          message_delta stops with
                                          "refusal" and these stop_details
 
-Text and tool steps take "model", the model that served them.
+Text and tool steps take "model", the model that served them. A built-in
+tool step takes "output", its result (otherwise "builtin <tool> ran").
+
+Like Claude Code, the fake keeps each session's conversation (the user
+messages, under the "uuid" the host gave them, and its own messages, each
+with a "uuid"), in FAKE_CLAUDE_STATE plus ".sessions" across processes.
+--resume-session-at=<uuid> cuts it back to that message as the session
+resumes, and fails as Claude Code does when no message has the UUID.
 
 A "/compact" message plays the next entry of the script when it is
 {"compact": {"pre_tokens": 1500, "post_tokens": 300}}: the compaction as
@@ -44,25 +52,60 @@ not taken from a real failure). Otherwise "/compact" is an ordinary message
 that plays a turn, as a CLI without the command would pass it to the model.
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
-event: argv, tools, user messages, hook and permission answers, tool results.
+event: argv, tools, user messages (each with the conversation before it, as
+"history"), hook and permission answers, tool results.
 """
 import json
 import os
 import sys
+import uuid
 
 ARGS = sys.argv[1:]
 state = {"counter": 0, "hooks": {}, "interrupted": False, "message": 0}
 
 
-def session_id():
+def flag(*names):
     for arg in ARGS:
-        for flag in ("--session-id=", "--resume="):
-            if arg.startswith(flag):
-                return arg[len(flag):]
-    return "fake-session"
+        for name in names:
+            if arg.startswith(name):
+                return arg[len(name):]
+    return None
 
 
-SESSION = session_id()
+SESSION = flag("--session-id=", "--resume=") or "fake-session"
+SESSIONS = os.environ.get("FAKE_CLAUDE_STATE", "state") + ".sessions"
+
+
+def sessions():
+    return json.load(open(SESSIONS)) if os.path.exists(SESSIONS) else {}
+
+
+def conversation():
+    return sessions().get(SESSION, [])
+
+
+def keep(conversation):
+    saved = sessions()
+    saved[SESSION] = conversation
+    with open(SESSIONS, "w") as out:
+        json.dump(saved, out)
+
+
+def record(text, message_uuid=None):
+    """Adds a message to the session's conversation and returns its UUID."""
+    message_uuid = message_uuid or str(uuid.uuid4())
+    keep(conversation() + [{"uuid": message_uuid, "text": text}])
+    return message_uuid
+
+
+RESUME_AT = flag("--resume-session-at=")
+if RESUME_AT:
+    entries = conversation()
+    found = [index for index, entry in enumerate(entries) if entry["uuid"] == RESUME_AT]
+    if not found:
+        sys.stderr.write("No message found with message.uuid of: %s\n" % RESUME_AT)
+        sys.exit(1)
+    keep(entries[:found[0] + 1])
 
 
 def log(event, **fields):
@@ -173,7 +216,11 @@ def assistant(content, step):
         stream_event({"type": "message_start", "message": {
             "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
             "usage": usage(step, 1)}})
+    text = " ".join(block["text"] if block["type"] == "text"
+                    else "%s %s" % (block["name"], json.dumps(block["input"]))
+                    for block in content)
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
+          "uuid": record(text),
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
                       "model": step.get("model", "claude-opus-5-5"), "content": content,
                       "usage": usage(step, 1)}})
@@ -219,20 +266,22 @@ def call_tool(step, index):
             output = "".join(part.get("text", "") for part in result.get("content", []))
             is_error = bool(result.get("isError"))
         else:
-            output = "builtin %s ran" % name
+            output = step.get("output", "builtin %s ran" % name)
     post = hook("PostToolUse", {"tool_name": name, "tool_input": tool_input,
                                 "tool_response": output}, tool_use_id)
     log("post", tool=name, answer=post, output=output, is_error=is_error)
     if step.get("crash") == "post":
         sys.exit(3)
     send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
+          "uuid": record(output),
           "message": {"role": "user", "content": [
               {"type": "tool_result", "tool_use_id": tool_use_id, "content": output,
                "is_error": is_error}]}})
 
 
-def turn(text):
-    log("user", text=text)
+def turn(text, message_uuid=None):
+    log("user", text=text, history=[entry["text"] for entry in conversation()])
+    record(text, message_uuid)
     if not state.get("listed"):
         state["listed"] = True
         listed = ask({"subtype": "mcp_message", "server_name": "arko",
@@ -276,6 +325,7 @@ def turn(text):
         if "api_error" in step:
             text = step.get("text", "API Error")
             send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
+                  "uuid": record(text),
                   "error": step["api_error"], "is_api_error_message": True,
                   "message": {"id": "synthetic_%d" % index, "role": "assistant",
                               "model": "<synthetic>", "stop_reason": "stop_sequence",
@@ -285,7 +335,8 @@ def turn(text):
                                         "cache_creation_input_tokens": 0}}})
             send({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
                   "session_id": SESSION, "duration_ms": 5, "result": text,
-                  "api_error_status": step.get("status"), "terminal_reason": "api_error"})
+                  "api_error_status": step.get("status"),
+                  "terminal_reason": step.get("terminal_reason", "api_error")})
             return
         if "fail" in step:
             result = {"type": "result", "subtype": "error_during_execution", "is_error": True,
@@ -325,7 +376,7 @@ def handle(message):
             reply(message["request_id"], {})
     elif message.get("type") == "user":
         content = message["message"]["content"]
-        turn(content if isinstance(content, str) else json.dumps(content))
+        turn(content if isinstance(content, str) else json.dumps(content), message.get("uuid"))
 
 
 while True:

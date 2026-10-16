@@ -31,7 +31,9 @@
 //! step that request added (the model's reply and its results) is left
 //! out, and the report is asked for from the conversation as it was at the
 //! last request the provider answered, with [`STEP_LEFT_OUT`] before the
-//! request.
+//! request. An agent whose model runs in Claude Code does the same for a
+//! turn that goes over the limit: the Claude Code session resumes at the
+//! message that ended the last request Claude Code answered.
 //!
 //! An agent whose model runs in Claude Code can compact instead
 //! ([`HandoverConfig::compact_in_claude_code`]): at the threshold, or at a
@@ -94,7 +96,7 @@ pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
 /// Said before the report request when the step that took a request over
 /// the model's input limit was left out of the conversation (see the
 /// [module docs](self)).
-pub const STEP_LEFT_OUT: &str = "The results of your latest step were too large for your context, even shortened, so that step (your last reply and its tool results) was left out of this conversation. Say in your report what that step was for, so that the fresh conversation can do it again in smaller parts: narrower reads or searches, or output limited to what you need.";
+pub const STEP_LEFT_OUT: &str = "The results of your latest step were too large for your context, so that step (your last reply and its tool results) was left out of this conversation. Say in your report what that step was for, so that the fresh conversation can do it again in smaller parts: narrower reads or searches, or output limited to what you need.";
 
 /// The heading of the report in the fresh conversation's first message.
 pub const REPORT_HEADING: &str = "# Handover report";

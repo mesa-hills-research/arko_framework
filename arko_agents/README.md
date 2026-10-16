@@ -1331,7 +1331,12 @@ main conversation as Claude Code reports it. Once reached, the model's next tool
 refused with the report request as its result (or, if its turn ends first, the request is
 sent as a message); the report is the turn's text, and a fresh Claude Code session starts
 from the seed and the report. Claude Code's own auto-compaction is off for such an
-agent (`autoCompactEnabled: false`), so it never replaces the conversation first.
+agent (`autoCompactEnabled: false`), so it never replaces the conversation first. A turn
+that goes over the model's input limit hands over without its last step, as in arko's own
+runtime: the session resumes at the message that ended the last request Claude Code
+answered (the CLI's `--resume-session-at`), and the report request there starts with
+`STEP_LEFT_OUT`. This happens once per handover, so a report request that goes over the
+limit as well ends the run on the error.
 
 **Compaction.** With `HandoverConfig::compact_in_claude_code`, the agent compacts instead
 of handing over, at the same threshold (and on `RequestHandover`). Once the threshold is
@@ -1342,7 +1347,8 @@ to continue. A conversation whose last turn ended over the threshold compacts as
 session starts, before the new input, and so does a request sent while no session runs
 (commands sent then are handled as the next session starts). A turn that fails over the
 model's input limit compacts at once. When Claude Code doesn't compact (no
-`compact_boundary` before the `/compact` turn ends), the agent hands over instead. Each
+`compact_boundary` before the `/compact` turn ends), the agent hands over instead, and
+leaves out its last step as above when the report request goes over the limit too. Each
 compaction, the runtime's or Claude Code's own, is reported as `ConversationCompacted`
 with the size before and after, and the task's conversation keeps every message. Tools
 observing the conversation start over, the cache monitor judges the compacted

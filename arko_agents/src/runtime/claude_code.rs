@@ -12,7 +12,9 @@
 //! The session lives while the task is in progress. A wait (for an answer,
 //! or an error-recovery decision) ends it, and the task resumes it
 //! ([`Task::claude_code_session`]) when it continues. A handover starts a
-//! new session. A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+//! new session, after the report. A turn over the model's input limit has
+//! the report written in the session resumed at an earlier message
+//! (`ClaudeCodeRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
 //! keeps it: the runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
@@ -545,13 +547,23 @@ enum Compaction {
     Sent { compacted: bool },
 }
 
+/// A message of the session's conversation, by the UUID that names it in
+/// Claude Code's transcript, with the length of the task's conversation
+/// once it was recorded there.
+#[derive(Debug, Clone)]
+struct Entry {
+    uuid: String,
+    messages: usize,
+}
+
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
     Stop,
     /// The task waits for a command; the session is closed meanwhile.
     Wait,
-    /// A handover: the next session starts a fresh conversation.
+    /// A handover (the next session starts a fresh conversation), or a
+    /// step left out (it resumes the session at an earlier message).
     Restart,
 }
 
@@ -649,6 +661,22 @@ pub(super) struct ClaudeCodeRun {
     compaction: Option<Compaction>,
     /// The calls held while it was due, as the model is told of them after.
     held_calls: Vec<String>,
+    /// The latest message the session received whose UUID arko knows: a
+    /// user message it sent, or a tool result.
+    last_entry: Option<Entry>,
+    /// The message before the model's latest response: the end of the
+    /// conversation as the last request Claude Code answered had it, and
+    /// whether tool results followed that response. A turn over the model's
+    /// input limit hands over from it; see
+    /// [`hand_over_without_the_step`](Self::hand_over_without_the_step).
+    answered: Option<Entry>,
+    step_results: bool,
+    /// The message ID of the model's latest response.
+    response: Option<String>,
+    /// A step was left out for the handover under way (once per handover).
+    step_left_out: bool,
+    /// The message the next session resumes at.
+    resume_at: Option<String>,
     host: Option<Arc<ToolHost>>,
     /// Receives the task at its safe points.
     pub(super) snapshots: TaskSnapshots,
@@ -728,6 +756,12 @@ impl ClaudeCodeRun {
             handover_skip_warned: false,
             compaction: None,
             held_calls: Vec::new(),
+            last_entry: None,
+            answered: None,
+            step_results: false,
+            response: None,
+            step_left_out: false,
+            resume_at: None,
             host: None,
             snapshots: TaskSnapshots::default(),
             host_stop: crate::stop::StopSignal::never(),
@@ -1471,6 +1505,7 @@ impl ClaudeCodeRun {
             Some(session) => cc::SessionStart::Resume {
                 session: session.clone(),
                 fork: false,
+                at: self.resume_at.take(),
             },
             None => {
                 let id = Uuid::new_v4().to_string();
@@ -1662,7 +1697,18 @@ impl ClaudeCodeRun {
                     .collect::<String>()
             })
             .unwrap_or_default();
-        session.send(sent).await
+        let uuid = session.send(sent).await?;
+        self.record_sent(uuid);
+        Ok(())
+    }
+
+    /// The session received a user message, the last of the task's
+    /// conversation so far.
+    fn record_sent(&mut self, uuid: String) {
+        self.last_entry = Some(Entry {
+            uuid,
+            messages: self.task.conversation.messages.len(),
+        });
     }
 
     async fn drive_session(
@@ -1703,10 +1749,13 @@ impl ClaudeCodeRun {
             Value::String(text) => session.send(text).await,
             content => session.send_content(content).await,
         };
-        if let Err(error) = sent {
-            let end = self.session_failed(error.to_string()).await?;
-            let _ = session.close().await;
-            return Ok(end);
+        match sent {
+            Ok(uuid) => self.record_sent(uuid),
+            Err(error) => {
+                let end = self.session_failed(error.to_string()).await?;
+                let _ = session.close().await;
+                return Ok(end);
+            }
         }
         self.emit_context_receipts().await?;
         self.questions = None;
@@ -2450,7 +2499,11 @@ impl ClaudeCodeRun {
     ) -> Result<(), ArkoAgentsError> {
         match message {
             cc::Message::Assistant(assistant) => {
-                if let Some(usage) = &assistant.usage {
+                // A failed request's own message (see `api_error` below)
+                // reports no request: its usage is all zeros.
+                if let Some(usage) = &assistant.usage
+                    && assistant.raw.get("error").and_then(Value::as_str).is_none()
+                {
                     let key = assistant
                         .raw
                         .pointer("/message/id")
@@ -2487,6 +2540,21 @@ impl ClaudeCodeRun {
                     .get("error")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                // The first message of a response (a failed request's isn't
+                // one) answers the request that ended with the latest entry.
+                // A response's messages (its text, each of its calls) share
+                // its ID, and the results of its calls come between them as
+                // the calls finish.
+                let id = assistant.raw.pointer("/message/id").and_then(Value::as_str);
+                let first = match id {
+                    Some(id) => self.response.as_deref() != Some(id),
+                    None => self.last_entry.is_some(),
+                };
+                if self.api_error.is_none() && first {
+                    self.response = id.map(str::to_string);
+                    self.answered = self.last_entry.take();
+                    self.step_results = false;
+                }
                 let mut text = String::new();
                 let mut calls = Vec::new();
                 for block in &assistant.content {
@@ -2553,9 +2621,11 @@ impl ClaudeCodeRun {
                     self.call_finished(id, &name, &record.arguments, &text, *is_error, session)
                         .await?;
                 }
+                let mut recorded = self.task.conversation.messages.len();
                 if !results.is_empty() {
                     self.task.conversation.add_tool_results(results);
                     self.observe_last();
+                    recorded += 1;
                     for context in std::mem::take(&mut self.delivered_context) {
                         self.task.conversation.add_user_message(&context);
                         self.task.increment_user_message_count();
@@ -2563,6 +2633,21 @@ impl ClaudeCodeRun {
                     }
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                     self.report(false).await;
+                }
+                // Claude Code adds the context delivered with the results after
+                // them, so a session cut back to them leaves it out, and it is
+                // sent again.
+                if let Some(uuid) = user.raw.get("uuid").and_then(Value::as_str)
+                    && user
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, cc::ContentBlock::ToolResult { .. }))
+                {
+                    self.last_entry = Some(Entry {
+                        uuid: uuid.to_string(),
+                        messages: recorded,
+                    });
+                    self.step_results = true;
                 }
             }
             cc::Message::StreamEvent {
@@ -3377,6 +3462,11 @@ impl ClaudeCodeRun {
                 self.error_kind = None;
                 return self.compact_now(session).await;
             }
+            if kind == arko_ai::ErrorKind::ContextOverflow
+                && self.hand_over_without_the_step(&message).await?
+            {
+                return Ok(Some(SessionEnd::Restart));
+            }
             return self.session_failed(message).await.map(Some);
         }
         // The final reply of an agent whose reply in text ends the task: a
@@ -3715,8 +3805,9 @@ impl ClaudeCodeRun {
             Value::String(text) => session.send(text).await,
             content => session.send_content(content).await,
         };
-        if let Err(error) = sent {
-            return self.session_failed(error.to_string()).await.map(Some);
+        match sent {
+            Ok(uuid) => self.record_sent(uuid),
+            Err(error) => return self.session_failed(error.to_string()).await.map(Some),
         }
         self.emit_context_receipts().await?;
         Ok(None)
@@ -3745,6 +3836,10 @@ impl ClaudeCodeRun {
         self.cache_warned = false;
         self.cache_pause_episode = false;
         self.handover_skip_warned = false;
+        // The messages before the summary aren't the conversation's now.
+        self.last_entry = None;
+        self.answered = None;
+        self.step_results = false;
         for name in self.registry.list_tool_names() {
             if let Some(tool) = self.registry.get(&name) {
                 tool.reset_context(self.task.id);
@@ -3798,7 +3893,9 @@ impl ClaudeCodeRun {
     /// Claude Code didn't compact the conversation (`/compact` failed, or
     /// isn't a command of this Claude Code): the agent hands over instead.
     /// The report request goes out with the task's input that waited for
-    /// the compaction, so the report covers it.
+    /// the compaction, so the report covers it. In a conversation already
+    /// over the model's input limit it fails as well, and the step that
+    /// took it there is left out ([`hand_over_without_the_step`](Self::hand_over_without_the_step)).
     async fn compaction_failed(
         &mut self,
         result: &cc::ResultMessage,
@@ -3819,6 +3916,93 @@ impl ClaudeCodeRun {
         self.add_user_message(&request)?;
         self.emit(AgentEvent::HandoverRequested { input_tokens })
             .await
+    }
+
+    /// A turn went over the model's input limit, for an agent that hands
+    /// over (it has `handover`, or the host set a threshold), as the native
+    /// runtime's `hand_over_without_the_step` does: the step that took the
+    /// conversation there (the model's reply, its results, and the runtime's
+    /// messages after them, such as a report request) is left out, and the
+    /// report is asked for from the conversation as the last request Claude
+    /// Code answered had it, with [`STEP_LEFT_OUT`](crate::handover::STEP_LEFT_OUT)
+    /// before the request. The next session resumes the session at the
+    /// message that ended that request (Claude Code's `--resume-session-at`),
+    /// and the context updates delivered since go again with the request.
+    /// Returns whether it does: not without a handover, without tool results
+    /// since the last answered request (a message took it over, such as the
+    /// report request itself), or once a step was left out for this
+    /// handover, so a report request that fails as well ends the run.
+    async fn hand_over_without_the_step(&mut self, error: &str) -> Result<bool, ArkoAgentsError> {
+        let hands_over =
+            self.task.agent_config.handover.is_some() || self.handover_threshold.get().is_some();
+        let Some(answered) = self.answered.take().filter(|answered| {
+            hands_over
+                && self.step_results
+                && !self.step_left_out
+                && answered.messages <= self.task.conversation.messages.len()
+        }) else {
+            return Ok(false);
+        };
+        let start = answered.messages;
+        let in_step = |message: &ai::Message| {
+            message.role == ai::Role::Assistant
+                || message
+                    .content
+                    .iter()
+                    .any(|content| content.as_tool_result().is_some())
+        };
+        let added = self.task.conversation.messages.split_off(start);
+        let runtime = &self.task.runtime_messages;
+        let kept: Vec<ai::Message> = added
+            .into_iter()
+            .enumerate()
+            .filter(|(offset, message)| !in_step(message) && !runtime.contains(&(start + offset)))
+            .map(|(_, message)| message)
+            .collect();
+        self.task.conversation.messages.extend(kept);
+        // The messages kept after `start` are the host's, not the runtime's.
+        self.task.runtime_messages.retain(|index| *index < start);
+        self.task
+            .runtime_text_messages
+            .retain(|index| *index < start);
+        // The resumed session has what came before `start`; the rest goes
+        // with the report request.
+        self.task.claude_code_synced = start;
+        self.resume_at = Some(answered.uuid);
+        self.step_left_out = true;
+        self.step_results = false;
+        self.last_entry = None;
+        self.error_kind = None;
+        log::warn!(
+            "Task {}: the conversation went over the model's input limit, so its latest step was left out and the agent hands over.",
+            self.task.id
+        );
+        self.emit(AgentEvent::ErrorEncountered {
+            error_message: format!(
+                "The conversation went over the model's input limit, so its latest step was left out and the agent hands over from the conversation before it: {error}"
+            ),
+            requires_approval_to_retry: false,
+            tool_call_id: None,
+            error_kind: Some(ai::ErrorKind::ContextOverflow),
+        })
+        .await?;
+        self.report_delivered = true;
+        let request = format!(
+            "{}\n\n{}",
+            crate::handover::STEP_LEFT_OUT,
+            self.report_request()
+        );
+        self.add_user_message(&request)?;
+        if self.task.handover_requested.is_none() {
+            let input_tokens = self.latest_size();
+            self.task.handover_requested = Some(HandoverRequest {
+                report_requested: true,
+                ..HandoverRequest::new(input_tokens)
+            });
+            self.emit(AgentEvent::HandoverRequested { input_tokens })
+                .await?;
+        }
+        Ok(true)
     }
 
     /// The report arrived: a fresh session starts from the seed and the
@@ -3865,6 +4049,11 @@ impl ClaudeCodeRun {
         self.report_delivered = false;
         self.open_turns = 0;
         self.handover_skip_warned = false;
+        self.last_entry = None;
+        self.answered = None;
+        self.step_results = false;
+        self.step_left_out = false;
+        self.resume_at = None;
         log::info!(
             "Task {}: Conversation handed over ({replaced_messages} messages replaced).",
             self.task.id

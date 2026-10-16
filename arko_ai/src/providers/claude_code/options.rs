@@ -19,8 +19,15 @@ pub enum SessionStart {
     WithId(String),
     /// An earlier conversation, by session ID or transcript path. With
     /// `fork`, the resumed conversation gets a new session ID and the
-    /// original is left unchanged.
-    Resume { session: String, fork: bool },
+    /// original is left unchanged. With `at`, the conversation goes on from
+    /// the message with that UUID (CLI 2.1's hidden `--resume-session-at`,
+    /// which the Agent SDK's `resumeSessionAt` passes): the messages after
+    /// it stay in the transcript, but not in the conversation.
+    Resume {
+        session: String,
+        fork: bool,
+        at: Option<String>,
+    },
     /// The most recent conversation in the working directory.
     Continue,
 }
@@ -297,10 +304,13 @@ impl ClaudeOptions {
         match &self.session {
             SessionStart::New => {}
             SessionStart::WithId(id) => push(&[&format!("--session-id={id}")]),
-            SessionStart::Resume { session, fork } => {
+            SessionStart::Resume { session, fork, at } => {
                 push(&[&format!("--resume={session}")]);
                 if *fork {
                     push(&["--fork-session"]);
+                }
+                if let Some(at) = at {
+                    push(&[&format!("--resume-session-at={at}")]);
                 }
             }
             SessionStart::Continue => push(&["--continue"]),

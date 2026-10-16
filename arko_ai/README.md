@@ -1213,7 +1213,7 @@ session.close().await?;
 | --- | --- |
 | Turns | One process per conversation; `send` starts a turn, `receive_turn` collects it up to its `Result` |
 | Model and effort | `--model` and `--effort` per process; `set_model` switches the model mid-session. To change effort, start a new session with `SessionStart::Resume` |
-| Conversation history | Claude Code keeps the transcript; hold on to `session_id()` and resume with `SessionStart::Resume { session, fork }`. `SessionStart::WithId` names a new session |
+| Conversation history | Claude Code keeps the transcript. Hold on to `session_id()` and resume with `SessionStart::Resume { session, fork, at }`, where `at` goes on from an earlier message: the UUID `send` returns, or a message's `uuid`. `SessionStart::WithId` names a new session |
 | Approvals | `permission_handler` answers the CLI's `can_use_tool` requests (`--permission-prompt-tool stdio`) |
 | Hooks | `hooks` registers host callbacks for events such as `PreToolUse`; `Hook::deny_tool` blocks a call |
 | Host tools | `tool_servers` are served in-process as MCP servers over the same pipes; the model sees `mcp__<server>__<tool>` |

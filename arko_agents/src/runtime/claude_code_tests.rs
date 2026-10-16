@@ -2414,6 +2414,262 @@ async fn going_over_the_input_limit_compacts() {
     assert!(users[2].contains("Claude Code compacted your conversation"));
 }
 
+struct Replaced(std::sync::Mutex<Vec<arko_ai::Message>>);
+
+impl crate::handover::HandoverHook for Replaced {
+    fn on_handover(&self, task: &Task, _report: &str) -> crate::handover::HandoverSeed {
+        *self.0.lock().unwrap() = task.conversation.messages.clone();
+        crate::handover::HandoverSeed::for_task(task)
+    }
+}
+
+/// A turn over the model's input limit as Claude Code 2.1.299 reports it
+/// when it refuses the request itself: its own message ("Prompt is too
+/// long", `invalid_request`), then an error result.
+fn too_long() -> Value {
+    json!({"api_error": "invalid_request", "text": "Prompt is too long",
+           "terminal_reason": "blocking_limit"})
+}
+
+/// The step that took the conversation over the limit: a search whose
+/// result is too large, after one whose result fit.
+fn oversized_step() -> Value {
+    json!([
+        {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400, "output": "a is in lib.rs"},
+        {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 500, "output": "HUGE RESULT"},
+        too_long(),
+    ])
+}
+
+fn argv(fake: &Fake, index: usize) -> Vec<String> {
+    serde_json::from_value(fake.logged("argv")[index]["argv"].clone()).unwrap()
+}
+
+/// The conversation a user message went to in the fake, oldest first.
+fn history(entry: &Value) -> Vec<String> {
+    entry["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|text| text.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// An agent that hands over (not compacting) whose step takes the
+/// conversation over the model's input limit hands over without that step:
+/// the session resumes at the message that ended the last request Claude
+/// Code answered (the first search's result), and the report is asked for
+/// there, told that the step was left out. The fresh session starts from
+/// the report.
+#[tokio::test]
+async fn going_over_the_input_limit_hands_over_without_the_step() {
+    let fake = Fake::new(json!([
+        oversized_step(),
+        [{"text": "REPORT: a is in lib.rs; b needs a narrower search."}],
+        [complete("Found b")],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(100_000));
+    let task = Task::new(config, "Find a and b.".into(), fake.workspace(), None);
+    let replaced = Arc::new(Replaced(Default::default()));
+    let runtime =
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_handover_hook(replaced.clone());
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(
+        task.handovers[0].report,
+        "REPORT: a is in lib.rs; b needs a narrower search."
+    );
+    // At the last answered request's input, reported as an error that
+    // needs no decision.
+    assert_eq!(task.handovers[0].input_tokens, 500);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ErrorEncountered {
+            requires_approval_to_retry: false,
+            error_kind: Some(arko_ai::ErrorKind::ContextOverflow),
+            ..
+        }
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { input_tokens: 500 }))
+    );
+    // The same session resumed at the first search's result, then a fresh
+    // one started.
+    assert_eq!(fake.logged("argv").len(), 3);
+    let session = argv(&fake, 0)
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--session-id=").map(str::to_string))
+        .unwrap();
+    let resumed = argv(&fake, 1);
+    assert!(
+        resumed.contains(&format!("--resume={session}")),
+        "{resumed:?}"
+    );
+    assert!(
+        resumed
+            .iter()
+            .any(|arg| arg.starts_with("--resume-session-at=")),
+        "{resumed:?}"
+    );
+    assert!(!argv(&fake, 2).contains(&format!("--session-id={session}")));
+    // The report request went to the conversation without the step: it
+    // ends with the first search's result.
+    let users = fake.logged("user");
+    let request = users[1]["text"].as_str().unwrap();
+    assert!(
+        request.starts_with(crate::handover::STEP_LEFT_OUT),
+        "{request}"
+    );
+    assert!(request.contains("Reply with that report as plain text"));
+    let before = history(&users[1]);
+    assert_eq!(before.last().unwrap(), "a is in lib.rs", "{before:?}");
+    assert!(
+        !before.iter().any(|text| text.contains("HUGE RESULT")
+            || text.contains("Prompt is too long")
+            || text.contains("\"b\"")),
+        "{before:?}"
+    );
+    assert!(users[2]["text"].as_str().unwrap().contains(REPORT_HEADING));
+    // The replaced conversation, as the task kept it, had the first search
+    // and not the second.
+    let old = replaced.0.lock().unwrap().clone();
+    let calls: Vec<&Value> = old
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .map(|call| &call.arguments)
+        .collect();
+    assert_eq!(calls, [&json!({"pattern": "a"})]);
+    let results: Vec<&str> = old
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(arko_ai::Content::as_tool_result)
+        .map(|result| result.output.as_str())
+        .collect();
+    assert_eq!(results, ["a is in lib.rs"]);
+}
+
+/// A step that starts a turn is left out back to the message arko sent. Its
+/// calls are one response, the result of the first coming before the second
+/// call, as Claude Code reports parallel calls.
+#[tokio::test]
+async fn a_step_that_starts_a_turn_is_left_out_back_to_its_message() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 500, "output": "a is in lib.rs"},
+            {"tool": "Grep", "input": {"pattern": "b"}, "continues": true, "output": "HUGE RESULT"},
+            too_long(),
+        ],
+        [{"text": "REPORT: b needs a narrower search."}],
+        [complete("Found b")],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(100_000));
+    let task = Task::new(config, "Find b.".into(), fake.workspace(), None);
+    let (task, _) = start(task).finish().await;
+    assert_eq!(task.handovers.len(), 1);
+    let users = fake.logged("user");
+    let before = history(&users[1]);
+    assert_eq!(before.len(), 1, "{before:?}");
+    assert!(before[0].starts_with("Find b."), "{before:?}");
+    assert!(
+        users[1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(crate::handover::STEP_LEFT_OUT)
+    );
+}
+
+/// A report request that goes over the limit too ends the run on the error:
+/// a step is left out once per handover.
+#[tokio::test]
+async fn a_step_is_left_out_once() {
+    let fake = Fake::new(json!([
+        oversized_step(),
+        [too_long()],
+        [complete("Not reached")]
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(100_000));
+    let task = Task::new(config, "Find a and b.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TaskStateChanged(
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_kind: Some(arko_ai::ErrorKind::ContextOverflow),
+                ..
+            }
+        ))
+    ));
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert!(task.handovers.is_empty());
+    assert_eq!(fake.logged("argv").len(), 2, "one resumed session, no more");
+    assert_eq!(fake.logged("user").len(), 2);
+}
+
+/// When an agent that compacts goes over the limit and Claude Code then
+/// doesn't compact, the report request it falls back to goes over the limit
+/// as well, and the step is left out as above.
+#[tokio::test]
+async fn a_compaction_that_doesnt_happen_over_the_limit_hands_over_without_the_step() {
+    let fake = Fake::new(json!([
+        oversized_step(),
+        {"compact": {"error": "Conversation too long."}},
+        [too_long()],
+        [{"text": "REPORT: a is in lib.rs; b needs a narrower search."}],
+        [complete("Found b")],
+    ]));
+    let task = Task::new(
+        compacting(&fake, &["Grep"], 100_000),
+        "Find a and b.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    let users = fake.logged("user");
+    let texts: Vec<&str> = users
+        .iter()
+        .map(|entry| entry["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts[1], "/compact");
+    assert!(texts[2].contains("Reply with that report as plain text"));
+    assert!(
+        texts[3].starts_with(crate::handover::STEP_LEFT_OUT),
+        "{}",
+        texts[3]
+    );
+    assert_eq!(history(&users[3]).last().unwrap(), "a is in lib.rs");
+    assert!(texts[4].contains(REPORT_HEADING));
+    assert!(
+        argv(&fake, 1)
+            .iter()
+            .any(|arg| arg.starts_with("--resume-session-at="))
+    );
+}
+
 /// A compaction Claude Code makes on its own (its auto-compaction, on for
 /// an agent without `handover`) is reported too.
 #[tokio::test]

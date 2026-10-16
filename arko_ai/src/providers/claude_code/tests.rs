@@ -79,6 +79,7 @@ fn options_become_cli_arguments() {
         session: SessionStart::Resume {
             session: "abc".into(),
             fork: true,
+            at: Some("m1".into()),
         },
         permission_handler: Some(Arc::new(Decide(PermissionDecision::allow()))),
         tool_servers: vec![Arc::new(ToolServer::new("math").tool(Arc::new(Add)))],
@@ -94,7 +95,7 @@ fn options_become_cli_arguments() {
         "--allowedTools Read,mcp__math__add",
         "--permission-prompt-tool stdio",
         "--permission-mode acceptEdits",
-        "--resume=abc --fork-session",
+        "--resume=abc --fork-session --resume-session-at=m1",
     ] {
         assert!(
             joined.contains(expected),
