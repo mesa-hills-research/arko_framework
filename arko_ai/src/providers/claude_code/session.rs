@@ -77,6 +77,14 @@ const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
 /// session unless its options set it ([`ClaudeOptions::env`]).
 const BASH_WORKING_DIRECTORY: (&str, &str) = ("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
 
+/// The CLI doesn't update itself: an update swaps the installed binary
+/// while a host's sessions run (a session started during the swap can't
+/// find it), and changes the version the user chose. The user's own
+/// setting for it isn't read when the host leaves the user's settings out
+/// (`--setting-sources`). Set for every session unless its options set it
+/// ([`ClaudeOptions::env`]).
+pub const NO_SELF_UPDATE: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClaudeError {
     #[error("could not start `{program}`: {source}")]
@@ -151,6 +159,7 @@ impl ClaudeSession {
         }
         command.envs(MCP_TOOL_LIMITS.iter().copied());
         command.env(BASH_WORKING_DIRECTORY.0, BASH_WORKING_DIRECTORY.1);
+        command.env(NO_SELF_UPDATE.0, NO_SELF_UPDATE.1);
         command.envs(&options.env);
         if let Some(directory) = &options.working_directory {
             command.current_dir(directory);

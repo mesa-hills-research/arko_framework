@@ -1233,7 +1233,11 @@ runs subagents in the background, `CLAUDE_CODE_BG_TASKS_REPORT_RUNNING`,
 `CLAUDE_CODE_USER_EMAIL`), unless `ClaudeOptions::env` sets them. Unless `ClaudeOptions::env`
 sets it, the client also sets `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`, so each `Bash`
 call starts in the session's working directory (by default the CLI keeps a `cd` from one
-call to the next), as a host that checks each call's command from there expects.
+call to the next), as a host that checks each call's command from there expects. It also
+sets `DISABLE_AUTOUPDATER=1` unless `ClaudeOptions::env` sets it (`NO_SELF_UPDATE`), so the
+CLI never updates itself: an update swaps the installed binary under the host's running
+sessions, and the user's own setting for it isn't read when the user's settings files are
+left out.
 
 The CLI runs in a process group of its own (on Windows, a job object that kills its
 processes when closed), with the programs it starts: `close`, or dropping the session,

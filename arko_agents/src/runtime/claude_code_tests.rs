@@ -1185,6 +1185,15 @@ async fn bash_calls_start_in_the_workspace() {
 }
 
 #[tokio::test]
+async fn the_cli_doesnt_update_itself() {
+    // An update would swap the binary under the host's other sessions.
+    let fake = Fake::new(json!([[complete("done")]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    start(task).finish().await;
+    assert_eq!(fake.logged("argv")[0]["env"]["DISABLE_AUTOUPDATER"], "1");
+}
+
+#[tokio::test]
 async fn metered_billing_bills_the_estimate() {
     let fake = Fake::new(json!([[complete("done")]]));
     let mut config = config(&fake, &[]);

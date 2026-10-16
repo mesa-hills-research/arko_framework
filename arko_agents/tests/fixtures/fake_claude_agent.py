@@ -365,7 +365,7 @@ def handle(message):
             reply(message["request_id"], {"commands": []})
             log("argv", argv=ARGS, env={name: os.environ.get(name) for name in (
                 "MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
-                "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR")})
+                "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "DISABLE_AUTOUPDATER")})
         elif subtype == "set_model":
             log("set_model", model=request.get("model"))
             reply(message["request_id"], {})
