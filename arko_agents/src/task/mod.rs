@@ -339,6 +339,10 @@ pub struct Task {
     #[serde(deserialize_with = "crate::agent_config::deserialize_task_agent_config")]
     pub agent_config: AgentConfig,
     pub initial_task_prompt: String,
+    /// Images that go with the initial prompt: the task's first message
+    /// holds them after its text. Set before the task first runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_task_images: Vec<arko_ai::Image>,
     pub conversation: arko_ai::Conversation,
     pub current_state: TaskState,
     #[serde(with = "chrono::serde::ts_seconds")]
@@ -440,6 +444,11 @@ pub struct Task {
     /// runs again still gets it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_context_injections: Vec<String>,
+    /// The images of the context in `pending_context_injections` (see
+    /// [`TurnContext::images`](crate::runtime::TurnContext::images)), added
+    /// with it, after its text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_context_images: Vec<crate::runtime::ContextImage>,
     /// Set while the runtime waits for the agent's handover report; see
     /// [`crate::handover`]. Saved so a task stopped in between still hands
     /// over when it runs again.
@@ -499,6 +508,38 @@ pub struct TaskParent {
 
 fn is_zero(value: &usize) -> bool {
     *value == 0
+}
+
+/// A user message's content: `text`, then `images`.
+pub(crate) fn with_images(
+    text: impl Into<String>,
+    images: impl IntoIterator<Item = arko_ai::Image>,
+) -> Vec<arko_ai::Content> {
+    std::iter::once(arko_ai::Content::Text(text.into()))
+        .chain(images.into_iter().map(arko_ai::Content::Image))
+        .collect()
+}
+
+/// A context update's content: `text`, then each image after its label.
+pub(crate) fn with_context_images(
+    text: impl Into<String>,
+    images: impl IntoIterator<Item = crate::runtime::ContextImage>,
+) -> Vec<arko_ai::Content> {
+    std::iter::once(arko_ai::Content::Text(text.into()))
+        .chain(context_image_content(images))
+        .collect()
+}
+
+/// Each image after its label, as message content.
+pub(crate) fn context_image_content(
+    images: impl IntoIterator<Item = crate::runtime::ContextImage>,
+) -> impl Iterator<Item = arko_ai::Content> {
+    images.into_iter().flat_map(|image| {
+        [
+            arko_ai::Content::Text(image.label),
+            arko_ai::Content::Image(image.image),
+        ]
+    })
 }
 
 /// A tool call that started running and has no recorded result yet; see
@@ -582,6 +623,7 @@ impl Task {
             agent_config_id,
             agent_config,
             initial_task_prompt,
+            initial_task_images: Vec::new(),
             conversation,
             current_state: TaskState::Pending,
             start_time: Utc::now(),
@@ -604,6 +646,7 @@ impl Task {
             plan_usage_threshold_reported: None,
             monitor_pause: false,
             pending_context_injections: Vec::new(),
+            pending_context_images: Vec::new(),
             handover_requested: None,
             handovers: Vec::new(),
             conversation_usage_start: 0,
@@ -691,6 +734,16 @@ impl Task {
         &mut self,
         continuation_prompt: String,
     ) -> Result<(), ArkoAgentsError> {
+        self.prepare_for_resumption_from_completed_with_images(continuation_prompt, Vec::new())
+    }
+
+    /// [`prepare_for_resumption_from_completed`](Self::prepare_for_resumption_from_completed)
+    /// with `images` after the prompt, in the same message.
+    pub fn prepare_for_resumption_from_completed_with_images(
+        &mut self,
+        continuation_prompt: String,
+        images: Vec<arko_ai::Image>,
+    ) -> Result<(), ArkoAgentsError> {
         if !matches!(self.current_state, TaskState::Completed { .. }) {
             return Err(ArkoAgentsError::InvalidTaskState(
                 "Task must be in a 'Completed' state to be resumed this way.".to_string(),
@@ -710,7 +763,8 @@ impl Task {
                     &continuation_prompt,
                     self.user_message_count + 1,
                 )?;
-        self.conversation.add_user_message(&continuation);
+        self.conversation
+            .add_user_message_with_contents(with_images(continuation, images));
         self.user_message_count += 1;
         Ok(())
     }
@@ -722,6 +776,16 @@ impl Task {
     pub fn prepare_for_resumption_with_user_response(
         &mut self,
         response: String,
+    ) -> Result<(), ArkoAgentsError> {
+        self.prepare_for_resumption_with_user_response_and_images(response, Vec::new())
+    }
+
+    /// [`prepare_for_resumption_with_user_response`](Self::prepare_for_resumption_with_user_response)
+    /// with `images` after the answer, in the same message.
+    pub fn prepare_for_resumption_with_user_response_and_images(
+        &mut self,
+        response: String,
+        images: Vec<arko_ai::Image>,
     ) -> Result<(), ArkoAgentsError> {
         let questions = match &self.current_state {
             TaskState::AwaitingUserResponse { questions } => questions.clone(),
@@ -741,7 +805,7 @@ impl Task {
         let answer = crate::parsing::PromptBuilder::new(&self.agent_config, vec![], &parsing, None)
             .text_beside_tool_results(self, Some(&answer), self.user_message_count + 1)?
             .unwrap_or(answer);
-        self.add_pending_tool_results(Some(&answer));
+        self.add_pending_tool_results_with_images(Some(&answer), images);
         Ok(())
     }
 
@@ -763,8 +827,22 @@ impl Task {
     /// images, each after its description. Adds nothing when there is
     /// nothing to add; returns whether a message was added.
     pub(crate) fn add_pending_tool_results(&mut self, text: Option<&str>) -> bool {
+        self.add_pending_tool_results_with_images(text, Vec::new())
+    }
+
+    /// [`add_pending_tool_results`](Self::add_pending_tool_results) with
+    /// the user's `images` right after `text`, before the tool images.
+    fn add_pending_tool_results_with_images(
+        &mut self,
+        text: Option<&str>,
+        images: Vec<arko_ai::Image>,
+    ) -> bool {
         let results = std::mem::take(&mut self.pending_native_tool_results);
-        if results.is_empty() && text.is_none() && self.pending_tool_images.is_empty() {
+        if results.is_empty()
+            && text.is_none()
+            && images.is_empty()
+            && self.pending_tool_images.is_empty()
+        {
             return false;
         }
         let mut content: Vec<_> = results
@@ -774,6 +852,7 @@ impl Task {
         if let Some(text) = text {
             content.push(arko_ai::Content::Text(text.to_string()));
         }
+        content.extend(images.into_iter().map(arko_ai::Content::Image));
         content.extend(self.take_tool_image_content());
         self.conversation.add_user_message_with_contents(content);
         self.increment_user_message_count();

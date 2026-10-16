@@ -174,6 +174,117 @@ async fn a_note_reaches_a_running_agent_at_its_next_turn_boundary() {
     assert_eq!(workflow.notes(), vec![posted]);
 }
 
+fn png(data: &str) -> arko_ai::Image {
+    arko_ai::Image::new_base64(data, "image/png")
+}
+
+fn input_image(data: &str) -> Value {
+    json!({"type": "input_image", "image_url": format!("data:image/png;base64,{data}")})
+}
+
+/// A one-time note's images reach a running agent with the note: after the
+/// context update's text, each after a label naming the note. A note may be
+/// images alone.
+#[tokio::test]
+async fn a_one_time_note_s_images_reach_a_running_agent_after_its_text() {
+    let workspace = Workspace::new();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let server = probing_server(go.clone()).await;
+    let workflow = Arc::new(
+        builder(&server, &workspace, &["worker"])
+            .agent_tool("worker", ProbeTool::new("probe", false))
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("worker", "Do the work.").await }
+    });
+    server.wait_for_requests(1).await;
+    workflow
+        .post_note(
+            Note::new("Compare these two.")
+                .once()
+                .images([png("b25l"), png("dHdv")]),
+        )
+        .unwrap();
+    let posted = workflow
+        .post_note(Note::new("").once().images([png("dGhyZWU=")]))
+        .unwrap();
+    assert_eq!(posted.note.text, "");
+    go.notify_one();
+    let result = run.await.unwrap().unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+
+    let body: Value = serde_json::from_str(&server.bodies()[1]).unwrap();
+    let update = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["role"] == "user"
+                && item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("# Workflow context update"))
+        })
+        .unwrap_or_else(|| panic!("{body}"));
+    let parts = update["content"].as_array().unwrap();
+    let text = parts[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Compare these two.\n  (With 2 images, shown after this update.)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("UTC:\n  (With an image, shown after this update.)"),
+        "{text}"
+    );
+    let label = |text: &str| json!({"type": "input_text", "text": text});
+    assert_eq!(
+        parts[1..],
+        [
+            label("Image 1 of note 1:"),
+            input_image("b25l"),
+            label("Image 2 of note 1:"),
+            input_image("dHdv"),
+            label("The image of note 2:"),
+            input_image("dGhyZWU="),
+        ]
+    );
+}
+
+/// Only a one-time note carries images, and only to agents whose models
+/// take them; a note without images still needs text.
+#[tokio::test]
+async fn notes_with_images_are_one_time_and_for_models_that_take_them() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let workflow = builder(&server, &workspace, &["worker"])
+        .agent("blind", blind)
+        .build()
+        .unwrap();
+    let error = |note: Note| workflow.post_note(note).unwrap_err().to_string();
+    assert!(
+        error(Note::new("See this.").to(["worker"]).images([png("eA==")]))
+            .contains("only a one-time note (Note::once) may carry images")
+    );
+    let blind = error(Note::new("See this.").once().images([png("eA==")]));
+    assert!(
+        blind.contains(
+            "agent 'blind' can't be sent the image: model 'gpt-5.6-luna' doesn't take images"
+        ),
+        "{blind}"
+    );
+    assert!(error(Note::new(" ").once().to(["worker"])).contains("empty"));
+    workflow
+        .post_note(Note::new(" ").once().to(["worker"]).images([png("eA==")]))
+        .unwrap();
+    // Saved without the field when it has no images.
+    let plain = serde_json::to_value(Note::new("x")).unwrap();
+    assert!(plain.get("images").is_none(), "{plain}");
+}
+
 /// A standing note is in the initial prompt of every later run, newest
 /// first; a one-time note isn't, and reaches a run that had started when it
 /// was posted once, when that run is continued.

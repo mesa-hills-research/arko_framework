@@ -141,9 +141,13 @@ impl AgentLoop {
             {
                 let initial_user_prompt = prompt_builder
                     .format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
+                let content = crate::task::with_images(
+                    initial_user_prompt,
+                    self.task.initial_task_images.iter().cloned(),
+                );
                 self.task
                     .conversation
-                    .add_user_message(&initial_user_prompt);
+                    .add_user_message_with_contents(content);
                 self.task.increment_user_message_count();
                 self.reset_llm_recovery();
             }

@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use super::ContextImage;
 use super::command::UserCommand;
 use super::event::AgentEvent;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
@@ -238,6 +239,26 @@ fn ask_tool() -> Value {
 
 fn add_context(text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}})
+}
+
+/// User message content as Claude Code's input blocks: text and images (an
+/// image given by URL as a line of text).
+fn input_blocks<'a>(contents: impl Iterator<Item = &'a ai::Content>) -> Value {
+    Value::Array(
+        contents
+            .filter_map(|content| match content {
+                ai::Content::Text(text) => Some(json!({"type": "text", "text": text})),
+                ai::Content::Image(ai::Image::Base64 { data, mime_type }) => Some(json!({
+                    "type": "image",
+                    "source": {"type": "base64", "data": data, "media_type": mime_type},
+                })),
+                ai::Content::Image(ai::Image::Url(url)) => {
+                    Some(json!({"type": "text", "text": format!("Image: {url}")}))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 struct PermissionForwarder {
@@ -583,6 +604,9 @@ pub(super) struct ClaudeCodeRun {
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     /// `ContextInjected` events for context taken and not yet reported.
     context_receipts: Vec<AgentEvent>,
+    /// The identifiers of context taken that waits with images for the
+    /// next input (see [`take_context`](Self::take_context)).
+    held_context_ids: Vec<String>,
     pub(super) host_decisions: super::HostDecisions,
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// The host's handover threshold, in place of the configuration's.
@@ -724,6 +748,7 @@ impl ClaudeCodeRun {
             commands,
             turn_context: None,
             context_receipts: Vec::new(),
+            held_context_ids: Vec::new(),
             host_decisions: super::HostDecisions::default(),
             handover_hook: None,
             handover_threshold: Default::default(),
@@ -890,7 +915,11 @@ impl ClaudeCodeRun {
             let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
             let first =
                 builder.format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
-            self.task.conversation.add_user_message(&first);
+            let content =
+                crate::task::with_images(first, self.task.initial_task_images.iter().cloned());
+            self.task
+                .conversation
+                .add_user_message_with_contents(content);
             self.task.increment_user_message_count();
         }
         // A call's approval can't outlive its session: a task saved while
@@ -1407,10 +1436,13 @@ impl ClaudeCodeRun {
     }
 
     /// The context waiting for the model (taken from the channel, and the
-    /// turn context source's), as one context update; `None` while a
-    /// handover report is due, when it waits for the fresh conversation,
-    /// and during a compaction, when it waits for the agent's next input.
-    fn take_context(&mut self) -> Option<String> {
+    /// turn context source's), as one context update, with its images;
+    /// `None` while a handover report is due, when it waits for the fresh
+    /// conversation, and during a compaction, when it waits for the agent's
+    /// next input. Where images can't go (`with_images` false: a hook's
+    /// context is text), context with images waits for the next input, and
+    /// the context taken after it waits with it, so it keeps its order.
+    fn take_context(&mut self, with_images: bool) -> Option<(String, Vec<ContextImage>)> {
         if self.handover_due() || self.compaction.is_some() {
             return None;
         }
@@ -1420,12 +1452,19 @@ impl ClaudeCodeRun {
             .as_ref()
             .and_then(|source| source.context_update(self.task.id))
         {
-            if !update.content.trim().is_empty() {
+            if !update.content.trim().is_empty() || !update.images.is_empty() {
                 update_ids = update.ids;
             }
             self.queue_context(update.content);
+            self.task.pending_context_images.extend(update.images);
         }
-        if self.task.pending_context_injections.is_empty() {
+        if self.task.pending_context_injections.is_empty()
+            && self.task.pending_context_images.is_empty()
+        {
+            return None;
+        }
+        if !with_images && !self.task.pending_context_images.is_empty() {
+            self.held_context_ids.append(&mut update_ids);
             return None;
         }
         let content = self.task.pending_context_injections.join("\n\n");
@@ -1440,13 +1479,15 @@ impl ClaudeCodeRun {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        ids.append(&mut self.held_context_ids);
         ids.append(&mut update_ids);
         self.context_receipts.push(AgentEvent::ContextInjected {
             ids,
             bytes: content.len(),
         });
         self.task.pending_context_injections.clear();
-        Some(format!("# Workflow context update\n\n{content}"))
+        let images = std::mem::take(&mut self.task.pending_context_images);
+        Some((format!("# Workflow context update\n\n{content}"), images))
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -1670,8 +1711,10 @@ impl ClaudeCodeRun {
                     .unwrap_or_default(),
             );
         }
-        if let Some(context) = self.take_context() {
-            self.task.conversation.add_user_message(&context);
+        if let Some((context, images)) = self.take_context(true) {
+            self.task.conversation.add_user_message_with_contents(
+                crate::task::with_context_images(context.clone(), images),
+            );
             self.task.increment_user_message_count();
             parts.push(context);
         }
@@ -1683,21 +1726,7 @@ impl ClaudeCodeRun {
                 .flat_map(|message| &message.content)
         };
         let input = if contents().any(|content| content.as_image().is_some()) {
-            Value::Array(
-                contents()
-                    .filter_map(|content| match content {
-                        ai::Content::Text(text) => Some(json!({"type": "text", "text": text})),
-                        ai::Content::Image(ai::Image::Base64 { data, mime_type }) => Some(json!({
-                            "type": "image",
-                            "source": {"type": "base64", "data": data, "media_type": mime_type},
-                        })),
-                        ai::Content::Image(ai::Image::Url(url)) => {
-                            Some(json!({"type": "text", "text": format!("Image: {url}")}))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-            )
+            input_blocks(contents())
         } else {
             Value::String(parts.join("\n\n"))
         };
@@ -1711,22 +1740,37 @@ impl ClaudeCodeRun {
         session: &cc::ClaudeSession,
         text: &str,
     ) -> Result<(), cc::ClaudeError> {
+        self.send_with_images(session, text, Vec::new()).await
+    }
+
+    /// [`send`](Self::send), with `images` after the text, each after its
+    /// label.
+    async fn send_with_images(
+        &mut self,
+        session: &cc::ClaudeSession,
+        text: &str,
+        images: Vec<ContextImage>,
+    ) -> Result<(), cc::ClaudeError> {
         self.add_user_message(text).ok();
         self.task.claude_code_synced = self.task.conversation.messages.len();
-        let sent = self
-            .task
-            .conversation
-            .messages
-            .last()
-            .map(|message| {
+        let Some(message) = self.task.conversation.messages.last_mut() else {
+            return Ok(());
+        };
+        let sent = if images.is_empty() {
+            Value::String(
                 message
                     .content
                     .iter()
                     .filter_map(ai::Content::as_text)
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-        let uuid = session.send(sent).await?;
+                    .collect::<String>(),
+            )
+        } else {
+            message
+                .content
+                .extend(crate::task::context_image_content(images));
+            input_blocks(message.content.iter())
+        };
+        let uuid = session.send_content(sent).await?;
         self.record_sent(uuid);
         Ok(())
     }
@@ -2496,7 +2540,8 @@ impl ClaudeCodeRun {
         if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
             texts.push(message);
         }
-        if let Some(context) = self.take_context() {
+        // A hook's context is text: images wait for the next input.
+        if let Some((context, _)) = self.take_context(false) {
             texts.push(context);
         }
         if texts.is_empty() {
@@ -3608,11 +3653,13 @@ impl ClaudeCodeRun {
             .await?;
             note = OPEN_TURN_MESSAGE_NOTE.to_string();
         }
-        if let Some(context) = self.take_context() {
+        let mut images = Vec::new();
+        if let Some((context, context_images)) = self.take_context(true) {
             note.push_str("\n\n");
             note.push_str(&context);
+            images = context_images;
         }
-        if let Err(error) = self.send(session, &note).await {
+        if let Err(error) = self.send_with_images(session, &note, images).await {
             return self.session_failed(error.to_string()).await.map(Some);
         }
         self.emit_context_receipts().await?;
@@ -4081,12 +4128,8 @@ impl ClaudeCodeRun {
             None => HandoverSeed::for_task(&self.task),
         };
         // A chat's fresh conversation answers the user's latest input, with
-        // the images it held.
-        let images = if chat {
-            crate::handover::unanswered_images(&self.task)
-        } else {
-            Vec::new()
-        };
+        // the images it held; a task's restates the task, with its images.
+        let images = crate::handover::seed_images(&self.task, chat);
         let input_tokens = self
             .task
             .handover_requested

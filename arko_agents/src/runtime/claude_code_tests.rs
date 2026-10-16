@@ -589,6 +589,118 @@ async fn context_arrives_with_the_next_result() {
     assert!(task.pending_context_injections.is_empty());
 }
 
+fn pixels() -> arko_ai::Image {
+    arko_ai::Image::new_base64("cGl4ZWxz", "image/png")
+}
+
+fn image_block() -> Value {
+    json!({"type": "image", "source": {"type": "base64", "data": "cGl4ZWxz", "media_type": "image/png"}})
+}
+
+/// The task's images go with its prompt, in the first input's content
+/// blocks.
+#[tokio::test]
+async fn the_task_s_images_go_with_its_first_input() {
+    let fake = Fake::new(json!([[complete("Seen")]]));
+    let mut task = Task::new(
+        config(&fake, &[]),
+        "Describe this.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.initial_task_images = vec![pixels()];
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let sent: Value = serde_json::from_str(&user_texts(&fake)[0]).unwrap();
+    let blocks = sent
+        .as_array()
+        .expect("an input with an image is sent as blocks");
+    assert_eq!(blocks.len(), 2, "{sent}");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Describe this."),
+        "{sent}"
+    );
+    assert_eq!(blocks[1], image_block());
+}
+
+/// Context with an image, once the model has been asked for context
+/// before.
+struct SecondUpdateWithImage {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| crate::runtime::TurnContext {
+            content: "A new note: look at this.".into(),
+            ids: vec!["note:3".into()],
+            images: vec![crate::runtime::ContextImage::new(
+                "The image of note 3:",
+                pixels(),
+            )],
+        })
+    }
+}
+
+/// Context with images that arrives during a turn can't go with a hook's
+/// text: it waits for the turn's end and goes with the next input, the
+/// image after its label.
+#[tokio::test]
+async fn context_with_images_waits_for_the_next_input() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "todo"}}, {"text": "Looked."}],
+        [complete("Seen")],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(SecondUpdateWithImage {
+            asked: Default::default(),
+        }),
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    assert!(
+        posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null(),
+        "{}",
+        posts[0]
+    );
+    let sent: Value = serde_json::from_str(&user_texts(&fake)[1]).unwrap();
+    let blocks = sent
+        .as_array()
+        .expect("an input with an image is sent as blocks");
+    let text = blocks[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("# Workflow context update\n\nA new note: look at this."),
+        "{text}"
+    );
+    assert_eq!(
+        &blocks[1..],
+        [
+            json!({"type": "text", "text": "The image of note 3:"}),
+            image_block()
+        ]
+    );
+    assert!(task.pending_context_images.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextInjected { ids, .. } if ids == &["note:3"]
+    )));
+}
+
 /// Context sent before the session starts goes with its first input.
 #[tokio::test]
 async fn context_sent_before_the_session_goes_with_its_first_input() {

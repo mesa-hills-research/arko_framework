@@ -5,7 +5,7 @@ pub(crate) mod options;
 pub mod result;
 pub mod stop;
 
-pub use options::RunOptions;
+pub use options::{ContinueOptions, RunOptions};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -182,13 +182,28 @@ impl Workflow {
         previous: &AgentResult,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.continue_agent_with(previous, prompt, ContinueOptions::default())
+            .await
+    }
+
+    /// [`continue_agent`](Self::continue_agent) with `options`: images go
+    /// with `prompt`, after its text in the same message
+    /// ([`ContinueOptions::images`]). Images the agent's model can't take
+    /// are refused, and so are images for a run continued after its
+    /// completion verifier failed (`BuilderInvalid`).
+    pub async fn continue_agent_with(
+        &self,
+        previous: &AgentResult,
+        prompt: &str,
+        options: ContinueOptions,
+    ) -> Result<AgentResult, WorkflowError> {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
             let result = self
                 .engine
-                .continue_agent(previous, prompt, &self.context)
+                .continue_agent_with(previous, prompt, options, &self.context)
                 .await;
             self.finish_call(result, |hook| {
                 hook.agent_name = Some(previous.agent_name.clone());
@@ -705,6 +720,20 @@ impl Workflow {
         run: &StoppedRun,
         note: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.restart_with(run, note, ContinueOptions::default())
+            .await
+    }
+
+    /// [`restart`](Self::restart) with `options`: images go with `note`
+    /// ([`ContinueOptions::images`]) when the run is reopened or continued.
+    /// A run that is recovered gets no message, so images for it are
+    /// refused (`BuilderInvalid`): send them with the next message.
+    pub async fn restart_with(
+        &self,
+        run: &StoppedRun,
+        note: &str,
+        options: ContinueOptions,
+    ) -> Result<AgentResult, WorkflowError> {
         if run
             .result
             .stopped_by
@@ -717,11 +746,18 @@ impl Workflow {
             )));
         }
         match run.restart {
+            Restart::Recover if !options.images.is_empty() => {
+                Err(WorkflowError::BuilderInvalid(format!(
+                    "agent run {} is recovered, which takes no message: send the images with the message after it",
+                    run.result.agent_run_id
+                )))
+            }
             Restart::Recover => self.recover_agent(&run.result).await,
-            Restart::Reopen => self.reopen_agent(&run.result, note).await,
+            Restart::Reopen => self.reopen_agent_with(&run.result, note, options).await,
             Restart::Continue => {
                 let message = crate::workflow::stop::continued_message(&run.result, note);
-                self.continue_agent(&run.result, &message).await
+                self.continue_agent_with(&run.result, &message, options)
+                    .await
             }
         }
     }
@@ -949,13 +985,26 @@ impl Workflow {
         previous: &AgentResult,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.reopen_agent_with(previous, prompt, ContinueOptions::default())
+            .await
+    }
+
+    /// [`reopen_agent`](Self::reopen_agent) with `options`: images go with
+    /// `prompt` ([`ContinueOptions::images`]), in the context update that
+    /// gives it to the run.
+    pub async fn reopen_agent_with(
+        &self,
+        previous: &AgentResult,
+        prompt: &str,
+        options: ContinueOptions,
+    ) -> Result<AgentResult, WorkflowError> {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
             let result = self
                 .engine
-                .reopen_agent(previous, prompt, &self.context)
+                .reopen_agent_with(previous, prompt, options, &self.context)
                 .await;
             self.finish_call(result, |hook| {
                 hook.agent_name = Some(previous.agent_name.clone());
@@ -2964,3 +3013,7 @@ mod stop_tests;
 #[cfg(test)]
 #[path = "run_stop_tests.rs"]
 mod run_stop_tests;
+
+#[cfg(test)]
+#[path = "user_image_tests.rs"]
+mod user_image_tests;

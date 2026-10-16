@@ -978,6 +978,7 @@ impl crate::runtime::TurnContextSource for Identified {
         Some(crate::runtime::TurnContext {
             content: "From the source.".into(),
             ids: vec!["note:1".into()],
+            ..Default::default()
         })
     }
 

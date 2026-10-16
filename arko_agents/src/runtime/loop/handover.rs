@@ -206,12 +206,8 @@ impl AgentLoop {
             None => HandoverSeed::for_task(&self.task),
         };
         // A chat's fresh conversation answers the user's latest input, with
-        // the images it held.
-        let images = if chat {
-            crate::handover::unanswered_images(&self.task)
-        } else {
-            Vec::new()
-        };
+        // the images it held; a task's restates the task, with its images.
+        let images = crate::handover::seed_images(&self.task, chat);
         let input_tokens = self
             .task
             .handover_requested

@@ -22,6 +22,14 @@ pub struct RunOptions {
     /// resumed or recovered run keeps it. A relative path is resolved against
     /// the workflow's workspace; the directory must exist.
     pub workspace: Option<PathBuf>,
+    /// Images that go with the prompt, after its text in the run's first
+    /// message (the task's
+    /// [`initial_task_images`](arko_agents::Task::initial_task_images)). A
+    /// fresh conversation after a handover starts with them again. An image
+    /// the agent's model can't take is refused (`WorkflowError::BuilderInvalid`
+    /// with [`arko_ai::Model::image_refusal`]'s reason), before the run
+    /// starts.
+    pub images: Vec<arko_ai::Image>,
 }
 
 impl RunOptions {
@@ -33,6 +41,43 @@ impl RunOptions {
     /// Runs the agent in `workspace`; see [`RunOptions::workspace`].
     pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
         self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// Sends `images` with the prompt; see [`RunOptions::images`].
+    pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
+        self.images = images.into_iter().collect();
+        self
+    }
+}
+
+/// Options for continuing an agent run, for
+/// [`Workflow::continue_agent_with`] and [`Workflow::restart_with`].
+/// `ContinueOptions::default()` continues as [`Workflow::continue_agent`]
+/// does.
+///
+/// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
+/// [`Workflow::restart_with`]: crate::Workflow::restart_with
+/// [`Workflow::continue_agent`]: crate::Workflow::continue_agent
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContinueOptions {
+    /// Images that go with the prompt, after its text in the same message.
+    /// An image the agent's model can't take is refused
+    /// (`WorkflowError::BuilderInvalid` with
+    /// [`arko_ai::Model::image_refusal`]'s reason), before the run goes on.
+    pub images: Vec<arko_ai::Image>,
+}
+
+impl ContinueOptions {
+    /// Options that change nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sends `images` with the prompt; see [`ContinueOptions::images`].
+    pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
+        self.images = images.into_iter().collect();
         self
     }
 }

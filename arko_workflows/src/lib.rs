@@ -62,7 +62,7 @@ pub use workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowR
 pub use workflow::stop::{
     Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp, stop_on_signals,
 };
-pub use workflow::{AgentHandle, RunOptions, Workflow, WorkflowBuilder};
+pub use workflow::{AgentHandle, ContinueOptions, RunOptions, Workflow, WorkflowBuilder};
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
@@ -112,5 +112,5 @@ pub mod prelude {
         Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp,
         stop_on_signals,
     };
-    pub use crate::workflow::{RunOptions, Workflow, WorkflowBuilder};
+    pub use crate::workflow::{ContinueOptions, RunOptions, Workflow, WorkflowBuilder};
 }

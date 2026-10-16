@@ -539,3 +539,7 @@ mod tool_less_tests;
 #[cfg(test)]
 #[path = "request_started_tests.rs"]
 mod request_started_tests;
+
+#[cfg(test)]
+#[path = "user_image_tests.rs"]
+mod user_image_tests;

@@ -1327,6 +1327,47 @@ pub(crate) struct StartOptions {
     /// The configuration it starts with, instead of its agent's registered
     /// one (a subagent's, as the host's hook changed it).
     pub config: Option<AgentConfig>,
+    /// Images that go with the prompt (see
+    /// [`RunOptions::images`](super::RunOptions::images)).
+    pub images: Vec<arko_ai::Image>,
+}
+
+/// A message to an agent run: its text, and images after it.
+pub(crate) struct UserInput<'a> {
+    pub text: &'a str,
+    pub images: Vec<arko_ai::Image>,
+}
+
+impl<'a> From<&'a str> for UserInput<'a> {
+    fn from(text: &'a str) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
+/// An error unless `config`'s model takes each of `images` (see
+/// [`arko_ai::Model::image_refusal`]).
+pub(crate) fn refuse_unsendable_images(
+    agent_name: &str,
+    config: &AgentConfig,
+    images: &[arko_ai::Image],
+) -> Result<(), WorkflowError> {
+    let model = &config.llm_config.model;
+    for (index, image) in images.iter().enumerate() {
+        if let Some(reason) = model.image_refusal(image) {
+            let which = if images.len() == 1 {
+                "the image".to_string()
+            } else {
+                format!("image {}", index + 1)
+            };
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent '{agent_name}' can't be sent {which}: {reason}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// What a run is, for the workflow tools it gets: how deep it is (see
@@ -1400,6 +1441,7 @@ impl Default for StartOptions {
             workspace: None,
             subagent: false,
             config: None,
+            images: Vec::new(),
         }
     }
 }
@@ -2073,6 +2115,8 @@ pub(crate) struct Recovery<'a> {
     /// Given to the run as a user message at its next turn boundary, once
     /// the calls it was running are settled.
     pub message: Option<&'a str>,
+    /// Images that go with `message`, after its text.
+    pub images: &'a [arko_ai::Image],
     /// When another recovery runs it, wait for that recovery and return
     /// the outcome it recorded, instead of failing.
     pub wait: bool,
@@ -2735,6 +2779,7 @@ impl WorkflowEngine {
                 base_config,
             )
             .map_err(WorkflowError::BuilderInvalid)?;
+            refuse_unsendable_images(agent_name, base_config, &options.images)?;
             let workspace = match &options.workspace {
                 Some(workspace) => super::options::run_workspace(&ctx.workspace, workspace)?,
                 None => ctx.workspace.clone(),
@@ -2756,6 +2801,7 @@ impl WorkflowEngine {
 
         let mut task = Task::new(config, String::new(), workspace, None);
         task.parent = options.parent;
+        task.initial_task_images = options.images;
         match options.reserved {
             Some(task_id) => task.id = task_id,
             None => ctx.registry.start(&[(task.id, agent_name)]),
@@ -2916,6 +2962,7 @@ impl WorkflowEngine {
     ) -> Result<AgentResult, WorkflowError> {
         let options = StartOptions {
             workspace: options.workspace,
+            images: options.images,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -2955,7 +3002,7 @@ impl WorkflowEngine {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
     > {
-        Box::pin(self.continue_at(previous, prompt, ctx, depth, parent, false))
+        Box::pin(self.continue_at(previous, prompt.into(), ctx, depth, parent, false))
     }
 
     /// [`continue_nested`](Self::continue_nested) for a completion
@@ -2970,7 +3017,7 @@ impl WorkflowEngine {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
     > {
-        Box::pin(self.continue_at(previous, prompt, ctx, depth, Some(parent), true))
+        Box::pin(self.continue_at(previous, prompt.into(), ctx, depth, Some(parent), true))
     }
 
     /// [`run_verifier`](Self::run_verifier), boxed as
@@ -3205,16 +3252,21 @@ impl WorkflowEngine {
         let options = StartOptions {
             driven: false,
             workspace: options.workspace,
+            images: options.images,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
         Ok(AgentHandle::new(run, ctx.clone(), self.persistence.clone()))
     }
 
-    pub async fn continue_agent(
+    /// Continue an agent run, as
+    /// [`Workflow::continue_agent_with`](super::Workflow::continue_agent_with)
+    /// says.
+    pub async fn continue_agent_with(
         &self,
         previous: &AgentResult,
         continuation_prompt: &str,
+        options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
         // A completion a verifier could not review (`VerifierFailed`): the
@@ -3228,6 +3280,11 @@ impl WorkflowEngine {
                 }
             )
         {
+            if !options.images.is_empty() {
+                return Err(WorkflowError::BuilderInvalid(
+                    "images can't go with the message that continues a run whose completion a verifier could not review; continue it without them, then send them".to_string(),
+                ));
+            }
             return self
                 .resume_agent(
                     previous,
@@ -3238,8 +3295,11 @@ impl WorkflowEngine {
                 )
                 .await;
         }
-        self.continue_at(previous, continuation_prompt, ctx, 0, None, false)
-            .await
+        let input = UserInput {
+            text: continuation_prompt,
+            images: options.images,
+        };
+        self.continue_at(previous, input, ctx, 0, None, false).await
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
@@ -3248,12 +3308,13 @@ impl WorkflowEngine {
     async fn continue_at(
         &self,
         previous: &AgentResult,
-        continuation_prompt: &str,
+        input: UserInput<'_>,
         ctx: &Arc<SharedContext>,
         depth: u32,
         parent: Option<arko_agents::TaskParent>,
         review: bool,
     ) -> Result<AgentResult, WorkflowError> {
+        let continuation_prompt = input.text;
         let resumable = match previous.status {
             AgentRunStatus::Completed => {
                 matches!(previous.task.current_state, TaskState::Completed { .. })
@@ -3270,6 +3331,7 @@ impl WorkflowEngine {
             ));
         }
         let agent_name = &previous.agent_name;
+        refuse_unsendable_images(agent_name, &previous.task.agent_config, &input.images)?;
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut task = previous.task.clone();
         task.parent = parent;
@@ -3324,8 +3386,10 @@ impl WorkflowEngine {
             .map_or_else(String::new, |notice| format!("\n\n{notice}"));
         let prompt = format!("{continuation_prompt}{messages}{changed_notice}");
         let prepared = match previous.status {
-            AgentRunStatus::Completed => task.prepare_for_resumption_from_completed(prompt),
-            _ => task.prepare_for_resumption_with_user_response(prompt),
+            AgentRunStatus::Completed => {
+                task.prepare_for_resumption_from_completed_with_images(prompt, input.images)
+            }
+            _ => task.prepare_for_resumption_with_user_response_and_images(prompt, input.images),
         };
         if let Err(error) = prepared {
             ctx.registry.abandon(task.id);
@@ -3574,13 +3638,19 @@ impl WorkflowEngine {
     /// as an interrupted run is (calls without results are settled in
     /// doubt, and the like), under its run identity. A run started inside
     /// another run's tool call becomes the host's: its parent link is
-    /// released.
-    pub async fn reopen_agent(
+    /// released. `options`' images go after `prompt`.
+    pub async fn reopen_agent_with(
         &self,
         previous: &AgentResult,
         prompt: &str,
+        options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
+        refuse_unsendable_images(
+            &previous.agent_name,
+            &previous.task.agent_config,
+            &options.images,
+        )?;
         let current =
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
         if current.status != AgentRunStatus::Cancelled {
@@ -3604,6 +3674,7 @@ impl WorkflowEngine {
         let recovery = Recovery {
             parent: current.task.parent.is_some().then_some(None),
             message: Some(&message),
+            images: &options.images,
             reopen: true,
             ..Recovery::default()
         };
@@ -3762,6 +3833,10 @@ impl WorkflowEngine {
         {
             task.pending_context_injections.push(message.to_string());
         }
+        task.pending_context_images
+            .extend(recovery.images.iter().enumerate().map(|(index, image)| {
+                arko_agents::ContextImage::new(format!("Image {}:", index + 1), image.clone())
+            }));
         // Recovered without a prompt: the messages it doesn't hold arrive as
         // context updates.
         let mut run = self.launch(

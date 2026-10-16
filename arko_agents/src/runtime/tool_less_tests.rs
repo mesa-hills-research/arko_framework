@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 /// A native agent offered `tools` (from the built-ins and `plain_text`),
 /// whose reply in text ends the task.
-fn replying_agent(
+pub(super) fn replying_agent(
     tools: &[&str],
 ) -> (
     AgentLoop,
@@ -28,7 +28,7 @@ fn replying_agent(
 
 /// A native agent offered nothing: no tools, and its reply in text ends
 /// the task.
-fn chat_agent() -> (
+pub(super) fn chat_agent() -> (
     AgentLoop,
     mpsc::Receiver<AgentEvent>,
     mpsc::Sender<UserCommand>,
@@ -36,7 +36,7 @@ fn chat_agent() -> (
     replying_agent(&[])
 }
 
-fn push(agent: &mut AgentLoop, replies: &[&str]) {
+pub(super) fn push(agent: &mut AgentLoop, replies: &[&str]) {
     for reply in replies {
         let Ok(end) = response(ai::Message::new_assistant(reply)) else {
             unreachable!()
@@ -50,7 +50,10 @@ fn push(agent: &mut AgentLoop, replies: &[&str]) {
     }
 }
 
-async fn run(agent: AgentLoop, events: &mut mpsc::Receiver<AgentEvent>) -> (Task, Vec<AgentEvent>) {
+pub(super) async fn run(
+    agent: AgentLoop,
+    events: &mut mpsc::Receiver<AgentEvent>,
+) -> (Task, Vec<AgentEvent>) {
     let outcome = timeout(Duration::from_secs(5), agent.run()).await;
     let received = drain(events);
     let task = outcome

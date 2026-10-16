@@ -852,7 +852,12 @@ Besides answers to the waiting states, a running task accepts:
   (by default `turn_context` with no ids), and `identify` gives an id for each queued
   `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
-  read.
+  read. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  update's text in the same message, each after its label, and wait with it in
+  `Task::pending_context_images` when it can't go yet. A Claude Code agent gets them with
+  its next input: an update with images that arrives during a turn can't go in a hook's
+  text, so it waits for the turn's end, and so does context taken after it, which keeps
+  the order.
 - `HostDeciding`: while the task awaits a command, the host is deciding that wait itself
   (an approval handler, or a wait before it continues after a usage limit), so
   `user_command_timeout_seconds` doesn't end it; the next wait is timed again. Ignored
@@ -895,6 +900,16 @@ there, since the model has not read it, and a continued task gets it.
 `prepare_for_resumption_from_completed` applies the same `EachUserMessage` environment
 details and reminder schedule as an ordinary user message. Pending context is delivered
 once at the next safe turn boundary, including file-tree changes, without duplication.
+
+**User images.** A user's images go into the same message as the text they come with,
+after it. `Task::initial_task_images` holds the task prompt's (set before the task first
+runs), `prepare_for_resumption_from_completed_with_images` and
+`prepare_for_resumption_with_user_response_and_images` take a follow-up's or an answer's,
+and `TurnContext::images` a context update's (below). Both runtimes send them, and a
+Claude Code agent receives them as image blocks of its input. A request with an image
+the model can't take is refused before it is sent (see
+[Tool images and Gemini 3.x](../docs/reference-map.md#tool-images-and-gemini-3x-arko_ai)).
+`arko_ai::Model::image_refusal` tells a host beforehand whether an image can go.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
@@ -1437,7 +1452,8 @@ let config = AgentConfig::builder(id, name, llm_config)
    and the task's usage. Its first message is the seed's text, framed as a task prompt
    (with the initial environment details and reminder): by default the task's
    `initial_task_prompt`, then `# Handover report`, a sentence saying the conversation
-   was replaced, and the report. The runtime then resets what it tracks about the old
+   was replaced, and the report, followed by the task's `initial_task_images`. The
+   runtime then resets what it tracks about the old
    conversation: tools observing the conversation start over
    (`Tool::reset_context`), the file tree is sent in full again, and the cache monitor
    judges only the fresh conversation's calls (`Task::conversation_usage_start`). The

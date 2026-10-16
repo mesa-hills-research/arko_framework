@@ -14,6 +14,11 @@ pub struct TurnContext {
     /// The host's identifiers of the items in `content` (such as note
     /// numbers or message ids), in any form it chooses; may be empty.
     pub ids: Vec<String>,
+    /// Images that go with `content`, each after its label, following the
+    /// text in the same message. A Claude Code agent gets them with its
+    /// next input: an update with images that arrives during a turn waits
+    /// for the turn's end, with any context taken after it.
+    pub images: Vec<ContextImage>,
 }
 
 impl From<String> for TurnContext {
@@ -21,6 +26,25 @@ impl From<String> for TurnContext {
         Self {
             content,
             ids: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+}
+
+/// An image a host adds to a task's context (see [`TurnContext::images`]),
+/// shown to the model after its label.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContextImage {
+    /// The text before the image, such as "Image 1 of note 4:".
+    pub label: String,
+    pub image: arko_ai::Image,
+}
+
+impl ContextImage {
+    pub fn new(label: impl Into<String>, image: arko_ai::Image) -> Self {
+        Self {
+            label: label.into(),
+            image,
         }
     }
 }

@@ -97,10 +97,11 @@ impl AgentLoop {
             .as_ref()
             .and_then(|source| source.context_update(self.task.id))
         {
-            if !update.content.trim().is_empty() {
+            if !update.content.trim().is_empty() || !update.images.is_empty() {
                 self.context_ids.extend(update.ids);
             }
             self.queue_context_injection(update.content);
+            self.task.pending_context_images.extend(update.images);
         }
         self.add_taken_context()
     }
@@ -117,13 +118,17 @@ impl AgentLoop {
     /// Adds the context taken from the command channel
     /// ([`Task::pending_context_injections`]) to the conversation as one
     /// user message headed `# Workflow context update`, in the order it was
-    /// sent. Only where a user message can go now; see
+    /// sent, with its images after the text. Only where a user message can
+    /// go now; see
     /// [`context_can_be_added_now`](Self::context_can_be_added_now).
     pub(super) fn add_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
         // While the handover report is due, context waits for the fresh
         // conversation: added now, it would be read only through the report
         // and could be lost from it (a message that needs a reply, say).
-        if self.task.pending_context_injections.is_empty() || self.handover_report_due() {
+        if (self.task.pending_context_injections.is_empty()
+            && self.task.pending_context_images.is_empty())
+            || self.handover_report_due()
+        {
             return Ok(());
         }
         let content = self.task.pending_context_injections.join("\n\n");
@@ -139,7 +144,10 @@ impl AgentLoop {
             next_message_number,
             !details_sent,
         )?;
-        self.task.conversation.add_user_message(&message);
+        let images = std::mem::take(&mut self.task.pending_context_images);
+        self.task
+            .conversation
+            .add_user_message_with_contents(crate::task::with_context_images(message, images));
         self.task.increment_user_message_count();
         // The host's identifiers of what it holds, for its receipt: those of
         // the content it sent, then the turn context source's.

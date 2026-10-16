@@ -119,6 +119,14 @@ pub struct Note {
     pub kind: NoteKind,
     #[serde(default)]
     pub source: NoteSource,
+    /// Images that go with the note, after the text of the context update
+    /// that gives it, each after a label naming the note. Only a one-time
+    /// note ([`NoteKind::Once`]) may carry images, and only to agents whose
+    /// models take them ([`arko_ai::Model::image_refusal`]); with images, the
+    /// text may be empty. A Claude Code agent gets them with its next input,
+    /// not during a turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<arko_ai::Image>,
 }
 
 impl Note {
@@ -159,6 +167,12 @@ impl Note {
     /// Who wrote it (default [`NoteSource::Operator`]).
     pub fn source(mut self, source: NoteSource) -> Self {
         self.source = source;
+        self
+    }
+
+    /// With `images`, as the note's `images` field describes.
+    pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
+        self.images = images.into_iter().collect();
         self
     }
 }
@@ -380,16 +394,16 @@ impl NoteBoard {
     /// The notes run `task_id` of `agent` (`review` for a completion
     /// verifier's review) receives that it hasn't been given, for its next
     /// turn boundary, oldest first, as many as fit ([`PROMPT_MAX_NOTES`],
-    /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown; `None`
-    /// when there are none. Only the notes shown count as given: the rest
-    /// come at the next boundary.
+    /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown and their
+    /// images, each labelled with its note; `None` when there are none. Only
+    /// the notes shown count as given: the rest come at the next boundary.
     pub(crate) fn update_with_seqs(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> Option<(String, Vec<u64>)> {
+    ) -> Option<(String, Vec<u64>, Vec<arko_agents::ContextImage>)> {
         self.poll(ctx);
         let mut state = self.state.lock();
         let newest = state.notes.last()?.seq;
@@ -416,6 +430,10 @@ impl NoteBoard {
             (
                 update(&notes[..shown], notes.len() - shown),
                 notes[..shown].iter().map(|posted| posted.seq).collect(),
+                notes[..shown]
+                    .iter()
+                    .flat_map(|posted| images(posted))
+                    .collect(),
             )
         });
         state.seen.insert(task_id, given);
@@ -495,7 +513,16 @@ impl NoteBoard {
         ctx: &SharedContext,
         mut note: Note,
     ) -> Result<(Note, Vec<String>), WorkflowError> {
-        note.text = checked_text(&note.text).map_err(WorkflowError::BuilderInvalid)?;
+        note.text = if note.images.is_empty() || !note.text.trim().is_empty() {
+            checked_text(&note.text).map_err(WorkflowError::BuilderInvalid)?
+        } else {
+            String::new()
+        };
+        if !note.images.is_empty() && note.kind != NoteKind::Once {
+            return Err(WorkflowError::BuilderInvalid(
+                "only a one-time note (Note::once) may carry images: a standing note is shown in every later run's prompt".to_string(),
+            ));
+        }
         if let NoteSource::Agent(name) = &note.source {
             if name.trim().is_empty() {
                 return Err(WorkflowError::BuilderInvalid(
@@ -534,6 +561,11 @@ impl NoteBoard {
             return Err(WorkflowError::BuilderInvalid(
                 "no agent receives this note: completion verifiers and agents set with notes_by_name_only get a note only when it names them".to_string(),
             ));
+        }
+        for agent in &recipients {
+            if let Some(config) = ctx.agent_configs.get(agent) {
+                crate::workflow::engine::refuse_unsendable_images(agent, config, &note.images)?;
+            }
         }
         Ok((note, recipients))
     }
@@ -775,13 +807,43 @@ fn cut(text: &str, max: usize) -> &str {
 /// One note as a list item. Every line of its text is indented, so no line
 /// of a note can pass for a heading of the prompt.
 fn item(posted: &PostedNote) -> String {
+    let mut text = posted.note.text.replace('\n', "\n  ");
+    let with_images = match posted.note.images.len() {
+        0 => None,
+        1 => Some("(With an image, shown after this update.)".to_string()),
+        count => Some(format!("(With {count} images, shown after this update.)")),
+    };
+    if let Some(line) = with_images {
+        if !text.is_empty() {
+            text.push_str("\n  ");
+        }
+        text.push_str(&line);
+    }
     format!(
         "\n- Note {} from {}, {}:\n  {}",
         posted.seq,
         source_label(&posted.note.source),
         posted.posted_at.format("%Y-%m-%d %H:%M UTC"),
-        posted.note.text.replace('\n', "\n  ")
+        text
     )
+}
+
+/// The images of a note, each labelled with its note.
+fn images(posted: &PostedNote) -> impl Iterator<Item = arko_agents::ContextImage> + '_ {
+    let count = posted.note.images.len();
+    posted
+        .note
+        .images
+        .iter()
+        .enumerate()
+        .map(move |(index, image)| {
+            let label = if count == 1 {
+                format!("The image of note {}:", posted.seq)
+            } else {
+                format!("Image {} of note {}:", index + 1, posted.seq)
+            };
+            arko_agents::ContextImage::new(label, image.clone())
+        })
 }
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
@@ -935,11 +997,13 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
     fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
         let mut parts = Vec::new();
         let mut ids = Vec::new();
+        let mut images = Vec::new();
         if let Some(inner) = self.inner.context_update(task_id) {
             parts.push(inner.content);
             ids.extend(inner.ids);
+            images.extend(inner.images);
         }
-        if let Some((notes, seqs)) = self.context.notes.update_with_seqs(
+        if let Some((notes, seqs, note_images)) = self.context.notes.update_with_seqs(
             &self.context,
             &self.agent_name,
             task_id,
@@ -947,6 +1011,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
         ) {
             parts.push(notes);
             ids.extend(seqs.into_iter().map(|seq| format!("note:{seq}")));
+            images.extend(note_images);
         }
         if !self.review
             && let Some((mail, mail_ids)) = self.context.subagents.update(task_id)
@@ -957,6 +1022,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
         (!parts.is_empty()).then(|| arko_agents::TurnContext {
             content: parts.join("\n\n"),
             ids,
+            images,
         })
     }
 

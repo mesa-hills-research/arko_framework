@@ -520,6 +520,21 @@ pub(crate) fn unanswered_images(task: &Task) -> Vec<arko_ai::Content> {
         .collect()
 }
 
+/// The images of a fresh conversation's first message: a chat's
+/// [`unanswered_images`], or the task's initial images, which go with the
+/// task it restates.
+pub(crate) fn seed_images(task: &Task, chat: bool) -> Vec<arko_ai::Content> {
+    if chat {
+        unanswered_images(task)
+    } else {
+        task.initial_task_images
+            .iter()
+            .cloned()
+            .map(arko_ai::Content::Image)
+            .collect()
+    }
+}
+
 /// Called by the runtime at the moment a task's conversation is replaced,
 /// or compacted in Claude Code. Set with
 /// [`AgentRuntime::with_handover_hook`](crate::runtime::AgentRuntime::with_handover_hook).
@@ -678,6 +693,15 @@ mod tests {
         );
         assert_eq!(unanswered_user_messages(&task).len(), 2);
         assert_eq!(unanswered_images(&task).len(), 1);
+        // A chat's fresh conversation gets the unanswered images; a task's
+        // gets the task's own, which go with the prompt it restates.
+        let chart = arko_ai::Image::new_base64("Y2hhcnQ=", "image/png");
+        task.initial_task_images = vec![chart.clone()];
+        assert_eq!(seed_images(&task, true).len(), 1);
+        assert!(seed_images(&task, true)[0].as_image() != Some(&chart));
+        let task_images = seed_images(&task, false);
+        assert_eq!(task_images.len(), 1);
+        assert_eq!(task_images[0].as_image(), Some(&chart));
     }
 
     #[test]
