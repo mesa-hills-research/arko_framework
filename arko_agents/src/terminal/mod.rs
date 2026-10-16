@@ -146,6 +146,10 @@ pub struct StartOptions {
     /// The arguments before the command for this job, instead of
     /// [`TerminalConfig::shell_args`] (default `None`).
     pub shell_args: Option<Vec<String>>,
+    /// What [`TerminalManager::background_jobs`] shows as the command, for
+    /// a host that wraps the command it was given (default `None`: the
+    /// command).
+    pub label: Option<String>,
 }
 impl Default for StartOptions {
     fn default() -> Self {
@@ -155,8 +159,20 @@ impl Default for StartOptions {
             timeout: None,
             held: false,
             shell_args: None,
+            label: None,
         }
     }
+}
+
+/// A job running in the background (not held), as
+/// [`TerminalManager::background_jobs`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundJob {
+    pub owner: Uuid,
+    pub job_id: Uuid,
+    /// The command, or its [`StartOptions::label`].
+    pub command: String,
+    pub started: std::time::Instant,
 }
 
 /// A job that finished in the background (not held), as
@@ -334,6 +350,10 @@ struct Job {
     /// The directory the job started in, for checking input typed into a
     /// shell it runs. `None` for jobs restored from an earlier process.
     working_directory: Option<PathBuf>,
+    /// The command as [`BackgroundJob`] shows it, and when it started
+    /// (empty for jobs restored from an earlier process, which never run).
+    command: String,
+    started: std::time::Instant,
     controls: mpsc::Sender<Control>,
     cancel: watch::Sender<bool>,
     changes: watch::Receiver<u64>,
@@ -348,6 +368,8 @@ fn completed_job(data: Arc<Mutex<JobData>>) -> Arc<Job> {
     Arc::new(Job {
         data,
         working_directory: None,
+        command: String::new(),
+        started: std::time::Instant::now(),
         controls,
         cancel,
         changes,
@@ -692,6 +714,8 @@ impl TerminalManager {
             Arc::new(Job {
                 data: data.clone(),
                 working_directory: Some(context.current_working_directory.to_path_buf()),
+                command: options.label.clone().unwrap_or_else(|| command.to_string()),
+                started: std::time::Instant::now(),
                 controls,
                 cancel,
                 changes,
@@ -795,6 +819,31 @@ impl TerminalManager {
     /// host can wake an idle agent for them.
     pub fn subscribe_finished(&self) -> tokio::sync::broadcast::Receiver<JobFinished> {
         self.finished.subscribe()
+    }
+
+    /// The jobs running in the background, of every owner, oldest first:
+    /// what [`shutdown`](Self::shutdown) would stop, for a host to say so
+    /// before it exits.
+    pub fn background_jobs(&self) -> Vec<BackgroundJob> {
+        let mut running: Vec<BackgroundJob> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|job| {
+                let data = job.data.lock().unwrap();
+                (data.record.state == JobState::Running && !data.record.held).then(|| {
+                    BackgroundJob {
+                        owner: data.record.owner,
+                        job_id: data.record.job_id,
+                        command: job.command.clone(),
+                        started: job.started,
+                    }
+                })
+            })
+            .collect();
+        running.sort_by_key(|job| job.started);
+        running
     }
 
     /// Wait for a revision change, input request, or completion; never more than 30s.

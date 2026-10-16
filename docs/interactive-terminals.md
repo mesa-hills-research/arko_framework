@@ -72,6 +72,11 @@ for example a non-interactive mode for commands run to completion.
 background, with its owner, ID and state, so that a host can start a turn of an
 idle agent for it.
 
+`TerminalManager::background_jobs()` lists the jobs running in the background,
+of every owner, with each one's command and start time, so that a host can say
+what stops before it exits. `StartOptions::label` sets the command shown, for a
+host that wraps the command it runs.
+
 ## Configuration
 
 `TerminalConfig::new(directory)` sets these defaults:

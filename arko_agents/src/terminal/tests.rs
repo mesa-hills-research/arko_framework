@@ -894,8 +894,9 @@ async fn update(receiver: &mut mpsc::Receiver<UserCommand>) -> serde_json::Value
 }
 
 /// A held job (a command its host waits for) sends no updates and isn't
-/// listed. Released, it is listed, the event it has goes out at once, and
-/// its end is an update and a finished notice.
+/// listed. Released, it is listed (the host's list shows its label), the
+/// event it has goes out at once, and its end is an update and a finished
+/// notice.
 #[tokio::test]
 async fn a_held_job_tells_nothing_until_it_is_released() {
     let f = Fixture::new(|_| {});
@@ -908,6 +909,7 @@ async fn a_held_job_tells_nothing_until_it_is_released() {
             terminal: false,
             detect_prompts: false,
             held: true,
+            label: Some("ask once".into()),
             ..Default::default()
         },
     );
@@ -915,10 +917,18 @@ async fn a_held_job_tells_nothing_until_it_is_released() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(receiver.try_recv().is_err(), "a held job sends no update");
     assert!(listed(&f).await.is_empty());
+    assert!(f.manager.background_jobs().is_empty());
 
     let released = f.manager.release(f.owner, job.job_id).unwrap();
     assert_eq!(released.state, JobState::Running);
     assert_eq!(listed(&f).await, [job.job_id]);
+    let background = f.manager.background_jobs();
+    assert_eq!(background.len(), 1);
+    assert_eq!(
+        (background[0].owner, background[0].job_id),
+        (f.owner, job.job_id)
+    );
+    assert_eq!(background[0].command, "ask once");
     assert_eq!(update(&mut receiver).await["input"]["prompt"], "Go on?");
     f.input(f.owner, job.job_id, asked.revision, "yes".into())
         .await
@@ -943,6 +953,7 @@ async fn a_held_job_tells_nothing_until_it_is_released() {
             state: JobState::Succeeded
         }
     );
+    assert!(f.manager.background_jobs().is_empty());
 }
 
 /// A held job that finished stays held: its host has the result, and the
