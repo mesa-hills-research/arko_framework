@@ -340,6 +340,49 @@ impl Workflow {
             .cloned()
     }
 
+    /// Adds a run of `agent_name` holding `task`, completed, to continue
+    /// with [`continue_agent`](Self::continue_agent) like any completed run:
+    /// a branch of a run of this workflow or of another one
+    /// ([`Task::branch`](arko_agents::Task::branch), which gives the copy
+    /// its own run ID, and a Claude Code agent its own session forked from
+    /// the original's). The run keeps the configuration saved in `task`.
+    /// It counts as given every note posted so far, as a run started now
+    /// does. `AgentNotFound` for an unregistered agent; `BuilderInvalid` for
+    /// a task that isn't `Completed` or whose ID the workflow has already.
+    pub fn import_agent_run(
+        &self,
+        agent_name: &str,
+        task: arko_agents::Task,
+    ) -> Result<AgentResult, WorkflowError> {
+        if !self.context.agent_configs.contains_key(agent_name) {
+            return Err(WorkflowError::AgentNotFound(agent_name.to_string()));
+        }
+        let arko_agents::TaskState::Completed { summary } = &task.current_state else {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "only a completed task (such as a branch) can be imported, not one {:?}",
+                task.current_state
+            )));
+        };
+        if self.agent_result(task.id).is_some() || self.context.registry.is_running(task.id) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} is in the workflow already; branch it (Task::branch) for a copy with its own ID",
+                task.id
+            )));
+        }
+        let result = AgentResult {
+            agent_run_id: task.id,
+            agent_name: agent_name.to_string(),
+            status: AgentRunStatus::Completed,
+            summary: summary.clone(),
+            error: None,
+            task,
+            stopped_by: None,
+        };
+        self.context.notes.adopted(&self.context, result.task.id);
+        engine::record_result(&self.context, result.clone());
+        Ok(result)
+    }
+
     /// Run multiple agents in parallel.
     ///
     /// All agents run concurrently. Results are returned in the same order
@@ -728,7 +771,9 @@ impl Workflow {
     /// ([`ContinueOptions::images`]) when the run is reopened or continued.
     /// A run that is recovered gets no message, so images for it are
     /// refused (`BuilderInvalid`): send them with the next message. Only a
-    /// continued run takes [`ContinueOptions::reconfigure`].
+    /// continued run takes [`ContinueOptions::reconfigure`] and
+    /// [`ContinueOptions::cut_back_to`]; `continue_agent_with` cuts back a
+    /// stopped run of any status.
     pub async fn restart_with(
         &self,
         run: &StoppedRun,
@@ -747,7 +792,11 @@ impl Workflow {
             )));
         }
         match run.restart {
-            Restart::Recover if !options.images.is_empty() || options.config.is_some() => {
+            Restart::Recover
+                if !options.images.is_empty()
+                    || options.config.is_some()
+                    || options.cut_back_to.is_some() =>
+            {
                 Err(WorkflowError::BuilderInvalid(format!(
                     "agent run {} is recovered, which takes no message: send the images, or the new configuration, with the message after it",
                     run.result.agent_run_id
@@ -3023,3 +3072,7 @@ mod user_image_tests;
 #[cfg(test)]
 #[path = "reconfigure_tests.rs"]
 mod reconfigure_tests;
+
+#[cfg(test)]
+#[path = "cut_back_tests.rs"]
+mod cut_back_tests;

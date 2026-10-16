@@ -5,11 +5,13 @@ use arko_ai::{ModelCallUsage, UsageInfo};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod cut_back;
 mod refusal;
+pub use cut_back::{UserTurn, UserTurnKind};
 pub use refusal::{RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult};
 
 /// Information about a single tool call pending approval, typically part of a batch.
@@ -481,6 +483,21 @@ pub struct Task {
     /// A handover's fresh session records the current one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claude_code_prompt_changed: bool,
+    /// For each message of the conversation whose entry in the Claude Code
+    /// session's transcript the runtime saw, by its index, the UUID of its
+    /// last entry there: a model response, a turn's tool results, or the
+    /// input the task sent. [`Task::cut_back`] resumes the session at one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claude_code_entries: BTreeMap<usize, String>,
+    /// The entry of the Claude Code session that its next launch resumes
+    /// at, after [`Task::cut_back`]: the transcript after it is left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_resume_at: Option<String>,
+    /// The Claude Code session that the next launch copies into the task's
+    /// own session ([`claude_code_session`](Self::claude_code_session)), for
+    /// a task made by [`Task::branch`]. The original is left unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_fork_of: Option<String>,
     /// The task runs with a configuration its host gave it after it started
     /// ([`Task::reconfigure`]), not the one it was started with. A workflow
     /// resumed from a checkpoint keeps it, without comparing it with the
@@ -666,6 +683,9 @@ impl Task {
             claude_code_session: None,
             claude_code_synced: 0,
             claude_code_prompt_changed: false,
+            claude_code_entries: BTreeMap::new(),
+            claude_code_resume_at: None,
+            claude_code_fork_of: None,
             reconfigured: false,
             running_tool_calls: Vec::new(),
             parent: None,

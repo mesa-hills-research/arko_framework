@@ -101,7 +101,7 @@ const ENVIRONMENT_SECTIONS: [&str; 2] = [
 /// Where the runtime-added sections at the end of `text` start. Beside
 /// native tool results the sections can be the whole text, without the
 /// blank line before them.
-fn runtime_sections_start(text: &str, reminder: Option<&str>) -> usize {
+pub(super) fn runtime_sections_start(text: &str, reminder: Option<&str>) -> usize {
     let mut end = text.len();
     if let Some(reminder) = reminder {
         let section = format!("\n\n# Reminder\n{reminder}");

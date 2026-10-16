@@ -924,6 +924,23 @@ are a new prefix, so the next request writes the prompt cache afresh. The task r
 Claude Code otherwise sends the prompt it recorded at the session's first request; a
 handover's fresh session records the new one.
 
+**Cutting back and branching.** `Task::user_turns()` lists the messages of the current
+conversation the host sent (`UserTurn { index, kind, text, images }`, `kind` one of
+`Prompt`, `Message` and `ContextUpdate`; the runtime's own messages and tool results are
+not among them, and `text` leaves out the environment details and reminder the runtime
+added). `Task::cut_back(index)` cuts the conversation back to just before one of them, to
+edit it or send it again: the later messages go, with what waited with them (calls and
+results, context taken, a refusal or handover under way), the usage stays, and the task is
+`Completed`, ready for a follow-up; cut back to `0` it is `Pending` and runs from its prompt
+again. `Task::branch(index)` is a copy cut back the same way (or whole, at the
+conversation's length) as a new task with its own ID and no usage, and the original stays.
+A Claude Code task records, for each message, its last entry in the session's transcript
+(`Task::claude_code_entries`): a cut resumes the session at the entry before the cut
+(`--resume-session-at`), sending the host's messages after it again, and a branch forks the
+session into its own (`Task::claude_code_fork_of`, `--fork-session --session-id`). A cut that
+would leave the model's work without a known entry (a task recorded before entries were, or
+before a compaction) is refused.
+
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
 makes its next model request, and a task awaiting a command waits for it.

@@ -1571,13 +1571,24 @@ impl ClaudeCodeRun {
             }));
         }
         self.served_tools = Some(ai::ToolConfig::new(served));
-        let session = match &self.task.claude_code_session {
-            Some(session) => cc::SessionStart::Resume {
+        // A cut back resumes at the entry the task recorded; a branch first
+        // copies the session it was branched from into its own.
+        let recorded_at = self.task.claude_code_resume_at.clone();
+        let session = match (
+            &self.task.claude_code_session,
+            &self.task.claude_code_fork_of,
+        ) {
+            (Some(session), Some(parent)) => cc::SessionStart::Fork {
+                session: parent.clone(),
+                at: recorded_at,
+                new_session: session.clone(),
+            },
+            (Some(session), None) => cc::SessionStart::Resume {
                 session: session.clone(),
                 fork: false,
-                at: self.resume_at.take(),
+                at: self.resume_at.take().or(recorded_at),
             },
-            None => {
+            (None, _) => {
                 let id = Uuid::new_v4().to_string();
                 self.task.claude_code_session = Some(id.clone());
                 cc::SessionStart::WithId(id)
@@ -1668,6 +1679,9 @@ impl ClaudeCodeRun {
         let (requests, receiver) = mpsc::unbounded_channel();
         let options = self.session_options(&requests);
         let session = cc::ClaudeSession::start(options).await?;
+        // The session has resumed (or forked) where the task said.
+        self.task.claude_code_resume_at = None;
+        self.task.claude_code_fork_of = None;
         if let Some(tools) = session.initialization().get("tools") {
             log::debug!("Task {}: Claude Code tools: {tools}", self.task.id);
         }
@@ -1780,6 +1794,7 @@ impl ClaudeCodeRun {
     /// The session received a user message, the last of the task's
     /// conversation so far.
     fn record_sent(&mut self, uuid: String) {
+        self.record_entry(Some(&uuid));
         self.last_entry = Some(Entry {
             uuid,
             messages: self.task.conversation.messages.len(),
@@ -2662,6 +2677,7 @@ impl ClaudeCodeRun {
                     let mut message = ai::Message::new_assistant(&text);
                     message.tool_calls = calls;
                     self.commit(message);
+                    self.record_entry(assistant.raw.get("uuid").and_then(Value::as_str));
                     // The model read the results of the calls that finished,
                     // so Claude Code has saved them.
                     self.task
@@ -2698,7 +2714,8 @@ impl ClaudeCodeRun {
                         .await?;
                 }
                 let mut recorded = self.task.conversation.messages.len();
-                if !results.is_empty() {
+                let with_results = !results.is_empty();
+                if with_results {
                     self.task.conversation.add_tool_results(results);
                     self.observe_last();
                     recorded += 1;
@@ -2723,6 +2740,11 @@ impl ClaudeCodeRun {
                         uuid: uuid.to_string(),
                         messages: recorded,
                     });
+                    if with_results {
+                        self.task
+                            .claude_code_entries
+                            .insert(recorded - 1, uuid.to_string());
+                    }
                     self.step_results = true;
                 }
             }
@@ -2812,6 +2834,18 @@ impl ClaudeCodeRun {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Records `uuid` as the transcript entry of the conversation's last
+    /// message (see [`Task::claude_code_entries`]).
+    fn record_entry(&mut self, uuid: Option<&str>) {
+        if let (Some(uuid), Some(index)) =
+            (uuid, self.task.conversation.messages.len().checked_sub(1))
+        {
+            self.task
+                .claude_code_entries
+                .insert(index, uuid.to_string());
+        }
     }
 
     fn commit(&mut self, message: ai::Message) {
@@ -3950,8 +3984,10 @@ impl ClaudeCodeRun {
         self.cache_warned = false;
         self.cache_pause_episode = false;
         self.handover_skip_warned = false;
-        // The messages before the summary aren't the conversation's now.
+        // The messages before the summary aren't the conversation's now:
+        // the session can't be cut back to them.
         self.last_entry = None;
+        self.task.claude_code_entries.clear();
         self.answered = None;
         self.step_results = false;
         for name in self.registry.list_tool_names() {
@@ -4082,6 +4118,9 @@ impl ClaudeCodeRun {
         // The resumed session has what came before `start`; the rest goes
         // with the report request.
         self.task.claude_code_synced = start;
+        self.task
+            .claude_code_entries
+            .retain(|kept, _| *kept < start);
         self.resume_at = Some(answered.uuid);
         self.step_left_out = true;
         self.step_results = false;
@@ -4157,6 +4196,9 @@ impl ClaudeCodeRun {
         self.task.claude_code_session = None;
         self.task.claude_code_synced = 0;
         self.task.claude_code_prompt_changed = false;
+        self.task.claude_code_entries.clear();
+        self.task.claude_code_resume_at = None;
+        self.task.claude_code_fork_of = None;
         for name in self.registry.list_tool_names() {
             if let Some(tool) = self.registry.get(&name) {
                 tool.reset_context(self.task.id);

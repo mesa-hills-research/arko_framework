@@ -70,6 +70,9 @@ pub struct ContinueOptions {
     /// The configuration the run continues with, in place of the one saved
     /// in its task (see [`ContinueOptions::reconfigure`]).
     pub config: Option<arko_agents::AgentConfig>,
+    /// The message the run's conversation is cut back to first, by its
+    /// index (see [`ContinueOptions::cut_back_to`]).
+    pub cut_back_to: Option<usize>,
 }
 
 impl ContinueOptions {
@@ -102,6 +105,28 @@ impl ContinueOptions {
     /// [`Workflow::restart_with`]: crate::Workflow::restart_with
     pub fn reconfigure(mut self, config: arko_agents::AgentConfig) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Cuts the run's conversation back to just before message `index`,
+    /// one of its task's [`user_turns`](arko_agents::Task::user_turns), and
+    /// sends the prompt in its place: an edited message, or the same one
+    /// again (regenerate). The messages from `index` on go, with what waited
+    /// with them (calls, results, a question, a pause); see
+    /// [`Task::cut_back`](arko_agents::Task::cut_back). Index `0` starts the
+    /// conversation over from the prompt, as a new run's (with the
+    /// workflow's notes and list of recipients), under the same run ID. A
+    /// run that isn't running can be cut back whatever its status:
+    /// completed, waiting for input, paused, cancelled, failed or
+    /// interrupted. The notes the removed messages gave it are given again,
+    /// except one-time notes, which went with them; messages from other
+    /// agents in them are not delivered again. A Claude Code agent's session
+    /// resumes at the reply before the cut. Only
+    /// [`Workflow::continue_agent_with`] takes it.
+    ///
+    /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
+    pub fn cut_back_to(mut self, index: usize) -> Self {
+        self.cut_back_to = Some(index);
         self
     }
 }

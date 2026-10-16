@@ -1339,6 +1339,9 @@ pub(crate) struct UserInput<'a> {
     pub text: &'a str,
     pub images: Vec<arko_ai::Image>,
     pub config: Option<AgentConfig>,
+    /// The message the conversation is cut back to first (see
+    /// [`ContinueOptions::cut_back_to`](super::ContinueOptions::cut_back_to)).
+    pub cut_back_to: Option<usize>,
 }
 
 impl<'a> From<&'a str> for UserInput<'a> {
@@ -1347,7 +1350,45 @@ impl<'a> From<&'a str> for UserInput<'a> {
             text,
             images: Vec::new(),
             config: None,
+            cut_back_to: None,
         }
+    }
+}
+
+/// The list of the agents a new run of `agent_name` may message, for its
+/// initial prompt (empty without `shown`, or for a chat, which can't message
+/// anyone), recording the version of their statuses the run has seen.
+fn roster_section(ctx: &SharedContext, agent_name: &str, task: &Task, shown: bool) -> String {
+    let recipients = ctx.message_recipients(agent_name);
+    if recipients.is_empty() {
+        return String::new();
+    }
+    // The roster's statuses and the version the run has seen come from one
+    // registry snapshot.
+    let roster = ctx.registry.roster(
+        task.id,
+        &recipients,
+        ctx.paused.load(std::sync::atomic::Ordering::Acquire),
+    );
+    let chat = task
+        .agent_config
+        .tool_config
+        .offered_tool_names()
+        .is_empty();
+    if !shown || chat {
+        return String::new();
+    }
+    format!("{ROSTER_HEADING}{}", render_recipients(ctx, &roster))
+}
+
+/// A task's refusal (a cut back or reconfiguration the task can't take) as
+/// the host's error.
+fn builder_invalid(error: arko_agents::ArkoAgentsError) -> WorkflowError {
+    match error {
+        arko_agents::ArkoAgentsError::InvalidTaskState(reason) => {
+            WorkflowError::BuilderInvalid(reason)
+        }
+        other => WorkflowError::BuilderInvalid(other.to_string()),
     }
 }
 
@@ -2233,7 +2274,7 @@ pub(crate) async fn save_stop_checkpoint(
 
 /// Records `result` in the run's results, replacing an earlier result of
 /// its task (without persistence; see [`PersistenceManager::record_result`]).
-fn record_result(ctx: &SharedContext, result: AgentResult) {
+pub(crate) fn record_result(ctx: &SharedContext, result: AgentResult) {
     crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
 }
 
@@ -2819,28 +2860,8 @@ impl WorkflowEngine {
         let notes = ctx
             .notes
             .initial_section(ctx, agent_name, task.id, options.review);
-        let mut initial_prompt = format!("{prompt}{messages}{notes}");
-        let recipients = ctx.message_recipients(agent_name);
-        if !recipients.is_empty() {
-            // The roster's statuses and the version the run has seen come
-            // from one registry snapshot.
-            let roster = ctx.registry.roster(
-                task.id,
-                &recipients,
-                ctx.paused.load(std::sync::atomic::Ordering::Acquire),
-            );
-            // A chat (an agent offered no tools) can't message anyone.
-            let chat = task
-                .agent_config
-                .tool_config
-                .offered_tool_names()
-                .is_empty();
-            if options.roster && !chat {
-                initial_prompt.push_str(ROSTER_HEADING);
-                initial_prompt.push_str(&render_recipients(ctx, &roster));
-            }
-        }
-        task.initial_task_prompt = initial_prompt;
+        let roster = roster_section(ctx, agent_name, &task, options.roster);
+        task.initial_task_prompt = format!("{prompt}{messages}{notes}{roster}");
         Ok(self.launch(
             agent_name,
             task,
@@ -3285,8 +3306,9 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
         // A completion a verifier could not review (`VerifierFailed`): the
-        // prompt is the agent's next message.
-        if previous.status == AgentRunStatus::Paused
+        // prompt is the agent's next message (a cut back replaces it).
+        if options.cut_back_to.is_none()
+            && previous.status == AgentRunStatus::Paused
             && matches!(
                 previous.task.current_state,
                 TaskState::AwaitingErrorRecoveryApproval {
@@ -3314,6 +3336,7 @@ impl WorkflowEngine {
             text: continuation_prompt,
             images: options.images,
             config: options.config,
+            cut_back_to: options.cut_back_to,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
     }
@@ -3332,6 +3355,9 @@ impl WorkflowEngine {
     ) -> Result<AgentResult, WorkflowError> {
         let continuation_prompt = input.text;
         let resumable = match previous.status {
+            // A cut back continues a run that isn't running, whatever its
+            // status (`start_unless_running` below refuses a running one).
+            _ if input.cut_back_to.is_some() => true,
             AgentRunStatus::Completed => {
                 matches!(previous.task.current_state, TaskState::Completed { .. })
             }
@@ -3349,6 +3375,9 @@ impl WorkflowEngine {
         let agent_name = &previous.agent_name;
         let mut task = previous.task.clone();
         task.parent = parent;
+        if let Some(index) = input.cut_back_to {
+            task.cut_back(index).map_err(builder_invalid)?;
+        }
         if let Some(config) = input.config {
             // A configuration given now is checked as one given at a start
             // is, and gets the workflow's tools as a new run's does.
@@ -3364,12 +3393,7 @@ impl WorkflowEngine {
                 ctx,
                 RunRole::of(ctx, depth, task.id),
             );
-            task.reconfigure(prepared).map_err(|error| match error {
-                arko_agents::ArkoAgentsError::InvalidTaskState(reason) => {
-                    WorkflowError::BuilderInvalid(reason)
-                }
-                other => WorkflowError::BuilderInvalid(other.to_string()),
-            })?;
+            task.reconfigure(prepared).map_err(builder_invalid)?;
         }
         refuse_unsendable_images(agent_name, &task.agent_config, &input.images)?;
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
@@ -3397,6 +3421,12 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
+        // Cut back, the notes and mail the removed messages gave it are
+        // given again (not the one-time notes, which went with them).
+        if input.cut_back_to.is_some_and(|index| index > 0) {
+            ctx.notes.cut_back(agent_name, &task, review);
+            ctx.subagents.recovered(&task);
+        }
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
@@ -3422,12 +3452,26 @@ impl WorkflowEngine {
             .as_ref()
             .and_then(|tracker| tracker.changed_notice(&changed))
             .map_or_else(String::new, |notice| format!("\n\n{notice}"));
-        let prompt = format!("{continuation_prompt}{messages}{changed_notice}");
-        let prepared = match previous.status {
-            AgentRunStatus::Completed => {
-                task.prepare_for_resumption_from_completed_with_images(prompt, input.images)
+        let prepared = match (input.cut_back_to, &previous.status) {
+            // Cut back to its first message: it starts over from the prompt
+            // as a new run does, with the standing notes and its roster.
+            (Some(0), _) => {
+                let notes = ctx.notes.initial_section(ctx, agent_name, task.id, review);
+                let roster = roster_section(ctx, agent_name, &task, true);
+                task.initial_task_prompt =
+                    format!("{continuation_prompt}{messages}{notes}{roster}{changed_notice}");
+                task.initial_task_images = input.images;
+                Ok(())
             }
-            _ => task.prepare_for_resumption_with_user_response_and_images(prompt, input.images),
+            (Some(_), _) | (None, AgentRunStatus::Completed) => task
+                .prepare_for_resumption_from_completed_with_images(
+                    format!("{continuation_prompt}{messages}{changed_notice}"),
+                    input.images,
+                ),
+            _ => task.prepare_for_resumption_with_user_response_and_images(
+                format!("{continuation_prompt}{messages}{changed_notice}"),
+                input.images,
+            ),
         };
         if let Err(error) = prepared {
             ctx.registry.abandon(task.id);
@@ -3684,9 +3728,9 @@ impl WorkflowEngine {
         options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        if options.config.is_some() {
+        if options.config.is_some() || options.cut_back_to.is_some() {
             return Err(WorkflowError::BuilderInvalid(
-                "a reopened run keeps its configuration: reopen it, then continue it with a new one".to_string(),
+                "a reopened run keeps its configuration and conversation: cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));
         }
         refuse_unsendable_images(

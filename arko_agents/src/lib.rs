@@ -52,7 +52,7 @@ pub use stop::{
 pub use task::{
     ApprovalReason, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
     PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult,
-    RunningToolCall, Task, TaskParent, TaskState,
+    RunningToolCall, Task, TaskParent, TaskState, UserTurn, UserTurnKind,
 };
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,

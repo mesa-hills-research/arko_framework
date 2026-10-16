@@ -619,6 +619,91 @@ async fn a_reconfigured_task_resumes_its_session_with_the_new_prompt_and_tools()
     assert!(task.claude_code_prompt_changed);
 }
 
+/// A cc agent whose replies in text end its task (a chat).
+fn chat_config(fake: &Fake) -> crate::agent_config::AgentConfig {
+    let mut config = config(fake, &[]);
+    config.tool_config.text_reply_ends_task = true;
+    config
+}
+
+/// The conversation Claude Code had when each message reached it (the
+/// fake's transcript before it).
+fn histories(fake: &Fake) -> Vec<Vec<String>> {
+    fake.logged("user")
+        .iter()
+        .map(|entry| serde_json::from_value(entry["history"].clone()).unwrap())
+        .collect()
+}
+
+/// Cut back to the follow-up, the session resumes at the reply before it
+/// and gets the new message in its place; a branch copies the session up
+/// to there into its own, and the original goes on with all of it.
+#[tokio::test]
+async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
+    let fake = Fake::new(json!([
+        [{"text": "Where to?"}],
+        [{"text": "Lisbon is nice."}],
+        [{"text": "Porto is nice."}],
+        [{"text": "Faro too."}],
+    ]));
+    let task = Task::new(
+        chat_config(&fake),
+        "Plan a trip.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (mut task, _) = start(task).finish().await;
+    task.prepare_for_resumption_from_completed("Lisbon.".into())
+        .unwrap();
+    let (original, _) = start(task).finish().await;
+    let session = original.claude_code_session.clone().unwrap();
+    let reply = original.claude_code_entries[&1].clone();
+    assert_eq!(texts(&original)[3], "Lisbon is nice.");
+
+    // A branch at the follow-up, with another message in its place.
+    let mut branch = original.branch(2).unwrap();
+    branch
+        .prepare_for_resumption_from_completed("Porto.".into())
+        .unwrap();
+    let (branch, _) = start(branch).finish().await;
+    assert!(
+        matches!(&branch.current_state, TaskState::Completed { summary } if summary == "Porto is nice.")
+    );
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[2]["argv"].clone()).unwrap();
+    let joined = argv.join(" ");
+    let forked = branch.claude_code_session.clone().unwrap();
+    assert!(
+        joined.contains(&format!(
+            "--resume={session} --fork-session --session-id={forked} --resume-session-at={reply}"
+        )),
+        "{joined}"
+    );
+    let history = &histories(&fake)[2];
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history[1], "Where to?");
+    assert!(branch.claude_code_fork_of.is_none());
+
+    // The original, cut back to its follow-up: the same session, resumed
+    // at the reply.
+    let mut cut = original.clone();
+    cut.cut_back(2).unwrap();
+    cut.prepare_for_resumption_from_completed("Faro.".into())
+        .unwrap();
+    let (cut, _) = start(cut).finish().await;
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[3]["argv"].clone()).unwrap();
+    let joined = argv.join(" ");
+    assert!(
+        joined.contains(&format!("--resume={session} --resume-session-at={reply}")),
+        "{joined}"
+    );
+    assert_eq!(histories(&fake)[3].len(), 2);
+    assert_eq!(
+        texts(&cut)[1..],
+        ["Where to?", texts(&cut)[2].as_str(), "Faro too."]
+    );
+    assert!(texts(&cut)[2].starts_with("Faro."));
+}
+
 fn pixels() -> arko_ai::Image {
     arko_ai::Image::new_base64("cGl4ZWxz", "image/png")
 }

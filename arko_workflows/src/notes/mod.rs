@@ -472,6 +472,33 @@ impl NoteBoard {
         }
     }
 
+    /// Run `task` of `agent` was cut back (`Task::cut_back`): the notes it
+    /// was given in the messages the cut removed are given again at its next
+    /// turn boundary, as for a recovered run, except the one-time notes,
+    /// which went with the messages around them (such as what the user wrote
+    /// while it worked). One-time notes it hasn't been given still reach it.
+    pub(crate) fn cut_back(&self, agent: &str, task: &arko_agents::Task, review: bool) {
+        let given = self.given(task.id);
+        self.recovered(agent, task, review);
+        if given > 0 {
+            let mut state = self.state.lock();
+            let skipped = state.skipped.entry(task.id).or_insert(0);
+            *skipped = (*skipped).max(given);
+        }
+    }
+
+    /// Run `task_id` joined the workflow with a conversation of its own (a
+    /// branch, `Workflow::import_agent_run`): it counts as given every note
+    /// posted so far, as a run started now does, and gets the later ones.
+    pub(crate) fn adopted(&self, ctx: &SharedContext, task_id: Uuid) {
+        self.poll(ctx);
+        let mut state = self.state.lock();
+        if let Some(newest) = state.notes.last().map(|posted| posted.seq) {
+            state.seen.insert(task_id, newest);
+            state.started.insert(task_id, newest);
+        }
+    }
+
     /// Whether a run of `agent` receives `note`; `review` for a completion
     /// verifier's review.
     fn receives(&self, note: &Note, agent: &str, review: bool) -> bool {

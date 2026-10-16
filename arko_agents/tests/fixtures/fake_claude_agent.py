@@ -42,6 +42,9 @@ messages, under the "uuid" the host gave them, and its own messages, each
 with a "uuid"), in FAKE_CLAUDE_STATE plus ".sessions" across processes.
 --resume-session-at=<uuid> cuts it back to that message as the session
 resumes, and fails as Claude Code does when no message has the UUID.
+--fork-session with --session-id=<new> starts the new session as a copy of
+the one --resume names (cut back as --resume-session-at says), which stays
+as it was.
 
 A "/compact" message plays the next entry of the script when it is
 {"compact": {"pre_tokens": 1500, "post_tokens": 300}}: the compaction as
@@ -73,7 +76,12 @@ def flag(*names):
     return None
 
 
-SESSION = flag("--session-id=", "--resume=") or "fake-session"
+FORK = "--fork-session" in ARGS
+PARENT = flag("--resume=")
+# A fork takes the ID --session-id gives it; a resume goes on in the
+# conversation it names.
+SESSION = (flag("--session-id=") if FORK else None) or flag("--session-id=", "--resume=") \
+    or "fake-session"
 SESSIONS = os.environ.get("FAKE_CLAUDE_STATE", "state") + ".sessions"
 
 
@@ -98,6 +106,10 @@ def record(text, message_uuid=None):
     keep(conversation() + [{"uuid": message_uuid, "text": text}])
     return message_uuid
 
+
+if FORK and PARENT:
+    # The fork starts as a copy of the parent's conversation, which stays.
+    keep(sessions().get(PARENT, []))
 
 RESUME_AT = flag("--resume-session-at=")
 if RESUME_AT:
