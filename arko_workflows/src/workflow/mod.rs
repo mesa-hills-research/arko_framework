@@ -1581,6 +1581,8 @@ pub struct WorkflowBuilder {
     cancel_grace_period: std::time::Duration,
     /// Agents that get a note only when it names them.
     notes_by_name_only: std::collections::BTreeSet<String>,
+    /// Agents whose saved runs keep their own configuration on resume.
+    keep_saved_configs: std::collections::BTreeSet<String>,
     /// Read notes from the run directory's control folder.
     control_folder: bool,
 }
@@ -1627,6 +1629,7 @@ impl WorkflowBuilder {
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
             notes_by_name_only: std::collections::BTreeSet::new(),
+            keep_saved_configs: std::collections::BTreeSet::new(),
             control_folder: false,
         }
     }
@@ -1785,6 +1788,26 @@ impl WorkflowBuilder {
     /// checkpoint tier that matches no configured tier makes `build` fail.
     pub fn drop_memory_tier_on_resume(mut self, name: impl Into<String>) -> Self {
         self.dropped_memory_tiers.insert(name.into());
+        self
+    }
+
+    /// On resume, the saved runs of these agents (registration names) keep
+    /// the configuration saved in their tasks, while their new runs use the
+    /// one registered now: a host may change an agent's instructions or
+    /// tools between runs, such as a chat whose next conversation takes new
+    /// instructions. A continued run is driven by its task's configuration
+    /// anyway. Instead of an unchanged configuration, `build` then checks
+    /// that every tool a saved run offers is still there (built in,
+    /// registered, or added by the workflow), and names the first missing
+    /// one. Adds to earlier calls. Default: none, every resumable run's
+    /// agent must keep its configuration ([`resume_from`](Self::resume_from)).
+    pub fn keep_saved_configs<I, S>(mut self, agents: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.keep_saved_configs
+            .extend(agents.into_iter().map(Into::into));
         self
     }
 
@@ -2294,6 +2317,15 @@ impl WorkflowBuilder {
                 "notes_by_name_only names unknown agent '{unknown}'"
             )));
         }
+        if let Some(unknown) = self
+            .keep_saved_configs
+            .iter()
+            .find(|agent| !agent_names.contains(*agent))
+        {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "keep_saved_configs names unknown agent '{unknown}'"
+            )));
+        }
         if self.control_folder && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
                 "control_folder requires persistence: the control folder is in the run directory"
@@ -2481,6 +2513,7 @@ impl WorkflowBuilder {
                 .map(|verifier| verifier.verifier_agent.as_str())
                 .collect(),
             &prepared,
+            &self.keep_saved_configs,
         )?;
         if resume_state.is_some() && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
@@ -2796,6 +2829,7 @@ fn validate_resumed_agent_configs(
     resumed_results: &[AgentResult],
     verifier_agents: &HashSet<&str>,
     prepared: &HashMap<uuid::Uuid, AgentConfig>,
+    keep_saved: &std::collections::BTreeSet<String>,
 ) -> Result<(), WorkflowError> {
     let by_id = resumed_results
         .iter()
@@ -2820,6 +2854,8 @@ fn validate_resumed_agent_configs(
     .chain(crate::subagents::SUBAGENT_TOOL_NAMES.iter().copied())
     .map(str::to_string)
     .collect::<HashSet<_>>();
+    // The tools the workflow adds itself, before the host's.
+    let provided = workflow_tools.clone();
     workflow_tools.extend(global_tools.iter().map(|tool| tool.name()));
     workflow_tools.extend(agent_tools.values().flatten().map(|tool| tool.name()));
 
@@ -2851,6 +2887,32 @@ fn validate_resumed_agent_configs(
         if result.status == AgentRunStatus::Interrupted
             && superseded_on_recovery(result, &by_id, verifier_agents, 0)
         {
+            continue;
+        }
+        if keep_saved.contains(&result.agent_name) {
+            // Its own configuration drives it: only its tools must be here.
+            let saved = &result.task.agent_config;
+            // Claude Code runs the names arko doesn't know as its own tools.
+            let claude_code = saved.llm_config.model.provider == arko_ai::Provider::ClaudeCode;
+            let built_in = arko_agents::ToolRegistry::new();
+            let registered = |name: &String| {
+                global_tools
+                    .iter()
+                    .chain(agent_tools.get(&result.agent_name).into_iter().flatten())
+                    .any(|tool| tool.name() == *name)
+            };
+            let missing = saved.tool_config.available_tool_names.iter().find(|name| {
+                !provided.contains(*name)
+                    && built_in.get(name).is_none()
+                    && !registered(name)
+                    && !claude_code
+            });
+            if let Some(missing) = missing {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "agent '{}' run {} offers tool '{missing}', which isn't registered: register it to resume the run",
+                    result.agent_name, result.agent_run_id
+                )));
+            }
             continue;
         }
         let current = normalized_resume_agent_config(current, &workflow_tools)?;

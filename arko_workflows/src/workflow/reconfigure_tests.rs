@@ -176,3 +176,120 @@ async fn only_a_chat_goes_without_the_workflow_s_tools() {
     );
     assert!(tool_names(&bodies[1]).is_empty());
 }
+
+/// The latest checkpoint of the run directory.
+fn latest_checkpoint(workspace: &Workspace) -> std::path::PathBuf {
+    let run = workspace.0.join(".run");
+    let name = std::fs::read_to_string(run.join("latest-checkpoint")).unwrap();
+    run.join(name.trim())
+}
+
+/// The system prompt a request body was sent with.
+fn instructions(body: &str) -> String {
+    serde_json::from_str::<Value>(body).unwrap()["instructions"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// With `keep_saved_configs`, an agent registered with another
+/// configuration resumes: its saved runs keep theirs (a continued run is
+/// sent its own instructions) and its new runs take the new one. Without
+/// it, the change refuses the resume.
+#[tokio::test]
+async fn saved_runs_keep_their_configuration_and_new_runs_take_the_registered_one() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let mut brief = chat();
+    brief.instructions = "Chat briefly with the user.".into();
+    let resume = || {
+        Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", brief.clone())
+            .agent_tool("main", ProbeTool::new("probe", false))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+            .resume_from(latest_checkpoint(&workspace))
+    };
+    let refused = resume().build().err().unwrap().to_string();
+    assert!(
+        refused.contains("configuration changed since its checkpoint (instructions changed)"),
+        "{refused}"
+    );
+    let unknown = resume()
+        .keep_saved_configs(["helper"])
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        unknown.contains("keep_saved_configs names unknown agent 'helper'"),
+        "{unknown}"
+    );
+
+    let resumed = resume().keep_saved_configs(["main"]).build().unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    let continued = instructions(server.bodies().last().unwrap());
+    assert!(continued.contains("Chat with the user."), "{continued}");
+    assert!(!continued.contains("Chat briefly"), "{continued}");
+    resumed.run_agent("main", "Start over.").await.unwrap();
+    let fresh = instructions(server.bodies().last().unwrap());
+    assert!(fresh.contains("Chat briefly with the user."), "{fresh}");
+}
+
+/// A saved run kept with its own configuration still needs the tools it
+/// offers: a resume without one is refused, naming it.
+#[tokio::test]
+async fn a_kept_configuration_needs_its_tools() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", agent())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let resume = |with_probe: bool| {
+        let mut builder = Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", chat())
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+            .resume_from(latest_checkpoint(&workspace))
+            .keep_saved_configs(["main"]);
+        if with_probe {
+            builder = builder.agent_tool("main", ProbeTool::new("probe", false));
+        }
+        builder.build()
+    };
+    let refused = resume(false).err().unwrap().to_string();
+    assert!(
+        refused.contains(&format!(
+            "agent 'main' run {} offers tool 'probe', which isn't registered",
+            first.agent_run_id
+        )),
+        "{refused}"
+    );
+    let resumed = resume(true).unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    let last: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
+    assert!(tool_names(&last).contains(&"probe".to_string()), "{last}");
+}

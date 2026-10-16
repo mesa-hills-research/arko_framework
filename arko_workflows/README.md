@@ -968,7 +968,9 @@ When a checkpoint contains a task that can be resumed (including an interrupted 
 (`agent 'coder' configuration changed since its checkpoint (instructions,
 tool_config.available_tool_names changed); ...`). Workflow-injected tools and prepared prompt state are excluded from this
 comparison, as are saved model registry details; provider, model ID, generation settings,
-and other user configuration must remain compatible.
+and other user configuration must remain compatible. `keep_saved_configs(agents)` lets
+those agents change for their new runs while each saved run keeps the configuration saved
+in its task, as long as the tools it offers are still registered.
 The event log records every event, including each streamed text and reasoning
 fragment; `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least
