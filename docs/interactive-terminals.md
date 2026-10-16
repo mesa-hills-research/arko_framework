@@ -77,6 +77,14 @@ of every owner, with each one's command and start time, so that a host can say
 what stops before it exits. `StartOptions::label` sets the command shown, for a
 host that wraps the command it runs.
 
+`TerminalManager::close(known)` readies the manager for the host's exit. If a
+job runs in the background that isn't in `known` (the jobs the host's user
+agreed to stop), it stays open and returns the jobs running. Otherwise it
+closes: no job starts and none moves to the background (`release` fails), so
+`shutdown` stops no background job the user didn't know of. The check and the
+closing are one step under the jobs' lock, so a job that moves to the
+background at the same moment is either listed or refused.
+
 ## Configuration
 
 `TerminalConfig::new(directory)` sets these defaults:

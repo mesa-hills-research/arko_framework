@@ -956,6 +956,44 @@ async fn a_held_job_tells_nothing_until_it_is_released() {
     assert!(f.manager.background_jobs().is_empty());
 }
 
+/// Closing for an exit is refused while a job the host's user didn't agree
+/// to stop runs in the background, which comes back. With every one known,
+/// it closes: from then on no job starts and none moves to the background.
+#[tokio::test]
+async fn closing_needs_every_background_job_known() {
+    let f = Fixture::new(|_| {});
+    let sleep = "import time; time.sleep(30)";
+    let background = f.python(sleep, Default::default());
+    let held = f.python(
+        sleep,
+        StartOptions {
+            held: true,
+            ..Default::default()
+        },
+    );
+    let refused = f.manager.close(&[]).unwrap_err();
+    assert_eq!(
+        refused.iter().map(|job| job.job_id).collect::<Vec<_>>(),
+        [background.job_id]
+    );
+    // Still open: a job starts.
+    let other = f.python(sleep, Default::default());
+    assert!(f.manager.close(&[background.job_id]).is_err());
+
+    f.manager.close(&[background.job_id, other.job_id]).unwrap();
+    assert!(
+        f.manager
+            .start(&f.context(), &f.command(sleep), Default::default())
+            .is_err()
+    );
+    assert!(matches!(
+        f.manager.release(f.owner, held.job_id),
+        Err(TerminalError::Invalid(_))
+    ));
+    assert!(f.manager.background_jobs().len() == 2);
+    f.manager.shutdown().await;
+}
+
 /// A held job that finished stays held: its host has the result, and the
 /// agent gets no update for it.
 #[tokio::test]

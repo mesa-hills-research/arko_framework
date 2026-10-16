@@ -792,9 +792,17 @@ impl TerminalManager {
     pub fn release(self: &Arc<Self>, owner: Uuid, id: Uuid) -> Result<TerminalSnapshot> {
         let job = self.owned(owner, id)?;
         let (snapshot, event) = {
+            // Under the jobs' lock, as `close` checks them: a job doesn't
+            // move to the background while the host exits.
+            let _jobs = self.jobs.lock().unwrap();
             let mut data = job.data.lock().unwrap();
             if data.record.state.is_terminal() {
                 return Err(TerminalError::Finished);
+            }
+            if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(TerminalError::Invalid(
+                    "terminal manager is shut down".into(),
+                ));
             }
             if data.record.held {
                 let record = Record {
@@ -825,25 +833,25 @@ impl TerminalManager {
     /// what [`shutdown`](Self::shutdown) would stop, for a host to say so
     /// before it exits.
     pub fn background_jobs(&self) -> Vec<BackgroundJob> {
-        let mut running: Vec<BackgroundJob> = self
-            .jobs
-            .lock()
-            .unwrap()
-            .values()
-            .filter_map(|job| {
-                let data = job.data.lock().unwrap();
-                (data.record.state == JobState::Running && !data.record.held).then(|| {
-                    BackgroundJob {
-                        owner: data.record.owner,
-                        job_id: data.record.job_id,
-                        command: job.command.clone(),
-                        started: job.started,
-                    }
-                })
-            })
-            .collect();
-        running.sort_by_key(|job| job.started);
-        running
+        background(&self.jobs.lock().unwrap())
+    }
+
+    /// Closes the manager for its host's exit, unless a job runs in the
+    /// background that isn't one of `known` (those the host's user agreed
+    /// to stop): then it stays open, and the jobs running in the background
+    /// come back. Closed, it starts no job and moves none to the background
+    /// ([`release`](Self::release)), so [`shutdown`](Self::shutdown) stops
+    /// no background job the user didn't know of. The check and the closing
+    /// are one step: no job gets past it.
+    pub fn close(&self, known: &[Uuid]) -> std::result::Result<(), Vec<BackgroundJob>> {
+        let jobs = self.jobs.lock().unwrap();
+        let running = background(&jobs);
+        if running.iter().any(|job| !known.contains(&job.job_id)) {
+            return Err(running);
+        }
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     /// Wait for a revision change, input request, or completion; never more than 30s.
@@ -915,6 +923,24 @@ impl Drop for TerminalManager {
             job.cancel.send_replace(true);
         }
     }
+}
+
+/// The jobs running in the background (not held) in `jobs`, oldest first.
+fn background(jobs: &HashMap<Uuid, Arc<Job>>) -> Vec<BackgroundJob> {
+    let mut running: Vec<BackgroundJob> = jobs
+        .values()
+        .filter_map(|job| {
+            let data = job.data.lock().unwrap();
+            (data.record.state == JobState::Running && !data.record.held).then(|| BackgroundJob {
+                owner: data.record.owner,
+                job_id: data.record.job_id,
+                command: job.command.clone(),
+                started: job.started,
+            })
+        })
+        .collect();
+    running.sort_by_key(|job| job.started);
+    running
 }
 
 fn persist(config: &TerminalConfig, record: &Record) -> Result<()> {
