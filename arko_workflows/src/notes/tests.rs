@@ -913,6 +913,44 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     );
 }
 
+/// A note's image is checked for every recipient when posted, from its
+/// header, and fitted when it is given: a BMP, which OpenAI doesn't take,
+/// reaches the agent as a PNG. An image that can't be read to convert it is
+/// refused when posted.
+#[tokio::test]
+async fn note_images_are_checked_when_posted_and_fitted_when_given() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = builder(&server, &workspace, &["worker"]).build().unwrap();
+    let worker = workflow.run_agent("worker", "Do it.").await.unwrap();
+    let mut bmp = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(6, 4, image::Rgb([9, 9, 9])))
+        .write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp)
+        .unwrap();
+    workflow
+        .post_note(
+            Note::new("A bitmap.")
+                .once()
+                .images([arko_ai::Image::from_bytes(&bmp, "image/bmp")]),
+        )
+        .unwrap();
+    let heic = arko_ai::Image::from_bytes(b"\0\0\0\x18ftypheic\0\0\0\0", "image/heic");
+    let refused = workflow
+        .post_note(Note::new("A photo.").once().images([heic]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains(
+            "agent 'worker' can't be sent the image: the model doesn't take image/heic images"
+        ),
+        "{refused}"
+    );
+    workflow.continue_agent(&worker, "Go on.").await.unwrap();
+    let body = server.bodies().last().unwrap().clone();
+    assert!(body.contains("data:image/png;base64,"), "{body}");
+    assert!(!body.contains("data:image/bmp"), "{body}");
+}
+
 /// A checkpoint written while notes held their images still restores them:
 /// they move out of the notes as a posted note's do.
 #[test]

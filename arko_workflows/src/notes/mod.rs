@@ -283,6 +283,9 @@ pub(crate) struct NoteBoard {
     /// The notes' images by name, in a run that isn't persisted (a
     /// persisted run's are in its image files).
     images: Mutex<HashMap<String, String>>,
+    /// The notes' images fitted for a model's limits, by name and limits:
+    /// fitted once for the recipients that share them.
+    fitted: Mutex<HashMap<(String, String), arko_ai::Image>>,
     /// Bumped when a note is posted, for the waits that end on one.
     posted: tokio::sync::watch::Sender<u64>,
 }
@@ -303,6 +306,7 @@ impl NoteBoard {
             events,
             warned: Mutex::new(HashSet::new()),
             images: Mutex::new(HashMap::new()),
+            fitted: Mutex::new(HashMap::new()),
             posted: tokio::sync::watch::Sender::new(0),
         };
         // A checkpoint written before the images were kept apart holds them
@@ -381,10 +385,24 @@ impl NoteBoard {
                 } else {
                     format!("Image {} of note {seq}:", index + 1)
                 };
-                let sendable = self.image(image).and_then(|image| match model {
-                    Some(model) => Ok(model.sendable_image(&image)?.unwrap_or(image)),
-                    None => Ok(image),
-                });
+                let sendable = match (model, image) {
+                    (Some(model), NoteImage::Stored { name, .. }) => {
+                        let key = (name.clone(), format!("{:?}", model.image_limits()));
+                        let fitted = self.fitted.lock().get(&key).cloned();
+                        match fitted {
+                            Some(image) => model.image_refusal(&image).map_or(Ok(image), Err),
+                            None => self.image(image).and_then(|image| {
+                                let image = model.sendable_image(&image)?.unwrap_or(image);
+                                self.fitted.lock().insert(key, image.clone());
+                                Ok(image)
+                            }),
+                        }
+                    }
+                    (Some(model), NoteImage::Url(_)) => self
+                        .image(image)
+                        .and_then(|image| Ok(model.sendable_image(&image)?.unwrap_or(image))),
+                    (None, _) => self.image(image),
+                };
                 match sendable {
                     Ok(image) => images.push(arko_agents::ContextImage::new(label, image)),
                     Err(error) => log::warn!(
@@ -719,7 +737,7 @@ impl NoteBoard {
         for agent in &recipients {
             if let Some(config) = ctx.agent_configs.get(agent) {
                 // Checked for every recipient here, fitted to each when given.
-                crate::workflow::engine::sendable_images(agent, config, note.images.clone(), None)?;
+                crate::workflow::engine::check_sendable_images(agent, config, &note.images)?;
             }
         }
         Ok((note, recipients))

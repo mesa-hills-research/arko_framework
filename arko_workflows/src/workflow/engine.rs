@@ -1494,6 +1494,30 @@ pub(crate) fn sendable_images(
     Ok(images)
 }
 
+/// An error unless `config`'s model can be sent each of `images`, as it is
+/// or fitted, judged from each one's header without decoding it
+/// ([`arko_ai::Model::check_image`]): for checking every recipient before
+/// fitting for one.
+pub(crate) fn check_sendable_images(
+    agent_name: &str,
+    config: &AgentConfig,
+    images: &[arko_ai::Image],
+) -> Result<(), WorkflowError> {
+    for (index, image) in images.iter().enumerate() {
+        if let Err(reason) = config.llm_config.model.check_image(image) {
+            let which = if images.len() == 1 {
+                "the image".to_string()
+            } else {
+                format!("image {}", index + 1)
+            };
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent '{agent_name}' can't be sent {which}: {reason}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// How many images `messages` hold (in tool results too) and how many bytes
 /// of base64 data.
 fn image_load<'a>(messages: impl Iterator<Item = &'a arko_ai::Message>) -> (usize, usize) {
