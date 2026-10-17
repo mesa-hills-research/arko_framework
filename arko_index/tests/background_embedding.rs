@@ -786,13 +786,13 @@ fn the_cli_embeds_in_the_background_and_reports_progress() {
     assert_eq!(s["progress"]["embedded_docs"], s["docs"]);
     let log = fs::read_to_string(state.path().join("embed.log")).unwrap();
     assert!(
-        log.contains("embeddings: hash/hash-v1 (64 dimensions)"),
+        log.contains("embeddings hash/hash-v1 (64 dimensions)"),
         "{log}"
     );
     let (hits, stderr) = run(&["search2", state_arg, "retry", "backoff"]);
     assert!(!hits.is_empty());
     assert!(
-        !stderr.contains("dense:"),
+        !stderr.contains("The others are found by lexical search only"),
         "complete coverage: no notice\n{stderr}"
     );
 

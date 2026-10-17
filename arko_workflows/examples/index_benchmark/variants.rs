@@ -477,7 +477,7 @@ fn build(
         .lines()
         .filter(|line| {
             line.starts_with("indexed ")
-                || line.contains(": embeddings: ")
+                || line.contains(": embeddings ")
                 || line.contains("token cap")
                 || line.contains(" files indexed")
         })
