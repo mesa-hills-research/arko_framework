@@ -293,3 +293,50 @@ async fn a_kept_configuration_needs_its_tools() {
     let last: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
     assert!(tool_names(&last).contains(&"probe".to_string()), "{last}");
 }
+
+/// A kept Claude Code run needs its host tools too: only Claude Code's own
+/// tools are the CLI's, and a host tool that is gone refuses the resume.
+#[tokio::test]
+async fn a_kept_claude_code_configuration_needs_its_host_tools() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(serde_json::json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Done."}}],
+    ]));
+    let workspace = Workspace::new();
+    let mut claude = fake.agent();
+    claude.tool_config.available_tool_names = vec!["probe".into(), "Read".into()];
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("main", claude.clone())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let mut without_probe = claude.clone();
+    without_probe.tool_config.available_tool_names = vec!["Read".into()];
+    let refused = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("main", without_probe)
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        refused.contains(&format!(
+            "agent 'main' run {} offers tool 'probe', which isn't registered",
+            first.agent_run_id
+        )),
+        "{refused}"
+    );
+}

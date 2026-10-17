@@ -2917,7 +2917,8 @@ fn validate_resumed_agent_configs(
         if keep_saved.contains(&result.agent_name) {
             // Its own configuration drives it: only its tools must be here.
             let saved = &result.task.agent_config;
-            // Claude Code runs the names arko doesn't know as its own tools.
+            // A Claude Code agent's names of Claude Code's own tools are the
+            // CLI's.
             let claude_code = saved.llm_config.model.provider == arko_ai::Provider::ClaudeCode;
             let built_in = arko_agents::ToolRegistry::new();
             let registered = |name: &String| {
@@ -2930,7 +2931,8 @@ fn validate_resumed_agent_configs(
                 !provided.contains(*name)
                     && built_in.get(name).is_none()
                     && !registered(name)
-                    && !claude_code
+                    && !(claude_code
+                        && arko_agents::claude_code::BUILT_IN_TOOLS.contains(&name.as_str()))
             });
             if let Some(missing) = missing {
                 return Err(WorkflowError::BuilderInvalid(format!(
