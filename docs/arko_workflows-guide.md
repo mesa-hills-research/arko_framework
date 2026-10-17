@@ -1,15 +1,15 @@
-# Arko Workflows
+# arko_workflows guide
 
-Multi-agent workflow orchestration built on [arko_agents](../arko_agents/README.md)
-and [arko_ai](../arko_ai/README.md). Workflows are ordinary Rust or Python code: the
+Multi-agent workflow orchestration built on [arko_agents](arko_agents-guide.md)
+and [arko_ai](arko_ai-guide.md). Workflows are ordinary Rust or Python code: the
 library provides agent execution, shared memory, messaging, budgets, hooks,
 context-freshness tracking, completion verification, durable steps, and
 persistence, and your code decides which agents run and in what order. There is no
 graph or pipeline definition to write.
 
-The [API index](INDEX.md) lists every public type, signature, default, and
+The [API index](../arko_workflows/INDEX.md) lists every public type, signature, default, and
 agent-tool contract; the
-[defaults reference](../docs/reference-map.md#arko_workflows) summarizes the
+[defaults reference](reference-map.md#arko_workflows) summarizes the
 defaults of all four crates.
 
 ## Installation
@@ -97,18 +97,18 @@ asyncio.run(main())
 
 The Python builder calls `LLMClient::from_env()` during `build`, so it reads the
 same environment variables. The Python API covers a subset of the Rust API; see
-[Python bindings](INDEX.md#python-bindings).
+[Python bindings](../arko_workflows/INDEX.md#python-bindings).
 
 For a complete orchestrator, coder, and verifier workflow, see the
-[DeepCoder example](examples/deepcoder/README.md).
+[DeepCoder example](../arko_workflows/examples/deepcoder/README.md).
 
 To have a workflow built for you, describe your use case to the
-[forge](examples/forge/README.md): an architect agent, helped by explorer agents, designs and
+[forge](../arko_workflows/examples/forge/README.md): an architect agent, helped by explorer agents, designs and
 writes an `arko_workflows` crate for it, checks that it builds and passes its tests, and
 documents it.
 
 For a compact end-to-end example that exercises the workflow primitives together, see
-[`complete_workflow.rs`](examples/complete_workflow.rs). It supports a credential-free
+[`complete_workflow.rs`](../arko_workflows/examples/complete_workflow.rs). It supports a credential-free
 `--dry-run`, checkpoint resume, `continue_agent`, and `resume_agent`.
 
 ## Running agents
@@ -237,7 +237,7 @@ from such a checkpoint starts the run again; to keep a cancelled run stopped,
 check the checkpoint's `cancellation` before calling `resume_from`. From Python,
 `workflow.cancel()` stops the run, and pending `run_agent` and
 `run_agents_parallel` calls raise `arko_workflows.WorkflowCancelled`. See
-[stopping a run](INDEX.md#stopping-a-run) for the details, including durable steps.
+[stopping a run](../arko_workflows/INDEX.md#stopping-a-run) for the details, including durable steps.
 
 ### Graceful stop
 
@@ -280,8 +280,8 @@ for run in resumed.stopped_runs() {
 }
 ```
 
-See [graceful stop](INDEX.md#graceful-stop) for the wrap-up notice and the
-rules, and the [workflow design guide](../docs/guides/workflow-design.md#make-side-effects-durable)
+See [graceful stop](../arko_workflows/INDEX.md#graceful-stop) for the wrap-up notice and the
+rules, and the [workflow design guide](guides/workflow-design.md#make-side-effects-durable)
 for what a resume after a redeploy allows to change.
 
 `stop_run` and `stop_agent` stop one agent run, or one agent's runs, the same
@@ -298,7 +298,7 @@ let request = StopRequest::operator("moving it to Opus 5.5").wrap_up(Duration::f
 workflow.stop_agent("worker-7", request, RunStopIntent::Retire)?;
 ```
 
-See [stopping one agent run](INDEX.md#stopping-one-agent-run).
+See [stopping one agent run](../arko_workflows/INDEX.md#stopping-one-agent-run).
 
 ## Shared memory
 
@@ -334,7 +334,7 @@ code decides access and limits and the checkpoint supplies the content by tier n
 a checkpoint tier that isn't configured stops the build unless it is renamed
 (`rename_memory_tier_on_resume`) or dropped (`drop_memory_tier_on_resume`). After the first full read,
 `read_memory` returns exact versioned changes; see
-[context management](../docs/context-efficiency.md#memory-reads).
+[context management](context-efficiency.md#memory-reads).
 
 ## Hooks
 
@@ -385,7 +385,7 @@ running agents are cancelled, and the run calls return
 `PreToolExecution` the call does not run; at `PostToolExecution` its result
 stands. Hooks cannot change tool output: use a `ToolResultInterceptor`, which runs
 before the result enters the agent's conversation. See
-[hooks and human input](INDEX.md#hooks-and-human-input) for when each point fires
+[hooks and human input](../arko_workflows/INDEX.md#hooks-and-human-input) for when each point fires
 and what its context contains.
 
 ## Context freshness
@@ -413,7 +413,7 @@ stale reader. A reader whose task has finished is neither notified nor reported
 to the hook; its reads are kept while the task can be continued, and
 `continue_agent` (or `resume_agent`) then tells it, in one message, which resources
 it read have changed since, advising a reread before editing them. See
-[context freshness](INDEX.md#context-freshness).
+[context freshness](../arko_workflows/INDEX.md#context-freshness).
 
 ## Budgets
 
@@ -483,8 +483,8 @@ workflow.set_budget(Some(20.0))?;
 
 `budget_exceeded_policy(BudgetExceededPolicy::Cancel)` cancels agents over the
 budget instead; `reopen_agent` continues a cancelled run from where it stopped. See
-[budget holds](INDEX.md#budget-holds) and
-[budget and cost accounting](INDEX.md#budget-and-cost-accounting).
+[budget holds](../arko_workflows/INDEX.md#budget-holds) and
+[budget and cost accounting](../arko_workflows/INDEX.md#budget-and-cost-accounting).
 
 ## Messaging
 
@@ -540,7 +540,7 @@ Names in the policy are registration names; an unknown one fails the build. The
 policy applies to every run of an agent, including runs started through workflow
 services. With messaging disabled, or for agents that are not offered the tools,
 the names `send_message`, `list_recipients` and `wait_for_message` are free for
-tools of your own. See [messaging](INDEX.md#messaging) for the statuses, notices,
+tools of your own. See [messaging](../arko_workflows/INDEX.md#messaging) for the statuses, notices,
 and tool results.
 
 ### Long-running agents
@@ -552,7 +552,7 @@ report in a fresh conversation, in the same run. Its name, task ID and status do
 change, so messages and replies still reach it. The workflow keeps the messages the
 old conversation read acknowledged, lets freshness tracking start over, and gives the
 fresh conversation the task and a current list of the agents it may message. See
-[Conversation handover](INDEX.md#conversation-handover).
+[Conversation handover](../arko_workflows/INDEX.md#conversation-handover).
 
 ```rust
 let mut lead = lead_config;
@@ -566,7 +566,7 @@ user's installed Claude Code CLI, under its login, and takes part in a workflow 
 other agent: messaging, approvals, error recovery, context freshness and handovers all
 apply. Claude Code's own tools (`Read`, `Edit`, `Bash`, …) are offered when the agent's
 `available_tool_names` lists them, and they pass the workflow's approval policy and
-hooks too. See [Claude Code agents](INDEX.md#claude-code-agents), and
+hooks too. See [Claude Code agents](../arko_workflows/INDEX.md#claude-code-agents), and
 `examples/claude_code_team.rs` for two such agents working together.
 
 ### Waiting for a message
@@ -661,7 +661,7 @@ cargo run -p arko_workflows --example runctl -- status /path/to/run
 ```
 
 Whoever can write the control folder can post notes, so keep the run directory out of
-the agents' reach. See [Operator notes](INDEX.md#operator-notes).
+the agents' reach. See [Operator notes](../arko_workflows/INDEX.md#operator-notes).
 
 ## Human input
 
@@ -759,7 +759,7 @@ are stopped because the parent must receive a bounded result. Under
 result), and where it would pause for anything else it is stopped with a reason (a
 verifier's review then fails). Under `RespectAgentConfig`, give such agents
 configurations that auto-approve the other tools they use, or use a `Handler`. See
-[Approvals and error recovery](INDEX.md#approvals-and-error-recovery) for every cause
+[Approvals and error recovery](../arko_workflows/INDEX.md#approvals-and-error-recovery) for every cause
 and option.
 
 ## Durable steps
@@ -788,7 +788,7 @@ with the actor and reason.
 Durable steps make replay safe; they are not an exactly-once guarantee. Automatic
 resolution needs an external system that supports idempotency or can be queried
 for the outcome. Durable steps require persistence. See
-[durable steps](INDEX.md#durable-steps).
+[durable steps](../arko_workflows/INDEX.md#durable-steps).
 
 ## Completion verification
 
@@ -807,7 +807,7 @@ fails (the verifier's run errors, or its verdict stays unusable after
 `complete_task` again, up to `review_retries` times, and then the run call returns
 `WorkflowError::VerifierFailed` with the task paused, neither accepted nor rejected:
 `continue_agent` on its result (`Workflow::agent_result(task_id)`) goes on. See
-[completion verification](INDEX.md#completion-verification).
+[completion verification](../arko_workflows/INDEX.md#completion-verification).
 
 ## Tool-result distillation
 
@@ -819,11 +819,11 @@ model, and reasoning. Their calls count against the budget and are recorded. A s
 replaces the output only when the model finished it; a refusal or a summary cut
 off by its output limit keeps the raw output. An output too large for the distiller's
 own model is not sent: it is kept, and the agent's overflow guard (arko_agents'
-[tool result size](../arko_agents/README.md#tool-result-size)) shortens it if the
+[tool result size](arko_agents-guide.md#tool-result-size)) shortens it if the
 agent's model can't take it either.
 `complete_task` and `ask_user` results are never distilled, and `load_skill` results
 only when the agent's `SkillsConfig::load_skill_interception` opts in. See
-[context management](../docs/context-efficiency.md#tool-result-distillation) for a
+[context management](context-efficiency.md#tool-result-distillation) for a
 configuration example.
 
 ## Workflow services and voting
@@ -841,8 +841,8 @@ the workflow's memory, budget, hooks, verification, and persistence. Voting
 (`enable_voting(voters)`, which offers `cast_vote` to those agents only) provides
 named ballots with eligibility, quorum, consensus thresholds, weights, and tie
 handling. See
-[workflow services](INDEX.md#workflow-services-and-custom-tools) and
-[structured voting](INDEX.md#structured-voting).
+[workflow services](../arko_workflows/INDEX.md#workflow-services-and-custom-tools) and
+[structured voting](../arko_workflows/INDEX.md#structured-voting).
 
 ## Background subagents
 
@@ -894,7 +894,7 @@ lead, and with the lead's other runs when the lead names them as peers.
   `resume_subagents()` relaunches the runs a stop or crash ended.
 
 A subagent's `ask_user` goes to its lead as a message, and the lead's reply is the
-answer. See [background subagents](INDEX.md#background-subagents) for the tools,
+answer. See [background subagents](../arko_workflows/INDEX.md#background-subagents) for the tools,
 settings, events and how mail is delivered.
 
 ## Persistence
@@ -977,7 +977,7 @@ finished responses stay in the task files). Events are buffered and written at l
 once a second (`event_flush_interval`), and at once for state changes, run ends, and
 error reports. A failed event-log write is logged as a warning and retried; it never
 stops an agent. `WorkflowBuilder::resume_from(path)` restores this state into a new
-workflow; see [persistence](INDEX.md#persistence-and-checkpoint-state) for what is
+workflow; see [persistence](../arko_workflows/INDEX.md#persistence-and-checkpoint-state) for what is
 restored and what must be configured again.
 
 ## Custom tools
@@ -1021,12 +1021,12 @@ let workflow = Workflow::builder()
 ```
 
 For interactive shell work, register the arko_agents terminal tools with
-`WorkflowBuilder::agent_tool`; see [interactive terminals](../docs/interactive-terminals.md).
+`WorkflowBuilder::agent_tool`; see [interactive terminals](interactive-terminals.md).
 
 A tool that works for a long time can watch `TaskContext::stop`, which fires when
 the workflow starts a graceful stop (or its agent is cancelled), save its state
 and return early; `arko_agents::StopAwareCommand` does this for a child process.
-See [stopping tool calls](../arko_agents/README.md#stopping-tool-calls).
+See [stopping tool calls](arko_agents-guide.md#stopping-tool-calls).
 
 ## Architecture
 

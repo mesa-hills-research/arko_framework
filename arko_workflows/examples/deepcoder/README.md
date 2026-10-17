@@ -43,7 +43,7 @@ The example uses OpenAI models only. Credentials are tried in this order:
 2. A Codex login at `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, shared with
    Codex: every token refresh reads the file again first, adopting tokens Codex
    refreshed in the meantime, and rotated tokens are saved to it at once (see
-   [ChatGPT OAuth credentials](../../../arko_ai/README.md#chatgpt-oauth-credentials)).
+   [ChatGPT OAuth credentials](../../../docs/arko_ai-guide.md#chatgpt-oauth-credentials)).
 3. An OpenAI API key:
 
    ```bash

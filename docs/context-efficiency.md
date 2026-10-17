@@ -112,7 +112,7 @@ tool that returns too much: `ToolResultLimits::max_result_tokens` for every tool
 `PerToolConfigOverride::max_result_tokens` for one. A capped result keeps its head and
 tail up to the cap, with the same notice. Prefer a cap to a hook that refuses large
 reads: the notice already tells the agent how to get the rest. See
-[Tool result size](../arko_agents/README.md#tool-result-size) for the settings and the
+[Tool result size](arko_agents-guide.md#tool-result-size) for the settings and the
 notice text.
 
 **Ranges for agents without a terminal.** `AgentToolConfig::read_file_line_ranges`

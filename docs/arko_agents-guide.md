@@ -1,13 +1,13 @@
-# Arko Agents
+# arko_agents guide
 
-Tool-using agents built on [arko_ai](../arko_ai/README.md). An `AgentConfig` describes an
+Tool-using agents built on [arko_ai](arko_ai-guide.md). An `AgentConfig` describes an
 agent: its role and instructions, model, tools, and approval and error policies. A `Task`
 holds one run's conversation and state. `AgentRuntime` runs a task as a Tokio task,
 streams `AgentEvent`s, and accepts `UserCommand`s for approvals, answers, error recovery,
-context updates, cancellation, and suspension. [arko_workflows](../arko_workflows/README.md)
+context updates, cancellation, and suspension. [arko_workflows](arko_workflows-guide.md)
 builds multi-agent orchestration on this crate.
 
-The [defaults reference](../docs/reference-map.md#arko_agents) lists every setting's
+The [defaults reference](reference-map.md#arko_agents) lists every setting's
 default.
 
 ## Installation
@@ -189,7 +189,7 @@ dynamic providers set again: a task that starts with a detail it will show (ever
 content fails at once with `ArkoAgentsError::Configuration` naming the detail and its
 provider. File-tree details default to a full
 first snapshot followed by changes at model-call boundaries; see
-[context management](../docs/context-efficiency.md#file-tree-context).
+[context management](context-efficiency.md#file-tree-context).
 
 ## Tools
 
@@ -580,7 +580,7 @@ In output-based mode they follow the results' text the same way. Images are not 
 result interceptors and never appear in events: a host that shows them gets each call's
 images from a `ToolImageSink` (`AgentRuntime::with_tool_image_sink`), keyed by the call's ID
 in the events. `read_file` and MCP tools return PNG,
-JPEG, GIF and WebP images this way too. See [tool images](../docs/reference-map.md#tool-images-arko_agents)
+JPEG, GIF and WebP images this way too. See [tool images](reference-map.md#tool-images-arko_agents)
 for size limits, embedded resources and Claude Code forwarding.
 
 End-user tools wrap a command without Rust code: a `ToolDefinition` whose
@@ -783,7 +783,7 @@ interceptor in it and reports no failures itself.)
 
 The opt-in `terminal` module provides PTY and pipe terminal tools that run commands in the
 background and notify the agent of input requests and completion. See
-[interactive terminals](../docs/interactive-terminals.md).
+[interactive terminals](interactive-terminals.md).
 
 ## Running tasks
 
@@ -819,7 +819,7 @@ version, and left out of the saved form when `None`.
 `arko_ai::ErrorKind` of the model-request error that ended recovery, when it was
 classified: `Authentication` for a lost login, `Billing` for a credit wall,
 `ContextOverflow` for a request over the model's input limit, and so on (see
-[Error kinds](../arko_ai/README.md#error-kinds)). `ErrorEncountered` carries it too. A
+[Error kinds](arko_ai-guide.md#error-kinds)). `ErrorEncountered` carries it too. A
 rejected recovery keeps it with the failure. It is `None` for other pauses and errors,
 unclassified ones, and in a task saved by an older version, and left out when `None`.
 
@@ -924,7 +924,7 @@ the model first with `arko_ai::Model::sendable_image`, which shrinks one over th
 limits and says why one can't go (a workflow does this for the images it is given). The
 images a tool returns are fitted when the runtime admits them (`ToolOutput::admit_images`),
 and those past the number of images a request takes are left out, with a line saying so (see
-[Tool images and Gemini 3.x](../docs/reference-map.md#tool-images-and-gemini-3x-arko_ai)).
+[Tool images and Gemini 3.x](reference-map.md#tool-images-and-gemini-3x-arko_ai)).
 
 **A new configuration.** `Task::reconfigure(config)` continues a task under another
 configuration, between turns (pending, completed, or awaiting the user's answer) and with
@@ -1181,7 +1181,7 @@ recovered like a failed request. A request rejected with HTTP 401 `token_expired
 refreshed and resent once by arko_ai. With credentials from a Codex `auth.json`, build the
 client with `LLMClient::with_codex_auth_file`, so that every refresh re-reads the file
 first and rotated tokens are saved to it at once; see
-[ChatGPT OAuth credentials](../arko_ai/README.md#chatgpt-oauth-credentials).
+[ChatGPT OAuth credentials](arko_ai-guide.md#chatgpt-oauth-credentials).
 The example CLI's `--openai-auth-json` does this.
 
 `CancelTask`, `SuspendTask`, and closing the command channel interrupt recovery waits and
@@ -1316,7 +1316,7 @@ answers:
 | `auto_approve_tool_use` and approvals | Yes | A call that needs approval goes to a permission request that waits for `ApproveToolUse` or `RejectToolUse` (`ToolCallAwaitingApproval`, `AwaitingToolApproval`), with `user_command_timeout_seconds` and `HostDecisions` as usual. `custom_tool_output` becomes the call's result instead of running it, and `message_to_agent` comes with the result |
 | Workspace path policy | Yes | On the path inputs of `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob` and `Grep` (`claude_code::built_in_path_parameters`) |
 | Execution middleware | Yes | `before` in the gate (a rejection, pause, failure or cancellation applies as for any call) and `after` once the call ran |
-| Terminal command guard | `Bash`, `PowerShell` | The command must pass [`CommandGuard`](../docs/interactive-terminals.md) for the working directory, where each `Bash` call starts (arko starts the CLI with `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` unless `ClaudeCodeSettings::env` sets it); `ClaudeCodeSettings::{allow_commands_outside_workspace, allowed_command_paths, dangerously_allow_all_commands}` are its opt-ins, and `ClaudeCodeSettings::command_rules` its [command rules](../docs/interactive-terminals.md#command-rules) (none by default), such as read-only git |
+| Terminal command guard | `Bash`, `PowerShell` | The command must pass [`CommandGuard`](interactive-terminals.md) for the working directory, where each `Bash` call starts (arko starts the CLI with `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` unless `ClaudeCodeSettings::env` sets it); `ClaudeCodeSettings::{allow_commands_outside_workspace, allowed_command_paths, dangerously_allow_all_commands}` are its opt-ins, and `ClaudeCodeSettings::command_rules` its [command rules](interactive-terminals.md#command-rules) (none by default), such as read-only git |
 | Result interception | No | Claude Code produces a built-in's output; a workflow rejects a distiller aimed at one |
 | `tool_timeout_seconds`, `parallel_safe` | No | Claude Code runs its built-ins; `validate` rejects these settings for them |
 | `ToolErrorPolicy` | Arko tools only | A built-in's failure (a command that exits non-zero, say) is its result |
@@ -1655,7 +1655,7 @@ cargo test -p arko_agents --locked
 ```
 
 The terminal tests run Python fixtures; see
-[interactive terminals](../docs/interactive-terminals.md#testing).
+[interactive terminals](interactive-terminals.md#testing).
 
 ## License
 

@@ -1,4 +1,4 @@
-# Arko AI
+# arko_ai guide
 
 Rust clients for language models from OpenAI (API key or ChatGPT OAuth), Anthropic,
 Google Gemini, and [OpenRouter](#openrouter), for Claude models run through the user's
@@ -7,7 +7,7 @@ installed [Claude Code](#claude-code) CLI, and for Voyage text embeddings. One
 response: text and reasoning, tool calls, stop reasons and refusals, token usage, and
 cost.
 
-The [defaults reference](../docs/reference-map.md#arko_ai) lists every setting's
+The [defaults reference](reference-map.md#arko_ai) lists every setting's
 default.
 
 ## Installation
@@ -989,7 +989,7 @@ Sources: Voyage's [model guide](https://docs.voyageai.com/docs/embeddings),
 [error codes](https://docs.voyageai.com/docs/error-codes),
 [pricing](https://docs.voyageai.com/docs/pricing), and
 [tokenizer documentation](https://docs.voyageai.com/docs/tokenization). Quotes and what
-the documentation leaves open: [Voyage API notes](../docs/voyage-api-notes.md).
+the documentation leaves open: [Voyage API notes](voyage-api-notes.md).
 
 ## OpenRouter
 
