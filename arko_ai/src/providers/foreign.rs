@@ -180,7 +180,7 @@ fn reasoning_hint(provider: &Provider) -> &'static str {
         }
         Provider::Google => "Gemini models take ReasoningConfig::Gemini or ::Google",
         Provider::OpenRouter => {
-            "OpenRouter models take ReasoningConfig::OpenRouter; convert another variant with ReasoningConfig::to_openrouter"
+            "OpenRouter models take ReasoningConfig::OpenRouter. Convert another variant with ReasoningConfig::to_openrouter"
         }
         Provider::ClaudeCode => {
             "Claude Code models take ReasoningConfig::AnthropicAdaptive or ::Anthropic, whose effort becomes Claude Code's --effort"
@@ -211,7 +211,7 @@ pub(crate) fn without_foreign_settings<'a>(
     for setting in settings {
         notice::warn_once(&format!("foreign:{provider:?}:{}", setting.name), || {
             format!(
-                "arko_ai: GenerationConfig::{} is not used by {provider:?} models (here '{}') and is ignored; it applies to {}.",
+                "arko_ai: GenerationConfig::{} is not used by {provider:?} models (here '{}') and is ignored. It applies to {}.",
                 setting.name, model.id, setting.applies_to
             )
         });
@@ -223,7 +223,7 @@ pub(crate) fn without_foreign_settings<'a>(
             &format!("foreign:{provider:?}:reasoning:{variant:?}"),
             || {
                 format!(
-                    "arko_ai: a {variant:?} ReasoningConfig is not used by {provider:?} models (here '{}') and is ignored, so the model's default reasoning applies; {}.",
+                    "arko_ai: a {variant:?} ReasoningConfig is not used by {provider:?} models (here '{}') and is ignored, so the model's default reasoning applies. {}.",
                     model.id,
                     reasoning_hint(provider)
                 )

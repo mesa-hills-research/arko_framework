@@ -639,7 +639,7 @@ pub(crate) fn admit_context_images(
         });
         match fitted {
             Ok(()) => admitted.push(image),
-            Err(reason) => left_out.push(format!("({label}: left out, {reason}.)")),
+            Err(reason) => left_out.push(format!("({label} was left out, {reason}.)")),
         }
     }
     (admitted, left_out)

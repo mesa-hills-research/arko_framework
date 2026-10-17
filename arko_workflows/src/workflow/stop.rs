@@ -379,21 +379,21 @@ pub fn stop_on_signals(
             match received {
                 1 => {
                     log::warn!(
-                        "Signal {number}: stopping the workflow run ({}: {}).",
+                        "Signal {number} is stopping the workflow run ({} — {}).",
                         request.kind,
                         request.reason
                     );
                     handle.stop(request.clone());
                 }
                 2 => {
-                    log::warn!("Signal {number} again: stopping the workflow run now.");
+                    log::warn!("Signal {number} again. Stopping the workflow run now.");
                     handle.stop(StopRequest {
                         wrap_up: None,
                         ..request.clone()
                     });
                 }
                 _ => {
-                    log::warn!("Signal {number} a third time: exiting.");
+                    log::warn!("Signal {number} a third time. Exiting.");
                     // Exiting runs no destructors: the commands' children,
                     // in their own process groups, would outlive it.
                     arko_agents::kill_stop_aware_commands();

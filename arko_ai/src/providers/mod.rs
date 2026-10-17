@@ -47,7 +47,7 @@ fn tls_config() -> rustls::ClientConfig {
         // TLS backend: HTTPS requests then fail certificate verification.
         Err(error) => {
             log::error!(
-                "arko_ai: system CA certificates are unavailable ({error}); HTTPS requests will fail"
+                "arko_ai: system CA certificates are unavailable ({error}). HTTPS requests will fail"
             );
             versions()
                 .with_root_certificates(rustls::RootCertStore::empty())

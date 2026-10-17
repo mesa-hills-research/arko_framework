@@ -65,14 +65,14 @@ pub fn parse_frontmatter(
         .any(|c| c.is_uppercase() || c == '_' || c == ' ')
     {
         log::warn!(
-            "Skill '{}': name is not kebab-case. Recommended format: lowercase-with-hyphens.",
+            "Skill '{}' needs a kebab-case name, such as lowercase-with-hyphens.",
             frontmatter.name
         );
     }
 
     if frontmatter.description.len() > 1024 {
         log::warn!(
-            "Skill '{}': description exceeds 1024 characters ({} chars). Consider shortening.",
+            "Skill '{}' has a description over 1024 characters ({} chars). Consider shortening it.",
             frontmatter.name,
             frontmatter.description.len()
         );

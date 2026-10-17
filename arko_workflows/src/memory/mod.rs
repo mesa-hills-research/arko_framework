@@ -535,14 +535,14 @@ impl MemoryConfig {
         for from in renames.keys() {
             if !saved.iter().any(|tier| &tier.name == from) {
                 log::warn!(
-                    "rename_memory_tier_on_resume: the checkpoint has no memory tier '{from}'"
+                    "rename_memory_tier_on_resume failed because the checkpoint has no memory tier '{from}'"
                 );
             }
         }
         for name in dropped {
             if !saved.iter().any(|tier| &tier.name == name) {
                 log::warn!(
-                    "drop_memory_tier_on_resume: the checkpoint has no memory tier '{name}'"
+                    "drop_memory_tier_on_resume failed because the checkpoint has no memory tier '{name}'"
                 );
             }
         }
@@ -563,7 +563,7 @@ impl MemoryConfig {
                             old.name
                         ),
                         None => format!(
-                            "memory tier '{name}' of the checkpoint is not configured: configure it, map it to a configured tier with rename_memory_tier_on_resume(\"{name}\", ..), or discard it with drop_memory_tier_on_resume(\"{name}\")",
+                            "memory tier '{name}' of the checkpoint is not configured. Configure it, map it to a configured tier with rename_memory_tier_on_resume(\"{name}\", ..), or discard it with drop_memory_tier_on_resume(\"{name}\")",
                             name = old.name
                         ),
                     },
@@ -583,7 +583,7 @@ impl MemoryConfig {
                 .is_some_and(|limit| old.content.len() > limit)
             {
                 log::warn!(
-                    "Memory tier '{target}' is restored with {} bytes, over its configured limit of {} bytes; writes that grow it fail until it is smaller",
+                    "Memory tier '{target}' is restored with {} bytes, over its configured limit of {} bytes. Writes that grow it fail until it is smaller",
                     old.content.len(),
                     tier.max_bytes.unwrap_or_default()
                 );

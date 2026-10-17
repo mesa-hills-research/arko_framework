@@ -251,7 +251,7 @@ impl Task {
         }
         if self.current_refused_input() != Some(input.clone()) {
             return Err(invalid(
-                "The conversation changed since the refusal: the refused input is no longer its last input.".into(),
+                "The conversation changed since the refusal. The refused input is no longer its last input.".into(),
             ));
         }
         let last = input
@@ -297,14 +297,14 @@ impl Task {
             let message = find(index)?;
             if message.runtime {
                 return Err(invalid(format!(
-                    "Message {index} was added by the runtime; it can't be changed."
+                    "Message {index} was added by the runtime. It can't be changed."
                 )));
             }
             match change {
                 RefusalResolution::RemoveUserMessage { .. } => {
                     if !message.tool_results.is_empty() {
                         return Err(invalid(format!(
-                            "Message {index} holds tool results; redact them instead of removing it."
+                            "Message {index} holds tool results. Redact them instead of removing it."
                         )));
                     }
                     removed.insert(index);
@@ -315,7 +315,7 @@ impl Task {
                 RefusalResolution::RephraseUserMessage { text, .. } => {
                     if message.runtime_text {
                         return Err(invalid(format!(
-                            "The text of message {index} was added by the runtime; it can't be rephrased."
+                            "The text of message {index} was added by the runtime. It can't be rephrased."
                         )));
                     }
                     if text.trim().is_empty() {
@@ -344,7 +344,7 @@ impl Task {
             .count();
         if users_left == 0 {
             return Err(invalid(
-                "Removing these messages would leave no user message from the host; rephrase instead.".into(),
+                "Removing these messages would leave no user message from the host. Rephrase instead.".into(),
             ));
         }
 

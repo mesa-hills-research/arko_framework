@@ -373,7 +373,7 @@ fn read_folder_skill(dir_path: &Path, source_label: &str) -> Option<Result<Loade
         .to_string();
     if frontmatter.name != dir_name {
         log::warn!(
-            "Skill '{}': frontmatter name '{}' does not match directory name '{}'. Using frontmatter name.",
+            "Skill '{}' has frontmatter name '{}', which does not match directory name '{}'. Using the frontmatter name.",
             dir_name,
             frontmatter.name,
             dir_name

@@ -614,7 +614,7 @@ async fn keeping_the_last_zero_checkpoints_fails_the_build() {
         .unwrap();
     assert!(
         matches!(&error, WorkflowError::BuilderInvalid(message)
-            if message == "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"),
+            if message == "keep_last_checkpoints needs at least 1. Every checkpoint is kept by default"),
         "{error}"
     );
     // A later valid count replaces the rejected one.

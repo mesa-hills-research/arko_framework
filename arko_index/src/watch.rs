@@ -176,7 +176,7 @@ impl std::fmt::Display for UncertainCommit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "journal rename succeeded but directory sync failed; drop/reopen before continuing: {}",
+            "journal rename succeeded but directory sync failed ({}). Drop and reopen before continuing",
             self.0
         )
     }
@@ -203,7 +203,7 @@ fn sync_parent(dir: &Path) -> std::io::Result<()> {
 impl Watcher {
     fn check_health(&self) -> Result<(), Error> {
         if self.poisoned {
-            return Err("watch commit outcome is uncertain; drop and reopen the watcher".into());
+            return Err("watch commit outcome is uncertain. Drop and reopen the watcher".into());
         }
         Ok(())
     }

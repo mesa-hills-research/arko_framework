@@ -136,10 +136,10 @@ fn watch_server(
             Err(error) => format!("exit status unavailable: {error}"),
         };
         if stderr_tail.is_empty() {
-            log::warn!("MCP server '{name}' exited ({described}); it wrote nothing to stderr.");
+            log::warn!("MCP server '{name}' exited ({described}). It wrote nothing to stderr.");
         } else {
             log::warn!(
-                "MCP server '{name}' exited ({described}); its last stderr lines:\n{}",
+                "MCP server '{name}' exited ({described}). Its last stderr lines:\n{}",
                 stderr_tail.join("\n")
             );
         }

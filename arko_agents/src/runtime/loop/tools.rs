@@ -407,7 +407,7 @@ impl AgentLoop {
                 Some(Value::String(path)) => path,
                 Some(other) => {
                     return PathCheck::Invalid(format!(
-                        "Path validation failed for parameter '{}': a path must be a string, not {other}.",
+                        "Path validation failed for parameter '{}'. A path must be a string, not {other}.",
                         param_def.name
                     ));
                 }

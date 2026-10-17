@@ -137,7 +137,7 @@ impl WorkflowServicesConfig {
     pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
         if self.zero_max_active_calls {
             return Err(WorkflowError::BuilderInvalid(
-                "max_active_calls needs at least 1; the default is 4".to_string(),
+                "max_active_calls needs at least 1. The default is 4".to_string(),
             ));
         }
         for (role, names) in [

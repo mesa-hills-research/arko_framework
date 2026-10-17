@@ -714,7 +714,7 @@ fn finish(turn: Turn, context: &ResponseContext) -> GenerationResponse {
 
     let reported = turn.usage.as_ref().map(ReportedUsage::parse);
     if reported.is_none() {
-        log::warn!("arko_ai: OpenRouter response carried no usage; recording zero tokens");
+        log::warn!("arko_ai: OpenRouter response carried no usage. Recording zero tokens");
     }
     let usage = reported.unwrap_or_default().usage_info(
         &context.model,

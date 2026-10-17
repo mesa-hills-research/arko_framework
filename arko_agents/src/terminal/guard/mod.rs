@@ -568,7 +568,7 @@ impl Finding {
                     .unwrap_or_default();
                 (
                     format!(
-                        "Refused: {action}, which is outside the working directory `{workspace}`{note}. Keep commands that delete, move or overwrite files inside the working directory or a temporary directory; other paths need the user's permission in the terminal settings."
+                        "Refused {action} because it is outside the working directory `{workspace}`{note}. Keep commands that delete, move or overwrite files inside the working directory or a temporary directory. Other paths need the user's permission in the terminal settings."
                     ),
                     false,
                 )

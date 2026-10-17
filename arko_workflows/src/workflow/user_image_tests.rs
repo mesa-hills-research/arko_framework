@@ -292,7 +292,7 @@ async fn a_conversation_full_of_images_takes_no_more() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("agent 'claude' can't be sent another image: its conversation holds 100 images, and model 'claude-opus-5-5' takes at most 100 in a request (cut the conversation back or hand it over to make room)"),
+        error.contains("agent 'claude' can't be sent another image. Its conversation holds 100 images, and model 'claude-opus-5-5' takes at most 100 in a request (cut the conversation back or hand it over to make room)"),
         "{error}"
     );
 
@@ -303,7 +303,7 @@ async fn a_conversation_full_of_images_takes_no_more() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("its conversation holds 24.0 MB, and a request to model 'claude-opus-5-5' takes at most 24.0 MB"),
+        error.contains("Its conversation holds 24.0 MB, and a request to model 'claude-opus-5-5' takes at most 24.0 MB"),
         "{error}"
     );
     assert!(server.bodies().is_empty());

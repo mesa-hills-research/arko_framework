@@ -89,7 +89,7 @@ impl AnthropicClient {
             && !conversation.model.supports_anthropic_fast_mode()
         {
             return Err(Error::InvalidRequest(format!(
-                "Fast mode is not supported for model '{}' (supported: Claude Opus 5.5, Opus 5 and Opus 4.8; Opus 4.6 would silently run at standard speed).",
+                "Fast mode is not supported for model '{}'. Use Claude Opus 5.5, Opus 5 or Opus 4.8. Opus 4.6 would silently run at standard speed.",
                 conversation.model.id
             )));
         }
@@ -227,7 +227,7 @@ impl AnthropicClient {
         if config.long_context == Some(true) && !conversation.model.supports_long_context() {
             if conversation.model.had_retired_anthropic_long_context_beta() {
                 return Err(Error::InvalidRequest(format!(
-                    "The 1M-context beta for model '{}' was retired on 2026-04-30; requests over 200K tokens now fail. Use a Claude 4.6 or later model for 1M context.",
+                    "The 1M-context beta for model '{}' was retired on 2026-04-30. Requests over 200K tokens now fail. Use a Claude 4.6 or later model for 1M context.",
                     conversation.model.id
                 )));
             }
@@ -410,7 +410,7 @@ impl AnthropicClient {
                 // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
                 if conversation.model.is_opus_4_6() && Self::uses_manual_thinking(config) {
                     return Err(Error::InvalidRequest(
-                        "Claude Opus 4.6 does not interleave thinking with manual budget_tokens; use adaptive thinking instead."
+                        "Claude Opus 4.6 does not interleave thinking with manual budget_tokens. Use adaptive thinking instead."
                             .to_string(),
                     ));
                 }
@@ -923,7 +923,7 @@ impl AnthropicClient {
             let id = &conversation.model.id;
             crate::notice::warn_once(&format!("anthropic:temperature:{id}"), || {
                 format!(
-                    "arko_ai: Claude model '{id}' takes no temperature; GenerationConfig::temperature is ignored for it."
+                    "arko_ai: Claude model '{id}' takes no temperature. GenerationConfig::temperature is ignored for it."
                 )
             });
         }

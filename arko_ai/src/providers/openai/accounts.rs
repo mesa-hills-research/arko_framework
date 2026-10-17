@@ -220,7 +220,7 @@ impl fmt::Display for ChatGptAccountEvent {
                 code,
             } => write!(
                 formatter,
-                "ChatGPT account `{account}` reached its usage limit ({}); it resets {}",
+                "ChatGPT account `{account}` reached its usage limit ({}). It resets {}",
                 code.as_deref().unwrap_or("no code"),
                 reset_phrase(*resets_at)
             ),
@@ -246,7 +246,7 @@ impl fmt::Display for ChatGptAccountEvent {
             ),
             Self::AllExhausted { resets_at } => write!(
                 formatter,
-                "Every ChatGPT account reached its usage limit; the earliest resets {}",
+                "Every ChatGPT account reached its usage limit. The earliest resets {}",
                 reset_phrase(*resets_at)
             ),
             Self::UsingCredits { account, balance } => write!(
@@ -653,7 +653,7 @@ impl ChatGptAccounts {
         for account in &accounts {
             if account.label.trim().is_empty() || !labels.insert(account.label.as_str()) {
                 return Err(Error::InvalidRequest(format!(
-                    "ChatGPT account labels must be distinct and non-empty; `{}` is not",
+                    "ChatGPT account labels must be distinct and non-empty. `{}` is not",
                     account.label
                 )));
             }
@@ -664,7 +664,7 @@ impl ChatGptAccounts {
             match &*auth {
                 OpenAIAuth::ApiKey(_) => {
                     return Err(Error::InvalidRequest(format!(
-                        "ChatGPT account `{}` uses an API key; every account must use ChatGPT OAuth",
+                        "ChatGPT account `{}` uses an API key. Every account must use ChatGPT OAuth",
                         account.label
                     )));
                 }
@@ -989,7 +989,7 @@ impl ChatGptAccounts {
                 }
                 Err(error) => {
                     log::info!(
-                        "arko_ai: the usage of ChatGPT account `{}` could not be read ({error}); the next request tries it",
+                        "arko_ai: the usage of ChatGPT account `{}` could not be read ({error}). The next request tries it",
                         account.label
                     );
                     (None, None)
@@ -1255,13 +1255,13 @@ impl ChatGptAccounts {
     fn retry_failed(&self, index: usize, error: &Error) {
         if error.is_retryable() {
             log::info!(
-                "arko_ai: trying ChatGPT account `{}` again failed ({error}); the next request tries it again",
+                "arko_ai: trying ChatGPT account `{}` again failed ({error}). The next request tries it again",
                 self.accounts[index].label
             );
             return;
         }
         log::info!(
-            "arko_ai: trying ChatGPT account `{}` again failed ({error}); it stays set aside",
+            "arko_ai: trying ChatGPT account `{}` again failed ({error}). It stays set aside",
             self.accounts[index].label
         );
         let now = self.now();
@@ -1389,7 +1389,7 @@ impl ChatGptAccounts {
                                 let next_usable = pool.choose(tried);
                                 let error = match next_usable {
                                     Some(next) => Error::StreamTruncated(format!(
-                                        "ChatGPT account `{}` was refused during the response; a retry goes to `{}` ({error})",
+                                        "ChatGPT account `{}` was refused during the response. A retry goes to `{}` ({error})",
                                         pool.accounts[index].label, pool.accounts[next].label
                                     )),
                                     None => error,

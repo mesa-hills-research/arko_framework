@@ -120,11 +120,11 @@ impl DeveloperDefinableEnvironmentDetail {
         }
         Some(match &self.dynamic_provider_name_for_serde {
             Some(provider) => format!(
-                "Environment detail '{}' needs its dynamic content provider '{}', which was not set: providers are not saved with a task or configuration, so set `content_provider` again before running the task.",
+                "Environment detail '{}' needs its dynamic content provider '{}', which was not set. Providers are not saved with a task or configuration, so set `content_provider` again before running the task.",
                 self.name, provider
             ),
             None => format!(
-                "Environment detail '{}' has no content: give it static content or a content provider.",
+                "Environment detail '{}' has no content. Give it static content or a content provider.",
                 self.name
             ),
         })
@@ -642,7 +642,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 log::warn!(
-                    "Agent configurations no longer have `allow_batched_tool_calls`; `false` is ignored. Every tool call of a response now runs, calls to parallel-safe tools at the same time; set `one_tool_call_per_turn: true` to ask for one call per response."
+                    "Agent configurations no longer have `allow_batched_tool_calls`. `false` is ignored. Every tool call of a response now runs, calls to parallel-safe tools at the same time. Set `one_tool_call_per_turn: true` to ask for one call per response."
                 );
             });
         }
@@ -774,14 +774,14 @@ impl AgentToolConfig {
             if let Some(problem) = problem {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentToolConfig".into(),
-                    message: format!("{problem}; turn chat off to offer tools."),
+                    message: format!("{problem}. Turn chat off to offer tools."),
                 });
             }
         }
         if self.text_reply_ends_task && self.text_reply_as_message {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "text_reply_ends_task and text_reply_as_message can't both be on: one makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
+                message: "text_reply_ends_task and text_reply_as_message can't both be on. One makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
             });
         }
         if self.result_limits.max_result_tokens == Some(0)
@@ -792,7 +792,7 @@ impl AgentToolConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "max_result_tokens must be positive; use None (null) for no cap.".into(),
+                message: "max_result_tokens must be positive. Use None (null) for no cap.".into(),
             });
         }
         let invalid = |seconds: Option<u64>| {
@@ -811,7 +811,7 @@ impl AgentToolConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "Tool timeouts must be positive and representable; use None (null) for no timeout.".into(),
+                message: "Tool timeouts must be positive and representable. Use None (null) for no timeout.".into(),
             });
         }
         Ok(())
@@ -1611,7 +1611,7 @@ impl AgentConfig {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentConfig".into(),
                     message: format!(
-                        "With handover set, the runtime offers its own '{}' tool for the report; rename the agent's tool of that name.",
+                        "With handover set, the runtime offers its own '{}' tool for the report. Rename the agent's tool of that name.",
                         crate::handover::HANDOVER_REPORT_TOOL_NAME
                     ),
                 });
@@ -1621,7 +1621,7 @@ impl AgentConfig {
         if self.user_command_timeout_seconds == Some(0) {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentConfig".into(),
-                message: "user_command_timeout_seconds must be at least 1 (a timeout of 0 ends every wait at once); leave it unset (None) to wait for commands without a limit.".into(),
+                message: "user_command_timeout_seconds must be at least 1 (a timeout of 0 ends every wait at once). Leave it unset (None) to wait for commands without a limit.".into(),
             });
         }
         if let Some(reminder) = &self.user_reminder
@@ -1629,7 +1629,7 @@ impl AgentConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "UserReminder".into(),
-                message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected); to turn the reminder off, leave user_reminder unset (None).".into(),
+                message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected). To turn the reminder off, leave user_reminder unset (None).".into(),
             });
         }
         for (setting, llm) in std::iter::once(("llm_config", &self.llm_config)).chain(
@@ -1648,7 +1648,7 @@ impl AgentConfig {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentConfig".into(),
                     message: format!(
-                        "{setting}.generation_config.tool_config.tool_choice forces a tool ({choice:?}), which model '{}' doesn't accept with this generation config (Model::supports_forced_tool_choice); use Auto or None.",
+                        "{setting}.generation_config.tool_config.tool_choice forces a tool ({choice:?}), which model '{}' doesn't accept with this generation config (Model::supports_forced_tool_choice). Use Auto or None.",
                         llm.model.id
                     ),
                 });
@@ -1696,13 +1696,13 @@ impl AgentConfig {
                 .find(|name| crate::claude_code::is_built_in_tool(name))
             {
                 return Err(error(format!(
-                    "'{tool}' is a Claude Code built-in tool, offered only to agents whose model is a Claude Code model (Model::claude_code); model '{}' is {:?}.",
+                    "'{tool}' is a Claude Code built-in tool, offered only to agents whose model is a Claude Code model (Model::claude_code). Model '{}' is {:?}.",
                     self.llm_config.model.id, self.llm_config.model.provider
                 )));
             }
             if self.claude_code.is_some() {
                 return Err(error(format!(
-                    "claude_code settings apply only to Claude Code models; model '{}' is {:?}.",
+                    "claude_code settings apply only to Claude Code models. Model '{}' is {:?}.",
                     self.llm_config.model.id, self.llm_config.model.provider
                 )));
             }
@@ -1710,7 +1710,7 @@ impl AgentConfig {
         }
         if tools.tool_calling_mode != ToolCallingMode::Native {
             return Err(error(
-                "a Claude Code agent calls tools natively; set tool_calling_mode to Native.".into(),
+                "a Claude Code agent calls tools natively. Set tool_calling_mode to Native.".into(),
             ));
         }
         if let Some(tool) = tools
@@ -1719,7 +1719,7 @@ impl AgentConfig {
             .find(|name| crate::claude_code::UNSUPPORTED_BUILT_IN_TOOLS.contains(&name.as_str()))
         {
             return Err(error(format!(
-                "Claude Code's '{tool}' can't be offered: it would bypass the host (ask the user with ask_user instead)."
+                "Claude Code's '{tool}' can't be offered. It would bypass the host (ask the user with ask_user instead)."
             )));
         }
         for (tool, config) in &tools.tool_specific_configs {
@@ -1728,12 +1728,12 @@ impl AgentConfig {
             }
             if config.tool_timeout_seconds.is_some() {
                 return Err(error(format!(
-                    "tool_timeout_seconds can't apply to Claude Code's '{tool}': Claude Code runs its built-in tools, and arko can't stop one call."
+                    "tool_timeout_seconds can't apply to Claude Code's '{tool}'. Claude Code runs its built-in tools, and arko can't stop one call."
                 )));
             }
             if config.parallel_safe.is_some() {
                 return Err(error(format!(
-                    "parallel_safe can't apply to Claude Code's '{tool}': Claude Code decides how its built-in tools run."
+                    "parallel_safe can't apply to Claude Code's '{tool}'. Claude Code decides how its built-in tools run."
                 )));
             }
         }

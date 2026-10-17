@@ -217,7 +217,7 @@ impl HandoverConfig {
         };
         if self.at_input_tokens.is_none() && self.at_context_fraction.is_none() {
             return Err(error(
-                "set at_input_tokens or at_context_fraction; a host can also ask for a handover with UserCommand::RequestHandover.",
+                "set at_input_tokens or at_context_fraction. A host can also ask for a handover with UserCommand::RequestHandover.",
             ));
         }
         if self.at_input_tokens == Some(0) {

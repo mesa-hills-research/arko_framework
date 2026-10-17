@@ -9,7 +9,7 @@ pub enum WorkflowError {
     #[error("LLM error: {0}")]
     Llm(#[from] arko_ai::Error),
 
-    #[error("Builder error: missing required field '{field}'")]
+    #[error("Builder is missing required field '{field}'")]
     BuilderMissing { field: String },
 
     #[error("Builder validation error: {0}")]
@@ -81,17 +81,19 @@ pub enum WorkflowError {
     #[error("Memory tier '{0}' not found")]
     MemoryTierNotFound(String),
 
-    #[error("Memory access denied: agent '{agent}' cannot {action} tier '{tier}'")]
+    #[error("Memory access denied because agent '{agent}' cannot {action} tier '{tier}'")]
     MemoryAccessDenied {
         agent: String,
         tier: String,
         action: String,
     },
 
-    #[error("Budget exceeded: spent ${spent:.6}, limit ${limit:.6}")]
+    #[error("Budget exceeded after spending ${spent:.6}, with a limit of ${limit:.6}")]
     BudgetExceeded { spent: f64, limit: f64 },
 
-    #[error("Agent '{agent}' budget exceeded: spent ${spent:.6}, limit ${limit:.6}")]
+    #[error(
+        "Agent '{agent}' exceeded its budget after spending ${spent:.6}, with a limit of ${limit:.6}"
+    )]
     AgentBudgetExceeded {
         agent: String,
         spent: f64,
@@ -112,7 +114,7 @@ pub enum WorkflowError {
         limit: f64,
     },
 
-    #[error("Invalid cost amount {0}: costs must be finite and non-negative")]
+    #[error("Invalid cost amount {0}. Costs must be finite and non-negative")]
     InvalidCost(f64),
 
     /// A hook returned `HookResult::Abort`. The run is stopped.

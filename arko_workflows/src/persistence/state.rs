@@ -222,7 +222,7 @@ impl WorkflowState {
                 let mut result = AgentResult::of_task(record.agent_name.clone(), task);
                 result.stopped_by = record.stopped_by.clone();
                 warnings.push(format!(
-                    "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}): it was {:?}, but resumes as last saved, {:?}, from {}.",
+                    "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}). It was {:?}, but resumes as last saved, {:?}, from {}.",
                     record.agent_name,
                     record.agent_run_id,
                     missing.reason,
@@ -262,7 +262,7 @@ impl WorkflowState {
         for missing in &self.missing_task_states {
             if missing.last_saved.is_none() {
                 warnings.push(format!(
-                    "The checkpoint lacks agent '{}' ({}): no state of its task could be saved ({}), so it is not restored.",
+                    "The checkpoint lacks agent '{}' ({}). No state of its task could be saved ({}), so it is not restored.",
                     missing.agent_name, missing.agent_run_id, missing.reason
                 ));
             }

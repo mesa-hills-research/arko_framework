@@ -74,7 +74,7 @@ fn recovery_message(
 ) -> String {
     let message = match wait {
         RecoveryWait::Capacity(_) => format!(
-            "LLM capacity error (attempt {attempt}; waiting until service recovers): {error}"
+            "LLM capacity error (attempt {attempt}, waiting until service recovers). {error}"
         ),
         RecoveryWait::RateLimit(_) => {
             let kind = if error.is_capacity_error() {
@@ -82,7 +82,7 @@ fn recovery_message(
             } else {
                 "rate limit"
             };
-            format!("LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}")
+            format!("LLM {kind} (attempt {attempt}, retrying when the provider allows). {error}")
         }
         RecoveryWait::Ordinary | RecoveryWait::UsageLimit => match note {
             Some(note) => {
@@ -93,7 +93,7 @@ fn recovery_message(
     };
     if fallback {
         format!(
-            "The refusal fallback model's request failed; it still has the refused input to answer. {message}"
+            "The refusal fallback model's request failed. It still has the refused input to answer. {message}"
         )
     } else {
         message
@@ -599,7 +599,7 @@ impl AgentLoop {
         .await?;
         self.emit_event(AgentEvent::ErrorEncountered {
             error_message: format!(
-                "Usage limit reached ({when}); waiting {} before retrying. {error}",
+                "Usage limit reached ({when}). Waiting {} before retrying. {error}",
                 describe_duration(delay)
             ),
             requires_approval_to_retry: false,

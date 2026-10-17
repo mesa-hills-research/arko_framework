@@ -601,7 +601,7 @@ pub enum Error {
 
     /// A response expected to contain exactly one call to `expected` did not.
     #[error(
-        "Expected one call to `{expected}`; the response stopped with {stop_reason:?} and called {found:?}"
+        "Expected one call to `{expected}`. The response stopped with {stop_reason:?} and called {found:?}"
     )]
     UnexpectedToolCalls {
         expected: String,

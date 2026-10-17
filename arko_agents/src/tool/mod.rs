@@ -156,11 +156,11 @@ impl ToolOutput {
                         let limits = model.image_limits();
                         notes.push(match full {
                             Full::Images => format!(
-                                "[The tool returned {label}, left out: the conversation holds as many images as a request to this model takes ({}). A handover or a cut back makes room.]",
+                                "[The tool returned {label}, which was left out because the conversation holds as many images as a request to this model takes ({}). A handover or a cut back makes room.]",
                                 limits.max_images
                             ),
                             Full::Bytes => format!(
-                                "[The tool returned {label}, left out: the conversation holds as much image data as a request to this model takes ({} MB). A handover or a cut back makes room.]",
+                                "[The tool returned {label}, which was left out because the conversation holds as much image data as a request to this model takes ({} MB). A handover or a cut back makes room.]",
                                 limits.max_request_image_bytes / (1024 * 1024)
                             ),
                         });

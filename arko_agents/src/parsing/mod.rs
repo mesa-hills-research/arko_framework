@@ -513,7 +513,7 @@ pub enum ToolCallGroup {
 /// Errors that can occur during tool call assembly.
 #[derive(Error, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolAssemblyError {
-    #[error("Mismatched tool closing tag: expected '{expected}', got '{actual}' during assembly.")]
+    #[error("Mismatched tool closing tag. Expected '{expected}', got '{actual}' during assembly.")]
     MismatchedClosingTag { expected: String, actual: String },
     #[error("Batch tool calls must all be for the same tool, found mixed types.")]
     MixedToolsInBatch,

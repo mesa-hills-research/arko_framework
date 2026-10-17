@@ -143,7 +143,7 @@ impl ToolResultInterceptor for ChainedInterceptor {
             }
             if let Some(error) = last_error {
                 log::warn!(
-                    "Task {}: skipping tool-result interceptor {} of {} for '{}'; the next gets the output so far",
+                    "Task {}: skipping tool-result interceptor {} of {} for '{}'. The next gets the output so far",
                     task_context.task_id,
                     stage + 1,
                     self.interceptors.len(),
@@ -161,7 +161,7 @@ impl ToolResultInterceptor for ChainedInterceptor {
                 )
             } else {
                 format!(
-                    "{current}\n\n[This is the full result: it was to be shortened, but the tool-result interceptor failed ({errors}).]"
+                    "{current}\n\n[This is the full result. It was to be shortened, but the tool-result interceptor failed ({errors}).]"
                 )
             };
             modified = true;
@@ -544,7 +544,7 @@ pub(super) fn auto_approval_warning(
 /// tool error for the delegating agent.
 fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> WorkflowError {
     let reason = format!(
-        "Stopped: agent '{agent_name}' runs inside another agent's tool call and can't be paused, but it needs {needs}. Configure it to auto-approve the tools it uses, or decide such calls with ApprovalPolicy::Handler."
+        "Stopped because agent '{agent_name}' runs inside another agent's tool call and can't be paused, but it needs {needs}. Configure it to auto-approve the tools it uses, or decide such calls with ApprovalPolicy::Handler."
     );
     log::warn!("Workflow '{}': {reason}", ctx.workflow_name);
     WorkflowError::AgentCancelled {
@@ -777,7 +777,7 @@ async fn answer_recovery_pause(
                     },
                 );
                 log::info!(
-                    "Workflow '{}': agent '{agent_name}' paused ({}); continuing in {wait:?}: {error}",
+                    "Workflow '{}': agent '{agent_name}' paused ({}). Continuing in {wait:?}: {error}",
                     ctx.workflow_name,
                     crate::policy::cause_name(&cause)
                 );
@@ -1470,7 +1470,7 @@ pub(crate) fn sendable_images(
         let room = "cut the conversation back or hand it over to make room";
         if held_images + images.len() > limits.max_images {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{agent_name}' can't be sent {}: its conversation holds {held_images} images, and model '{}' takes at most {} in a request ({room})",
+                "agent '{agent_name}' can't be sent {}. Its conversation holds {held_images} images, and model '{}' takes at most {} in a request ({room})",
                 if images.len() == 1 {
                     "another image".to_string()
                 } else {
@@ -1483,7 +1483,7 @@ pub(crate) fn sendable_images(
         if held_bytes + new_bytes > limits.max_request_image_bytes {
             const MIB: f64 = 1024.0 * 1024.0;
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{agent_name}' can't be sent {:.1} MB more of images: its conversation holds {:.1} MB, and a request to model '{}' takes at most {:.1} MB ({room})",
+                "agent '{agent_name}' can't be sent {:.1} MB more of images. Its conversation holds {:.1} MB, and a request to model '{}' takes at most {:.1} MB ({room})",
                 new_bytes as f64 / MIB,
                 held_bytes as f64 / MIB,
                 model.id,
@@ -1654,7 +1654,7 @@ impl Drop for Reservation {
 
 /// Why an interrupted run inside a recovered run's tool call that doesn't
 /// resume it is recorded cancelled.
-pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded: the workflow stopped while this agent ran inside another agent's tool call, and that call was not resumed when its agent was recovered (a completion is reviewed again by a new review).";
+pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded because the workflow stopped while this agent ran inside another agent's tool call, and that call was not resumed when its agent was recovered (a completion is reviewed again by a new review).";
 
 /// Whether `run` was cancelled because another run replaced it (see
 /// [`SUPERSEDED_AFTER_RESTART`]): it is not reopened, as that would do its
@@ -2244,7 +2244,7 @@ fn refuse_unless_orphaned(ctx: &SharedContext, run: &AgentResult) -> Result<(), 
             )
         } else {
             format!(
-                "agent run {} was started by a tool call of agent run {}; recover that run, which recovers this one",
+                "agent run {} was started by a tool call of agent run {}. Recover that run, which recovers this one",
                 run.agent_run_id, parent.task_id
             )
         },
@@ -3450,7 +3450,7 @@ impl WorkflowEngine {
             if !options.images.is_empty() || options.config.is_some() || options.workspace.is_some()
             {
                 return Err(WorkflowError::BuilderInvalid(
-                    "a run whose completion a verifier could not review continues with its message alone: continue it without images or a new configuration, then send them".to_string(),
+                    "a run whose completion a verifier could not review continues with its message alone. Continue it without images or a new configuration, then send them".to_string(),
                 ));
             }
             return self
@@ -3501,7 +3501,7 @@ impl WorkflowEngine {
         };
         if !resumable {
             return Err(WorkflowError::BuilderInvalid(
-                "only a completed or user-input-suspended agent run, or one a completion verifier could not review, can be continued; resume a paused one with resume_agent, recover an interrupted one with recover_agent".to_string(),
+                "only a completed or user-input-suspended agent run, or one a completion verifier could not review, can be continued. Resume a paused one with resume_agent, recover an interrupted one with recover_agent".to_string(),
             ));
         }
         let agent_name = &previous.agent_name;
@@ -3717,7 +3717,7 @@ impl WorkflowEngine {
             .flatten()
             .ok_or_else(|| {
                 WorkflowError::BuilderInvalid(
-                    "only a paused agent run can be resumed; continue a completed or input-waiting run with continue_agent".to_string(),
+                    "only a paused agent run can be resumed. Continue a completed or input-waiting run with continue_agent".to_string(),
                 )
             })?;
         enum Decision {
@@ -3766,7 +3766,7 @@ impl WorkflowEngine {
                         | arko_agents::ErrorRecoveryCause::Unknown
                 ) {
                     return Err(WorkflowError::BuilderInvalid(format!(
-                        "ResolveRefusal answers a refusal; the agent is paused for another error ({}): continue or fail it",
+                        "ResolveRefusal answers a refusal. The agent is paused for another error ({}). Continue or fail it",
                         crate::policy::cause_name(cause)
                     )));
                 }
@@ -3777,7 +3777,7 @@ impl WorkflowEngine {
                 }
                 if previous.task.agent_config.runs_in_claude_code() {
                     return Err(WorkflowError::BuilderInvalid(
-                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation): continue or fail it".to_string(),
+                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation). Continue or fail it".to_string(),
                     ));
                 }
                 Decision::Command(UserCommand::ResolveRefusal { changes })
@@ -3896,7 +3896,7 @@ impl WorkflowEngine {
     ) -> Result<arko_agents::CacheRefresh, WorkflowError> {
         if ctx.registry.is_running(previous.agent_run_id) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running (a run waiting in a host handler, for a tool approval or an answer, counts as running): only a run that isn't running is refreshed",
+                "agent run {} is running (a run waiting in a host handler, for a tool approval or an answer, counts as running). Only a run that isn't running is refreshed",
                 previous.agent_run_id
             )));
         }
@@ -3909,7 +3909,7 @@ impl WorkflowEngine {
             Some(record) => record.depth,
             None if task.parent.is_some() => {
                 return Err(WorkflowError::BuilderInvalid(format!(
-                    "agent run {} was started inside another run's tool call, which continues it: it isn't refreshed on its own",
+                    "agent run {} was started inside another run's tool call, which continues it. It isn't refreshed on its own",
                     previous.agent_run_id
                 )));
             }
@@ -3971,7 +3971,7 @@ impl WorkflowEngine {
         if options.config.is_some() || options.cut_back_to.is_some() || options.workspace.is_some()
         {
             return Err(WorkflowError::BuilderInvalid(
-                "a reopened run keeps its configuration and conversation: cut it back or reconfigure it with continue_agent_with instead".to_string(),
+                "a reopened run keeps its configuration and conversation. Cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));
         }
         let images = sendable_images(
@@ -3984,13 +3984,13 @@ impl WorkflowEngine {
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
         if current.status != AgentRunStatus::Cancelled {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "only a cancelled agent run can be reopened; agent run {} is {:?}",
+                "only a cancelled agent run can be reopened. Agent run {} is {:?}",
                 previous.agent_run_id, current.status
             )));
         }
         if is_superseded(&current) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} was superseded by a run that replaced it after a restart; it is not reopened",
+                "agent run {} was superseded by a run that replaced it after a restart. It is not reopened",
                 previous.agent_run_id
             )));
         }
@@ -4056,7 +4056,7 @@ impl WorkflowEngine {
                     return run_outcome(current);
                 }
                 return Err(WorkflowError::BuilderInvalid(
-                    "only an interrupted agent run can be recovered; continue a completed or input-waiting run with continue_agent, resume a paused one with resume_agent".to_string(),
+                    "only an interrupted agent run can be recovered. Continue a completed or input-waiting run with continue_agent, resume a paused one with resume_agent".to_string(),
                 ));
             }
             if let Some(recovering) = ctx.registry.recovery(agent_run_id) {
@@ -4369,7 +4369,7 @@ impl WorkflowExecutionMiddleware {
             .insert(execution.task_id, (verifier.name.clone(), reason.clone()));
         ToolExecutionDecision::PauseTask {
             message_to_agent: format!(
-                "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work; the task is paused until the caller decides how to go on.",
+                "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work. The task is paused until the caller decides how to go on.",
                 verifier.name
             ),
             reason: format!(

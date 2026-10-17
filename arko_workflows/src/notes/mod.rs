@@ -253,7 +253,7 @@ fn is_zero(value: &u64) -> bool {
 const SECTION_MARK: &str = "\n\n# Notes on your task\n\nNotes added while this workflow runs";
 
 /// What a note may and may not do, as the agents are told.
-const NOTES_RULE: &str = "A note refines your task; it doesn't change your role's rules (what you may read, write or run, and whom you may message) or override the workflow's own notices, such as a request to stop. Where notes differ, the newer one takes precedence.";
+const NOTES_RULE: &str = "A note refines your task. It doesn't change your role's rules (what you may read, write or run, and whom you may message) or override the workflow's own notices, such as a request to stop. Where notes differ, the newer one takes precedence.";
 
 /// `prompt` without the notes its initial prompt was given: a completion
 /// verifier quotes the task without them, and a handover restates it with
@@ -692,7 +692,7 @@ impl NoteBoard {
         };
         if !note.images.is_empty() && note.kind != NoteKind::Once {
             return Err(WorkflowError::BuilderInvalid(
-                "only a one-time note (Note::once) may carry images: a standing note is shown in every later run's prompt".to_string(),
+                "only a one-time note (Note::once) may carry images. A standing note is shown in every later run's prompt".to_string(),
             ));
         }
         if let NoteSource::Agent(name) = &note.source {
@@ -731,7 +731,7 @@ impl NoteBoard {
             .collect::<Vec<_>>();
         if recipients.is_empty() {
             return Err(WorkflowError::BuilderInvalid(
-                "no agent receives this note: completion verifiers and agents set with notes_by_name_only get a note only when it names them".to_string(),
+                "no agent receives this note. Completion verifiers and agents set with notes_by_name_only get a note only when it names them".to_string(),
             ));
         }
         for agent in &recipients {
@@ -955,7 +955,7 @@ pub(crate) fn checked_text(text: &str) -> Result<String, String> {
     }
     if text.len() > MAX_NOTE_BYTES {
         return Err(format!(
-            "a note may be at most {MAX_NOTE_BYTES} bytes; this one is {} bytes (a document belongs in a file or a memory tier)",
+            "a note may be at most {MAX_NOTE_BYTES} bytes. This one is {} bytes (a document belongs in a file or a memory tier)",
             text.len()
         ));
     }

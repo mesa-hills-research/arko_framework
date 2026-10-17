@@ -223,7 +223,7 @@ const LIVE_TASK_FILE: &str = "live.json";
 /// The error a checkpoint records for an agent run that was running when
 /// it was written.
 pub(crate) const RUNNING_AT_CHECKPOINT: &str =
-    "The workflow stopped while this agent run was running; Workflow::recover_agent continues it.";
+    "The workflow stopped while this agent run was running. Workflow::recover_agent continues it.";
 
 /// The live file of task `id`, relative to the run directory.
 fn live_task_file(id: uuid::Uuid) -> String {
@@ -382,7 +382,7 @@ impl PersistenceConfig {
     pub(crate) fn validate(&self) -> Result<(), WorkflowError> {
         if self.zero_kept_checkpoints {
             return Err(WorkflowError::BuilderInvalid(
-                "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"
+                "keep_last_checkpoints needs at least 1. Every checkpoint is kept by default"
                     .to_string(),
             ));
         }
@@ -1031,7 +1031,7 @@ impl PersistenceManager {
                 Ok(references) => referenced.extend(references),
                 Err(error) => {
                     log::warn!(
-                        "Not deleting task versions: checkpoint {} can't be read ({error})",
+                        "Not deleting task versions because checkpoint {} can't be read ({error})",
                         path.display()
                     );
                     return;
@@ -2099,7 +2099,7 @@ impl EventWriter {
                 pending.bytes = rest;
                 if !std::mem::replace(&mut pending.failing, true) {
                     log::warn!(
-                        "Could not write the event log {}: {error}. Events stay buffered and are written when writing succeeds again; the agents go on.",
+                        "Could not write the event log {}: {error}. Events stay buffered and are written when writing succeeds again. The agents go on.",
                         self.path.display()
                     );
                 }
@@ -2191,7 +2191,7 @@ mod tests {
         .unwrap();
         assert!(
             matches!(&error, WorkflowError::BuilderInvalid(message)
-                if message == "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"),
+                if message == "keep_last_checkpoints needs at least 1. Every checkpoint is kept by default"),
             "{error}"
         );
         let kept = manager(PersistenceConfig::new(&workspace.0).keep_last_checkpoints(2));

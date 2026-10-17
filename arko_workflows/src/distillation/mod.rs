@@ -520,7 +520,7 @@ pub(crate) mod tests {
         assert_eq!(records.len(), 1);
         let rejection = records[0].rejection.as_deref().unwrap();
         assert!(
-            rejection.starts_with("skipped: the input (about 16"),
+            rejection.starts_with("skipped because the input (about 16"),
             "{rejection}"
         );
         assert!(
@@ -968,10 +968,10 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 .unwrap_or_else(|| self.config.default_max_output_tokens());
             if input.saturating_add(output) > limit {
                 let reason = format!(
-                    "skipped: the input (about {input} tokens) and output limit ({output} tokens) are over the distiller model's input limit ({limit} tokens)"
+                    "skipped because the input (about {input} tokens) and output limit ({output} tokens) are over the distiller model's input limit ({limit} tokens)"
                 );
                 log::warn!(
-                    "Task {}: distiller '{}' {reason} for tool '{}'; keeping the tool output",
+                    "Task {}: distiller '{}' {reason} for tool '{}'. Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name
@@ -1003,7 +1003,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             // moderation 403) would repeat like any other refusal.
             Err(arko_ai::Error::Refusal(refusal)) => {
                 log::warn!(
-                    "Task {}: distiller '{}' request for tool '{}' was {refusal}; keeping the tool output",
+                    "Task {}: distiller '{}' request for tool '{}' was {refusal}. Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name
@@ -1081,7 +1081,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 retryable: false,
             }) => {
                 log::warn!(
-                    "Task {}: distiller '{}' result for tool '{}' not used ({reason}); keeping the tool output",
+                    "Task {}: distiller '{}' result for tool '{}' not used ({reason}). Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name

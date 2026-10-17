@@ -887,7 +887,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     json["format_version"] = 1.into();
     fs::write(&manifest, serde_json::to_vec(&json).unwrap()).unwrap();
     let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
-    assert!(err.to_string().contains("rebuild"), "{err}");
+    assert!(err.to_string().to_lowercase().contains("rebuild"), "{err}");
     assert!(!index2::search(state.path(), "journal").unwrap().is_empty());
     e.reset();
     let d = build_with(root.path(), state.path(), Some(&e), None, 1)
@@ -908,7 +908,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
         .expect("a segment file");
     fs::remove_file(segment).unwrap();
     let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
-    assert!(err.to_string().contains("rebuild"), "{err}");
+    assert!(err.to_string().to_lowercase().contains("rebuild"), "{err}");
     let d = build_with(root.path(), state.path(), Some(&e), None, 1)
         .unwrap()
         .dense
@@ -927,10 +927,10 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
         .persist()
         .unwrap();
     let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
-    assert!(err.to_string().contains("rebuild"), "{err}");
+    assert!(err.to_string().to_lowercase().contains("rebuild"), "{err}");
     // Found before the query is embedded.
     let err = hybrid::search(state.path(), &dense, None).unwrap_err();
-    assert!(err.to_string().contains("rebuild"), "{err}");
+    assert!(err.to_string().to_lowercase().contains("rebuild"), "{err}");
     let hybrid_err = hybrid::search(
         state.path(),
         &SearchRequest::new("journal entry").with_mode(Mode::Hybrid),

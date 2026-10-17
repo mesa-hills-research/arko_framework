@@ -32,7 +32,7 @@ pub enum TerminalError {
     Invalid(String),
     #[error("terminal job not found or owned by another task")]
     NotOwned,
-    #[error("terminal view changed; read status before sending input")]
+    #[error("terminal view changed. Read status before sending input")]
     StaleView,
     #[error("terminal job has finished")]
     Finished,
@@ -467,7 +467,7 @@ impl TerminalManager {
                 record.input = None;
                 record.revision += 1;
                 record.error = Some(
-                    "host stopped before recording completion; inspect artifacts before retrying"
+                    "host stopped before recording completion. Inspect artifacts before retrying"
                         .into(),
                 );
             }

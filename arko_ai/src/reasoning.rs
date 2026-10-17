@@ -347,7 +347,7 @@ impl ReasoningConfig {
                 effort: Some(_), ..
             } => {
                 return invalid(
-                    "OpenRouter reasoning takes either an effort or a token budget, not both; use OpenRouterReasoning::effort or ::max_tokens.",
+                    "OpenRouter reasoning takes either an effort or a token budget, not both. Use OpenRouterReasoning::effort or ::max_tokens.",
                 );
             }
             ReasoningConfig::AnthropicAdaptive { effort } => match effort {

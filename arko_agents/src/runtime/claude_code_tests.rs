@@ -1504,7 +1504,7 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
         .as_str()
         .unwrap_or_else(|| panic!("{}", posts[0]));
     assert!(
-        hooked.contains("# Workflow context update\n\nA new note: look at this.\n\n(The image of this update can't come during a turn: it comes with your next input.)"),
+        hooked.contains("# Workflow context update\n\nA new note: look at this.\n\n(The image of this update can't come during a turn. It comes with your next input.)"),
         "{hooked}"
     );
     let sent: Value = serde_json::from_str(&user_texts(&fake)[1]).unwrap();

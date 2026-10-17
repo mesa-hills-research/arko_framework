@@ -214,7 +214,7 @@ impl Tool for McpTool {
                             images.push(ToolImage::base64(uri.clone(), blob.clone(), mime_type))
                         }
                         None => push(&format!(
-                            "[Resource {uri}: binary content ({}) that can't be shown.]",
+                            "[Resource {uri} has binary content ({}) that can't be shown.]",
                             mime_type.as_deref().unwrap_or("of an unknown type")
                         )),
                     },

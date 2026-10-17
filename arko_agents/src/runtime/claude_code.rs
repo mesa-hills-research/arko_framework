@@ -112,7 +112,7 @@ fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolO
 
 /// The error a refusal resolution gets: Claude Code sends its own
 /// conversation.
-const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal: a Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
+const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal. A Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
 
 /// Heads the note on the calls that were open when the task stopped. See
 /// [`ClaudeCodeRun::recover_open_calls`].
@@ -201,7 +201,7 @@ impl cc::HookCallback for HookForwarder {
 fn stopping_answer(event: &cc::HookEvent) -> Value {
     match event {
         cc::HookEvent::PreToolUse => {
-            cc::Hook::deny_tool("arko did not run this call: the agent is stopping.")
+            cc::Hook::deny_tool("arko did not run this call because the agent is stopping.")
         }
         _ => cc::Hook::proceed(),
     }
@@ -1355,7 +1355,7 @@ impl ClaudeCodeRun {
                     .await?;
                 }
                 (_, other) => log::warn!(
-                    "Task {}: command {:?} doesn't apply while the task is {:?}; ignored.",
+                    "Task {}: command {:?} doesn't apply while the task is {:?}. Ignored.",
                     self.task.id,
                     other,
                     self.task.current_state
@@ -1383,7 +1383,7 @@ impl ClaudeCodeRun {
                 }
                 UserCommand::SuspendTask => return Ok(false),
                 other => log::warn!(
-                    "Task {}: command {:?} doesn't apply before Claude Code runs; ignored.",
+                    "Task {}: command {:?} doesn't apply before Claude Code runs. Ignored.",
                     self.task.id,
                     other
                 ),
@@ -1523,8 +1523,8 @@ impl ClaudeCodeRun {
         let images = if hold_images {
             if arrived > 0 {
                 content.push_str(&match arrived {
-                    1 => "\n\n(The image of this update can't come during a turn: it comes with your next input.)".to_string(),
-                    count => format!("\n\n(The {count} images of this update can't come during a turn: they come with your next input.)"),
+                    1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
+                    count => format!("\n\n(The {count} images of this update can't come during a turn. They come with your next input.)"),
                 });
             }
             Vec::new()
@@ -1999,7 +1999,7 @@ impl ClaudeCodeRun {
                         // Calls held by the SlowDown don't run.
                         for (_, reply, _) in self.slowed.drain(..) {
                             let _ = reply.send(cc::Hook::deny_tool(
-                                "arko did not run this call: the agent is stopping.",
+                                "arko did not run this call because the agent is stopping.",
                             ));
                         }
                     }
@@ -2148,7 +2148,7 @@ impl ClaudeCodeRun {
                 let _ = session.interrupt().await;
             }
             Some(other) => log::warn!(
-                "Task {}: command {:?} doesn't apply while Claude Code runs; ignored.",
+                "Task {}: command {:?} doesn't apply while Claude Code runs. Ignored.",
                 self.task.id,
                 other
             ),
@@ -2574,7 +2574,7 @@ impl ClaudeCodeRun {
             .is_none_or(|approval| approval.id != id)
         {
             log::warn!(
-                "Task {}: no call {id} awaits approval; ignored.",
+                "Task {}: no call {id} awaits approval. Ignored.",
                 self.task.id
             );
             return Ok(());
@@ -3098,7 +3098,7 @@ impl ClaudeCodeRun {
         let kind = ai::ErrorKind::from_claude_code(error, status, None, "");
         self.emit(AgentEvent::ErrorEncountered {
             error_message: format!(
-                "Claude Code's request failed ({what}); it retries (attempt {attempt}{attempts})."
+                "Claude Code's request failed ({what}). It retries (attempt {attempt}{attempts})."
             ),
             requires_approval_to_retry: false,
             tool_call_id: None,
@@ -3433,7 +3433,7 @@ impl ClaudeCodeRun {
             })
             .ok_or_else(|| {
                 ArkoAgentsError::LLM(ai::Error::UnsupportedFeature(
-                    "The prompt cache can't be refreshed: the task has no Claude Code session yet."
+                    "The prompt cache can't be refreshed. The task has no Claude Code session yet."
                         .to_string(),
                 ))
             })?;
@@ -3735,7 +3735,7 @@ impl ClaudeCodeRun {
                     "handover"
                 };
                 log::warn!(
-                    "Task {}: No {what}: the conversation's first request was already over the handover threshold ({threshold}).",
+                    "Task {}: No {what}. The conversation's first request was already over the handover threshold ({threshold}).",
                     self.task.id
                 );
             }

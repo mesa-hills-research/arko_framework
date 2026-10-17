@@ -939,7 +939,7 @@ impl WorkflowCancelHandle {
             .or_else(|| self.runtime.clone());
         let Some(runtime) = runtime else {
             log::warn!(
-                "Agent run stop: no Tokio runtime to time the wrap-up, so run {task_id} is stopped at once."
+                "Agent run {task_id} is stopped at once because no Tokio runtime is available to time the wrap-up."
             );
             self.control.cancel_run(task_id, Some(id));
             return;

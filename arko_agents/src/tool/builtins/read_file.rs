@@ -303,7 +303,7 @@ fn image_output(path: &str, mime_type: &str, bytes: &[u8]) -> ToolOutput {
     };
     if bytes.len() > MAX_TOOL_IMAGE_BYTES {
         return ToolOutput::text(format!(
-            "{path} is an image ({mime_type}, {size}), too large to show: the limit is {} MB.",
+            "{path} is an image ({mime_type}, {size}), too large to show. The limit is {} MB.",
             MAX_TOOL_IMAGE_BYTES / (1024 * 1024)
         ));
     }

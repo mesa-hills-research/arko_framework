@@ -63,7 +63,7 @@ impl AgentLoop {
                     .map(|text| format!("# File tree (max depth {depth})\n{text}"))
                     .or_else(|| {
                         recovered
-                            .then(|| "File-tree scan recovered; visible tree is unchanged.".into())
+                            .then(|| "File-tree scan recovered. Visible tree is unchanged.".into())
                     })
             }
             Err(error) => {
@@ -73,7 +73,7 @@ impl AgentLoop {
                 } else {
                     self.file_tree_error = Some(error.clone());
                     Some(format!(
-                        "File-tree scan failed; current inventory could not be checked: {error}"
+                        "File-tree scan failed. Current inventory could not be checked: {error}"
                     ))
                 }
             }

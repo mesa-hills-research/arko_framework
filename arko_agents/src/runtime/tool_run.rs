@@ -359,7 +359,7 @@ async fn intercept(
             .unwrap_or_default();
         return (
             format!(
-                "{raw_result}\n\n[This is the full result: it was to be shortened, but the tool-result interceptor failed ({error}).]"
+                "{raw_result}\n\n[This is the full result. It was to be shortened, but the tool-result interceptor failed ({error}).]"
             ),
             true,
         );

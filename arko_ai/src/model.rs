@@ -2038,7 +2038,7 @@ impl Model {
     pub fn get(provider: Provider, model_id: &str) -> Result<Self, crate::error::Error> {
         if provider == Provider::OpenRouter {
             return Err(crate::error::Error::ModelNotSupported(format!(
-                "OpenRouter model '{model_id}' is not in the static registry; OpenRouter models are dynamic (use Model::openrouter or OpenRouterClient::model)."
+                "OpenRouter model '{model_id}' is not in the static registry. OpenRouter models are dynamic (use Model::openrouter or OpenRouterClient::model)."
             )));
         }
         Self::list(provider.clone())
@@ -2223,7 +2223,7 @@ impl Model {
                     && mime_type.trim().eq_ignore_ascii_case("image/gif") =>
             {
                 Some(format!(
-                    "model '{}' doesn't take GIF images: convert it to PNG or JPEG",
+                    "model '{}' doesn't take GIF images. Convert it to PNG or JPEG",
                     self.id
                 ))
             }

@@ -159,7 +159,7 @@ impl LLMClient {
             && let Some(file) = codex_file_holding(refresh_token, account_id, lookup)
         {
             log::info!(
-                "arko_ai: OPENAI_OAUTH_REFRESH_TOKEN is the refresh token in {}; using that file for the ChatGPT OAuth credentials, so rotated tokens are saved to it and Codex stays signed in",
+                "arko_ai: OPENAI_OAUTH_REFRESH_TOKEN is the refresh token in {}. Using that file for the ChatGPT OAuth credentials, so rotated tokens are saved to it and Codex stays signed in",
                 file.path().display()
             );
             return self.with_codex_auth_file(&file);
@@ -465,7 +465,7 @@ impl LLMClient {
         }
         if self.openai_accounts.is_some() {
             return Err(Error::InvalidRequest(
-                "The OpenAI provider has several ChatGPT accounts; update an account's own client (ChatGptAccount::client)".into(),
+                "The OpenAI provider has several ChatGPT accounts. Update an account's own client (ChatGptAccount::client)".into(),
             ));
         }
         match &self.openai_client {
@@ -854,7 +854,7 @@ impl LLMClient {
                 .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("OpenRouter".to_string())),
             Provider::ClaudeCode => Err(Error::ModelNotSupported(
-                "Claude Code models run in a Claude Code session (arko_ai::claude_code), which arko_agents drives for an agent; they take no LLMClient requests.".to_string(),
+                "Claude Code models run in a Claude Code session (arko_ai::claude_code), which arko_agents drives for an agent. They take no LLMClient requests.".to_string(),
             )),
         }
     }
@@ -865,7 +865,7 @@ impl LLMClient {
         if self.request_trace.is_some() && *provider != Provider::OpenAI {
             crate::notice::warn_once(&format!("trace:{provider:?}"), || {
                 format!(
-                    "arko_ai: request tracing covers OpenAI requests only; {provider:?} requests are not traced."
+                    "arko_ai: request tracing covers OpenAI requests only. {provider:?} requests are not traced."
                 )
             });
         }

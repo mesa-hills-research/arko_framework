@@ -237,7 +237,7 @@ impl ImageStore for ImageFiles {
         // damaged.
         if !name.starts_with(&crate::digest::sha256_hex(&bytes)) {
             return Err(format!(
-                "image {} is damaged: its content doesn't match its name",
+                "image {} is damaged. Its content doesn't match its name",
                 path.display()
             ));
         }

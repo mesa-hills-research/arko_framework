@@ -111,7 +111,7 @@ pub(crate) fn choose(device: Device, precision: Precision) -> Result<Option<Choi
     }
     if matches!(device, Device::Auto | Device::Gpu | Device::Wgpu) {
         if precision == Precision::Bf16 {
-            why.push("wgpu: no bf16 arithmetic".into());
+            why.push("wgpu has no bf16 arithmetic".into());
         } else {
             match wgpu(adapters) {
                 Ok(choice) => return Ok(Some(choice)),
@@ -130,12 +130,12 @@ fn cuda() -> Result<Choice, String> {
     use cudarc::driver::{result, sys};
     // SAFETY: loads the driver library, as every cudarc call does first.
     if !unsafe { sys::is_culib_present() } {
-        return Err("CUDA: no NVIDIA driver (libcuda) found".into());
+        return Err("CUDA found no NVIDIA driver (libcuda)".into());
     }
-    result::init().map_err(|e| format!("CUDA: the driver failed to start: {e}"))?;
+    result::init().map_err(|e| format!("CUDA driver failed to start ({e})"))?;
     let count = result::device::get_count().map_err(|e| format!("CUDA: {e}"))?;
     if count < 1 {
-        return Err("CUDA: the driver lists no GPU".into());
+        return Err("CUDA driver lists no GPU".into());
     }
     let dev = result::device::get(0).map_err(|e| format!("CUDA: {e}"))?;
     let name = result::device::get_name(dev).map_err(|e| format!("CUDA: {e}"))?;
@@ -150,12 +150,12 @@ fn cuda() -> Result<Choice, String> {
     // SAFETY: loads the NVRTC library, as cudarc's NVRTC calls do first.
     if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
         return Err(
-            "CUDA: NVRTC (libnvrtc, from the CUDA toolkit), which compiles the kernels, not found"
+            "CUDA NVRTC (libnvrtc, from the CUDA toolkit), which compiles the kernels, was not found"
                 .into(),
         );
     }
     if !cuda_path().is_some_and(|p| p.join("include/cuda_fp16.h").is_file()) {
-        return Err("CUDA: the toolkit's headers (include/cuda_fp16.h) not found under CUDA_PATH, /usr/local/cuda, /opt/cuda or /usr".into());
+        return Err("CUDA toolkit headers (include/cuda_fp16.h) were not found under CUDA_PATH, /usr/local/cuda, /opt/cuda or /usr".into());
     }
     let (mut nvrtc_major, mut nvrtc_minor) = (0, 0);
     // SAFETY: NVRTC is present, and the two pointers are valid for writes.
@@ -245,9 +245,9 @@ fn wgpu(adapters: Adapters) -> Result<Choice, String> {
             max_buffer,
         }),
         None => Err(match adapters {
-            Adapters::Discrete => "wgpu: no discrete GPU".into(),
-            Adapters::Gpus => format!("wgpu: no GPU among the {backend:?} adapters"),
-            Adapters::Any => format!("wgpu: no {backend:?} adapter"),
+            Adapters::Discrete => "wgpu found no discrete GPU".into(),
+            Adapters::Gpus => format!("wgpu found no GPU among the {backend:?} adapters"),
+            Adapters::Any => format!("wgpu found no {backend:?} adapter"),
         }),
     }
 }
@@ -340,7 +340,7 @@ where
         Precision::F16 => (FloatDType::F16, DType::F16),
         Precision::Bf16 => (FloatDType::BF16, DType::BF16),
         Precision::Int8 => {
-            return Err("int8 runs on the CPU: a GPU runs f32, f16 or bf16".into());
+            return Err("int8 runs on the CPU. A GPU runs f32, f16 or bf16".into());
         }
     };
     if !B::supports_dtype(&device, kind) {

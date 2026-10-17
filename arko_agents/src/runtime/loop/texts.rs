@@ -49,12 +49,12 @@ pub(super) const TEXT_REPLY_SENT: &str = "Your reply was sent to the user as a m
 
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 pub(super) const INTERRUPTED_CALL: &str =
-    "The model's response was interrupted before this call finished; it was not run.";
+    "The model's response was interrupted before this call finished. It was not run.";
 pub(super) const FAILED_STREAM_CALL: &str =
-    "The model's response failed before this call finished; it was not run.";
+    "The model's response failed before this call finished. It was not run.";
 pub(super) const REFUSED_TURN_CALL: &str = "turn refused";
 pub(super) const UNDELIVERED_CALL: &str =
-    "The model's final response did not include this call; it was not run.";
+    "The model's final response did not include this call. It was not run.";
 pub(super) use crate::task::{RESTARTED_CALL, UNREACHED_CALL};
 /// Why a call awaiting approval was not run, when its wait ended without a
 /// decision. See [`AgentLoop::settle_interrupted_wait`]. For a task saved
@@ -89,7 +89,8 @@ pub(super) const REJECTED_BY_USER: &str = "Rejected by user";
 /// result (output-based).
 pub(super) const NO_DECISION: &str = "No decision provided";
 pub(super) const NO_DECISION_CALL: &str = "No decision provided, implicitly rejected";
-pub(super) const NO_DECISION_TEXT_CALL: &str = "Implicitly rejected: No decision provided.";
+pub(super) const NO_DECISION_TEXT_CALL: &str =
+    "Implicitly rejected because no decision was provided.";
 
 /// The runtime's request to continue after a decision that leaves no
 /// message of its own (a decision on a pause, say).

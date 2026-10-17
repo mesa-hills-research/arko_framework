@@ -15,7 +15,7 @@ use crate::error::ArkoAgentsError;
 pub(crate) const RESTARTED_CALL: &str = "The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.";
 
 /// The result of a call of a turn that ended before the call ran.
-pub(crate) const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
+pub(crate) const UNREACHED_CALL: &str = "The turn ended before this call ran. It was not run.";
 
 /// What a message the host sent to a task was. See [`Task::user_turns`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,7 +321,7 @@ impl Task {
             .all(|(offset, message)| self.is_user_turn(from + offset, message))
         {
             return Err(ArkoAgentsError::InvalidTaskState(format!(
-                "the Claude Code session can't be cut back to message {index}: its transcript entry for message {} is not known (recorded before entries were, or before a compaction)",
+                "the Claude Code session can't be cut back to message {index}. Its transcript entry for message {} is not known (recorded before entries were, or before a compaction)",
                 from + resent
                     .iter()
                     .position(|message| message.role != Role::User)

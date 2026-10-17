@@ -106,7 +106,7 @@ impl std::str::FromStr for EmbedText {
             "path-scope-source" => EmbedText::PathScopeSource,
             _ => {
                 return Err(format!(
-                    "embedded text {s:?}: use source, path-source or path-scope-source"
+                    "embedded text {s:?}. Use source, path-source or path-scope-source"
                 )
                 .into());
             }

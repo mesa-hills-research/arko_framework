@@ -67,7 +67,7 @@ pub(super) fn warn_if_slow_down_outlasts_cache(
         && std::time::Duration::from_millis(delay_ms) + CACHE_HEADROOM > lifetime
     {
         log::warn!(
-            "Task {task_id}: the plan-usage SlowDown delay ({delay_ms} ms) comes within {} s of the prompt-cache lifetime ({} s): a request after it can miss the cache and read the whole context again as uncached input, which uses more of the plan than the delay saves. Keep the delay well under the lifetime.",
+            "Task {task_id}: The plan-usage SlowDown delay ({delay_ms} ms) comes within {} s of the prompt-cache lifetime ({} s). A request after it can miss the cache and read the whole context again as uncached input, which uses more of the plan than the delay saves. Keep the delay well under the lifetime.",
             CACHE_HEADROOM.as_secs(),
             lifetime.as_secs()
         );

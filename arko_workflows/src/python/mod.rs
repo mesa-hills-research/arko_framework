@@ -16,7 +16,7 @@ pyo3::create_exception!(
     arko_workflows,
     UserInputRequired,
     pyo3::exceptions::PyException,
-    "An agent asked a question and waits for an answer: args are (message, agent_run_id). Answer with PyWorkflow.continue_agent."
+    "An agent asked a question and waits for an answer. Args are (message, agent_run_id). Answer with PyWorkflow.continue_agent."
 );
 
 #[cfg(feature = "python")]
@@ -24,7 +24,7 @@ pyo3::create_exception!(
     arko_workflows,
     AgentPaused,
     pyo3::exceptions::PyException,
-    "An agent paused for a tool approval or error-recovery decision: args are (message, agent_run_id). Decide with PyWorkflow.resume_agent."
+    "An agent paused for a tool approval or error-recovery decision. Args are (message, agent_run_id). Decide with PyWorkflow.resume_agent."
 );
 
 #[cfg(feature = "python")]
@@ -32,7 +32,7 @@ pyo3::create_exception!(
     arko_workflows,
     VerifierFailed,
     pyo3::exceptions::PyException,
-    "A completion verifier could not review the agent's completion, which was neither accepted nor rejected; the agent is left paused: args are (message, agent_run_id). Continue it with PyWorkflow.continue_agent on PyWorkflow.agent_result(agent_run_id)."
+    "A completion verifier could not review the agent's completion, which was neither accepted nor rejected. The agent is left paused. Arguments are (message, agent_run_id). Continue it with PyWorkflow.continue_agent on PyWorkflow.agent_result(agent_run_id)."
 );
 
 #[cfg(feature = "python")]
@@ -220,7 +220,7 @@ impl PyWorkflowBuilder {
     ) -> PyResult<()> {
         if retain_checkpoints == Some(0) {
             return Err(value_error(
-                "retain_checkpoints needs at least 1; every checkpoint is kept by default",
+                "retain_checkpoints needs at least 1. Every checkpoint is kept by default",
             ));
         }
         self.event_log = match event_log {

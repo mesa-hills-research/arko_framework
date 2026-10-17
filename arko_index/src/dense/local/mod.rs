@@ -220,7 +220,7 @@ impl std::str::FromStr for Precision {
         Precision::ALL
             .into_iter()
             .find(|p| p.as_str().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown precision {s:?}: use int8, f32, f16 or bf16").into())
+            .ok_or_else(|| format!("unknown precision {s:?}. Use int8, f32, f16 or bf16").into())
     }
 }
 
@@ -290,7 +290,7 @@ impl std::str::FromStr for Device {
         Device::ALL
             .into_iter()
             .find(|d| d.as_str().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown device {s:?}: use auto, cpu, gpu, cuda or wgpu").into())
+            .ok_or_else(|| format!("unknown device {s:?}. Use auto, cpu, gpu, cuda or wgpu").into())
     }
 }
 
@@ -331,7 +331,7 @@ impl LocalModel {
             .map(|p| (model, p))
             .ok_or_else(|| {
                 format!(
-                    "{} was embedded with another revision or settings of {} ({:?}); this build runs revision {}",
+                    "{} was embedded with another revision or settings of {} ({:?}). This build runs revision {}",
                     descriptor.display(),
                     model.repo,
                     descriptor.revision,
@@ -489,7 +489,7 @@ impl LocalEmbedder {
                 .collect();
             if bytes.len() as u64 != file.size || digest != file.sha256 {
                 return Err(format!(
-                    "{}: not the pinned file of {} at {} (size or SHA-256 differs); delete it to download it again",
+                    "{} is not the pinned file of {} at {} (size or SHA-256 differs). Delete it to download it again",
                     path.display(),
                     model.repo,
                     model.revision
@@ -807,7 +807,7 @@ fn choose_gpu(device: Device, precision: Precision) -> Result<Option<GpuChoice>,
         Device::Cpu => cpu_only(precision).map(|()| None),
         Device::Auto if precision == Precision::Int8 => Ok(None),
         _ if precision == Precision::Int8 => {
-            Err("int8 runs on the CPU: a GPU runs f32, f16 or bf16".into())
+            Err("int8 runs on the CPU. A GPU runs f32, f16 or bf16".into())
         }
         _ => gpu::choose(device, precision),
     }
@@ -830,7 +830,7 @@ fn cpu_only(precision: Precision) -> Result<(), Error> {
         Ok(())
     } else {
         Err(format!(
-            "{precision} runs on a GPU (features local-embed-gpu and local-embed-cuda): the CPU runs int8 and f32"
+            "{precision} runs on a GPU (features local-embed-gpu and local-embed-cuda). The CPU runs int8 and f32"
         )
         .into())
     }

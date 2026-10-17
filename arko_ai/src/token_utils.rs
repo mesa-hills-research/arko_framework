@@ -97,7 +97,7 @@ fn load_error(id: &str, revision: &str, error: impl std::fmt::Display) -> Error 
     let error = error.to_string();
     if is_download_failure(&error) && error.contains("status code 404") {
         return Error::TokenizerError(format!(
-            "Failed to load the tokenizer {id}@{revision}: the Hugging Face Hub has no tokenizer at this revision of {id} ({error}). Check the model name and the tokenizer revision (a commit, branch or tag of {id}); without a pinned revision the repository's current version is loaded."
+            "Failed to load the tokenizer {id}@{revision}. The Hugging Face Hub has no tokenizer at this revision of {id} ({error}). Check the model name and the tokenizer revision (a commit, branch or tag of {id}). Without a pinned revision the repository's current version is loaded."
         ));
     }
     if !is_download_failure(&error) {
@@ -129,7 +129,7 @@ fn cache_location_error(
 ) -> Option<Error> {
     (hf_home.is_none() && home.is_none()).then(|| {
         Error::TokenizerError(
-            "Cannot load a tokenizer: there is no home directory for the Hugging Face cache. Set HF_HOME to a writable directory."
+            "Cannot load a tokenizer. There is no home directory for the Hugging Face cache. Set HF_HOME to a writable directory."
                 .into(),
         )
     })

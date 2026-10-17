@@ -151,7 +151,7 @@ fn invalid(message: String) -> Error {
 fn check_interleaved_thinking(model: &Model, config: &GenerationConfig) -> Result<(), Error> {
     match config.interleaved_thinking {
         Some(false) if is_claude_family(&model.id) => Err(Error::UnsupportedFeature(format!(
-            "GenerationConfig::interleaved_thinking: OpenRouter can't disable interleaved thinking for '{}'; leave it unset.",
+            "OpenRouter can't disable interleaved thinking for '{}'. Leave GenerationConfig::interleaved_thinking unset.",
             model.id
         ))),
         _ => Ok(()),
@@ -190,7 +190,7 @@ fn text_only(message: &Message, role: &str) -> Result<String, Error> {
             Content::Text(part) => text.push_str(part),
             _ => {
                 return Err(invalid(format!(
-                    "OpenRouter {role} messages carry only text; this one has images or tool results."
+                    "OpenRouter {role} messages carry only text. This one has images or tool results."
                 )));
             }
         }
@@ -236,7 +236,7 @@ fn assistant_message(message: &Message, raw_invalid_arguments: bool) -> Result<V
         }
         Some(ReasoningArtifact::OpenRouter { .. }) | None => {}
         Some(other) => log::debug!(
-            "arko_ai: dropping a {:?} reasoning artifact; OpenRouter replays only its own reasoning_details",
+            "arko_ai: dropping a {:?} reasoning artifact. OpenRouter replays only its own reasoning_details",
             other.provider()
         ),
     }
@@ -254,7 +254,7 @@ fn convert_messages(conversation: &Conversation) -> Result<Vec<Value>, Error> {
         if let Some(update) = &message.configuration_update {
             if previous_was_update {
                 return Err(invalid(
-                    "Two configuration updates are adjacent; OpenRouter rejects adjacent updates. Keep only the latest.".into(),
+                    "Two configuration updates are adjacent. OpenRouter rejects adjacent updates. Keep only the latest.".into(),
                 ));
             }
             previous_was_update = true;
@@ -267,7 +267,7 @@ fn convert_messages(conversation: &Conversation) -> Result<Vec<Value>, Error> {
             });
             if before_tool_results {
                 return Err(invalid(
-                    "A configuration update sits between tool calls and their results; add it after the tool results, before the next user turn.".into(),
+                    "A configuration update sits between tool calls and their results. Add it after the tool results, before the next user turn.".into(),
                 ));
             }
             // The Chat Completions form: a content-less system message.
@@ -378,7 +378,7 @@ fn validate_reasoning(
         && (reasoning.effort == Some(ReasoningEffort::None) || reasoning.enabled == Some(false))
     {
         return Err(invalid(format!(
-            "Reasoning is mandatory for model '{model}'; it rejects `effort: none` and `enabled: false`."
+            "Reasoning is mandatory for model '{model}'. It rejects `effort: none` and `enabled: false`."
         )));
     }
     Ok(())
@@ -413,7 +413,7 @@ impl OpenRouterClient {
             && !catalog.contains(slug)
         {
             return Err(Error::ModelNotSupported(format!(
-                "OpenRouter model '{slug}' is not in the loaded catalog ({:?}); check the slug, or clear the catalog to send it unchecked.",
+                "OpenRouter model '{slug}' is not in the loaded catalog ({:?}). Check the slug, or clear the catalog to send it unchecked.",
                 catalog.source()
             )));
         }
@@ -466,7 +466,7 @@ impl OpenRouterClient {
             // which would override the reasoning effort.
             if claude && reasoning.as_ref().is_some_and(|r| r.effort.is_some()) {
                 return Err(invalid(format!(
-                    "On Claude, OpenRouter maps verbosity ({verbosity:?}) to output_config.effort, overriding reasoning.effort; set only one."
+                    "On Claude, OpenRouter maps verbosity ({verbosity:?}) to output_config.effort, overriding reasoning.effort. Set only one."
                 )));
             }
         }
@@ -539,7 +539,7 @@ impl OpenRouterClient {
             });
             if claude && to_none {
                 return Err(invalid(format!(
-                    "Claude models reject a mid-conversation effort update to `none` ('{slug}'); use `minimal` (sent as `low`) or higher."
+                    "Claude models reject a mid-conversation effort update to `none` ('{slug}'). Use `minimal` (sent as `low`) or higher."
                 )));
             }
         }

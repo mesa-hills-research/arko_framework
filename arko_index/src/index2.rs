@@ -854,7 +854,7 @@ pub fn build(
         (Some(d), Some(published)) if !d.embed_later => {
             let run = embed_run(&state_dir, d, Some(&generation)).map_err(|e| {
                 format!(
-                    "{e} (the build published its generation: lexical search works, and a later embedding run continues where this one stopped)"
+                    "{e} (the build published its generation, so lexical search works, and a later embedding run continues where this one stopped)"
                 )
             })?;
             // Superseded before it began: what the build published.
@@ -1038,7 +1038,7 @@ fn embed_run(
         read => read?,
     };
     let (info, (hashes, keys, files)) = read.ok_or(
-        "the index's current generation has no embeddings: build it with them (index2 --embed)",
+        "the index's current generation has no embeddings. Build it with them (index2 --embed)",
     )?;
     check_dense_format(&info)?;
     if info.embedder != descriptor {
@@ -1054,7 +1054,7 @@ fn embed_run(
     let dir = &generation.dir;
     if hashes.len() as u64 != info.docs || keys.len() as u64 != info.docs {
         return Err(
-            "the generation's vector keys do not match its chunks: rebuild the index".into(),
+            "the generation's vector keys do not match its chunks. Rebuild the index".into(),
         );
     }
     let live: HashSet<[u8; 32]> = hashes.iter().copied().collect();
@@ -1264,7 +1264,7 @@ fn read_hashes(dir: &Path) -> Result<Vec<[u8; 32]>, Error> {
     let raw = std::fs::read(dir.join(VHASH)).map_err(|e| {
         std::io::Error::new(
             e.kind(),
-            format!("{e}: this generation was built by an earlier version; rebuild the index (index2) to embed it"),
+            format!("{e}. This generation was built by an earlier version. Rebuild the index (index2) to embed it"),
         )
     })?;
     if raw.len() % 32 != 0 {
@@ -1422,7 +1422,7 @@ pub(crate) fn check_dense_format(info: &DenseIndexInfo) -> Result<(), Error> {
         return Ok(());
     }
     Err(format!(
-        "this index's vectors were stored by an earlier version of arko_index (format {}): rebuild the index (index2) to search it densely, or search lexically",
+        "this index's vectors were stored by an earlier version of arko_index (format {}). Rebuild the index (index2) to search it densely, or search lexically",
         info.version
     )
     .into())
@@ -1556,7 +1556,7 @@ fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
         std::io::Error::new(
             e.kind(),
             format!(
-                "{e}: this index has no file table (built by an earlier version); rebuild it to filter"
+                "{e}. This index has no file table (built by an earlier version). Rebuild it to filter"
             ),
         )
     })?;
@@ -1633,12 +1633,11 @@ impl Generation {
             return Err(format!("bad vector store name {:?}", info.store).into());
         }
         let dir = self.state_dir.join(&info.store);
-        let store = CaprockStore::open(&dir).map_err(|e| {
-            format!("{e} (the vector store of this index: rebuild the index to restore it)")
-        })?;
+        let store = CaprockStore::open(&dir)
+            .map_err(|e| format!("{e} (rebuild the index to restore its vector store)"))?;
         if !store.matches(&info.store_config()) {
             return Err(format!(
-                "the vector store {} does not hold this index's model and settings ({}): rebuild the index",
+                "the vector store {} does not hold this index's model and settings ({}). Rebuild the index",
                 dir.display(),
                 info.embedder.display()
             )
@@ -1650,7 +1649,7 @@ impl Generation {
         // search starts over on that.
         if (store.len() as u64) < info.embedded {
             return Err(format!(
-                "the vector store {} holds {} of this index's {} vectors (an embedding run is replacing it, or one stopped while it did): rebuild the index",
+                "the vector store {} holds {} of this index's {} vectors (an embedding run is replacing it, or one stopped while it did). Rebuild the index",
                 dir.display(),
                 store.len(),
                 info.embedded

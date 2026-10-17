@@ -366,7 +366,7 @@ impl Why {
     /// The reason for an image that needs fitting but can't be read here.
     fn unreadable(&self, mime_type: &str) -> String {
         format!(
-            "{}, and its {} data can't be read here to convert it: convert it to PNG or JPEG",
+            "{}, and its {} data can't be read here to convert it. Convert it to PNG or JPEG",
             self.describe(),
             normalized(mime_type)
         )
@@ -715,7 +715,7 @@ mod tests {
             error.contains("the model doesn't take image/heic images"),
             "{error}"
         );
-        assert!(error.contains("convert it to PNG or JPEG"), "{error}");
+        assert!(error.contains("Convert it to PNG or JPEG"), "{error}");
         assert_eq!(fit_image(&heic, &GOOGLE), Ok(None));
     }
 

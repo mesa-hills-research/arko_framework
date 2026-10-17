@@ -397,7 +397,7 @@ impl Workflow {
         };
         if self.agent_result(task.id).is_some() || self.context.registry.is_running(task.id) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is in the workflow already; branch it (Task::branch) for a copy with its own ID",
+                "agent run {} is in the workflow already. Branch it (Task::branch) for a copy with its own ID",
                 task.id
             )));
         }
@@ -831,7 +831,7 @@ impl Workflow {
                     || options.workspace.is_some() =>
             {
                 Err(WorkflowError::BuilderInvalid(format!(
-                    "agent run {} is recovered, which takes no message: send the images, or the new configuration, with the message after it",
+                    "agent run {} is recovered, which takes no message. Send the images, or the new configuration, with the message after it",
                     run.result.agent_run_id
                 )))
             }
@@ -1311,7 +1311,7 @@ impl Workflow {
             .find(|voter| !self.context.voters.contains(*voter))
         {
             return Err(WorkflowError::Deliberation(format!(
-                "eligible voter '{voter}' is not offered cast_vote; name it in WorkflowBuilder::enable_voting"
+                "eligible voter '{voter}' is not offered cast_vote. Name it in WorkflowBuilder::enable_voting"
             )));
         }
         if config.eligible_voters.is_empty() {
@@ -2248,7 +2248,7 @@ impl WorkflowBuilder {
             }
             if verifier.target_agents.is_empty() {
                 return Err(WorkflowError::BuilderInvalid(format!(
-                    "completion verifier '{}' has no target: name the agents it verifies with target(..)",
+                    "completion verifier '{}' has no target. Name the agents it verifies with target(..)",
                     verifier.name
                 )));
             }
@@ -2293,7 +2293,7 @@ impl WorkflowBuilder {
                 .filter(|_| claude_code_target)
             {
                 return Err(WorkflowError::BuilderInvalid(format!(
-                    "distiller '{}' targets Claude Code's '{tool}', whose output can't be distilled: Claude Code runs its built-in tools itself.",
+                    "distiller '{}' targets Claude Code's '{tool}', whose output can't be distilled. Claude Code runs its built-in tools itself.",
                     distiller.name
                 )));
             }
@@ -2353,7 +2353,7 @@ impl WorkflowBuilder {
         }
         if self.control_folder && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
-                "control_folder requires persistence: the control folder is in the run directory"
+                "control_folder requires persistence. The control folder is in the run directory"
                     .to_string(),
             ));
         }
@@ -2937,7 +2937,7 @@ fn validate_resumed_agent_configs(
             });
             if let Some(missing) = missing {
                 return Err(WorkflowError::BuilderInvalid(format!(
-                    "agent '{}' run {} offers tool '{missing}', which isn't registered: register it to resume the run",
+                    "agent '{}' run {} offers tool '{missing}', which isn't registered. Register it to resume the run",
                     result.agent_name, result.agent_run_id
                 )));
             }
@@ -2949,7 +2949,7 @@ fn validate_resumed_agent_configs(
             let mut changed = Vec::new();
             changed_fields(&saved, &current, "", &mut changed);
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{}' configuration changed since its checkpoint ({} changed); use the original configuration to resume it or register the changed configuration under another agent name",
+                "agent '{}' configuration changed since its checkpoint ({} changed). Use the original configuration to resume it or register the changed configuration under another agent name",
                 result.agent_name,
                 describe_changed_fields(&changed)
             )));
@@ -3163,7 +3163,7 @@ fn warn_unknown_tool_names(
     for (source, tool) in named {
         if !known.contains(tool) {
             log::warn!(
-                "Workflow '{workflow}': {source} names tool '{tool}', which no agent is configured with and no workflow or built-in tool has; check the name (an MCP or skill tool can't be checked before it runs)."
+                "Workflow '{workflow}': {source} names tool '{tool}', which no agent is configured with and no workflow or built-in tool has. Check the name (an MCP or skill tool can't be checked before it runs)."
             );
         }
     }

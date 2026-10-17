@@ -495,7 +495,7 @@ impl AgentLoop {
             UserCommand::ResolveRefusal { ref changes } => {
                 match self.task.resolve_refusal(changes.clone()) {
                     Ok(()) => {
-                        log::info!("Task {}: Refused input changed; continuing.", self.task.id);
+                        log::info!("Task {}: Refused input changed. Continuing.", self.task.id);
                         self.task.monitor_pause = false;
                         self.task.fallback_for = None;
                         self.task.set_state(TaskState::InProgress);

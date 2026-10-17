@@ -839,7 +839,7 @@ impl OpenAIClient {
             .await?
             .ok_or_else(|| {
                 Error::InvalidRequest(
-                    "Cannot refresh OAuth token: client is using API key auth".into(),
+                    "Cannot refresh OAuth token. Client is using API key auth".into(),
                 )
             })
     }
@@ -853,14 +853,14 @@ impl OpenAIClient {
     ) -> Result<OAuthRefreshResult, Error> {
         let OpenAIAuth::ChatGptOAuth(rejected) = expected else {
             return Err(Error::InvalidRequest(
-                "Cannot refresh OAuth token: client is using API key auth".to_string(),
+                "Cannot refresh OAuth token. Client is using API key auth".to_string(),
             ));
         };
         self.refresh(RefreshTarget::Rejected(rejected.clone()), retry_rate_limits)
             .await?
             .ok_or_else(|| {
                 Error::InvalidRequest(
-                    "Cannot refresh OAuth token: client is using API key auth".into(),
+                    "Cannot refresh OAuth token. Client is using API key auth".into(),
                 )
             })
     }
@@ -915,7 +915,7 @@ impl OpenAIClient {
             );
             rate_limit_retries += 1;
             log::warn!(
-                "ChatGPT OAuth refresh was rate limited; waiting {delay:?} before retry {rate_limit_retries}"
+                "ChatGPT OAuth refresh was rate limited. Waiting {delay:?} before retry {rate_limit_retries}"
             );
             tokio::time::sleep(delay).await;
         }
@@ -981,7 +981,7 @@ impl OpenAIClient {
                 return Ok(None);
             }
             return Err(Error::InvalidRequest(
-                "Cannot refresh OAuth token: client is using API key auth".to_string(),
+                "Cannot refresh OAuth token. Client is using API key auth".to_string(),
             ));
         };
         let mut current = held.clone();
@@ -995,7 +995,7 @@ impl OpenAIClient {
             RefreshTarget::Rejected(rejected) | RefreshTarget::Reload(rejected) => {
                 if current.account_id != rejected.account_id {
                     return Err(Error::AuthenticationFailed(
-                        "OAuth account changed during the request; start a new request.".into(),
+                        "OAuth account changed during the request. Start a new request.".into(),
                     ));
                 }
                 if current.access_token != rejected.access_token {
@@ -1082,7 +1082,7 @@ impl OpenAIClient {
             store.save_refreshed(&refreshed, result.id_token.as_deref())?;
         } else if self.warn_unsaved_rotation {
             crate::notice::warn_once("openai-oauth:unsaved-rotation", || {
-                "arko_ai: the ChatGPT OAuth refresh token from OPENAI_OAUTH_REFRESH_TOKEN was rotated; the new tokens are kept in memory only, and the value in the environment no longer works. Save them from LLMClient::openai_chatgpt_oauth_credentials(), or load the credentials with CodexAuthFile and LLMClient::with_codex_auth_file so every rotation is written back.".to_string()
+                "arko_ai: the ChatGPT OAuth refresh token from OPENAI_OAUTH_REFRESH_TOKEN was rotated. The new tokens are kept in memory only, and the value in the environment no longer works. Save them from LLMClient::openai_chatgpt_oauth_credentials(), or load the credentials with CodexAuthFile and LLMClient::with_codex_auth_file so every rotation is written back.".to_string()
             });
         }
         Ok(Some(result))
@@ -1105,7 +1105,7 @@ impl OpenAIClient {
     ) -> Result<OAuthRefreshResult, Error> {
         if stored.account_id != current.account_id {
             return Err(Error::AuthenticationFailed(
-                "The credential store holds a different ChatGPT account; sign in again.".into(),
+                "The credential store holds a different ChatGPT account. Sign in again.".into(),
             ));
         }
         if spent_tokens::credentials_spent(&stored) {
@@ -1202,7 +1202,7 @@ impl OpenAIClient {
                 // Nothing was streamed: the same request goes again without
                 // the summaries, and no request asks for them again.
                 log::warn!(
-                    "OpenAI refused reasoning summaries for this organization (it isn't verified for them): requests ask for none from now on."
+                    "OpenAI refused reasoning summaries for this organization (it isn't verified for them). Requests ask for none from now on."
                 );
                 self.summaries_refused.store(true, Ordering::Relaxed);
                 reasoning.summary = None;
@@ -1348,7 +1348,7 @@ impl OpenAIClient {
                 Ok(value) => builder.header(name, value),
                 Err(_) => {
                     log::warn!(
-                        "arko_ai: not sending the {name} header: its value is not a valid header value"
+                        "arko_ai: Not sending the {name} header. Its value is not a valid header value"
                     );
                     builder
                 }
@@ -2069,13 +2069,13 @@ impl OpenAIClient {
                 Ok(Some(tier))
             }
             OpenAIServiceTier::Fast => Err(Error::InvalidRequest(format!(
-                "{request_model} does not offer Fast mode over ChatGPT OAuth; Codex offers it for {}.",
+                "{request_model} does not offer Fast mode over ChatGPT OAuth. Codex offers it for {}.",
                 CHATGPT_FAST_MODE_MODELS.join(", ")
             ))),
             OpenAIServiceTier::Default => Ok(None),
             OpenAIServiceTier::Flex | OpenAIServiceTier::Auto => {
                 Err(Error::UnsupportedFeature(format!(
-                    "The {tier:?} OpenAI service tier requires API-key authentication; over ChatGPT OAuth only Fast (and Default, which sends no tier) can be requested."
+                    "The {tier:?} OpenAI service tier requires API-key authentication. Over ChatGPT OAuth only Fast (and Default, which sends no tier) can be requested."
                 )))
             }
         }
@@ -2599,7 +2599,7 @@ impl OpenAIClient {
         if let Some(max_tokens) = config.max_tokens {
             crate::notice::warn_once("openai-oauth:max_tokens", || {
                 format!(
-                    "arko_ai: the ChatGPT OAuth backend rejects max_output_tokens, so GenerationConfig::max_tokens ({max_tokens}) is not sent on ChatGPT OAuth requests; the model's own output limit applies."
+                    "arko_ai: the ChatGPT OAuth backend rejects max_output_tokens, so GenerationConfig::max_tokens ({max_tokens}) is not sent on ChatGPT OAuth requests. The model's own output limit applies."
                 )
             });
         }

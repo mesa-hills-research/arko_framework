@@ -165,7 +165,7 @@ async fn a_context_update_s_image_past_the_request_s_room_is_left_out() {
     assert!(images(update).is_empty());
     assert!(
         message_text(update).contains(
-            "(The image of note 3: left out, the conversation holds as many images as a request to this model takes.)"
+            "(The image of note 3 was left out, the conversation holds as many images as a request to this model takes.)"
         ),
         "{}",
         message_text(update)

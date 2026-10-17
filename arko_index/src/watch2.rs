@@ -686,7 +686,7 @@ impl Watcher2 {
                 let v: Version = serde_json::from_slice(&raw)?;
                 if v.version != SNAP_VERSION {
                     return Err(format!(
-                        "watch2 state version {} is from an earlier prototype; remove {} to rebuild it",
+                        "watch2 state version {} is from an earlier prototype. Remove {} to rebuild it",
                         v.version,
                         dir.display()
                     )
@@ -863,7 +863,7 @@ impl Watcher2 {
     fn healthy(&self) -> Result<(), Error> {
         match &self.poisoned {
             Some(why) => Err(format!(
-                "watch state uncertain after a failed write ({why}); reopen the watcher"
+                "watch state uncertain after a failed write ({why}). Reopen the watcher"
             )
             .into()),
             None => Ok(()),

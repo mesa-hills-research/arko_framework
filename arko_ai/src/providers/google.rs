@@ -824,7 +824,7 @@ impl GoogleClient {
                 if model.is_gemini_2_5_pro() || model.is_gemini_2_5_flash() =>
             {
                 Err(Error::InvalidRequest(format!(
-                    "Thinking can't be disabled for '{}' on the Interactions API; use a positive budget, or -1 for the model default.",
+                    "Thinking can't be disabled for '{}' on the Interactions API. Use a positive budget, or -1 for the model default.",
                     model.id
                 )))
             }

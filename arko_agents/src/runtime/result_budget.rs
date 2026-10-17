@@ -346,10 +346,10 @@ pub(crate) fn notice(facts: &NoticeFacts) -> String {
     let shown = if facts.head_lines + facts.tail_lines == 0 {
         "None of it is shown.".to_string()
     } else if facts.tail_lines == 0 {
-        format!("Shown: the first {} lines.", grouped(facts.head_lines))
+        format!("Showing the first {} lines.", grouped(facts.head_lines))
     } else {
         format!(
-            "Shown: the first {} and the last {} lines.",
+            "Showing the first {} and the last {} lines.",
             grouped(facts.head_lines),
             grouped(facts.tail_lines)
         )
@@ -674,7 +674,7 @@ mod tests {
     fn notices_point_to_the_terminal_or_ask_for_less() {
         let with_terminal = notice(&facts(true, false, "read_file"));
         assert!(
-            with_terminal.starts_with("[Shortened: this result is about 2,100,000 tokens (8.2 MB, 81,431 lines), too large for your context. Shown: the first 410 and the last 80 lines."),
+            with_terminal.starts_with("[Shortened: this result is about 2,100,000 tokens (8.2 MB, 81,431 lines), too large for your context. Showing the first 410 and the last 80 lines."),
             "{with_terminal}"
         );
         for command in [

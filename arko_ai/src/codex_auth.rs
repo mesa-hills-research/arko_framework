@@ -201,7 +201,7 @@ impl CodexAuthFile {
                 }
                 if in_file != self.credentials()? {
                     return Err(Error::AuthenticationFailed(format!(
-                        "{} changed since it was loaded; refusing to overwrite newer credentials",
+                        "{} changed since it was loaded. Refusing to overwrite newer credentials",
                         self.path.display()
                     )));
                 }
@@ -259,7 +259,7 @@ impl CodexAuthFile {
             return Ok(CodexAuthSync::Saved);
         }
         Err(Error::AuthenticationFailed(format!(
-            "{} kept changing while rotated credentials were being saved; not overwriting it",
+            "{} kept changing while rotated credentials were being saved. Not overwriting it",
             self.path.display()
         )))
     }
@@ -384,7 +384,7 @@ impl CodexAuthFile {
                 if *in_client == known {
                     if spent_tokens::credentials_spent(&in_file) {
                         return Err(Error::AuthenticationFailed(format!(
-                            "{} holds a ChatGPT OAuth refresh token that {SPENT}; not loading it (using it again would sign you out)",
+                            "{} holds a ChatGPT OAuth refresh token that {SPENT}. Not loading it (using it again would sign you out)",
                             self.path.display()
                         )));
                     }
@@ -394,7 +394,7 @@ impl CodexAuthFile {
                     });
                 }
                 return Err(Error::AuthenticationFailed(format!(
-                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    "Both {} and this client rotated ChatGPT OAuth credentials. Sign in again",
                     self.path.display()
                 )));
             }
@@ -406,7 +406,7 @@ impl CodexAuthFile {
         }
         if spent_tokens::credentials_spent(in_client) {
             return Err(Error::AuthenticationFailed(format!(
-                "this client holds a ChatGPT OAuth refresh token that {SPENT}; not saving it to {}",
+                "this client holds a ChatGPT OAuth refresh token that {SPENT}. Not saving it to {}",
                 self.path.display()
             )));
         }
@@ -463,7 +463,7 @@ impl CodexAuthFile {
                     return Ok(CodexAuthSync::Unchanged);
                 }
                 Err(Error::AuthenticationFailed(format!(
-                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    "Both {} and this client rotated ChatGPT OAuth credentials. Sign in again",
                     self.path.display()
                 )))
             }
@@ -670,16 +670,16 @@ pub(crate) fn spent_refresh_token_error(account_id: Option<&str>) -> Error {
         })
     });
     let refused = format!(
-        "Not using a ChatGPT OAuth refresh token that {SPENT}: using it again would sign you out"
+        "Not using a ChatGPT OAuth refresh token that {SPENT}. Using it again would sign you out"
     );
     Error::AuthenticationFailed(match unsaved {
         Some((path, Some(recovery))) => format!(
-            "{refused}. The newest tokens for {path} could not be saved there; they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+            "{refused}. The newest tokens for {path} could not be saved there. They are in {} ({RECOVERY_FILE_PRIVACY}). Put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
             recovery.display(),
             path = path.display(),
         ),
         Some((path, None)) => format!(
-            "{refused}. The newest tokens for {} could not be saved; sign in to Codex again",
+            "{refused}. The newest tokens for {} could not be saved. Sign in to Codex again",
             path.display()
         ),
         None => format!("{refused}. Use the tokens that refresh returned, or sign in again"),
@@ -710,7 +710,7 @@ impl CodexAuthStore {
 
 fn different_account(path: &Path) -> Error {
     Error::AuthenticationFailed(format!(
-        "{} holds a different ChatGPT account than this client (signed out, or signed in to another account); sign in again",
+        "{} holds a different ChatGPT account than this client (signed out, or signed in to another account). Sign in again",
         path.display()
     ))
 }
@@ -722,11 +722,11 @@ fn with_unsaved_rotation(error: Error, path: &Path, rotation: &UnsavedRotation) 
     let path = path.display();
     Error::AuthenticationFailed(match &rotation.recovery {
         Some(recovery) => format!(
-            "{error}; refreshed ChatGPT OAuth tokens of this account that could not be saved to {path} are in {} ({RECOVERY_FILE_PRIVACY})",
+            "{error}. Refreshed ChatGPT OAuth tokens of this account that could not be saved to {path} are in {} ({RECOVERY_FILE_PRIVACY})",
             recovery.display()
         ),
         None => format!(
-            "{error}; refreshed ChatGPT OAuth tokens of this account could not be saved to {path}, nor to a recovery file"
+            "{error}. Refreshed ChatGPT OAuth tokens of this account could not be saved to {path}, nor to a recovery file"
         ),
     })
 }
@@ -737,11 +737,11 @@ fn unsaved_error(path: &Path, error: &Error, recovery: Option<&Path>) -> Error {
     let path = path.display();
     Error::AuthenticationFailed(match recovery {
         Some(recovery) => format!(
-            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}). They are in {} ({RECOVERY_FILE_PRIVACY}). Put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
             recovery.display()
         ),
         None => format!(
-            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); sign in to Codex again"
+            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}). Sign in to Codex again"
         ),
     })
 }
@@ -750,7 +750,7 @@ fn unsaved_error(path: &Path, error: &Error, recovery: Option<&Path>) -> Error {
 #[cfg(unix)]
 const RECOVERY_FILE_PRIVACY: &str = "readable only by you";
 #[cfg(not(unix))]
-const RECOVERY_FILE_PRIVACY: &str = "it holds your credentials; keep it private";
+const RECOVERY_FILE_PRIVACY: &str = "keep this credential file private";
 
 impl std::fmt::Debug for CodexAuthStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -796,7 +796,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             // they can still be refreshed.
             if current.refresh_token.is_none() || spent(current) {
                 return Err(Error::AuthenticationFailed(format!(
-                    "{} holds a ChatGPT OAuth refresh token that {SPENT}, and this client holds no newer one (using it again would sign you out); sign in to Codex again",
+                    "{} holds a ChatGPT OAuth refresh token that {SPENT}, and this client holds no newer one (using it again would sign you out). Sign in to Codex again",
                     path.display()
                 )));
             }
@@ -835,7 +835,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             Err(recovery_error) => (
                 None,
                 Error::AuthenticationFailed(format!(
-                    "refreshed ChatGPT OAuth tokens could not be saved to {} ({error}) nor to a recovery file ({recovery_error}); sign in to Codex again",
+                    "refreshed ChatGPT OAuth tokens could not be saved to {} ({error}) nor to a recovery file ({recovery_error}). Sign in to Codex again",
                     file.path.display()
                 )),
             ),
@@ -881,7 +881,7 @@ fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), E
             if error.kind() == std::io::ErrorKind::NotFound {
                 Error::IoError(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("No Codex login at {}: run `codex login`", path.display()),
+                    format!("No Codex login at {}. Run `codex login`", path.display()),
                 ))
             } else {
                 Error::IoError(error)

@@ -96,7 +96,7 @@ pub fn post_note(run_dir: &Path, note: &Note) -> io::Result<ControlNote> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{} doesn't exist: the workflow of this run directory doesn't read a control folder (WorkflowBuilder::control_folder)",
+                "{} doesn't exist. The workflow of this run directory doesn't read a control folder (WorkflowBuilder::control_folder)",
                 folder.display()
             ),
         ));
@@ -235,7 +235,7 @@ fn read_lines_from(folder: &Path, name: &str, offset: u64) -> io::Result<Option<
     };
     let offset = if len < offset {
         log::warn!(
-            "{} is shorter than the part already read; reading it again from the start",
+            "{} is shorter than the part already read. Reading it again from the start",
             path.display()
         );
         0
@@ -390,7 +390,7 @@ pub fn request_stop(run_dir: &Path, stop: &ControlStop) -> io::Result<ControlSto
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{} doesn't exist: the workflow of this run directory doesn't read a control folder (WorkflowBuilder::control_folder)",
+                "{} doesn't exist. The workflow of this run directory doesn't read a control folder (WorkflowBuilder::control_folder)",
                 folder.display()
             ),
         ));

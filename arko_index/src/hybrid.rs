@@ -326,7 +326,7 @@ fn search_once(
         Mode::Dense | Mode::Hybrid => {
             request.fusion.validate()?;
             let info = info.as_ref().ok_or(
-                "this index has no embeddings: build it with embeddings (index2 --embed) or search lexically",
+                "this index has no embeddings. Build it with embeddings (index2 --embed) or search lexically",
             )?;
             let check_model = |have: &ModelDescriptor| -> Result<(), Error> {
                 if *have != info.embedder {

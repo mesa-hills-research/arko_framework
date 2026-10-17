@@ -127,7 +127,7 @@ impl AgentLoop {
             if first >= threshold {
                 if !std::mem::replace(&mut self.handover_skip_warned, true) {
                     log::warn!(
-                        "Task {}: No handover: the conversation's first request ({} input tokens) was already over the handover threshold ({}).",
+                        "Task {}: No handover. The conversation's first request ({} input tokens) was already over the handover threshold ({}).",
                         self.task.id,
                         first,
                         threshold

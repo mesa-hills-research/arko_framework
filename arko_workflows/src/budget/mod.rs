@@ -348,14 +348,14 @@ impl BudgetManager {
         }
         if self.is_exceeded() {
             return Some(format!(
-                "Budget exceeded: spent ${:.4} of the workflow's ${:.4} limit. The request waits until the budget is raised.",
+                "Budget exceeded after spending ${:.4} of the workflow's ${:.4} limit. The request waits until the budget is raised.",
                 self.total_spent(),
                 self.limit().unwrap_or(0.0)
             ));
         }
         if self.is_agent_exceeded(agent_name) {
             return Some(format!(
-                "Agent budget exceeded: agent '{agent_name}' spent ${:.4} of its ${:.4} limit. The request waits until the budget is raised.",
+                "Agent '{agent_name}' exceeded its budget after spending ${:.4} of its ${:.4} limit. The request waits until the budget is raised.",
                 self.agent_spent(agent_name),
                 self.agent_limit(agent_name).unwrap_or(0.0)
             ));
@@ -588,7 +588,7 @@ mod tests {
             budget
                 .hold_reason("coder")
                 .unwrap()
-                .contains("agent 'coder'")
+                .contains("Agent 'coder'")
         );
         assert!(budget.hold_reason("reviewer").is_none());
         budget.clear_agent_limit("coder");

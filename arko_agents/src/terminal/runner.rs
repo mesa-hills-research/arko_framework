@@ -279,7 +279,7 @@ pub(super) async fn run(
                         match result {
                             Ok(Ok(())) => { let _ = response.send(Ok(())); }
                             error => {
-                                let message = format!("input delivery uncertain; job stopped to prevent duplicate input: {error:?}");
+                                let message = format!("input delivery uncertain. Job stopped to prevent duplicate input: {error:?}");
                                 failure = Some(message.clone()); stop = Some(JobState::Failed);
                                 let _ = response.send(Err(TerminalError::Invalid(message)));
                             }
@@ -310,7 +310,7 @@ pub(super) async fn run(
         .await
         .is_err()
     {
-        failure = Some("output drain did not complete; output may be incomplete".into());
+        failure = Some("output drain did not complete. Output may be incomplete".into());
     }
     readers.abort_all();
     while readers.join_next().await.is_some() {}
