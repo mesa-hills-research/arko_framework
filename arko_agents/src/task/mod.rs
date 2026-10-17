@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod cut_back;
 mod refusal;
+pub(crate) use cut_back::{RESTARTED_CALL, UNREACHED_CALL};
 pub use cut_back::{UserTurn, UserTurnKind};
 pub use refusal::{RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult};
 
