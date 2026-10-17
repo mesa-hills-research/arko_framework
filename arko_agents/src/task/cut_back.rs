@@ -110,7 +110,9 @@ impl Task {
     /// ([`prepare_for_resumption_from_completed`](Self::prepare_for_resumption_from_completed)).
     /// Cut back to its first message (`0`), it is `Pending` with no
     /// conversation, and runs from [`initial_task_prompt`](Self::initial_task_prompt)
-    /// (which the host replaces) like a new task.
+    /// (which the host replaces) like a new task. A task with no
+    /// conversation (a [`branch`](Self::branch) at its first message) is cut
+    /// back to `0` too.
     ///
     /// A Claude Code task's session resumes at the last entry before the
     /// cut, and the host's messages after that entry go with the next input
@@ -120,6 +122,9 @@ impl Task {
     /// `InvalidTaskState`, as is an index that isn't a user turn. The host
     /// cuts back a task its runtime isn't running.
     pub fn cut_back(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
+        if index == 0 && self.conversation.messages.is_empty() {
+            return self.cut_at(0);
+        }
         let Some(message) = self.conversation.messages.get(index) else {
             return Err(ArkoAgentsError::InvalidTaskState(format!(
                 "message {index} is past the conversation's end ({} messages)",
@@ -140,15 +145,16 @@ impl Task {
     /// the conversation's length. The original stays as it is. A Claude Code
     /// task's copy forks the session when it first runs
     /// ([`claude_code_fork_of`](Self::claude_code_fork_of)), so both
-    /// conversations go on apart. Index `0` is refused: a new run of the
-    /// agent starts from a prompt.
+    /// conversations go on apart.
+    ///
+    /// At its first message (`0`), the copy has no conversation but keeps
+    /// the rest, such as its [`handovers`](Self::handovers), whose latest
+    /// report a host may start the branch's conversation from. It is
+    /// `Completed` with an empty summary, for the host to import, and the
+    /// host continues it cut back to its first message
+    /// (`ContinueOptions::cut_back_to(0)` in `arko_workflows`): it starts
+    /// over from the host's message as a new task does.
     pub fn branch(&self, index: usize) -> Result<Task, ArkoAgentsError> {
-        if index == 0 {
-            return Err(ArkoAgentsError::InvalidTaskState(
-                "a branch keeps at least the task's first message; start a new task instead"
-                    .to_string(),
-            ));
-        }
         let mut branch = self.clone();
         branch.id = Uuid::new_v4();
         branch.parent = None;
@@ -162,6 +168,11 @@ impl Task {
             branch.cut_at(index)?;
         } else {
             branch.cut_back(index)?;
+        }
+        if index == 0 {
+            branch.set_state(TaskState::Completed {
+                summary: String::new(),
+            });
         }
         branch.conversation_usage_start = 0;
         branch.conversation_model_call_start = 0;
@@ -494,7 +505,28 @@ mod tests {
         let again = whole.branch(7).unwrap();
         assert_eq!(again.claude_code_fork_of.as_deref(), Some("s1"));
 
-        assert!(task.branch(0).is_err());
+        // At the first message: no conversation, and the rest kept.
+        task.handovers.push(crate::handover::HandoverRecord {
+            at: chrono::Utc::now(),
+            input_tokens: 500,
+            replaced_messages: 4,
+            report: "The trip so far.".into(),
+        });
+        let first = task.branch(0).unwrap();
+        assert!(first.conversation.messages.is_empty());
+        assert!(first.conversation.system_message.is_none());
+        assert!(
+            matches!(&first.current_state, TaskState::Completed { summary } if summary.is_empty())
+        );
+        assert_eq!(first.handovers, task.handovers);
+        assert_eq!(first.claude_code_session, None);
+        assert_eq!(first.claude_code_fork_of, None);
+        assert_eq!(first.claude_code_resume_at, None);
+        // Cut back to its first message, it starts over.
+        let mut again = first.clone();
+        again.cut_back(0).unwrap();
+        assert!(matches!(again.current_state, TaskState::Pending));
+        assert!(again.cut_back(1).is_err());
     }
 
     /// A task moves to another directory with its prompt written again. A

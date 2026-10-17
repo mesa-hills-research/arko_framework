@@ -189,6 +189,37 @@ async fn a_branch_goes_on_apart_from_the_original() {
     assert!(error(workflow.import_agent_run("main", running)).contains("only a completed task"));
 }
 
+/// A branch at the first message has no conversation: imported and
+/// continued cut back to its first message, it starts over from the new
+/// prompt as a run of its own, and the original keeps its conversation.
+#[tokio::test]
+async fn a_branch_at_the_first_message_starts_over_from_the_next() {
+    let workspace = Workspace::new();
+    let server = server().await;
+    let workflow = workflow(&server, &workspace);
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let original = workflow.continue_agent(&first, "Plan A.").await.unwrap();
+
+    let branch = workflow
+        .import_agent_run("main", original.task.branch(0).unwrap())
+        .unwrap();
+    assert!(branch.task.conversation.messages.is_empty());
+    let answered = workflow
+        .continue_agent_with(
+            &branch,
+            "Good evening.",
+            ContinueOptions::new().cut_back_to(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered.agent_run_id, branch.agent_run_id);
+    let sent = input_texts(server.bodies().last().unwrap());
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("Good evening."));
+    assert_eq!(answered.task.conversation.messages.len(), 2);
+    assert_eq!(original.task.conversation.messages.len(), 4);
+}
+
 /// A cut back is reported as the run goes on: `ConversationCutBack` names
 /// the message and how many went, before the run's own events.
 #[tokio::test]
