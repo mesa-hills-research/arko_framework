@@ -1,4 +1,4 @@
-/// Result types returned after workflow and agent execution.
+//! Result types returned after workflow and agent execution.
 use serde::{Deserialize, Serialize};
 
 use crate::budget::CostLedger;

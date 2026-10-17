@@ -1,8 +1,8 @@
-/// Budget tracking and cost ledger for workflows.
-///
-/// Tracks accumulated cost across all agents and manual additions,
-/// maintaining both a lock-free running total (for fast threshold checks)
-/// and a detailed serializable ledger (for persistence and analysis).
+//! Budget tracking and cost ledger for workflows.
+//!
+//! Tracks accumulated cost across all agents and manual additions,
+//! maintaining both a lock-free running total (for fast threshold checks)
+//! and a detailed serializable ledger (for persistence and analysis).
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

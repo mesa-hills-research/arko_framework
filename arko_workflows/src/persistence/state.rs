@@ -1,4 +1,4 @@
-/// Serializable workflow state for checkpointing.
+//! Serializable workflow state for checkpointing.
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

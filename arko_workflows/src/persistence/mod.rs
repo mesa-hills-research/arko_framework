@@ -1,4 +1,4 @@
-/// Checkpoint and resume support for workflows.
+//! Checkpoint and resume support for workflows.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
