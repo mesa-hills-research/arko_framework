@@ -7,7 +7,8 @@ pub mod types;
 pub use config::{InvalidSkillPolicy, SkillSource, SkillsConfig};
 pub use load_skill::{LOAD_SKILL_TOOL_NAME, LoadSkillTool};
 pub use types::{
-    AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillSummary,
+    AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillScan,
+    SkillSummary,
 };
 
 use std::collections::HashMap;
@@ -17,6 +18,18 @@ use std::sync::Arc;
 use crate::agent_config::{AgentConfig, PerToolConfigOverride};
 use crate::error::ArkoAgentsError;
 use crate::tool::ToolRegistry;
+
+/// Lists the skill files and folders in the sources of `config`, resolving
+/// workspace paths relative to `workspace_root`, with what
+/// [`SkillManager::load`] makes of each: the name it loads it under, or
+/// why it skips it. It reads them as loading does, by the same rules, but
+/// doesn't fail: a source directory that doesn't exist has nothing to
+/// list, and one that can't be read is logged and left out (loading fails
+/// on it). Within a source, entries are taken in the order of their
+/// names, and earlier sources come first.
+pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
+    loader::scan(config, workspace_root)
+}
 
 /// Manages skill loading, deduplication, and tool creation.
 ///
