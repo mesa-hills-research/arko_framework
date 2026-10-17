@@ -17,7 +17,7 @@ Summary:
 
 ## Prompting
 
-Follow the prompting guide for each agent's model. Use the [Opus 5.5 prompting guide](../prompting/opus-5.5.md) for Opus 5.5. It also applies to Fable 5.1. Use the [Astra 6 prompting guide](../prompting/astra-6.md) for Astra 6.
+Give each agent a clear task and role. [Writing prompts](../prompting/README.md) explains how prompts fit with the framework's configuration and workflow APIs.
 
 Anything you put in front of an agent steers it. Mentioning a rule or concept, or making a tool available, often leads an agent to use it even when the task doesn't need it. Decide carefully what each prompt includes, and leave out what the role doesn't need. When something is optional, say so, and say when it applies.
 

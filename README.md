@@ -48,7 +48,7 @@ The tests make no provider calls. The terminal, MCP and Claude Code tests need P
 - The [agent design guide](docs/guides/agent-design.md) and the
   [workflow design guide](docs/guides/workflow-design.md) collect ideas for roles, tools,
   topology, shared state, verification and persistence.
-- The [prompting guides](docs/prompting/README.md) give advice for particular models.
+- [Writing prompts](docs/prompting/README.md) covers tasks, roles and configuration.
 - [Context management](docs/context-efficiency.md) explains versioned memory reads, file-tree
   change notices, tool-result distillation and background shell jobs.
 - [Interactive terminals](docs/interactive-terminals.md) describes the PTY and pipe terminal
