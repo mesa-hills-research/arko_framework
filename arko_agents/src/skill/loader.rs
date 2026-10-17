@@ -48,7 +48,7 @@ pub fn load_skills(
             Outcome::Invalid(error) => handle_skill_error(error, &config.on_invalid_skill)?,
             Outcome::Unreadable(error) => match config.on_invalid_skill {
                 InvalidSkillPolicy::Warn => {
-                    log::warn!("Skipping a skill that can't be read: {}", error);
+                    log::warn!("{}", unreadable_warning(&error));
                 }
                 InvalidSkillPolicy::Error => return Err(error),
             },
@@ -645,6 +645,10 @@ fn build_prompt_context(skills: &[LoadedSkill]) -> SkillPromptContext {
     }
 }
 
+fn unreadable_warning(error: &ArkoAgentsError) -> String {
+    format!("Skipping a skill that can't be read ({error}).")
+}
+
 fn handle_skill_error(
     error: SkillLoadError,
     policy: &InvalidSkillPolicy,
@@ -661,6 +665,15 @@ fn handle_skill_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_skill_warnings_keep_the_error_in_parentheses() {
+        let error = ArkoAgentsError::Configuration("unreadable skill file".into());
+        assert_eq!(
+            unreadable_warning(&error),
+            format!("Skipping a skill that can't be read ({error}).")
+        );
+    }
 
     /// A temporary directory, removed when dropped.
     struct Temp(PathBuf);
