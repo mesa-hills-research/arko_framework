@@ -2839,7 +2839,17 @@ impl ClaudeCodeRun {
                     if call.built_in
                         && let Some(sink) = &self.image_sink
                     {
-                        let images = result_images(content);
+                        let mut images = result_images(content);
+                        // Captioned as `read_file` captions its images: the
+                        // file's path and size.
+                        if let Some(path) = call.record.arguments["file_path"].as_str() {
+                            for image in &mut images {
+                                image.description = match image.decoded_len() {
+                                    Some(bytes) => format!("{path}, {}", file_size(bytes)),
+                                    None => path.to_string(),
+                                };
+                            }
+                        }
                         if !images.is_empty() {
                             sink.tool_images(self.task.id, call.id, &call.name, &images);
                         }
@@ -4642,6 +4652,15 @@ fn result_text(content: &Value) -> String {
 
 /// Images in a reported result, either MCP content or Claude's image
 /// source blocks. Arko tools retain their originals in `ToolHost` too.
+/// A file's size as `read_file` gives it: KB under a megabyte, else MB.
+fn file_size(bytes: usize) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 fn result_images(content: &Value) -> Vec<crate::tool::ToolImage> {
     let blocks = match content {
         Value::Array(blocks) => blocks,

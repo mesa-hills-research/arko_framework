@@ -1233,7 +1233,7 @@ async fn a_branch_forks_again_after_a_failed_first_launch() {
 
 /// Records what a tool image sink is given: the call's ID, name and images.
 #[derive(Default)]
-struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, usize)>>);
+struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, Vec<String>)>>);
 
 impl crate::tool::ToolImageSink for Images {
     fn tool_images(
@@ -1243,16 +1243,21 @@ impl crate::tool::ToolImageSink for Images {
         tool_name: &str,
         images: &[crate::tool::ToolImage],
     ) {
-        self.0
-            .lock()
-            .unwrap()
-            .push((tool_call_id, tool_name.to_string(), images.len()));
+        self.0.lock().unwrap().push((
+            tool_call_id,
+            tool_name.to_string(),
+            images
+                .iter()
+                .map(|image| image.description.clone())
+                .collect(),
+        ));
     }
 }
 
 /// The host's sink gets the images of an arko tool's call once (not again
 /// when Claude Code reports the result) and those of Claude Code's own
-/// `Read`, each by the call's ID in the events.
+/// `Read`, each by the call's ID in the events, and captioned alike: the
+/// file's path and size.
 #[tokio::test]
 async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
     let fake = Fake::new(json!([[
@@ -1282,9 +1287,15 @@ async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
     let recorded = images.0.lock().unwrap().clone();
     let names: Vec<_> = recorded
         .iter()
-        .map(|(_, name, count)| (name.as_str(), *count))
+        .map(|(_, name, captions)| (name.as_str(), captions.clone()))
         .collect();
-    assert_eq!(names, [("read_file", 1), ("Read", 1)]);
+    assert_eq!(
+        names,
+        [
+            ("read_file", vec!["a.png, 1 KB".to_string()]),
+            ("Read", vec!["b.png, 1 KB".to_string()])
+        ]
+    );
     for (id, name, _) in &recorded {
         assert!(
             events.iter().any(|event| matches!(
