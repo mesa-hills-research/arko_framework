@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::GenerationConfig;
 use crate::conversation::Conversation;
 use crate::message::{Content, Image, Message, Role};
+use crate::model::Model;
 use crate::tool::ToolConfig;
 
 /// The size of a request by section: bytes of text, which a bytes-per-token
@@ -36,7 +37,8 @@ pub struct RequestSizes {
     /// How many images the request holds, in user messages and tool
     /// results.
     pub images: usize,
-    /// Their estimated input tokens ([`Image::estimated_tokens`]).
+    /// Their estimated input tokens, by the conversation's model's rule
+    /// ([`Model::image_tokens`](crate::Model::image_tokens)).
     pub image_tokens: usize,
 }
 
@@ -76,7 +78,7 @@ impl RequestSizes {
     ) -> Self {
         let mut sizes = Self::new(conversation.system_message.as_deref(), tools);
         for message in messages {
-            sizes.add_message(message);
+            sizes.add_message_for(message, &conversation.model);
         }
         sizes
     }
@@ -91,30 +93,38 @@ impl RequestSizes {
     ) -> Self {
         let mut sizes = Self::new(conversation.system_message.as_deref(), tools);
         for message in messages {
-            sizes.add(message, false);
+            sizes.add(message, None);
         }
         sizes
     }
 
-    /// Adds a message's size to its sections.
+    /// Adds a message's size to its sections, its images counted as for a
+    /// current Claude model ([`Image::estimated_tokens`]).
     pub fn add_message(&mut self, message: &Message) {
-        self.add(message, true);
+        self.add(message, Some(&ImageCount::Generic));
     }
 
-    /// Adds a message's size, with its images' tokens when `image_tokens`.
-    fn add(&mut self, message: &Message, image_tokens: bool) {
+    /// Adds a message's size to its sections, its images counted by
+    /// `model`'s rule ([`Model::image_tokens`](crate::Model::image_tokens)).
+    pub fn add_message_for(&mut self, message: &Message, model: &Model) {
+        self.add(message, Some(&ImageCount::For(model)));
+    }
+
+    /// Adds a message's size, with its images' tokens counted as `count`
+    /// says, or not at all.
+    fn add(&mut self, message: &Message, count: Option<&ImageCount<'_>>) {
         for content in &message.content {
             match content {
                 Content::Text(text) if message.role == Role::Assistant => {
                     self.assistant_text += text.len()
                 }
                 Content::Text(text) => self.user_text += text.len(),
-                Content::Image(image) => self.add_image(image, image_tokens),
+                Content::Image(image) => self.add_image(image, count),
                 Content::ToolResult(result) => {
                     self.tool_results += result.name.len() + result.output.len();
                     for image in &result.images {
                         self.tool_results += image.label.len();
-                        self.add_image(&image.image, image_tokens);
+                        self.add_image(&image.image, count);
                     }
                 }
             }
@@ -124,11 +134,13 @@ impl RequestSizes {
         }
     }
 
-    fn add_image(&mut self, image: &Image, tokens: bool) {
+    fn add_image(&mut self, image: &Image, count: Option<&ImageCount<'_>>) {
         self.images += 1;
-        if tokens {
-            self.image_tokens += image.estimated_tokens();
-        }
+        self.image_tokens += match count {
+            Some(ImageCount::For(model)) => model.image_tokens(image),
+            Some(ImageCount::Generic) => image.estimated_tokens(),
+            None => 0,
+        };
     }
 
     /// The bytes of text in every section, the system prompt and the tool
@@ -155,6 +167,14 @@ impl RequestSizes {
     pub fn estimated_tokens(&self, bytes_per_token: f64) -> usize {
         Self::tokens(self.text_bytes(), bytes_per_token) + self.image_tokens
     }
+}
+
+/// How a request's images are counted.
+enum ImageCount<'a> {
+    /// As for a current Claude model.
+    Generic,
+    /// By the model's rule.
+    For(&'a Model),
 }
 
 #[cfg(test)]
@@ -215,8 +235,8 @@ mod tests {
             "read_file".len() + "contents".len() + "a.png".len()
         );
         assert_eq!(sizes.images, 2);
-        // 750 × 100 / 750, and 1500 × 1000 scaled to fit 1.15 megapixels.
-        assert_eq!(sizes.image_tokens, 100 + 1534);
+        // A token per 28 × 28 pixels on Opus 5.5.
+        assert_eq!(sizes.image_tokens, 27 * 4 + 54 * 36);
         assert_eq!(
             sizes.text_bytes(),
             sizes.system_prompt

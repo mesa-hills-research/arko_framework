@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod error;
 pub mod image_fit;
 pub mod image_store;
+pub mod image_tokens;
 pub mod input_limit;
 pub mod message;
 pub mod model;

@@ -98,21 +98,16 @@ impl Image {
         image_size(&head)
     }
 
-    /// An estimate of the input tokens the image takes in a request: its
-    /// pixels over 750, after scaling it down to fit 1,568 pixels on its
-    /// long side and 1.15 megapixels (Anthropic's rule; other providers
-    /// count tiles or patches, to similar totals). 1,600 when its size is
-    /// unknown, about the most an image takes after scaling.
+    /// An estimate of the input tokens the image takes in a request to a
+    /// current Claude model (a token per 28 × 28 pixels, after scaling to
+    /// 2,576 pixels on the long side and 4,784 tokens). Other models count
+    /// images differently: [`Model::image_tokens`](crate::Model::image_tokens)
+    /// gives a given model's count.
     pub fn estimated_tokens(&self) -> usize {
-        const UNKNOWN: usize = 1_600;
-        let Some((width, height)) = self.dimensions().filter(|(w, h)| *w > 0 && *h > 0) else {
-            return UNKNOWN;
-        };
-        let (width, height) = (f64::from(width), f64::from(height));
-        let scale = (1_568.0 / width.max(height))
-            .min((1_150_000.0 / (width * height)).sqrt())
-            .min(1.0);
-        (width * height * scale * scale / 750.0).ceil().max(1.0) as usize
+        crate::image_tokens::anthropic_tokens(
+            self.dimensions().filter(|(w, h)| *w > 0 && *h > 0),
+            crate::image_tokens::AnthropicTier::HIGH_RESOLUTION,
+        )
     }
 }
 
@@ -472,11 +467,11 @@ mod tests {
 
         assert_eq!(image(b"not an image".to_vec()).dimensions(), None);
         assert_eq!(Image::new_url("https://x/y.png").dimensions(), None);
-        assert_eq!(Image::new_url("https://x/y.png").estimated_tokens(), 1_600);
+        assert_eq!(Image::new_url("https://x/y.png").estimated_tokens(), 4_784);
     }
 
-    /// Tokens follow the pixels, after scaling down to 1,568 pixels on the
-    /// long side and 1.15 megapixels.
+    /// Tokens follow the pixels, a token per 28 × 28 pixels after scaling
+    /// down to a current Claude model's limit.
     #[test]
     fn image_tokens_follow_the_scaled_pixels() {
         let png = |width: u32, height: u32| {
@@ -485,12 +480,14 @@ mod tests {
             bytes.extend(height.to_be_bytes());
             Image::from_bytes(&bytes, "image/png")
         };
-        assert_eq!(png(750, 100).estimated_tokens(), 100);
+        // A token per 28 × 28 pixels.
+        assert_eq!(png(750, 100).estimated_tokens(), 27 * 4);
         assert_eq!(png(1, 1).estimated_tokens(), 1);
-        // Both at the cap of 1.15 megapixels.
-        assert_eq!(png(1500, 1000).estimated_tokens(), 1534);
-        assert_eq!(png(4000, 3000).estimated_tokens(), 1534);
-        // A long strip is scaled to 1,568 pixels long.
-        assert_eq!(png(3136, 100).estimated_tokens(), 105);
+        assert_eq!(png(1500, 1000).estimated_tokens(), 54 * 36);
+        // Scaled down to 4,784 tokens at most.
+        let large = png(4000, 3000).estimated_tokens();
+        assert!((4_700..=4_784).contains(&large), "{large}");
+        // A long strip is scaled to 2,576 pixels long.
+        assert_eq!(png(3136, 100).estimated_tokens(), 92 * 3);
     }
 }

@@ -339,19 +339,24 @@ why an image can't go to a model, before a request is built: the model has no im
 the image is a URL and the model is an Anthropic, Gemini or Claude Code one (these take
 images as data, `Image::from_bytes`), or it is a GIF for Gemini.
 
-A request with an image over its provider's limits fails, and a conversation sends its
-images again with every request. `Model::image_limits()` gives a provider's limits
-(`image_fit::ImageLimits`: bytes per image, pixels a side, images and bytes of images per
-request), and `Model::sendable_image(&image)` fits an image to them: `None` when it can go
-as it is, the image scaled down (keeping its aspect) and re-encoded until it fits, or the
-reason it can't go. A PNG stays a PNG when that is small enough, other images become JPEG.
+A request with an image over its provider's limits, or of a format it doesn't take, fails,
+and a conversation sends its images again with every request. `Model::image_limits()` gives
+a provider's limits (`image_fit::ImageLimits`: bytes per image, pixels a side, a patch
+limit, images and bytes of images per request, formats), and `Model::sendable_image(&image)`
+fits an image to them: `None` when it can go as it is, or the image turned upright (its EXIF
+orientation applied), converted and scaled down (keeping its aspect) and re-encoded until it
+fits, or the reason it can't go. A lossless image stays a PNG when that is small enough, the
+rest become JPEG, and an animation its first frame. PNG, JPEG, GIF, WebP, BMP and TIFF are
+read. Decoding takes at most 256 MB, so a small file of enormous size is refused at once,
+and it runs off the async workers on a multi-threaded Tokio runtime.
+`Model::check_image(&image)` judges from the header alone whether an image can go.
 
-| Provider | Per image | Pixels a side | Images | Image data per request |
-| --- | --- | --- | --- | --- |
-| Anthropic, Claude Code | 5 MiB | 2,000 (8,000 up to 20 images) | 100 | 24 MiB of the 32 MB request |
-| OpenAI | 20 MiB | 8,000 | 500 | 40 MiB of the 50 MB request |
-| Google | 15 MiB | 8,000 | 3,000 | 15 MiB of 20 MB inline |
-| OpenRouter | as its model's maker, Anthropic's for others | | | |
+| Provider | Per image | Pixels a side | Images | Image data per request | Formats |
+| --- | --- | --- | --- | --- | --- |
+| Anthropic, Claude Code | 5 MiB | 2,000 (8,000 up to 20 images) | 100 | 24 MiB of the 32 MB request | JPEG, PNG, GIF, WebP |
+| OpenAI | 20 MiB | 65,535, and at most 30,000 squares of 32 px | 500 | 40 MiB | PNG, JPEG, WebP, GIF without animation |
+| Google | 15 MiB | 8,000 | 3,000 | 15 MiB of 20 MB inline | PNG, JPEG, WebP, HEIC, HEIF |
+| OpenRouter | as its model's maker, Anthropic's for others | | | | |
 
 ## Stop reasons and refusals
 
@@ -806,10 +811,18 @@ let total = sizes.estimated_tokens(3.2);
 
 The text sections add up to `text_bytes()`, the request's text as this crate sends it,
 before each provider's framing. `add_message` updates the sizes one message at a time, so
-a host can keep them as a conversation grows. `Image::estimated_tokens` reads an inline
-image's size from its header (`Image::dimensions`: PNG, JPEG, GIF, WebP) and counts its
-pixels over 750 after scaling it to fit 1,568 pixels on its long side and 1.15
-megapixels, Anthropic's rule. An image of unknown size counts as 1,600 tokens.
+a host can keep them as a conversation grows. An image's tokens follow the rule of the
+conversation's model (`Model::image_tokens`), from its size as its header gives it
+(`Image::dimensions`: PNG, JPEG, GIF, WebP):
+
+| Provider | Tokens of an image |
+| --- | --- |
+| Anthropic | `⌈w/28⌉ × ⌈h/28⌉` after scaling to 2,576 px and 4,784 tokens (Claude 4.7 and later) or 1,568 px and 1,568 tokens |
+| OpenAI | `⌈w/32⌉ × ⌈h/32⌉` times 1.2 after the model's own scaling, or 512 px tiles for older models |
+| Google | 258, or 258 per tile of two thirds of the shorter side |
+
+`Image::estimated_tokens` counts as for a current Claude model, and `add_message_for`
+counts by a given model's rule.
 arko_agents reports these sizes, with a bytes-per-token ratio calibrated from the
 conversation's own requests, before each request (`AgentEvent::ModelRequestStarted`).
 
