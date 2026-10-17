@@ -458,3 +458,25 @@ async fn an_anthropic_cache_refresh_shares_the_continuation_s_prefix() {
         ping_messages[shared]
     );
 }
+
+/// On the ChatGPT backend, which takes no output limit, a run waiting with
+/// calls that have no results yet isn't refreshed: its last request would
+/// have the model write its whole turn again. Nothing is sent.
+#[tokio::test]
+async fn a_paused_run_on_a_chatgpt_login_is_not_refreshed() {
+    let (mut agent, _events, _commands) = agent("http://127.0.0.1:9", LLMRetryConfig::default());
+    agent.llm_client =
+        Arc::new(ai::LLMClient::new().with_openai_chatgpt_oauth("token", None, "account"));
+    agent.task.conversation.system_message = Some("You are a test agent.".into());
+    agent.task.conversation.add_user_message("Probe it.");
+    let mut call = ai::Message::new_assistant("");
+    call.tool_calls
+        .push(super::image_tests::call("call_1", "probe"));
+    agent.task.conversation.messages.push(call);
+    match agent.refresh_prompt_cache().await {
+        Err(ArkoAgentsError::LLM(ai::Error::UnsupportedFeature(reason))) => {
+            assert!(reason.contains("takes no output limit"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}

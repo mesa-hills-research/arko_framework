@@ -27,7 +27,9 @@ impl AgentLoop {
     /// reasoning on (OpenRouter derives the thinking budget from the output
     /// cap, so a capped request would change the thinking parameters and
     /// miss the cached messages), a manual Anthropic thinking budget (the
-    /// ping could spend it), and a task that has made no request yet.
+    /// ping could spend it), a task that has made no request yet, and a task
+    /// waiting with calls on the ChatGPT backend (its last request would go
+    /// again uncapped).
     pub(crate) async fn refresh_prompt_cache(mut self) -> Result<CacheRefresh, ArkoAgentsError> {
         if self.task.conversation.system_message.is_none()
             || self.task.conversation.messages.is_empty()
@@ -74,6 +76,13 @@ impl AgentLoop {
             }
         };
         let resent = match unanswered_calls(&conversation) {
+            // Without an output limit, the last request would have the
+            // model write its whole turn again.
+            Some(_) if config.max_tokens.is_none() => {
+                return Err(unsupported(
+                    "the run waits with calls that have no results yet, so its last request would go again, and the ChatGPT backend takes no output limit to keep it short",
+                ));
+            }
             Some(turn) => {
                 conversation.messages.truncate(turn);
                 true
