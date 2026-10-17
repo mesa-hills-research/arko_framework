@@ -2544,7 +2544,8 @@ async fn completed_tool_images_survive_a_stop_before_claude_code_records_the_res
         [complete("Recovered completed image")],
     ]));
     let path = fake.workspace().join("done.png");
-    let bytes = b"\x89PNG\r\n\x1a\ncompleted-image-fixture";
+    // A PNG signature and a 16×16 size before the rest.
+    let bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10completed-image-fixture";
     std::fs::write(&path, bytes).unwrap();
     let image = arko_ai::Image::from_bytes(bytes, "image/png");
     let arko_ai::Image::Base64 { data, mime_type } = &image else {

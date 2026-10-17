@@ -1696,6 +1696,8 @@ impl ClaudeCodeRun {
                 stop: self.host_stop.or(&self.calls_stop.signal()),
                 model: self.task.agent_config.llm_config.model.clone(),
                 image_sink: self.image_sink.clone(),
+                // Claude Code holds the conversation and keeps its own count.
+                image_room: None,
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),

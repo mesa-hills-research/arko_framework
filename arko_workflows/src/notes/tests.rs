@@ -848,7 +848,8 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     };
     let first = persisted().build().unwrap();
     let worker = first.run_agent("worker", "Do it.").await.unwrap();
-    let bytes = b"\x89PNG\r\n\x1a\n not quite the pixels of a screenshot";
+    // A PNG signature and a 16×16 size, then not quite pixels.
+    let bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10 not quite pixels";
     let image = arko_ai::Image::from_bytes(bytes, "image/png");
     let arko_ai::Image::Base64 { data, .. } = &image else {
         unreachable!()

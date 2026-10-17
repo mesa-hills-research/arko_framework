@@ -34,6 +34,7 @@ name = "arko_workflows"
 crate-type = ["lib"]
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 env_logger.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

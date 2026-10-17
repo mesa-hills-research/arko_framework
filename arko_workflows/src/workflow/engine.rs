@@ -1420,27 +1420,99 @@ fn builder_invalid(error: arko_agents::ArkoAgentsError) -> WorkflowError {
     }
 }
 
-/// An error unless `config`'s model takes each of `images` (see
-/// [`arko_ai::Model::image_refusal`]).
-pub(crate) fn refuse_unsendable_images(
+/// `images` as `config`'s model can be sent them: each one over the model's
+/// limits shrunk to fit them ([`arko_ai::Model::sendable_image`]), or an
+/// error naming the one that can't be sent and why. With `held`, the
+/// conversation they join, also an error when a request would then hold
+/// more images, or more image data, than the model's provider takes
+/// ([`arko_ai::Model::image_limits`]): every later request would fail.
+pub(crate) fn sendable_images(
     agent_name: &str,
     config: &AgentConfig,
-    images: &[arko_ai::Image],
-) -> Result<(), WorkflowError> {
+    images: Vec<arko_ai::Image>,
+    held: Option<&arko_ai::Conversation>,
+) -> Result<Vec<arko_ai::Image>, WorkflowError> {
     let model = &config.llm_config.model;
-    for (index, image) in images.iter().enumerate() {
-        if let Some(reason) = model.image_refusal(image) {
-            let which = if images.len() == 1 {
-                "the image".to_string()
-            } else {
-                format!("image {}", index + 1)
-            };
+    let count = images.len();
+    let images = images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| match model.sendable_image(&image) {
+            Ok(fitted) => Ok(fitted.unwrap_or(image)),
+            Err(reason) => {
+                let which = if count == 1 {
+                    "the image".to_string()
+                } else {
+                    format!("image {}", index + 1)
+                };
+                Err(WorkflowError::BuilderInvalid(format!(
+                    "agent '{agent_name}' can't be sent {which}: {reason}"
+                )))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(conversation) = held
+        && !images.is_empty()
+    {
+        let limits = model.image_limits();
+        let (held_images, held_bytes) = image_load(conversation.messages.iter());
+        let (_, new_bytes) =
+            image_load(std::iter::once(&arko_ai::Message::new_user_with_contents(
+                images
+                    .iter()
+                    .cloned()
+                    .map(arko_ai::Content::Image)
+                    .collect(),
+            )));
+        let room = "cut the conversation back or hand it over to make room";
+        if held_images + images.len() > limits.max_images {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{agent_name}' can't be sent {which}: {reason}"
+                "agent '{agent_name}' can't be sent {}: its conversation holds {held_images} images, and model '{}' takes at most {} in a request ({room})",
+                if images.len() == 1 {
+                    "another image".to_string()
+                } else {
+                    format!("{} more images", images.len())
+                },
+                model.id,
+                limits.max_images
+            )));
+        }
+        if held_bytes + new_bytes > limits.max_request_image_bytes {
+            const MIB: f64 = 1024.0 * 1024.0;
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent '{agent_name}' can't be sent {:.1} MB more of images: its conversation holds {:.1} MB, and a request to model '{}' takes at most {:.1} MB ({room})",
+                new_bytes as f64 / MIB,
+                held_bytes as f64 / MIB,
+                model.id,
+                limits.max_request_image_bytes as f64 / MIB
             )));
         }
     }
-    Ok(())
+    Ok(images)
+}
+
+/// How many images `messages` hold (in tool results too) and how many bytes
+/// of base64 data.
+fn image_load<'a>(messages: impl Iterator<Item = &'a arko_ai::Message>) -> (usize, usize) {
+    let mut load = (0, 0);
+    for message in messages {
+        for content in &message.content {
+            let images: Vec<&arko_ai::Image> = match content {
+                arko_ai::Content::Image(image) => vec![image],
+                arko_ai::Content::ToolResult(result) => {
+                    result.images.iter().map(|image| &image.image).collect()
+                }
+                arko_ai::Content::Text(_) => Vec::new(),
+            };
+            for image in images {
+                load.0 += 1;
+                if let arko_ai::Image::Base64 { data, .. } = image {
+                    load.1 += data.len();
+                }
+            }
+        }
+    }
+    load
 }
 
 /// What a run is, for the workflow tools it gets: how deep it is (see
@@ -2825,7 +2897,7 @@ impl WorkflowEngine {
         agent_name: &str,
         prompt: &str,
         ctx: &Arc<SharedContext>,
-        options: StartOptions,
+        mut options: StartOptions,
     ) -> Result<StartedRun, WorkflowError> {
         let admission = if options.admitted {
             Ok(())
@@ -2852,7 +2924,12 @@ impl WorkflowEngine {
                 base_config,
             )
             .map_err(WorkflowError::BuilderInvalid)?;
-            refuse_unsendable_images(agent_name, base_config, &options.images)?;
+            options.images = sendable_images(
+                agent_name,
+                base_config,
+                std::mem::take(&mut options.images),
+                None,
+            )?;
             let workspace = match &options.workspace {
                 Some(workspace) => super::options::run_workspace(&ctx.workspace, workspace)?,
                 None => ctx.workspace.clone(),
@@ -3375,7 +3452,7 @@ impl WorkflowEngine {
     async fn continue_at(
         &self,
         previous: &AgentResult,
-        input: UserInput<'_>,
+        mut input: UserInput<'_>,
         ctx: &Arc<SharedContext>,
         depth: u32,
         parent: Option<arko_agents::TaskParent>,
@@ -3450,7 +3527,12 @@ impl WorkflowEngine {
                 tools: task.agent_config.tool_config.offered_tool_names().len(),
             });
         }
-        refuse_unsendable_images(agent_name, &task.agent_config, &input.images)?;
+        input.images = sendable_images(
+            agent_name,
+            &task.agent_config,
+            std::mem::take(&mut input.images),
+            Some(&task.conversation),
+        )?;
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut registry =
             self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
@@ -3872,10 +3954,11 @@ impl WorkflowEngine {
                 "a reopened run keeps its configuration and conversation: cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));
         }
-        refuse_unsendable_images(
+        let images = sendable_images(
             &previous.agent_name,
             &previous.task.agent_config,
-            &options.images,
+            options.images,
+            Some(&previous.task.conversation),
         )?;
         let current =
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
@@ -3900,7 +3983,7 @@ impl WorkflowEngine {
         let recovery = Recovery {
             parent: current.task.parent.is_some().then_some(None),
             message: Some(&message),
-            images: &options.images,
+            images: &images,
             reopen: true,
             ..Recovery::default()
         };

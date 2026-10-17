@@ -28,6 +28,9 @@ pub(super) struct RunEnvironment {
     pub model: arko_ai::Model,
     /// Receives the images calls return; see [`ToolImageSink`].
     pub image_sink: Option<Arc<dyn ToolImageSink>>,
+    /// How many more images the conversation takes before a request would
+    /// hold more than the model's provider takes; `None` for no count.
+    pub image_room: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RunEnvironment {
@@ -236,7 +239,10 @@ pub(super) async fn run_tool(
                             &output.images,
                         );
                     }
-                    output.admit_images(&environment.model);
+                    match &environment.image_room {
+                        Some(room) => output.admit_images_within(&environment.model, room),
+                        None => output.admit_images(&environment.model),
+                    }
                     if let Some(middleware) = middleware
                         && let Err(error) = middleware
                             .after(

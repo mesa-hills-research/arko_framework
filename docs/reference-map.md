@@ -220,7 +220,8 @@ Code paths are relative to the repository root. Items are listed by their shorte
 | `Model::google_gemini_3_8_flash`, `google_gemini_3_7_flash`, `google_gemini_3_6_flash`, `google_gemini_3_5_flash`, `google_gemini_3_5_flash_lite`, `google_gemini_3_1_pro`, `google_gemini_3_1_pro_customtools`, `google_gemini_3_1_flash_lite_stable`, `google_gemini_3_1_flash_lite`, `google_gemini_3_0_pro`, `google_gemini_3_0_flash` | Registered models `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3.1-flash-lite-preview`, `gemini-3-pro-preview`, `gemini-3-flash-preview`. | `arko_ai/src/model.rs` | [Models](../arko_ai/README.md#models) |
 | `Model::google_gemini_2_5_pro`, `google_gemini_2_5_flash`, `google_gemini_2_5_flash_lite`, `google_gemini_2_0_flash` | Registered models `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash` (the only Gemini model without thinking or caching). | `arko_ai/src/model.rs` | [Models](../arko_ai/README.md#models) |
 | `Model::supports_forced_tool_choice`, `supports_disabling_parallel_tool_calls`, `reports_stop_reason`, `accepts_tool_result_images` | Whether a forced tool choice is accepted with a given config; whether `parallel_tool_calls: Some(false)` is (false only for Gemini); always true; whether images go inside tool results (OpenAI, Anthropic, Gemini 3 and later, with image input). | `arko_ai/src/model.rs` | [Tool calls (arko_ai)](#tool-calls-arko_ai) |
-| `Model::image_refusal` | Why an image can't go to the model in a user message (no image input, a URL for Anthropic, Gemini or Claude Code, a GIF for Gemini), or `None`. | `arko_ai/src/model.rs` | [Tool images and Gemini 3.x (arko_ai)](#tool-images-and-gemini-3x-arko_ai) |
+| `Model::image_refusal` | Why an image can't go to the model in a user message (no image input, a URL for Anthropic, Gemini or Claude Code, a GIF for Gemini), or `None`. |
+| `Model::image_limits`, `Model::sendable_image`, `image_fit::{ImageLimits, fit_image}` | A provider's image limits (bytes per image, pixels a side, images and image bytes per request), and an image fitted to them: unchanged, scaled down and re-encoded (PNG kept when small enough, else JPEG), or the reason it can't go (unreadable data, can't shrink enough, or an `image_refusal` reason). | `arko_ai/src/model.rs` | [Tool images and Gemini 3.x (arko_ai)](#tool-images-and-gemini-3x-arko_ai) |
 | `Model::is_openai_gpt_6_astra`, `is_openai_gpt_6_sol_or_luna`, `is_openai_gpt_5_6`, `is_openai_gpt_5_5_pro`, `is_openai_gpt_5_2_pro`, `is_openai_gpt_5_pro`, `supports_openai_prompt_cache_options` | OpenAI model-id tests; `supports_openai_prompt_cache_options` is true for GPT-5.6 and GPT-6. | `arko_ai/src/model.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `Model::is_fable_5_1`, `is_mythos_5_1`, `is_fable_or_mythos_5_1`, `is_fable_5`, `is_opus_5_5`, `is_opus_5`, `is_opus_4_8`, `is_opus_4_7`, `is_opus_4_6`, `is_opus_4_5`, `is_sonnet_5_5`, `is_sonnet_5`, `is_sonnet_4_6`, `is_haiku_5_5` | Claude model-id tests (exact ids). `is_fable_or_mythos_5_1` matches either id, since every Fable 5.1 rule applies to both. | `arko_ai/src/model.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `Model::supports_anthropic_adaptive_thinking`, `defaults_anthropic_adaptive_thinking`, `always_uses_anthropic_adaptive_thinking`, `rejects_anthropic_manual_thinking`, `omits_anthropic_sampling_parameters`, `supports_anthropic_summarized_thinking_display`, `supports_anthropic_effort`, `supports_anthropic_xhigh_effort`, `supports_anthropic_max_effort`, `rejects_anthropic_forced_tool_choice`, `supports_anthropic_fast_mode`, `supports_anthropic_inference_geo`, `has_standard_anthropic_1m_context`, `had_retired_anthropic_long_context_beta`, `supports_long_context`, `supports_interleaved_thinking`, `auto_enables_interleaved_thinking` | The Claude capability rules the Anthropic provider (and, for forced tool choice, OpenRouter) checks before sending. | `arko_ai/src/model.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
@@ -530,6 +531,8 @@ A user's images go in their user message after its text, as each provider's imag
 (OpenRouter). `Model::image_refusal(image)` gives the reason an image can't go before any
 request is built: a model without image input, an image by URL for Anthropic, Gemini or
 Claude Code (which would pass the URL on as text), and a GIF for Gemini.
+`Model::sendable_image(image)` also fits an image over the provider's limits
+(`Model::image_limits`) by shrinking it, refusing only one it can't read or shrink enough.
 
 On Gemini 3 and later, content that follows tool results is folded into the message's
 last `function_result`: the other content of a tool-result message (an `ask_user`
@@ -865,7 +868,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | Item | What it is | Code | Docs |
 |---|---|---|---|
 | `Tool` (`definition`, `execute`) | The trait a tool implements; `execute` returns the result text or a `ToolError`. | `arko_agents/src/tool/mod.rs` | [Custom tools](../arko_agents/README.md#custom-tools) |
-| `Tool::execute_with_output`, `ToolOutput { text, images }`, `ToolOutput::{text, admit_images}`, `ToolImage { description, image }`, `ToolImage::{base64, decoded_len}`, `tool::MAX_TOOL_IMAGE_BYTES` | A result with images. By default it calls `execute`. The runtime omits images on text-only models and base64 images larger than 5 MiB decoded, with a notice in the text. | `arko_agents/src/tool/mod.rs` | [Custom tools](../arko_agents/README.md#custom-tools) |
+| `Tool::execute_with_output`, `ToolOutput { text, images }`, `ToolOutput::{text, admit_images, admit_images_within}`, `ToolImage { description, image }`, `ToolImage::{base64, decoded_len}`, `tool::MAX_TOOL_IMAGE_BYTES` | A result with images. By default it calls `execute`. The runtime fits each image to the model (`arko_ai::Model::sendable_image`), and leaves out, with a notice in the text, those it can't send and those past the images a request takes. `MAX_TOOL_IMAGE_BYTES` (5 MiB) is the largest image file `read_file` shows. | `arko_agents/src/tool/mod.rs` | [Custom tools](../arko_agents/README.md#custom-tools) |
 | `Tool::{uses_host_timeout, interruptible, allow_result_interception}` | Opt-outs, each `true` by default: the host time limit, being stopped mid-call, result interception. | `arko_agents/src/tool/mod.rs` | [Tools (arko_agents)](#tools-arko_agents) |
 | `Tool::{bind_runtime, reset_context, observe_context, name}` | A weak command sender for background tools; callbacks that track what reached the conversation (no-ops by default); `name` is the definition's name. | `arko_agents/src/tool/mod.rs` | [Custom tools](../arko_agents/README.md#custom-tools) |
 | `TaskContext { task_id, agent_name, initial_task_prompt, current_working_directory, tool_call_id, recovering, stop }`, `TaskContext::new(task_id, agent_name, initial_task_prompt, current_working_directory)`, `TaskContext::with_stop` | What `execute` receives about the task and the call: its runtime id (`None` outside a call), whether it runs again after its task stopped while it ran, and its stop signal. `new` leaves the call fields unset and the signal one that never fires. `#[non_exhaustive]`: outside the crate, build it with `new`. | `arko_agents/src/tool/mod.rs` | [Custom tools](../arko_agents/README.md#custom-tools) |
@@ -1070,11 +1073,14 @@ in the result text. Audio, unsupported image formats and other binary resources
 get a description. Structured content supplies the text when the server omits it,
 including results that also contain images.
 
-The runtime omits images when the model has no image input, and base64 images
-above `tool::MAX_TOOL_IMAGE_BYTES` (5 MiB decoded), with a notice for each omission. GIF images on Google are also omitted with a
-conversion hint, following its [supported formats](https://ai.google.dev/gemini-api/docs/image-understanding#supported-image-formats).
-URL images have no local size check. Provider limits on dimensions and the whole
-request still apply.
+The runtime fits each image to the model's provider (`arko_ai::Model::sendable_image`):
+one over its limits is scaled down and re-encoded. It omits, with a notice for each, the
+images a model without image input can't take, URL images where images go as data, GIF
+images on Google (with a conversion hint, following its
+[supported formats](https://ai.google.dev/gemini-api/docs/image-understanding#supported-image-formats)),
+images it can't read or shrink enough, and, in the native runtime, images past the number a
+request to the model takes (a handover or a cut back makes room). URL images have no local
+size check.
 
 The Claude Code runtime forwards base64 images as MCP image blocks. Its
 `arko_ai::claude_code::ToolOutput::with_images` also serves images from custom

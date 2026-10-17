@@ -32,6 +32,7 @@ name = "arko_agents_cli"
 test = true
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 clap.workspace = true
 dotenv.workspace = true
 env_logger.workspace = true

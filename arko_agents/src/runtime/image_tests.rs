@@ -334,7 +334,7 @@ async fn a_model_without_image_input_gets_the_tools_text_and_an_omission_note() 
     assert!(!result.is_error);
     assert!(result.images.is_empty());
     assert!(result.output.contains("Viewed fixture.png"));
-    assert!(result.output.contains("this model doesn't take images"));
+    assert!(result.output.contains("doesn't take images"));
     while let Ok(event) = events.try_recv() {
         assert!(!serde_json::to_string(&event).unwrap().contains(IMAGE_DATA));
     }
@@ -352,24 +352,42 @@ async fn a_model_without_image_input_gets_the_tools_text_and_an_omission_note() 
         )
         .await
         .unwrap();
-    assert!(text.contains("this model doesn't take images"));
+    assert!(text.contains("doesn't take images"));
     assert!(agent.task.pending_tool_images.is_empty());
 }
 
-#[test]
-fn oversized_tool_images_are_left_out_without_losing_other_images_or_text() {
-    use crate::tool::MAX_TOOL_IMAGE_BYTES;
+/// A PNG of `width` × `height` pixels.
+fn png(width: u32, height: u32) -> ai::Image {
+    let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba([40, 90, 200, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    ai::Image::from_bytes(&bytes, "image/png")
+}
 
+/// Images over the model's limits are shrunk to fit them; one that can't be
+/// read to shrink it, or that the model can't take (a URL on Anthropic), is
+/// left out with a line saying why, without losing the others or the text.
+#[test]
+fn oversized_tool_images_are_shrunk_or_left_out_without_losing_the_rest() {
     let mut output = ToolOutput {
-        text: "Two screenshots".into(),
+        text: "Four screenshots".into(),
         images: vec![
             ToolImage {
-                description: "at limit".into(),
-                image: ai::Image::from_bytes(&vec![0; MAX_TOOL_IMAGE_BYTES], "image/png"),
+                description: "small".into(),
+                image: png(20, 10),
             },
             ToolImage {
-                description: "over limit".into(),
-                image: ai::Image::from_bytes(&vec![0; MAX_TOOL_IMAGE_BYTES + 1], "image/png"),
+                description: "wide".into(),
+                image: png(3_000, 30),
+            },
+            ToolImage {
+                description: "unreadable".into(),
+                image: ai::Image::from_bytes(&vec![0; 6 * 1024 * 1024], "image/png"),
             },
             ToolImage {
                 description: "link".into(),
@@ -377,14 +395,53 @@ fn oversized_tool_images_are_left_out_without_losing_other_images_or_text() {
             },
         ],
     };
-    output.admit_images(&super::tests::test_config().llm_config.model);
-    assert_eq!(output.images.len(), 2);
-    assert_eq!(output.images[0].description, "at limit");
-    assert_eq!(output.images[1].description, "link");
-    assert!(output.text.starts_with("Two screenshots"));
-    assert!(output.text.contains("over limit, left out"));
-    assert_eq!(output.images[0].decoded_len(), Some(MAX_TOOL_IMAGE_BYTES));
-    assert_eq!(output.images[1].decoded_len(), None);
+    output.admit_images(&ai::Model::anthropic_claude_opus_5_5());
+    let kept: Vec<_> = output
+        .images
+        .iter()
+        .map(|image| (image.description.as_str(), image.image.dimensions()))
+        .collect();
+    assert_eq!(
+        kept,
+        [("small", Some((20, 10))), ("wide", Some((2_000, 20)))]
+    );
+    assert!(output.text.starts_with("Four screenshots"));
+    assert!(
+        output
+            .text
+            .contains("image unreadable, left out: its 8.0 MB are over the 5.0 MB"),
+        "{}",
+        output.text
+    );
+    assert!(
+        output
+            .text
+            .contains("image link, left out: model 'claude-opus-5-5' takes images as data")
+    );
+}
+
+/// Past the images a request takes, a tool's images are left out, saying
+/// how to make room.
+#[test]
+fn tool_images_past_the_request_count_are_left_out() {
+    let mut output = ToolOutput {
+        text: "Two screenshots".into(),
+        images: vec![
+            ToolImage::base64("first", IMAGE_DATA.into(), "image/png"),
+            ToolImage::base64("second", IMAGE_DATA.into(), "image/png"),
+        ],
+    };
+    let room = std::sync::atomic::AtomicUsize::new(1);
+    output.admit_images_within(&super::tests::test_config().llm_config.model, &room);
+    assert_eq!(output.images.len(), 1);
+    assert_eq!(output.images[0].description, "first");
+    assert!(
+        output
+            .text
+            .contains("image second, left out: the conversation holds as many images as a request to this model takes (500)"),
+        "{}",
+        output.text
+    );
 }
 
 struct ReplaceText;
@@ -557,7 +614,11 @@ fn google_gif_results_are_described_without_blocking_other_images() {
     assert_eq!(output.images.len(), 1);
     assert_eq!(output.images[0].description, "still");
     assert!(output.text.starts_with("Screenshots"));
-    assert!(output.text.contains("Google models don't take GIF images"));
+    assert!(
+        output
+            .text
+            .contains("doesn't take GIF images: convert it to PNG or JPEG")
+    );
 }
 
 /// A sink's report: the task, the call, the tool and the images.

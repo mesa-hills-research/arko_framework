@@ -363,8 +363,14 @@ impl NoteBoard {
     }
 
     /// The images of `notes` (each note's number and images), each labelled
-    /// with its note. One that can't be read is left out, with a warning.
-    fn context_images(&self, notes: &[(u64, Vec<NoteImage>)]) -> Vec<arko_agents::ContextImage> {
+    /// with its note, fitted to what `model` takes
+    /// ([`arko_ai::Model::sendable_image`]). One that can't be read or
+    /// sent is left out, with a warning.
+    fn context_images(
+        &self,
+        notes: &[(u64, Vec<NoteImage>)],
+        model: Option<&arko_ai::Model>,
+    ) -> Vec<arko_agents::ContextImage> {
         let mut images = Vec::new();
         for (seq, note_images) in notes {
             for (index, image) in note_images.iter().enumerate() {
@@ -373,10 +379,14 @@ impl NoteBoard {
                 } else {
                     format!("Image {} of note {seq}:", index + 1)
                 };
-                match self.image(image) {
+                let sendable = self.image(image).and_then(|image| match model {
+                    Some(model) => Ok(model.sendable_image(&image)?.unwrap_or(image)),
+                    None => Ok(image),
+                });
+                match sendable {
                     Ok(image) => images.push(arko_agents::ContextImage::new(label, image)),
                     Err(error) => log::warn!(
-                        "An image of note {seq} can't be read, so it isn't given: {error}"
+                        "An image of note {seq} can't be given, so it is left out: {error}"
                     ),
                 }
             }
@@ -548,7 +558,11 @@ impl NoteBoard {
         state.seen.insert(task_id, given);
         drop(state);
         // Read outside the lock: an image may come from its file.
-        text.map(|(text, seqs, images)| (text, seqs, self.context_images(&images)))
+        let model = ctx
+            .agent_configs
+            .get(agent)
+            .map(|config| &config.llm_config.model);
+        text.map(|(text, seqs, images)| (text, seqs, self.context_images(&images, model)))
     }
 
     /// Run `task` of `agent` is recovered from its task as last saved (after
@@ -702,7 +716,8 @@ impl NoteBoard {
         }
         for agent in &recipients {
             if let Some(config) = ctx.agent_configs.get(agent) {
-                crate::workflow::engine::refuse_unsendable_images(agent, config, &note.images)?;
+                // Checked for every recipient here, fitted to each when given.
+                crate::workflow::engine::sendable_images(agent, config, note.images.clone(), None)?;
             }
         }
         Ok((note, recipients))

@@ -46,7 +46,9 @@ impl Debug for ToolImage {
     }
 }
 
-/// The largest base64 image a tool result carries: 5 MiB once decoded.
+/// The largest image file `read_file` shows: 5 MiB. (The images a tool
+/// returns are fitted to the model's limits when the runtime admits them,
+/// [`ToolOutput::admit_images`].)
 pub const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 impl ToolImage {
@@ -114,46 +116,58 @@ impl ToolOutput {
         }
     }
 
-    /// Leaves out the images the model can't be sent: every image for a
-    /// model without image input, GIF images on Google, and any larger than
-    /// [`MAX_TOOL_IMAGE_BYTES`]. A line for each says so, after the text.
+    /// Fits the images to what `model` can be sent
+    /// ([`arko_ai::Model::sendable_image`]): one over the model's limits is
+    /// shrunk, and one the model can't be sent (every image for a model
+    /// without image input, a URL where images go as data, GIF on Google,
+    /// one that can't be read or shrunk enough) is left out, with a line
+    /// saying why after the text.
     pub fn admit_images(&mut self, model: &arko_ai::Model) {
+        self.admit_images_within(model, &std::sync::atomic::AtomicUsize::new(usize::MAX));
+    }
+
+    /// [`admit_images`](Self::admit_images), admitting at most `room` images
+    /// (each one admitted takes one): a request holds at most
+    /// [`ImageLimits::max_images`](arko_ai::image_fit::ImageLimits::max_images),
+    /// so the images past it are left out too, with a line saying so.
+    pub fn admit_images_within(
+        &mut self,
+        model: &arko_ai::Model,
+        room: &std::sync::atomic::AtomicUsize,
+    ) {
+        use std::sync::atomic::Ordering;
         let mut notes = Vec::new();
-        self.images.retain(|image| {
+        let images = std::mem::take(&mut self.images);
+        for mut image in images {
             let label = if image.description.is_empty() {
                 "an image".to_string()
             } else {
                 format!("image {}", image.description)
             };
-            if !model.supports_image_input {
-                notes.push(format!(
-                    "[The tool returned {label}, left out: this model doesn't take images.]"
-                ));
-                return false;
-            }
-            // Google's image MIME list excludes GIF:
-            // https://ai.google.dev/gemini-api/docs/image-understanding#supported-image-formats
-            if model.provider == arko_ai::Provider::Google
-                && matches!(&image.image, arko_ai::Image::Base64 { mime_type, .. }
-                    if mime_type.trim().eq_ignore_ascii_case("image/gif"))
-            {
-                notes.push(format!(
-                    "[The tool returned {label}, left out: Google models don't take GIF images. Convert it to PNG or JPEG.]"
-                ));
-                return false;
-            }
-            match image.decoded_len() {
-                Some(bytes) if bytes > MAX_TOOL_IMAGE_BYTES => {
-                    notes.push(format!(
-                        "[The tool returned {label}, left out: its {:.1} MB are over the {} MB limit for an image.]",
-                        bytes as f64 / (1024.0 * 1024.0),
-                        MAX_TOOL_IMAGE_BYTES / (1024 * 1024)
-                    ));
-                    false
+            match model.sendable_image(&image.image) {
+                Ok(fitted) => {
+                    if room
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_err()
+                    {
+                        notes.push(format!(
+                            "[The tool returned {label}, left out: the conversation holds as many images as a request to this model takes ({}). A handover or a cut back makes room.]",
+                            model.image_limits().max_images
+                        ));
+                        continue;
+                    }
+                    if let Some(fitted) = fitted {
+                        image.image = fitted;
+                    }
+                    self.images.push(image);
                 }
-                _ => true,
+                Err(reason) => {
+                    notes.push(format!("[The tool returned {label}, left out: {reason}.]"))
+                }
             }
-        });
+        }
         for note in notes {
             if !self.text.is_empty() {
                 self.text.push_str("\n\n");

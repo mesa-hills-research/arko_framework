@@ -221,3 +221,89 @@ async fn the_workflow_s_sink_gets_the_images_tools_return() {
     }
     assert!(formatted);
 }
+
+/// A PNG of `width` × `height` pixels, of one color.
+fn sized_png(width: u32, height: u32) -> arko_ai::Image {
+    let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba([200, 40, 40, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    arko_ai::Image::from_bytes(&bytes, "image/png")
+}
+
+/// An image over what the agent's model takes is shrunk to fit before it
+/// is sent: here wider than the 8,000 pixels a side OpenAI takes.
+#[tokio::test]
+async fn an_image_over_the_model_s_limits_is_shrunk_before_it_is_sent() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = workflow(&server, &workspace);
+    let result = workflow
+        .run_agent_with(
+            "worker",
+            "Describe this.",
+            RunOptions::new().images([sized_png(8_400, 2)]),
+        )
+        .await
+        .unwrap();
+    let content = last_user_content(&server.bodies()[0]);
+    let url = content[1]["image_url"].as_str().unwrap();
+    let data = url.strip_prefix("data:image/png;base64,").unwrap();
+    assert_eq!(png(data).dimensions(), Some((8_000, 2)));
+    assert_eq!(
+        result.task.initial_images()[0].dimensions(),
+        Some((8_000, 2))
+    );
+}
+
+/// A conversation that holds as many images, or as much image data, as a
+/// request to its model takes is sent no more: every later request would
+/// fail. The refusal says how to make room.
+#[tokio::test]
+async fn a_conversation_full_of_images_takes_no_more() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = workflow(&server, &workspace);
+    let mut claude = agent_config("Claude");
+    claude.llm_config.model = arko_ai::Model::anthropic_claude_opus_5_5();
+    let held = |images: Vec<arko_ai::Image>| {
+        let mut task =
+            arko_agents::Task::new(claude.clone(), "Look.".into(), workspace.0.clone(), None);
+        task.conversation.add_user_message_with_contents(
+            images.into_iter().map(arko_ai::Content::Image).collect(),
+        );
+        task.conversation.add_assistant_message("Seen.");
+        task.set_state(arko_agents::TaskState::Completed {
+            summary: "Seen.".into(),
+        });
+        workflow.import_agent_run("claude", task).unwrap()
+    };
+    let more = || ContinueOptions::new().images([png("eA==")]);
+
+    let full = held(vec![png("eA=="); 100]);
+    let error = workflow
+        .continue_agent_with(&full, "And this?", more())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("agent 'claude' can't be sent another image: its conversation holds 100 images, and model 'claude-opus-5-5' takes at most 100 in a request (cut the conversation back or hand it over to make room)"),
+        "{error}"
+    );
+
+    let heavy = held(vec![png(&"A".repeat(24 * 1024 * 1024))]);
+    let error = workflow
+        .continue_agent_with(&heavy, "And this?", more())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("its conversation holds 24.0 MB, and a request to model 'claude-opus-5-5' takes at most 24.0 MB"),
+        "{error}"
+    );
+    assert!(server.bodies().is_empty());
+}

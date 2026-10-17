@@ -917,10 +917,12 @@ written (set them before the task first runs, the runtime then moves them into t
 and `Task::initial_images` gives them either way), `prepare_for_resumption_from_completed_with_images` and
 `prepare_for_resumption_with_user_response_and_images` take a follow-up's or an answer's,
 and `TurnContext::images` a context update's (below). Both runtimes send them, and a
-Claude Code agent receives them as image blocks of its input. A request with an image
-the model can't take is refused before it is sent (see
+Claude Code agent receives them as image blocks of its input. A host fits a user's image to
+the model first with `arko_ai::Model::sendable_image`, which shrinks one over the provider's
+limits and says why one can't go (a workflow does this for the images it is given). The
+images a tool returns are fitted when the runtime admits them (`ToolOutput::admit_images`),
+and those past the number of images a request takes are left out, with a line saying so (see
 [Tool images and Gemini 3.x](../docs/reference-map.md#tool-images-and-gemini-3x-arko_ai)).
-`arko_ai::Model::image_refusal` tells a host beforehand whether an image can go.
 
 **A new configuration.** `Task::reconfigure(config)` continues a task under another
 configuration, between turns (pending, completed, or awaiting the user's answer) and with
