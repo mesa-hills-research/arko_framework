@@ -298,3 +298,163 @@ async fn a_refused_output_limit_is_raised_once_and_reported() {
     assert_eq!(bodies[1]["max_output_tokens"], 1_024);
     assert_eq!(bodies[1]["input"], bodies[0]["input"]);
 }
+
+/// Serves an Anthropic-style API: a streamed request gets a response that
+/// calls `complete_task`, a whole one a one-word reply read from the cache.
+/// Returns the base URL and the request bodies received.
+async fn serve_anthropic(requests: usize) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = bodies.clone();
+    tokio::spawn(async move {
+        for _ in 0..requests {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let body: Value = loop {
+                let mut chunk = [0; 16384];
+                let n = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..n]);
+                let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |value| value.trim().parse().unwrap());
+                if request.len() >= end + 4 + length {
+                    break serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                }
+            };
+            let streamed = body["stream"] == serde_json::json!(true);
+            received.lock().unwrap().push(body);
+            let reply = if streamed {
+                let events = [
+                    serde_json::json!({"type": "message_start", "message": {
+                        "id": "msg_1", "type": "message", "role": "assistant",
+                        "model": "claude-opus-5-5", "content": [], "stop_reason": null,
+                        "usage": {"input_tokens": 10, "output_tokens": 1}}}),
+                    serde_json::json!({"type": "content_block_start", "index": 0,
+                        "content_block": {"type": "tool_use", "id": "toolu_1",
+                                          "name": "complete_task", "input": {}}}),
+                    serde_json::json!({"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "input_json_delta",
+                                  "partial_json": "{\"summary\":\"done\"}"}}),
+                    serde_json::json!({"type": "content_block_stop", "index": 0}),
+                    serde_json::json!({"type": "message_delta",
+                        "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+                    serde_json::json!({"type": "message_stop"}),
+                ];
+                let stream: String = events
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "event: {}\ndata: {event}\n\n",
+                            event["type"].as_str().unwrap()
+                        )
+                    })
+                    .collect();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"
+                )
+            } else {
+                let message = serde_json::json!({
+                    "id": "msg_r", "type": "message", "role": "assistant",
+                    "model": "claude-opus-5-5", "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "max_tokens",
+                    "usage": {"input_tokens": 5, "cache_read_input_tokens": 1000,
+                              "output_tokens": 1},
+                })
+                .to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message}",
+                    message.len()
+                )
+            };
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    (url, bodies)
+}
+
+/// On Anthropic, a cache refresh sends the next request's prefix as the
+/// continuation sends it (system prompt, tools, thinking settings, the
+/// top-level cache breakpoint and the conversation), with a one-token
+/// output limit and the ping after the conversation.
+#[tokio::test]
+async fn an_anthropic_cache_refresh_shares_the_continuation_s_prefix() {
+    let (url, bodies) = serve_anthropic(2).await;
+    let agent_for = |task: Task| {
+        let client = ai::LLMClient::new().with_anthropic_client(
+            ai::providers::anthropic::AnthropicClient::new("test").with_base_url(&url),
+        );
+        let (events, receiver) = mpsc::channel(200);
+        let (sender, commands) = mpsc::channel(10);
+        let agent = AgentLoop::new(
+            task,
+            Arc::new(client),
+            Arc::new(ToolRegistry::new()),
+            events,
+            commands,
+            None,
+            true,
+            None,
+            None,
+            None,
+        );
+        (agent, receiver, sender)
+    };
+    let (agent, _events, _commands) = agent("http://127.0.0.1:9", LLMRetryConfig::default());
+    let mut task = agent.task;
+    task.agent_config.llm_config.model = ai::Model::anthropic_claude_opus_5_5();
+    task.agent_config.llm_config.generation_config.reasoning =
+        Some(ai::ReasoningConfig::AnthropicAdaptive { effort: None });
+    task.conversation.model = task.agent_config.llm_config.model.clone();
+    // A turn the task has had, under the prompt its runtime writes.
+    let (mut first, _events, _commands) = agent_for(task.clone());
+    first.write_prompts().unwrap();
+    let mut task = first.task;
+    task.conversation.add_assistant_message("Done.");
+    task.set_state(TaskState::Completed {
+        summary: "Done.".into(),
+    });
+
+    let (refresher, _events, _commands) = agent_for(task.clone());
+    let refresh = refresher.refresh_prompt_cache().await.unwrap();
+    assert_eq!(refresh.output_cap, Some(1));
+    assert_eq!(refresh.usage.cached_tokens, Some(1000));
+    task.prepare_for_resumption_from_completed("Again.".into())
+        .unwrap();
+    let (next, _events, _commands) = agent_for(task);
+    let continued = timeout(Duration::from_secs(10), next.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        continued.current_state,
+        TaskState::Completed { .. }
+    ));
+
+    let bodies = bodies.lock().unwrap().clone();
+    let (ping, next) = (&bodies[0], &bodies[1]);
+    assert_ne!(ping["stream"], serde_json::json!(true));
+    assert_eq!(ping["max_tokens"], 1);
+    for key in ["system", "tools", "thinking", "cache_control", "model"] {
+        assert_eq!(ping[key], next[key], "{key}");
+    }
+    assert!(ping["cache_control"].is_object(), "{ping}");
+    let (ping_messages, next_messages) = (
+        ping["messages"].as_array().unwrap(),
+        next["messages"].as_array().unwrap(),
+    );
+    let shared = ping_messages.len() - 1;
+    assert_eq!(ping_messages[..shared], next_messages[..shared]);
+    assert!(
+        ping_messages[shared]
+            .to_string()
+            .contains("Reply with the single word ok"),
+        "{}",
+        ping_messages[shared]
+    );
+}

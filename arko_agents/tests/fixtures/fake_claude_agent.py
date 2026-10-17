@@ -18,6 +18,11 @@ the next turn's index). Steps:
   {"retry": {"attempt": 1, ...}}         an api_retry system message with
                                          these fields
   {"sleep": 0.3}                         waits this many seconds
+  {"subagent": {"parent": "toolu_x", "text": "...", "input_tokens": 300}}
+                                         a request of a subagent Claude Code
+                                         runs (its Agent tool): its stream
+                                         events and message carry the call's
+                                         id as their parent_tool_use_id
   {"stream_fail": "..."}                 a response that fails while it
                                          streams: its message_start and this
                                          text as a content_block_delta, and
@@ -390,6 +395,25 @@ def turn(text, message_uuid=None):
         if "retry" in step:
             send(dict({"type": "system", "subtype": "api_retry", "session_id": SESSION},
                       **step["retry"]))
+            continue
+        if "subagent" in step:
+            sub = step["subagent"]
+            parent, model = sub["parent"], sub.get("model", "claude-haiku-4-5")
+            state["message"] += 1
+            message_id = "msg_%d" % state["message"]
+            if "--include-partial-messages" in ARGS:
+                send({"type": "stream_event", "parent_tool_use_id": parent, "session_id": SESSION,
+                      "event": {"type": "message_start", "message": {
+                          "id": message_id, "model": model, "usage": usage(sub, 1)}}})
+            send({"type": "assistant", "parent_tool_use_id": parent, "session_id": SESSION,
+                  "uuid": str(uuid.uuid4()),
+                  "message": {"id": message_id, "role": "assistant", "model": model,
+                              "content": [{"type": "text", "text": sub["text"]}],
+                              "usage": usage(sub, 1)}})
+            if "--include-partial-messages" in ARGS:
+                send({"type": "stream_event", "parent_tool_use_id": parent, "session_id": SESSION,
+                      "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                                "usage": usage(sub, 5)}})
             continue
         if "sleep" in step:
             time.sleep(step["sleep"])

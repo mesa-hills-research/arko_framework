@@ -3341,7 +3341,6 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Records a thread's pending usage.
     /// A request's usage, priced for `model`, as Claude Code reports it
     /// (Anthropic's exclusive input counts).
     fn usage_info(&self, usage: &Value, model: &ai::Model) -> ai::UsageInfo {
@@ -3444,6 +3443,7 @@ impl ClaudeCodeRun {
         Ok(self.usage_info(&result.raw["usage"], &model))
     }
 
+    /// Records a thread's pending usage.
     async fn flush_thread(&mut self, thread: &Option<String>) -> Result<(), ArkoAgentsError> {
         let Some(pending) = self.pending_usage.remove(thread) else {
             return Ok(());

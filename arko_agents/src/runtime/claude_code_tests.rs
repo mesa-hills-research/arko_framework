@@ -766,6 +766,118 @@ async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
     )));
 }
 
+/// Claude Code sends a response as one assistant message per block, each
+/// with the response's id: its thinking, its text, then its call. Streamed,
+/// each block's text comes once, as it streams, and the complete messages
+/// don't repeat it. The conversation records each block's message: the
+/// text, then the call.
+#[tokio::test]
+async fn a_response_streamed_block_by_block_comes_once() {
+    let fake = Fake::new(json!([[
+        {"thinking": "Let me look.", "stream": true, "closes": false},
+        {"text": "Checking the files.", "stream": true, "continues": true, "closes": false},
+        {"tool": "Grep", "input": {"pattern": "todo"}, "continues": true},
+        complete("Found none"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let chunks = |reasoning: bool| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ReasoningChunk(chunk) if reasoning => Some(chunk.clone()),
+                AgentEvent::AssistantResponseChunk(chunk) if !reasoning => Some(chunk.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(chunks(true), ["Let me ", "look."]);
+    assert_eq!(chunks(false), ["Checking the ", "files."]);
+    let at = task
+        .conversation
+        .messages
+        .iter()
+        .position(|message| message.role == arko_ai::Role::Assistant)
+        .unwrap();
+    let (reply, call) = (
+        &task.conversation.messages[at],
+        &task.conversation.messages[at + 1],
+    );
+    let text: String = reply
+        .content
+        .iter()
+        .filter_map(arko_ai::Content::as_text)
+        .collect();
+    assert_eq!(text, "Checking the files.");
+    assert_eq!(call.role, arko_ai::Role::Assistant);
+    assert_eq!(call.tool_calls[0].name, "Grep");
+}
+
+/// A subagent Claude Code runs (its `Agent` tool) makes requests of its
+/// own: each is reported with the call that started it and no sizes (its
+/// conversation isn't the task's), its usage is marked as the subagent's
+/// and compared with that subagent's previous call only, and its messages
+/// stay out of the task's conversation.
+#[tokio::test]
+async fn a_subagent_s_requests_are_reported_as_its_own() {
+    let fake = Fake::new(json!([[
+        {"subagent": {"parent": "toolu_agent", "text": "Looked around.", "input_tokens": 300}},
+        {"subagent": {"parent": "toolu_agent", "text": "Found it.", "input_tokens": 450}},
+        {"text": "All done.", "input_tokens": 1000},
+    ]]));
+    let task = Task::new(chat_config(&fake), "Look.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted {
+                subagent, sizes, ..
+            } => Some((subagent.clone(), sizes.is_some())),
+            _ => None,
+        })
+        .collect();
+    let agent = Some("toolu_agent".to_string());
+    assert_eq!(
+        started,
+        [(agent.clone(), false), (agent.clone(), false), (None, true)]
+    );
+    let calls: Vec<_> = task
+        .model_call_usage_history
+        .iter()
+        .map(|call| {
+            (
+                call.subagent.clone(),
+                call.input_tokens,
+                call.input_delta_from_previous_call,
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            (agent.clone(), 300, None),
+            (agent, 450, Some(150)),
+            (None, 1000, None),
+        ]
+    );
+    let texts = texts(&task);
+    assert!(
+        !texts.iter().any(|text| text.contains("Looked around")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("All done.")),
+        "{texts:?}"
+    );
+}
+
 /// A response that fails while it streams is retried by Claude Code: the
 /// host is told to drop what it streamed before the retry is reported, and
 /// the retry streams anew. Only the full reply is kept.

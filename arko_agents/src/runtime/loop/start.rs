@@ -104,7 +104,7 @@ impl AgentLoop {
 
     /// Writes the system prompt and the task prompt, unless the
     /// conversation has them already.
-    fn write_prompts(&mut self) -> Result<(), ArkoAgentsError> {
+    pub(super) fn write_prompts(&mut self) -> Result<(), ArkoAgentsError> {
         if self.task.conversation.system_message.is_none() {
             let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();
             for name in &self.task.agent_config.tool_config.available_tool_names {
