@@ -131,7 +131,19 @@ impl AgentLoop {
         {
             return Ok(());
         }
-        let content = self.task.pending_context_injections.join("\n\n");
+        let mut content = self.task.pending_context_injections.join("\n\n");
+        // Its images as the model can be sent them, within what a request
+        // takes: the others are left out, with a line saying why.
+        let images = std::mem::take(&mut self.task.pending_context_images);
+        let (images, left_out) = crate::task::admit_context_images(
+            &self.task.conversation.model,
+            &self.task.conversation.messages,
+            images,
+        );
+        for line in left_out {
+            content.push_str("\n\n");
+            content.push_str(&line);
+        }
         let prompt_builder = self.prompts();
         let next_message_number = self.task.user_message_count + 1;
         // The message just before this one (tool results, say) already
@@ -144,7 +156,6 @@ impl AgentLoop {
             next_message_number,
             !details_sent,
         )?;
-        let images = std::mem::take(&mut self.task.pending_context_images);
         self.task
             .conversation
             .add_user_message_with_contents(crate::task::with_context_images(message, images));

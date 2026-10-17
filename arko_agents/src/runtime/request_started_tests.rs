@@ -134,7 +134,8 @@ async fn the_ratio_leaves_the_images_out() {
         std::env::temp_dir(),
         None,
     );
-    // A PNG header of 1,500 × 750 pixels: 1,500 estimated tokens.
+    // A PNG header of 1,500 × 750 pixels: 47 × 24 patches of 32 pixels,
+    // times 1.2, for the test's OpenAI model.
     let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     png.extend(1_500u32.to_be_bytes());
     png.extend(750u32.to_be_bytes());
@@ -173,9 +174,9 @@ async fn the_ratio_leaves_the_images_out() {
         })
         .collect();
     let (first, _) = started[0];
-    assert_eq!(first.image_tokens, 1_500);
+    assert_eq!(first.image_tokens, 1_354);
     assert_eq!(
         Some(started[1].1),
-        result_budget::calibrated_bytes_per_token(first.text_bytes(), 2_500 - 1_500)
+        result_budget::calibrated_bytes_per_token(first.text_bytes(), 2_500 - 1_354)
     );
 }

@@ -62,20 +62,9 @@ impl AgentLoop {
             stop: self.host_stop.or(&self.calls_stop.signal()),
             model: self.task.conversation.model.clone(),
             image_sink: self.image_sink.clone(),
-            image_room: Some(Arc::new(std::sync::atomic::AtomicUsize::new(
-                self.task
-                    .conversation
-                    .model
-                    .image_limits()
-                    .max_images
-                    .saturating_sub(
-                        self.task
-                            .conversation
-                            .messages
-                            .iter()
-                            .map(ai::Message::image_count)
-                            .sum(),
-                    ),
+            image_room: Some(Arc::new(crate::tool::ImageRoom::left(
+                &self.task.conversation.model,
+                &self.task.conversation.messages,
             ))),
         })
     }

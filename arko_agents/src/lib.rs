@@ -55,7 +55,7 @@ pub use task::{
     RunningToolCall, Task, TaskParent, TaskState, UserTurn, UserTurnKind,
 };
 pub use tool::{
-    InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
+    ImageRoom, InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
     ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
     ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput,
     ToolParameterDefinition, ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor,

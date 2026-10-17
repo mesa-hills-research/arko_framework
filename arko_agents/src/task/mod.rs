@@ -594,6 +594,51 @@ pub(crate) fn with_images(
 }
 
 /// A context update's content: `text`, then each image after its label.
+/// `images` of a context update, as `model` can be sent them in a
+/// conversation holding `held`: each fitted ([`arko_ai::Model::sendable_image`]),
+/// within the images and image data a request takes
+/// ([`ImageRoom`](crate::tool::ImageRoom)). Those it can't take are left out,
+/// with a line each saying why.
+pub(crate) fn admit_context_images(
+    model: &arko_ai::Model,
+    held: &[arko_ai::Message],
+    images: Vec<crate::runtime::ContextImage>,
+) -> (Vec<crate::runtime::ContextImage>, Vec<String>) {
+    if images.is_empty() {
+        return (images, Vec::new());
+    }
+    let room = crate::tool::ImageRoom::left(model, held);
+    let mut admitted = Vec::new();
+    let mut left_out = Vec::new();
+    for mut image in images {
+        let label = image.label.trim_end_matches(':').to_string();
+        let fitted = model.sendable_image(&image.image).and_then(|fitted| {
+            if let Some(fitted) = fitted {
+                image.image = fitted;
+            }
+            let bytes = match &image.image {
+                arko_ai::Image::Base64 { data, .. } => data.len(),
+                arko_ai::Image::Url(_) => 0,
+            };
+            room.take(bytes).map_err(|full| match full {
+                crate::tool::Full::Images => {
+                    "the conversation holds as many images as a request to this model takes"
+                        .to_string()
+                }
+                crate::tool::Full::Bytes => {
+                    "the conversation holds as much image data as a request to this model takes"
+                        .to_string()
+                }
+            })
+        });
+        match fitted {
+            Ok(()) => admitted.push(image),
+            Err(reason) => left_out.push(format!("({label}: left out, {reason}.)")),
+        }
+    }
+    (admitted, left_out)
+}
+
 pub(crate) fn with_context_images(
     text: impl Into<String>,
     images: impl IntoIterator<Item = crate::runtime::ContextImage>,

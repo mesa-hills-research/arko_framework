@@ -420,8 +420,8 @@ fn oversized_tool_images_are_shrunk_or_left_out_without_losing_the_rest() {
     );
 }
 
-/// Past the images a request takes, a tool's images are left out, saying
-/// how to make room.
+/// Past the images, or the image data, a request takes, a tool's images are
+/// left out, saying how to make room.
 #[test]
 fn tool_images_past_the_request_count_are_left_out() {
     let mut output = ToolOutput {
@@ -431,7 +431,7 @@ fn tool_images_past_the_request_count_are_left_out() {
             ToolImage::base64("second", IMAGE_DATA.into(), "image/png"),
         ],
     };
-    let room = std::sync::atomic::AtomicUsize::new(1);
+    let room = crate::tool::ImageRoom::new(1, usize::MAX);
     output.admit_images_within(&super::tests::test_config().llm_config.model, &room);
     assert_eq!(output.images.len(), 1);
     assert_eq!(output.images[0].description, "first");
@@ -439,6 +439,25 @@ fn tool_images_past_the_request_count_are_left_out() {
         output
             .text
             .contains("image second, left out: the conversation holds as many images as a request to this model takes (500)"),
+        "{}",
+        output.text
+    );
+
+    // And past the image data a request takes: the bytes count too.
+    let mut output = ToolOutput {
+        text: "Two screenshots".into(),
+        images: vec![
+            ToolImage::base64("first", IMAGE_DATA.into(), "image/png"),
+            ToolImage::base64("second", IMAGE_DATA.into(), "image/png"),
+        ],
+    };
+    let room = crate::tool::ImageRoom::new(10, IMAGE_DATA.len() + 5);
+    output.admit_images_within(&super::tests::test_config().llm_config.model, &room);
+    assert_eq!(output.images.len(), 1);
+    assert!(
+        output
+            .text
+            .contains("image second, left out: the conversation holds as much image data as a request to this model takes (40 MB)"),
         "{}",
         output.text
     );

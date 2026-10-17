@@ -132,3 +132,42 @@ fn a_task_s_images_are_saved_with_it() {
         [ContextImage::new("Image 1:", pixels())]
     );
 }
+
+/// A context update's image the conversation has no more room for (it
+/// holds as many images as a request to the model takes) is left out, the
+/// update's text saying so in its place.
+#[tokio::test]
+async fn a_context_update_s_image_past_the_request_s_room_is_left_out() {
+    let (mut agent, mut events, _commands) = chat_agent();
+    let full = agent.task.conversation.model.image_limits().max_images;
+    agent
+        .task
+        .conversation
+        .add_user_message_with_contents(vec![ai::Content::Image(pixels()); full]);
+    agent
+        .task
+        .conversation
+        .add_assistant_message("Seen them all.");
+    agent.turn_context = Some(Arc::new(Once(std::sync::Mutex::new(Some(TurnContext {
+        content: "A new note on your task.".into(),
+        ids: vec!["note:3".into()],
+        images: vec![ContextImage::new("The image of note 3:", pixels())],
+    })))));
+    push(&mut agent, &["Noted."]);
+    let (task, _) = run(agent, &mut events).await;
+
+    let update = task
+        .conversation
+        .messages
+        .iter()
+        .find(|message| message_text(message).contains("A new note on your task."))
+        .unwrap();
+    assert!(images(update).is_empty());
+    assert!(
+        message_text(update).contains(
+            "(The image of note 3: left out, the conversation holds as many images as a request to this model takes.)"
+        ),
+        "{}",
+        message_text(update)
+    );
+}

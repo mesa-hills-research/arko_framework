@@ -30,7 +30,7 @@ pub(super) struct RunEnvironment {
     pub image_sink: Option<Arc<dyn ToolImageSink>>,
     /// How many more images the conversation takes before a request would
     /// hold more than the model's provider takes; `None` for no count.
-    pub image_room: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    pub image_room: Option<Arc<crate::tool::ImageRoom>>,
 }
 
 impl RunEnvironment {

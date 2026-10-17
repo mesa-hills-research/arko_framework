@@ -123,19 +123,18 @@ impl ToolOutput {
     /// one that can't be read or shrunk enough) is left out, with a line
     /// saying why after the text.
     pub fn admit_images(&mut self, model: &arko_ai::Model) {
-        self.admit_images_within(model, &std::sync::atomic::AtomicUsize::new(usize::MAX));
+        self.admit_images_within(model, &ImageRoom::unlimited());
     }
 
-    /// [`admit_images`](Self::admit_images), admitting at most `room` images
-    /// (each one admitted takes one): a request holds at most
-    /// [`ImageLimits::max_images`](arko_ai::image_fit::ImageLimits::max_images),
-    /// so the images past it are left out too, with a line saying so.
-    pub fn admit_images_within(
-        &mut self,
-        model: &arko_ai::Model,
-        room: &std::sync::atomic::AtomicUsize,
-    ) {
-        use std::sync::atomic::Ordering;
+    /// [`admit_images`](Self::admit_images), admitting only the images
+    /// `room` has room for (each one admitted takes its place and its bytes
+    /// from it): a request holds at most
+    /// [`ImageLimits::max_images`](arko_ai::image_fit::ImageLimits::max_images)
+    /// images and
+    /// [`max_request_image_bytes`](arko_ai::image_fit::ImageLimits::max_request_image_bytes)
+    /// of them, so the images past it are left out too, with a line saying
+    /// so.
+    pub fn admit_images_within(&mut self, model: &arko_ai::Model, room: &ImageRoom) {
         let mut notes = Vec::new();
         let images = std::mem::take(&mut self.images);
         for mut image in images {
@@ -146,20 +145,26 @@ impl ToolOutput {
             };
             match model.sendable_image(&image.image) {
                 Ok(fitted) => {
-                    if room
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                            left.checked_sub(1)
-                        })
-                        .is_err()
-                    {
-                        notes.push(format!(
-                            "[The tool returned {label}, left out: the conversation holds as many images as a request to this model takes ({}). A handover or a cut back makes room.]",
-                            model.image_limits().max_images
-                        ));
-                        continue;
-                    }
                     if let Some(fitted) = fitted {
                         image.image = fitted;
+                    }
+                    let bytes = match &image.image {
+                        arko_ai::Image::Base64 { data, .. } => data.len(),
+                        arko_ai::Image::Url(_) => 0,
+                    };
+                    if let Err(full) = room.take(bytes) {
+                        let limits = model.image_limits();
+                        notes.push(match full {
+                            Full::Images => format!(
+                                "[The tool returned {label}, left out: the conversation holds as many images as a request to this model takes ({}). A handover or a cut back makes room.]",
+                                limits.max_images
+                            ),
+                            Full::Bytes => format!(
+                                "[The tool returned {label}, left out: the conversation holds as much image data as a request to this model takes ({} MB). A handover or a cut back makes room.]",
+                                limits.max_request_image_bytes / (1024 * 1024)
+                            ),
+                        });
+                        continue;
                     }
                     self.images.push(image);
                 }
@@ -174,6 +179,82 @@ impl ToolOutput {
             }
             self.text.push_str(&note);
         }
+    }
+}
+
+/// What a conversation still takes of images in a request: how many more,
+/// and how many more bytes of base64 data (see
+/// [`ToolOutput::admit_images_within`]). Shared by the calls of a turn, so
+/// their images together stay within it.
+#[derive(Debug)]
+pub struct ImageRoom {
+    images: std::sync::atomic::AtomicUsize,
+    bytes: std::sync::atomic::AtomicUsize,
+}
+
+/// What an [`ImageRoom`] has no more room for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    Images,
+    Bytes,
+}
+
+impl ImageRoom {
+    /// Room for `images` more images, of `bytes` more bytes in all.
+    pub fn new(images: usize, bytes: usize) -> Self {
+        Self {
+            images: images.into(),
+            bytes: bytes.into(),
+        }
+    }
+
+    /// Room for any number of images.
+    pub fn unlimited() -> Self {
+        Self::new(usize::MAX, usize::MAX)
+    }
+
+    /// The room left for `model` in a conversation holding `messages`.
+    pub fn left(model: &arko_ai::Model, messages: &[arko_ai::Message]) -> Self {
+        let limits = model.image_limits();
+        let (mut images, mut bytes) = (0, 0);
+        for message in messages {
+            for content in &message.content {
+                let held: Vec<&arko_ai::Image> = match content {
+                    arko_ai::Content::Image(image) => vec![image],
+                    arko_ai::Content::ToolResult(result) => {
+                        result.images.iter().map(|image| &image.image).collect()
+                    }
+                    arko_ai::Content::Text(_) => Vec::new(),
+                };
+                for image in held {
+                    images += 1;
+                    if let arko_ai::Image::Base64 { data, .. } = image {
+                        bytes += data.len();
+                    }
+                }
+            }
+        }
+        Self::new(
+            limits.max_images.saturating_sub(images),
+            limits.max_request_image_bytes.saturating_sub(bytes),
+        )
+    }
+
+    /// Takes room for one image of `bytes` bytes, or says what is full.
+    pub fn take(&self, bytes: usize) -> Result<(), Full> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.images
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .map_err(|_| Full::Images)?;
+        if self
+            .bytes
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(bytes))
+            .is_err()
+        {
+            self.images.fetch_add(1, SeqCst);
+            return Err(Full::Bytes);
+        }
+        Ok(())
     }
 }
 

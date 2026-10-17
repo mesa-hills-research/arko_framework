@@ -23,7 +23,8 @@ impl Model {
     ///   per tile of about two thirds of its shorter side.
     ///
     /// An image whose size can't be read (a URL, a format whose header isn't
-    /// read) counts as the model's largest, or 1,600.
+    /// read) counts as an Anthropic model's limit, as 2,500 patches on
+    /// OpenAI's patch-based models, or as 1,600.
     pub fn image_tokens(&self, image: &Image) -> usize {
         let size = image.dimensions().filter(|(w, h)| *w > 0 && *h > 0);
         let (provider, id) = match (self.provider.clone(), self.id.split_once('/')) {
