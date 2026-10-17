@@ -9,7 +9,7 @@ through the agent runtime's context channel.
 ## Registering the tools
 
 Share one `TerminalManager` across the four tools. The manager's directory must
-belong to this host: the manager takes an exclusive lock on it and keeps each
+belong to this host, because the manager takes an exclusive lock on it and keeps each
 job's artifacts in a per-job subdirectory.
 
 ```rust,ignore
@@ -33,7 +33,7 @@ for tool in TerminalTool::all(manager.clone()) {
 `AgentRuntime::run_task` binds the tools the agent is offered to the task's
 context channel through `Tool::bind_runtime`. Custom hosts call
 `manager.bind_runtime(task_id, sender.downgrade())` themselves. Jobs belong to
-the task that started them; another task cannot inspect, answer, or cancel them
+the task that started them. Another task cannot inspect, answer, or cancel them
 through these tools. The runtime's approval and middleware path applies to
 terminal tools as to any other tool, and their results bypass tool-result
 distillers so output reaches the agent unchanged. The agent's host-side tool time
@@ -42,9 +42,9 @@ and a wait ends after at most 30 seconds), unless a per-tool setting gives one.
 
 | Tool | Behavior |
 | --- | --- |
-| `terminal_start` | Run `command` in the task's working directory and return a job ID immediately. `terminal` selects PTY or pipes; `detect_prompts` toggles inferred input notices; `timeout_ms` sets an execution deadline. |
+| `terminal_start` | Run `command` in the task's working directory and return a job ID immediately. `terminal` selects PTY or pipes. `detect_prompts` toggles inferred input notices. `timeout_ms` sets an execution deadline. |
 | `terminal_status` | Read the job state and a bounded output window, optionally starting at `after_output`. |
-| `terminal_input` | Deliver `text`, citing the latest `revision`. For an ordinary line prompt send `\n` on Unix and in pipe mode, or `\r` in a Windows PTY; for a raw key send the key alone. A program request receives a JSON reply carrying its request ID. |
+| `terminal_input` | Deliver `text`, citing the latest `revision`. For an ordinary line prompt send `\n` on Unix and in pipe mode, or `\r` in a Windows PTY. For a raw key send the key alone. A program request receives a JSON reply carrying its request ID. |
 | `terminal_control` | `list`, `wait`, `cancel`, or `forget`. A wait ends after at most 30 seconds and does not stop the job. `forget` removes a finished job from the catalog and keeps its artifacts. |
 
 Integer parameters are passed as strings in both native and text-based tool
@@ -59,7 +59,7 @@ turn waits with its task (`Task::pending_context_injections`) for the next turn.
 
 A host that runs a command to completion itself, such as a shell tool, can hand
 the command to the agent while it runs. `StartOptions { held: true, .. }` starts
-a held job: it sends no terminal updates and `terminal_control list` leaves it
+a held job. It sends no terminal updates and `terminal_control list` leaves it
 out, while the host reads it with `status` and `wait` as usual.
 `TerminalManager::release(owner, job_id)` moves it to the background. From then
 on it is listed, and its updates go to its owner, starting with an event it
@@ -80,7 +80,7 @@ host that wraps the command it runs.
 `TerminalManager::close(known)` readies the manager for the host's exit. If a
 job runs in the background that isn't in `known` (the jobs the host's user
 agreed to stop), it stays open and returns the jobs running. Otherwise it
-closes: no job starts and none moves to the background (`release` fails), so
+closes, so no job starts and none moves to the background (`release` fails), so
 `shutdown` stops no background job the user didn't know of. The check and the
 closing are one step under the jobs' lock, so a job that moves to the
 background at the same moment is either listed or refused.
@@ -99,7 +99,7 @@ background at the same moment is either listed or refused.
 | Shell (`shell`, `shell_args`) | `/bin/sh -c` on Unix, `cmd.exe /D /S /C` on Windows |
 | Prompt rules (`prompt_rules`) | Y/N, password/passphrase, and "press a key" prompts |
 | Quiet environment for PTY jobs (`quiet_terminal_environment`) | On |
-| Command guard (`command_guard`) | On: drastic commands are refused (see [Command guard](#command-guard)) |
+| Command guard (`command_guard`) | On, so drastic commands are refused (see [Command guard](#command-guard)) |
 
 PTY jobs run with the host's environment plus `TERM=dumb`, `NO_COLOR=1`,
 `PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to a UTF-8
@@ -107,12 +107,12 @@ locale, `C.UTF-8` (`en_US.UTF-8` on macOS, which may lack `C.UTF-8`)
 (`QUIET_TERMINAL_ENVIRONMENT`), on every platform. Programs that see a
 terminal then print plain text instead of colours, progress redraws, and pagers,
 which would otherwise fill the output window. Full-screen programs such as
-editors, `top`, and `less` refuse to run or degrade under `TERM=dumb`; set
+editors, `top`, and `less` refuse to run or degrade under `TERM=dumb`. Set
 `quiet_terminal_environment: false` to give PTY jobs the host's environment
 unchanged. Pipe jobs always get it unchanged.
 
 Prompt rules are named regular expressions. The number of jobs is not limited,
-running or finished. Jobs run with the host process's permissions; the terminal
+running or finished. Jobs run with the host process's permissions. The terminal
 tools do not provide a filesystem or network sandbox.
 
 ## Command guard
@@ -120,20 +120,20 @@ tools do not provide a filesystem or network sandbox.
 `TerminalConfig::command_guard` refuses commands that would delete, move,
 overwrite, or reformat something by accident. It checks `terminal_start`
 commands, and `terminal_input` text too, since that can be a command typed into
-a shell. A refused command starts no job; the tool returns an error that names the
+a shell. A refused command starts no job. The tool returns an error that names the
 path and why, so the agent can correct the command.
 
 | Target | Default | Setting that allows it |
 | --- | --- | --- |
 | The working directory and everything below it, and the inside of temporary directories | Allowed | — |
 | Other paths, such as `~/Documents` or a sibling repository | Refused | `allow_outside_workspace: true`, or the path (and what is below it) in `allowed_paths` |
-| Protected paths: the filesystem root, drive roots and network-share roots, the home directory, its parents and other users' home directories, top-level directories (`/usr`, `/opt`, `D:\data`), system directories (`/etc`, `/var`, `/System`, `C:\Windows`, `C:\Program Files`), mounted volumes (`/Volumes/*`, `/mnt/*`, `/media/*`), and devices | Refused | Only `dangerously_allow_all_commands: true`, which turns the guard off |
+| Protected paths, such as the filesystem root, drive roots and network-share roots, the home directory, its parents and other users' home directories, top-level directories (`/usr`, `/opt`, `D:\data`), system directories (`/etc`, `/var`, `/System`, `C:\Windows`, `C:\Program Files`), mounted volumes (`/Volumes/*`, `/mnt/*`, `/media/*`), and devices | Refused | Only `dangerously_allow_all_commands: true`, which turns the guard off |
 
 The guard reads the command in the shell's language, chosen from `shell`
-(`ShellDialect::from_shell`: POSIX shells, `cmd.exe`, or PowerShell). It follows
+(`ShellDialect::from_shell`, for POSIX shells, `cmd.exe`, or PowerShell). It follows
 what the shell will do rather than matching command names:
 
-- It finds the paths a command acts on: `rm`, `rmdir`, `shred`, `find -delete` and
+- It finds the paths a command acts on, for `rm`, `rmdir`, `shred`, `find -delete` and
   `-exec rm`, `git clean -f`, `rsync --delete`, `mv` sources, `truncate`,
   `dd of=`, `tee`, recursive `chmod`/`chown`, disk tools (`mkfs`, `wipefs`, `fdisk`,
   `diskutil erase…`), `>` redirections, and on Windows `rd`, `del`, `move`,
@@ -145,11 +145,11 @@ what the shell will do rather than matching command names:
   `..`, and wildcards. An unset variable expands to nothing, as in the shell, so
   `rm -rf "$OUT"/*` with `OUT` unset is refused as a delete of `/*`. `${OUT:?}`
   makes the shell stop instead, and the guard allows it. A `cd` or assignment in
-  a POSIX subshell lasts only there: in `( … )`, in a background list (`… &`),
+  a POSIX subshell lasts only there, in `( … )`, in a background list (`… &`),
   and in a pipeline's member other than the last, be it a command, a subshell, a
   `{ … }` group or a loop. One in a pipeline's last member leaves the directory
-  or variable only known when the command runs: bash runs that member in a
-  subshell, zsh in the shell itself. A `{ … }` group, loop or `if` run in the
+  or variable only known when the command runs, because bash runs that member in a
+  subshell and zsh in the shell itself. A `{ … }` group, loop or `if` run in the
   shell itself keeps its `cd`.
 - It follows wrappers to the command they run (`sudo` and `env` with their
   `NAME=value` assignments, `nice`, `timeout`, `setsid`, `flock`, `taskset`,
@@ -164,7 +164,7 @@ what the shell will do rather than matching command names:
   may set) counts as outside the working directory. If that value could be empty
   and the rest of the path starts at the root, the root path is checked as well.
 
-It guards against accidents, not against a determined agent: a script, Makefile,
+It guards against accidents, not against a determined agent. A script, Makefile,
 or test the command runs is not inspected, and neither is text a command decodes
 and pipes to a shell. Harmless commands are not refused because of what they
 print, so `echo "rm -rf /"` and a heredoc containing it run.
@@ -183,7 +183,7 @@ turn outside access on and off during a session. It applies from the next
 `allows_outside_workspace()` reads the current value.
 
 `CommandGuard::check(command, dialect, working_directory)` runs the same check
-for other tools that run shell commands; the `deepcoder` example's `run_shell`
+for other tools that run shell commands. The `deepcoder` example's `run_shell`
 uses it, with a `--dangerously-allow-all-commands` flag.
 
 ### Command rules
@@ -208,69 +208,68 @@ config.command_guard.rules = vec![
 ];
 ```
 
-- **Patterns.** A pattern is words separated by spaces. The first is the
+- A pattern is words separated by spaces. The first is the
   program, compared with the base name of the command's program, ignoring case
   and `.exe` (`/usr/bin/git` and `GIT.EXE` are `git`). Each other word matches
-  one argument, in order: `*` alone matches any number of arguments, none
-  included; `*` inside a word matches any text in that argument (`--output*`
-  matches `--output=log.txt`); any other word matches itself exactly, after the
+  one argument, in order. `*` alone matches any number of arguments, none
+  included. `*` inside a word matches any text in that argument (`--output*`
+  matches `--output=log.txt`). Any other word matches itself exactly, after the
   shell's quoting is removed. A pattern matches the whole command, so `git log`
   matches only `git log` with no arguments, and `git * --output*` only a command
   whose last argument starts with `--output`. Variables the guard can resolve
-  are resolved, and an unquoted one splits into words as the shell splits it;
-  an argument only known when the command runs (`$(…)` output) matches only `*`.
-- **git.** Before matching, git's global options `-C <dir>`, `--no-pager`, `-P`
+  are resolved, and an unquoted one splits into words as the shell splits it.
+  An argument only known when the command runs (`$(…)` output) matches only `*`.
+- Before matching, git's global options `-C <dir>`, `--no-pager`, `-P`
   and `--no-optional-locks` are skipped, so `git log *` matches
   `git -C repo --no-pager log`. Its other global options (`-c`, `--git-dir`,
   `--work-tree`, …) stay, so `git log *` doesn't match `git -c core.pager=… log`.
-- **Decision.** A command that a `Deny` rule matches is refused. Otherwise, if
-  its program has `Allow` rules, it runs only if one of them matches; if not,
+- A command that a `Deny` rule matches is refused. Otherwise, if
+  its program has `Allow` rules, it runs only if one of them matches. If not,
   the rules allow it. The path checks apply either way.
-- **`within`.** A rule with `within` applies only to a command run in that
+- A rule with `within` applies only to a command run in that
   directory or below it, following `cd` and git's `-C` in the same command line
-  (the guard checks one line at a time, from the job's working directory; a
+  (the guard checks one line at a time, from the job's working directory, and a
   Claude Code agent's `Bash` calls each start there too, since arko starts the
   CLI with `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`). A `cd` in a subshell
   lasts only there, so after `(cd scratch && cargo test); git commit -m x` the
   commit runs in the working directory. A relative `within` is relative to the
   job's working directory. A command whose directory isn't known
-  is never within one: after `cd` to a value only known when it runs, with
+  is never within one, as after `cd` to a value only known when it runs, with
   `env -C` or `unshare -w`, or for git with `--git-dir`, `--work-tree`, or one
   of `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
   `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` set in the
   environment or the command line (also through `env`, `sudo` or `strace -E`),
   whatever `-C` follows (git then works on that repository, work tree, index or
   object store). An `Allow` rule
-  with `within` still puts its program on an allow-list everywhere: with the
+  with `within` still puts its program on an allow-list everywhere, so with the
   rules above, git runs fully in `scratch` and only reads elsewhere.
-- **Which commands.** The rules apply to every command the guard finds in the
-  line: each pipeline and list item; the command behind wrappers such as
-  `sudo`, `env`, `nice`, `timeout`, `nohup` and the others above; commands in
-  `sh -c`, `bash -c`, `eval`, `watch`, `su -c`, `script -c`, `cmd /c` and
-  `powershell -Command`; commands in `$(…)` and backticks
-  (in PowerShell, `$(…)`, `@(…)` and `(…)`); and the commands `xargs` and
-  `find -exec` run. Words that only mention a program are not commands, so under
+- The rules apply to every command the guard finds in the line. That means each
+  pipeline and list item, the command behind wrappers such as `sudo`, `env`, `nice`,
+  `timeout`, `nohup` and the others above, commands in `sh -c`, `bash -c`, `eval`,
+  `watch`, `su -c`, `script -c`, `cmd /c` and `powershell -Command`, commands in
+  `$(…)` and backticks (in PowerShell, `$(…)`, `@(…)` and `(…)`), and the commands
+  `xargs` and `find -exec` run. Words that only mention a program are not commands, so under
   a git allow-list `ls /usr/share/doc/git`, `grep -rn git .`, `echo git push`
   and a heredoc that contains `git push` run. In PowerShell, a statement that
-  starts with a quoted or computed word runs a command only after `&`; without
+  starts with a quoted or computed word runs a command only after `&`. Without
   it (`$files | Measure-Object`) it is an expression.
-- **Commands known only when they run.** While there are rules, a command whose
+- While there are rules, a command whose
   program is only known when it runs (`$(which git) push`, `& $tool push`), or
   shell text that is (`bash -c "$(cat script.sh)"`, `eval "$(…)"`), is refused,
   since the rules can't check it. Without rules these run as before.
-- **Deny rules guard against accidents.** They match the words the guard reads,
+- Deny rules guard against accidents. They match the words the guard reads,
   so an argument only known when the command runs doesn't match a deny rule's
-  literal words: `cargo publish *` doesn't refuse `cargo $(printf publish)`, or
-  `sh -c 'cargo "$1"' _ publish`. An allow-list is the stronger form: such an
+  literal words, so `cargo publish *` doesn't refuse `cargo $(printf publish)`, or
+  `sh -c 'cargo "$1"' _ publish`. An allow-list is the stronger form, because such an
   argument matches only `*`, so with `cargo build *` and `cargo test *` allowed,
   both are refused.
-- **Refusals.** A refusal names the command and the rule, or for an allow-list
+- A refusal names the command and the rule, or for an allow-list
   the patterns allowed for that program, followed by the rule's `reason`
   (without one, a note to do the work another way). Its `target` is the
   command, and `protected` is false. `dangerously_allow_all_commands` turns the
   rules off too.
 
-Like the rest of the guard, rules guard against accidents: a script, Makefile or
+Like the rest of the guard, rules guard against accidents. A script, Makefile or
 program a command runs can still run anything. A Claude Code agent's `Bash` and
 `PowerShell` get the same rules from `ClaudeCodeSettings::command_rules`.
 
@@ -278,18 +277,18 @@ program a command runs can still run anything. A Claude Code agent's `Bash` and
 
 A snapshot has an execution `state` and an optional `input` notice:
 
-- `input: null`: no input request is known. Input can still be sent at any time.
-- `input.source.kind: "program"`: the program explicitly declared a request
+- `input: null` means no input request is known. Input can still be sent at any time.
+- `input.source.kind: "program"` means the program explicitly declared a request
   (see [Program input requests](#program-input-requests)). The reply carries its
   `request_id`.
-- `input.source.kind: "prompt_rule"`: a configured rule matched the terminal
-  output. This means input is *possibly* needed; rules can miss prompts and can
+- `input.source.kind: "prompt_rule"` means a configured rule matched the terminal
+  output. This means input is *possibly* needed. Rules can miss prompts and can
   match output that is not a question.
 
 Every `terminal_input` call supplies the `revision` of the latest snapshot. Output,
 new or withdrawn requests, and accepted input advance the revision, and the host
 rejects stale or duplicate submissions. For ordinary terminal input, the program
-can still change between the observation and the write: revision checks do not
+can still change between the observation and the write, because revision checks don't
 make a terminal interaction atomic. Programs using explicit requests must check
 the request ID of each reply before applying it.
 
@@ -321,7 +320,7 @@ python3 arko_agents/tests/fixtures/interactive_probe.py
 ## Reading output
 
 Responses contain a bounded window of recent output with byte offsets. Pass the
-previous `output.end` as `after_output` to read only new bytes; `available_end` is
+previous `output.end` as `after_output` to read only new bytes. `available_end` is
 the end of the buffered output, so more bytes remain when it is greater than
 `end`. `gap` reports that part of the requested range has already left the
 buffer. When the window contains invalid or split UTF-8, `raw_hex` holds the exact
@@ -329,19 +328,19 @@ bytes alongside the display text. `prompt_truncated` marks a shortened inferred
 prompt.
 
 Each job's `output.log` (at `log_path`) keeps the combined output in arrival order
-up to `max_log_bytes`; `log_truncated` reports that the limit was reached. In PTY
+up to `max_log_bytes`. `log_truncated` reports that the limit was reached. In PTY
 mode stdout and stderr share one terminal, and Windows ConPTY emits a rendered
-terminal stream; use pipe mode when the original stdout and stderr bytes matter.
+terminal stream. Use pipe mode when the original stdout and stderr bytes matter.
 On Windows, the text a PTY job's status and notices show the agent has its
 escape sequences removed, since ConPTY adds cursor moves, window titles, and
-colour resets whatever the program prints; cursor-forward moves become the
+colour resets whatever the program prints. Cursor-forward moves become the
 spaces they stand for. The byte offsets (`start`, `end`, `available_end`,
 `after_output`), `raw_hex`, and `output.log` keep the raw output.
 The prompt matcher handles line prompts and ANSI decoration, not full-screen
 terminal interfaces.
 
 Because a response holds a bounded window and the full output stays in `output.log`,
-the terminal is the way to read large files and outputs: `wc -l` for the size,
+the terminal is the way to read large files and outputs, with `wc -l` for the size,
 `grep -n` to find what is needed, `head` or `sed -n 'a,bp'` for a range, or a short
 script that prints only what matters. Printing a whole large file costs one window,
 never the context. An agent offered both `read_file` and these tools sees a sentence in
@@ -355,8 +354,8 @@ guard names these commands in the notice of the shortened result (see
 A program, or an adapter wrapping it, can declare an input request without
 printing anything. The child process receives two file paths in its environment:
 
-- `ARKO_INPUT_REQUEST_PATH`: append newline-delimited UTF-8 JSON requests.
-- `ARKO_INPUT_REPLY_PATH`: read newline-delimited UTF-8 JSON replies.
+- `ARKO_INPUT_REQUEST_PATH` is where it appends newline-delimited UTF-8 JSON requests.
+- `ARKO_INPUT_REPLY_PATH` is where it reads newline-delimited UTF-8 JSON replies.
 
 Both terminal modes use this append-only file protocol. Each stream has a single
 writer, which appends complete lines and flushes them. Readers keep partial lines
@@ -387,16 +386,16 @@ while True:
         break
 ```
 
-Declare one outstanding request at a time and use a new ID for each question;
-repeated IDs are deduplicated for the lifetime of the job. To withdraw a question,
+Declare one outstanding request at a time and use a new ID for each question.
+Repeated IDs are deduplicated for the lifetime of the job. To withdraw a question,
 send `{"type":"input_cancelled","request_id":"…"}`. Check reply IDs even when
 withdrawing requests, because a reply can cross a cancellation. Answers to
-program requests go to the reply stream; ordinary commands keep receiving input
+program requests go to the reply stream. Ordinary commands keep receiving input
 through stdin or the PTY. JSON printed to stdout never creates a program request.
 
-Limits: 8 KiB per request line, 128 bytes per request ID, 4 KiB per prompt, 1,024
+The limits are 8 KiB per request line, 128 bytes per request ID, 4 KiB per prompt, 1,024
 distinct requests per job, and 8 MiB per control stream. The request and reply
-files are kept with the output log; never truncate or replace an active stream.
+files are kept with the output log. Never truncate or replace an active stream.
 A malformed or conflicting declaration stops the job with a diagnostic. A failed
 or partial input write also stops the job, because retrying it could deliver an
 answer twice.
@@ -406,14 +405,14 @@ answer twice.
 Input requests and job completion produce context messages for the owning task.
 Each job has at most one pending delivery, which waits for channel capacity
 without blocking the job. A newer question replaces an undelivered older one.
-Unchanged prompts and routine output do not produce further notifications; status
+Unchanged prompts and routine output do not produce further notifications. Status
 reads remain available while output grows. Rebinding an active manager to a
-resumed runtime can replay the latest notices; use the job ID and revision to
-recognize updates. A notice does not start a model run by itself: the host decides
+resumed runtime can replay the latest notices. Use the job ID and revision to
+recognize updates. A notice doesn't start a model run by itself, and the host decides
 whether an idle or completed agent continues.
 
 `manager.shutdown().await` cancels owned processes, waits for their cleanup, and
-prevents new starts. Dropping the manager requests cancellation; the directory
+prevents new starts. Dropping the manager requests cancellation. The directory
 stays locked until the workers finish. A wait timeout is independent of a job's
 execution deadline. PTY input handles control characters according to the
 program's terminal settings. Terminal resizing and closing stdin in pipe mode are
@@ -421,7 +420,7 @@ not supported.
 
 After a host restart, saved running jobs are marked `interrupted` and pending
 input is cleared. Saved process IDs are never used to reattach to, kill, or rerun
-a command. Job records and logs persist; the live output buffer and notification
+a command. Job records and logs persist. The live output buffer and notification
 queue do not. A resumed host should list and reconcile jobs before relying on
 them.
 
@@ -472,6 +471,6 @@ cargo run -p arko_agents --example interactive_terminal --locked
 ```
 
 The example answers a fixed Y/N fixture with a predetermined answer and needs no
-model or credentials. The fixtures and the example require Python 3;
+model or credentials. The fixtures and the example require Python 3.
 `ARKO_TEST_PYTHON` selects the interpreter. The library itself does not require
 Python.
