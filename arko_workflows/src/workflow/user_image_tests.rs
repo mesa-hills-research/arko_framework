@@ -235,29 +235,30 @@ fn sized_png(width: u32, height: u32) -> arko_ai::Image {
     arko_ai::Image::from_bytes(&bytes, "image/png")
 }
 
-/// An image over what the agent's model takes is shrunk to fit before it
-/// is sent: here wider than the 8,000 pixels a side OpenAI takes.
+/// An image the agent's model can't take as it is is fitted before it is
+/// sent: here a BMP, which OpenAI doesn't take, becomes a PNG.
 #[tokio::test]
-async fn an_image_over_the_model_s_limits_is_shrunk_before_it_is_sent() {
+async fn an_image_the_model_cant_take_as_it_is_is_fitted_before_it_is_sent() {
     let workspace = Workspace::new();
     let server = done_server().await;
     let workflow = workflow(&server, &workspace);
+    let mut bmp = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 30, image::Rgb([9, 9, 9])))
+        .write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp)
+        .unwrap();
     let result = workflow
         .run_agent_with(
             "worker",
             "Describe this.",
-            RunOptions::new().images([sized_png(8_400, 2)]),
+            RunOptions::new().images([arko_ai::Image::from_bytes(&bmp, "image/bmp")]),
         )
         .await
         .unwrap();
     let content = last_user_content(&server.bodies()[0]);
     let url = content[1]["image_url"].as_str().unwrap();
     let data = url.strip_prefix("data:image/png;base64,").unwrap();
-    assert_eq!(png(data).dimensions(), Some((8_000, 2)));
-    assert_eq!(
-        result.task.initial_images()[0].dimensions(),
-        Some((8_000, 2))
-    );
+    assert_eq!(png(data).dimensions(), Some((40, 30)));
+    assert_eq!(result.task.initial_images()[0].dimensions(), Some((40, 30)));
 }
 
 /// A conversation that holds as many images, or as much image data, as a
@@ -317,15 +318,15 @@ async fn a_session_resumes_without_the_image_files_it_lost() {
         let workspace = Workspace::new();
         let server = done_server().await;
         let run = workspace.0.join(".run");
-        let persisted = || {
+        let persisted = |run: &std::path::Path| {
             Workflow::builder()
                 .name("user-image-test")
                 .workspace(&workspace.0)
                 .llm_client(Arc::new(server.client()))
                 .agent("worker", agent_config("Worker"))
-                .persistence(crate::persistence::PersistenceConfig::new(&run))
+                .persistence(crate::persistence::PersistenceConfig::new(run))
         };
-        let first = persisted().build().unwrap();
+        let first = persisted(&run).build().unwrap();
         let worker = first
             .run_agent_with(
                 "worker",
@@ -336,6 +337,11 @@ async fn a_session_resumes_without_the_image_files_it_lost() {
             .unwrap();
         first.checkpoint().await.unwrap();
         drop(first);
+        // A copy of the run directory, as a partial copy of the data would
+        // be, its image then lost.
+        let copy = workspace.0.join(".copy");
+        copy_directory(&run, &copy);
+        let run = copy;
         let file = std::fs::read_dir(run.join("images"))
             .unwrap()
             .next()
@@ -348,7 +354,7 @@ async fn a_session_resumes_without_the_image_files_it_lost() {
         }
 
         let latest = std::fs::read_to_string(run.join("latest-checkpoint")).unwrap();
-        let resumed = persisted()
+        let resumed = persisted(&run)
             .resume_from(run.join(latest.trim()))
             .build()
             .unwrap();
@@ -377,5 +383,18 @@ async fn a_session_resumes_without_the_image_files_it_lost() {
             "is damaged"
         };
         assert!(reported[0].contains(expected), "{damage}: {reported:?}");
+    }
+}
+
+/// Copies directory `from` to `to`, with what it holds.
+fn copy_directory(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
     }
 }

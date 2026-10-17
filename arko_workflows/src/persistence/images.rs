@@ -205,7 +205,11 @@ impl ImageFiles {
 
 impl ImageStore for ImageFiles {
     fn save(&self, data: &str, mime_type: &str) -> Result<String, String> {
-        if let Some(name) = self.known(data, mime_type) {
+        // Known, and its file still there (one deleted since is written
+        // again).
+        if let Some(name) = self.known(data, mime_type)
+            && self.dir.join(&name).is_file()
+        {
             return Ok(name);
         }
         let (name, bytes) = image_file(data, mime_type);
@@ -365,6 +369,27 @@ mod tests {
             ),
             Some(name)
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file deleted while the image is known is written again when the
+    /// image is saved, and a damaged file isn't read back.
+    #[test]
+    fn a_lost_file_is_written_again_and_a_damaged_one_refused() {
+        let dir = run_dir();
+        let files = ImageFiles::in_run_dir(&dir);
+        let image = arko_ai::Image::from_bytes(b"pixels of a kind", "image/png");
+        let save = || files.with(|| serde_json::to_value(&image).unwrap());
+        let name = save()["Base64"]["stored"].as_str().unwrap().to_string();
+        let path = dir.join(IMAGES_DIR).join(&name);
+        std::fs::remove_file(&path).unwrap();
+        save();
+        assert!(path.is_file());
+
+        std::fs::write(&path, b"pixels").unwrap();
+        let fresh = ImageFiles::new(dir.join(IMAGES_DIR), CACHE_BYTES);
+        let error = fresh.load(&name, "image/png").unwrap_err();
+        assert!(error.contains("is damaged"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
