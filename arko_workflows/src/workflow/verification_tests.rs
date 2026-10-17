@@ -219,7 +219,7 @@ async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
     };
     let continued = coder_bodies().last().unwrap().clone();
     assert!(
-        continued.contains("Nothing was decided about your work; the task is paused"),
+        continued.contains("Nothing was decided about your work. The task is paused"),
         "{continued}"
     );
     assert!(

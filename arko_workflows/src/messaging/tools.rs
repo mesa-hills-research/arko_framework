@@ -1,4 +1,4 @@
-//! Tools for inter-agent communication: `send_message` and
+//! Tools for inter-agent communication, `send_message` and
 //! `list_recipients` (and `wait_for_message`, from [`wait`](super::wait)),
 //! and the start notices agents receive.
 
@@ -136,7 +136,7 @@ impl Tool for SendMessageTool {
             }
             AgentStatus::Finished(_) if !self.context.keeps_messages_for_finished() => {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "Agent '{to}' is {}; it no longer receives messages.",
+                    "Agent '{to}' is {}. It no longer receives messages.",
                     status.describe()
                 )));
             }
@@ -179,12 +179,12 @@ impl Tool for SendMessageTool {
                 format!("Message {} sent to agent '{to}'.", message.id)
             }
             AgentStatus::Waiting(_) => format!(
-                "Message {} sent to agent '{to}', which is {}; it receives the message when it continues.",
+                "Message {} sent to agent '{to}', which is {}. It receives the message when it continues.",
                 message.id,
                 status.describe()
             ),
             AgentStatus::Finished(_) => format!(
-                "Message {} queued for agent '{to}', which is {}; it receives the message if it is continued or runs again.",
+                "Message {} queued for agent '{to}', which is {}. It receives the message if it is continued or runs again.",
                 message.id,
                 status.describe()
             ),
@@ -269,7 +269,7 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
 pub(crate) struct ActivityNotices {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
-    /// The run is a completion verifier's review: it isn't told to wrap up.
+    /// The run is a completion verifier's review. It isn't told to wrap up.
     pub review: bool,
 }
 

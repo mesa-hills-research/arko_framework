@@ -16,7 +16,7 @@ pyo3::create_exception!(
     arko_workflows,
     UserInputRequired,
     pyo3::exceptions::PyException,
-    "An agent asked a question and waits for an answer: args are (message, agent_run_id). Answer with PyWorkflow.continue_agent."
+    "An agent asked a question and waits for an answer. Args are (message, agent_run_id). Answer with PyWorkflow.continue_agent."
 );
 
 #[cfg(feature = "python")]
@@ -24,7 +24,7 @@ pyo3::create_exception!(
     arko_workflows,
     AgentPaused,
     pyo3::exceptions::PyException,
-    "An agent paused for a tool approval or error-recovery decision: args are (message, agent_run_id). Decide with PyWorkflow.resume_agent."
+    "An agent paused for a tool approval or error-recovery decision. Args are (message, agent_run_id). Decide with PyWorkflow.resume_agent."
 );
 
 #[cfg(feature = "python")]
@@ -32,7 +32,7 @@ pyo3::create_exception!(
     arko_workflows,
     VerifierFailed,
     pyo3::exceptions::PyException,
-    "A completion verifier could not review the agent's completion, which was neither accepted nor rejected; the agent is left paused: args are (message, agent_run_id). Continue it with PyWorkflow.continue_agent on PyWorkflow.agent_result(agent_run_id)."
+    "A completion verifier could not review the agent's completion, which was neither accepted nor rejected. The agent is left paused. Arguments are (message, agent_run_id). Continue it with PyWorkflow.continue_agent on PyWorkflow.agent_result(agent_run_id)."
 );
 
 #[cfg(feature = "python")]
@@ -48,10 +48,10 @@ fn arko_workflows(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// A cancelled run raises `WorkflowCancelled`; an agent waiting for input
+/// A cancelled run raises `WorkflowCancelled`. An agent waiting for input
 /// `UserInputRequired`, a paused agent `AgentPaused`, and an agent whose
 /// completion a verifier could not review (left paused) `VerifierFailed`,
-/// each with the agent run ID as the second argument; other errors raise
+/// each with the agent run ID as the second argument. Other errors raise
 /// `RuntimeError`.
 #[cfg(feature = "python")]
 fn run_error(error: crate::WorkflowError) -> PyErr {
@@ -99,7 +99,7 @@ pub struct PyWorkflowBuilder {
     max_parallel_agents: Option<usize>,
     fail_fast: bool,
     cancel_grace_period: Option<f64>,
-    /// `None`: the automatic limit.
+    /// `None` means the automatic limit.
     wait_for_message_timeout: Option<f64>,
     agent_wait_for_message_timeouts: Vec<(String, Option<f64>)>,
 }
@@ -180,8 +180,8 @@ impl PyWorkflowBuilder {
 
     /// What happens over the budget: `"pause"` (the default: each agent is
     /// held before its next model request until `set_budget` raises the
-    /// budget; a run the host started raises `AgentPaused`, or waits with
-    /// `wait_for_raise=True`) or `"cancel"` (the agent is cancelled;
+    /// budget, a run the host started raises `AgentPaused`, or waits with
+    /// `wait_for_raise=True`) or `"cancel"` (the agent is cancelled,
     /// `reopen_agent` continues it).
     #[pyo3(signature = (policy, wait_for_raise=false))]
     fn budget_exceeded_policy(&mut self, policy: &str, wait_for_raise: bool) -> PyResult<()> {
@@ -200,12 +200,12 @@ impl PyWorkflowBuilder {
 
     /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
     /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
-    /// and task version kept (`retain_checkpoints=None`; a count of at least
+    /// and task version kept (`retain_checkpoints=None`, a count of at least
     /// 1 keeps the newest checkpoints and the task versions they refer to,
     /// and 0 raises `ValueError`), and every event logged
-    /// (`event_log="full"`; `"lifecycle_only"` leaves out streamed
+    /// (`event_log="full"`, `"lifecycle_only"` leaves out streamed
     /// fragments). Running agents are saved as they run, so a workflow that
-    /// stops resumes them where they were (`task_journal=True`; see
+    /// stops resumes them where they were (`task_journal=True`, see
     /// `interrupted_runs` and `recover_agent`), in compact JSON
     /// (`pretty_json=False`).
     #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full", task_journal=true, pretty_json=false))]
@@ -220,7 +220,7 @@ impl PyWorkflowBuilder {
     ) -> PyResult<()> {
         if retain_checkpoints == Some(0) {
             return Err(value_error(
-                "retain_checkpoints needs at least 1; every checkpoint is kept by default",
+                "retain_checkpoints needs at least 1. Every checkpoint is kept by default",
             ));
         }
         self.event_log = match event_log {
@@ -327,7 +327,7 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    /// Seconds `wait_for_message` waits at most; `None` (the default)
+    /// Seconds `wait_for_message` waits at most. `None` (the default)
     /// selects the automatic limit, just inside each agent's prompt-cache
     /// lifetime.
     #[pyo3(signature = (seconds=None))]
@@ -513,7 +513,7 @@ impl PyWorkflow {
 
     /// Continue a paused agent (`AgentPaused`): `"approve"` or `"reject"`
     /// every call awaiting approval, or `"continue"` (the failed request is
-    /// sent again; `note`, when given, is added for the model first) or
+    /// sent again, `note`, when given, is added for the model first) or
     /// `"fail"` (`note` is the reason) after an error-recovery pause.
     #[pyo3(signature = (previous, decision, note=None))]
     fn resume_agent<'py>(
@@ -567,7 +567,7 @@ impl PyWorkflow {
 
     /// The agent runs that were running when the workflow stopped, as the
     /// checkpoint it resumed from saved them, and orphaned nested runs
-    /// (their parent can no longer resume them); continue each with
+    /// (their parent can no longer resume them). Continue each with
     /// `recover_agent`. Runs started inside a tool call their parent still
     /// holds open are recovered with that run and not listed.
     fn interrupted_runs(&self) -> Vec<PyAgentResult> {
@@ -747,15 +747,15 @@ pub struct PyAgentResult {
     #[pyo3(get)]
     pub error: Option<String>,
     /// Why a `"Failed"` run failed, when it failed at a rejected
-    /// error-recovery pause: the pause's cause, such as `"non_retryable"`
+    /// error-recovery pause, the pause's cause, such as `"non_retryable"`
     /// (the request needs a new credential or a configuration change) or
-    /// `"refusal"`; `None` otherwise.
+    /// `"refusal"`. `None` otherwise.
     #[pyo3(get)]
     pub failure_cause: Option<String>,
     /// The kind of the model-request error a `"Failed"` run failed on, when
-    /// it was classified: `"authentication"` (a lost login),
+    /// it was classified, such as `"authentication"` (a lost login),
     /// `"context_overflow"` (a request over the model's input limit),
-    /// `"billing"`, and so on; `None` otherwise.
+    /// `"billing"`, and so on. `None` otherwise.
     #[pyo3(get)]
     pub failure_kind: Option<String>,
     /// The full result, to continue or resume the run.

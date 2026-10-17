@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input_tokens,
                 handovers,
             } => println!(
-                "=== handover {handovers} done ({input_tokens} tokens); report:\n{report}\n==="
+                "=== handover {handovers} done ({input_tokens} tokens)\nReport\n{report}\n==="
             ),
             AgentEvent::ConversationCompacted {
                 input_tokens,

@@ -80,7 +80,7 @@ const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
 /// A run-level setting: it is not part of the task and is not saved, so a
 /// task run later without it is timed as configured. Clones share the
 /// setting, and the host may change it while the run runs: turned on during
-/// a wait, that wait is no longer timed; turned off, the waits that start
+/// a wait, that wait is no longer timed. Turned off, the waits that start
 /// afterwards are.
 #[derive(Clone, Debug, Default)]
 pub struct HostDecisions(Arc<AtomicBool>);
@@ -146,7 +146,7 @@ impl AgentRuntime {
     }
 
     /// Asks `source` for context before each model request of the tasks this
-    /// runtime runs; see [`TurnContextSource`].
+    /// runtime runs. See [`TurnContextSource`].
     pub fn with_turn_context(mut self, source: Arc<dyn TurnContextSource>) -> Self {
         self.turn_context = Some(source);
         self
@@ -169,7 +169,7 @@ impl AgentRuntime {
 
     /// Reports the tasks this runtime runs to `sink` at their safe points,
     /// so that the host can save a task while it runs and continue it after
-    /// a crash; see [`TaskSnapshotSink`]. Before tool calls start, the run
+    /// a crash. See [`TaskSnapshotSink`]. Before tool calls start, the run
     /// waits until the sink has saved the task with the calls recorded as
     /// running ([`Task::running_tool_calls`]).
     pub fn with_task_snapshots(mut self, sink: Arc<dyn TaskSnapshotSink>) -> Self {
@@ -252,8 +252,8 @@ impl AgentRuntime {
     /// Runs a task with the given agent configuration and tool registry.
     ///
     /// The task runs only the registry's tools its configuration offers
-    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names));
-    /// those tools are bound to the task's command channel
+    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names)).
+    /// Those tools are bound to the task's command channel
     /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)).
     ///
     /// An optional `InterceptorConfig` enables tool result interception,

@@ -40,10 +40,10 @@ by `+int8` in int8:
 
 The descriptor is the embedding cache key, so vectors of another model, revision or
 precision never mix, and the background run and every search load the model in the
-precision the index names. The `quantization` setting beside it is separate: it is how
+precision the index names. The `quantization` setting beside it is separate, and says how
 the vector store keeps the vectors.
 
-In a program: `LocalEmbedder::load(&local::CODE_RANK_EMBED, dir)` loads the model in
+In a program, `LocalEmbedder::load(&local::CODE_RANK_EMBED, dir)` loads the model in
 int8, and `LocalEmbedder::load_with_precision(&local::CODE_RANK_EMBED, dir,
 Precision::F32)` in f32. Both read `config.json`, `tokenizer.json` and
 `model.safetensors` from `dir` after checking each file's size and SHA-256 against
@@ -55,7 +55,7 @@ into a host crate.
 
 | Model | Parameters | Licence | Prefixes | Pooling | Download |
 |---|---|---|---|---|---|
-| `nomic-ai/CodeRankEmbed` (default) | 137M | MIT | queries: `Represent this query for searching relevant code: ` | `[CLS]` | 548 MB |
+| `nomic-ai/CodeRankEmbed` (default) | 137M | MIT | `Represent this query for searching relevant code: ` before queries | `[CLS]` | 548 MB |
 | `jinaai/jina-embeddings-v2-base-code` | 161M | Apache-2.0 | none | mean | 324 MB |
 
 Both have 768 dimensions and take up to 8,192 tokens. CodeRankEmbed is a code
@@ -81,7 +81,7 @@ they run on integers:
   scaled back to f32.
 - The query, key and value projection stays in f32, as do attention, the embeddings,
   layer norms, pooling and normalization. The softmax magnifies errors in queries and
-  keys: in int8, that projection alone moves the vectors more than the other three
+  keys, and in int8 that projection alone moves the vectors more than the other three
   layers together.
 
 On x86 CPUs with AVX2 the kernel multiplies bytes with `vpmaddubsw`, chosen at run time.
@@ -98,26 +98,26 @@ the model as it was trained.
 
 ## How it runs
 
-- **Tokens.** The model's own `tokenizer.json`, through the `tokenizers` crate with the
+- Tokens come from the model's own `tokenizer.json`, through the `tokenizers` crate with the
   pure-Rust fancy-regex engine. Every text is embedded whole. One longer than the
   model's 8,192 tokens, which arko_index's default chunks never reach, runs in windows
   of up to 8,192 tokens, each with the model's special tokens and the query prefix.
   Its vector is the mean of the windows' vectors, weighted by the text tokens each
   holds, at unit length.
-- **Batches.** A build sends up to 256 texts and 8,192 tokens per request. The texts of
-  a request run through the encoder packed back to back, without padding: the linear
-  layers run once over all tokens, attention runs per text, head and block of 128
+- A build sends up to 256 texts and 8,192 tokens per request. The texts of
+  a request run through the encoder packed back to back, without padding. The linear
+  layers run once over all tokens, and attention runs per text, head and block of 128
   query rows.
-- **Arithmetic.** The int8 layers as above. f32 matrices are multiplied by `gemm`,
+- The int8 layers run as above. f32 matrices are multiplied by `gemm`,
   which picks AVX-512, AVX2 or NEON kernels at run time. Weights stored in f16 are
   widened on load. The softmax and SiLU take a polynomial exponential that vectorizes.
-- **Threads.** A dedicated rayon pool of `threads()` workers (`ARKO_INDEX_THREADS`),
+- The work runs on a dedicated rayon pool of `threads()` workers (`ARKO_INDEX_THREADS`),
   or `LocalEmbedder::with_threads`. Loading quantizes the weights on the same pool, in
   about 0.7 s for CodeRankEmbed, checksums included.
-- **Output.** Mean or `[CLS]` pooling as the model was trained, then unit length.
+- The output is mean or `[CLS]` pooling as the model was trained, then unit length.
   `tokens` in the build's statistics counts the tokens processed. Nothing is billed, and
   a `--max-embed-tokens` cap still applies as a work limit.
-- **Memory.** CodeRankEmbed holds 0.34 GB in int8 and 0.57 GB in f32 once loaded. A
+- CodeRankEmbed holds 0.34 GB in int8 and 0.57 GB in f32 once loaded. A
   forward pass adds about 58 KB per token in flight, so a full pass of 8,192 tokens
   peaks at 0.8 GB in int8 and 1.0 GB in f32. A smaller `with_batch_tokens` lowers
   that. Loading peaks at 1.0 GB in int8 and 1.2 GB in f32, with the model file in
@@ -130,14 +130,14 @@ prints nothing.
 ## GPUs
 
 With `local-embed-cuda` or `local-embed-gpu` the same models run on a GPU, on burn's
-tensors in pure Rust. `local-embed-cuda` runs NVIDIA GPUs through CUDA: cubecl loads the
+tensors in pure Rust. `local-embed-cuda` runs NVIDIA GPUs through CUDA. cubecl loads the
 driver and NVRTC when it starts and compiles its kernels at run time, so the build needs
 no CUDA toolkit. The machine needs the driver, NVRTC and the toolkit's headers (cudart,
 crt and CCCL) of a CUDA version no newer than the driver's. They are found through
 `CUDA_PATH`, else `/usr/local/cuda`, `/opt/cuda` or `/usr` (with `nvcc`), and `libnvrtc`
 through the library path. NVIDIA's redistributable archives (`cuda_nvrtc`, `cuda_cudart`,
 `cuda_cccl` and the `include/crt` folder of `cuda_nvcc`) unpacked into one folder named
-by `CUDA_PATH` serve as well. `local-embed-gpu` runs any GPU through wgpu: Vulkan, Metal
+by `CUDA_PATH` serve as well. `local-embed-gpu` runs any GPU through wgpu, with Vulkan, Metal
 or DirectX 12.
 
 ```sh
@@ -157,41 +157,41 @@ $CLI index2 --embed local:f16:cuda ./repo ./index-state     # in f16 through CUD
 background embedding, and `ARKO_INDEX_EMBED_DEVICE` sets it for any command. A library
 caller passes a `Device` to `LocalEmbedder::load_on`, or finds the device first with
 `Placement::find`, which reads no model, and loads with `LocalEmbedder::load_placed` when
-the model is first needed. The CLI works that way: it finds the device when a command
+the model is first needed. The CLI works that way. It finds the device when a command
 starts, so a missing GPU is reported at once, and loads the model on its first embedding.
 
-- **Precision.** `f32` by default on a GPU, `f16` and `bf16` (CUDA only) on request. In
+- A GPU runs `f32` by default, and `f16` and `bf16` (CUDA only) on request. In
   `f16` and `bf16` every matrix product takes 16-bit inputs, the weights stored in
   them. Layer norms, softmax, residual sums and pooling stay in f32. The precision is
-  part of the vectors' identity and the device is not: f32 vectors from a GPU and from
+  part of the vectors' identity and the device isn't, so f32 vectors from a GPU and from
   the CPU differ by rounding and share one index. Searches embed their queries on the
   CPU when it runs the index's precision.
-- **Long texts.** Split into the same windows as on the CPU and combined the same way.
-- **Batches.** A request takes up to 1,024 texts and eight forward passes' worth of
+- Long texts are split into the same windows as on the CPU and combined the same way.
+- A request takes up to 1,024 texts and eight forward passes' worth of
   tokens. Its texts are sorted by token count and split into batches of at most 4,096
   tokens with padding (`with_batch_tokens`), so texts of similar length share a batch.
   Padded keys are masked out of attention, and the vectors come back in input order.
   Smaller batches ran faster on the GPUs measured ([GPU speed](#gpu-speed)).
-- **Buffers.** Every tensor stays within the device's largest buffer: the adapter's
+- Every tensor stays within the device's largest buffer, which is the adapter's
   largest storage buffer on wgpu (128 MiB on Mesa's llvmpipe) and a quarter of the GPU's
   memory on CUDA. A batch holds at most one buffer of hidden states. Attention splits a
   batch's query rows into blocks when its scores would pass that or 64M values (256 MB in
   f32), and the query, key and value projection and the feed-forward layer run on blocks
   of tokens when their outputs would.
-- **The process.** The background embedding holds the GPU only while it runs: it
+- The background embedding holds the GPU only while it runs. It
   ends after its current request when its owner ends, and the driver frees what the
   process held when it exits.
-- **Kernels.** cubecl compiles a kernel the first time it needs it and times kernel
+- cubecl compiles a kernel the first time it needs it and times kernel
   variants the first time it sees a shape, about two minutes on a new machine. The
   timings stay in the user's cache directory (`~/.cache/cubecl` on Linux), and on CUDA
   the compiled kernels too (`~/.cache/cubecl/kernels/`, about 120 MB per GPU
   architecture and NVRTC version), so a later run starts in seconds.
-- **Checks.** A vector with NaN or infinite values fails the request. In f16 the
+- A vector with NaN or infinite values fails the request. In f16 the
   queries are scaled before their product with the keys, which keeps the scores far
   from f16's largest value.
 
 The GPU features add burn 0.21 (its tensor, ndarray, wgpu and CUDA crates), cubecl, wgpu
-and cudarc, also Rust only: `cargo tree -p arko_index --features
+and cudarc, also Rust only, so `cargo tree -p arko_index --features
 local-embed-cuda,local-embed-gpu -e normal,build --target all -i cc` prints nothing as
 well. burn's operation fusion is off. Its fused kernels returned wrong vectors for
 whole batches of some shapes (on an L4 through CUDA and Vulkan, on an RTX 5090 through
@@ -199,7 +199,7 @@ CUDA), and the same operations unfused did not. `local_embed_device_bench` measu
 device and precision over a fixed corpus and compares the vectors with a reference
 run's.
 
-## Verification
+## Tests
 
 ```sh
 cargo test -p arko_index --features local-embed
@@ -294,5 +294,5 @@ result for 9 of 19 questions. Hybrid shared 6.5 (4 to 8) and the same first resu
 
 On 40 threads of an AMD EPYC 9354P (Zen 4, AVX-512) shared with other jobs, CodeRankEmbed
 in f32 embedded the 7,438 chunks of the arko repository in 330 s, 22 chunks/s. The
-index state took 50.3 MB: 23.0 MB of vectors, 23.1 MB of embedding cache and 4.2 MB of
+index state took 50.3 MB, with 23.0 MB of vectors, 23.1 MB of embedding cache and 4.2 MB of
 lexical index. AVX-512 made the f32 matrix products 54% faster than AVX2 there.

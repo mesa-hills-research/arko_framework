@@ -1,37 +1,34 @@
 //! Live check of dense and hybrid retrieval with Voyage. **Spends Voyage tokens** and
 //! needs `VOYAGE_API_KEY`.
 //!
-//! Builds an index2 with embeddings of a small corpus (by default the arko snapshot
-//! the retrieval evaluation was written against), then runs the evaluation questions
-//! (`breadth-depth-arko.json`, `behaviour-arko.json`) in lexical, dense and hybrid
-//! modes and prints each question's rank, the scores, and the tokens used.
+//! Builds an index2 with embeddings of the corpus given by `--corpus DIR`, then
+//! runs the evaluation questions (`breadth-depth-arko.json`, `behaviour-arko.json`)
+//! from the required `--eval-dir DIR` in lexical, dense and hybrid modes. Prints
+//! each question's rank, the scores, and the tokens used.
 //!
 //! ```sh
-//! cargo run --release -p arko_index --example dense_live_check -- --dry-run   # counts tokens only
-//! VOYAGE_API_KEY=... cargo run --release -p arko_index --example dense_live_check
+//! cargo run --release -p arko_index --example dense_live_check -- --corpus DIR --eval-dir DIR --dry-run
+//! VOYAGE_API_KEY=... cargo run --release -p arko_index --example dense_live_check -- --corpus DIR --eval-dir DIR
 //! ```
 //!
-//! Flags: `--corpus DIR`, `--eval-dir DIR` (holding the two JSON files), `--state DIR`
-//! (kept between runs: a rerun embeds nothing new and spends only query tokens),
-//! `--model MODEL` (voyage-code-4; `hash` runs the whole check offline with the
-//! non-semantic hash embedder, to test the harness: its lexical column is the real
-//! lexical result), `--dimensions N` (the model's default), `--max-embed-tokens N`
-//! (2,500,000), `--fusion rrf|linear`, `--rrf-k K`, `--lexical-weight W`,
-//! `--dense-weight W`, `--candidates N` (hybrid tuning: a rerun on the same state costs
-//! only the queries' tokens), `--f32` (f32 vector codes instead of int8), `--dry-run`
-//! (build with a cap of 0 tokens in a scratch state and print what embedding would
-//! take; needs no key, only the tokenizer download), `--top FILE` (write every
-//! question's top 10 per mode as JSON lines, to compare models; `-` prints them last),
-//! `--voyage-key-stdin` (read the key from standard input instead of the environment).
-//! `--model local`, `local:MODEL`, `local:PRECISION` or `local:MODEL:PRECISION` runs a
-//! local model (`--features local-embed`, in int8 by default or f32): no key, no tokens
-//! billed.
+//! `--state DIR` selects persistent state, which defaults to
+//! `EVAL_DIR/.dense-live-check/MODEL-DIMENSIONS`. A rerun embeds nothing new and
+//! spends only query tokens.
 //!
-//! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 billed tokens
-//! without headers (path and source only, 2026-10-04). With the headers, `--dry-run`
-//! counted 1,797,537 tokens (2026-10-07; Voyage bills about one token per text less
-//! than its tokenizer counts): about $0.22 at voyage-code-4's list price of $0.12 per
-//! million tokens, plus about 200 tokens for the 19 queries.
+//! Other flags include `--model MODEL` (voyage-code-4 by default), `--dimensions N`
+//! (the model's default), `--max-embed-tokens N` (2,500,000), `--fusion rrf|linear`,
+//! `--rrf-k K`, `--lexical-weight W`, `--dense-weight W`, `--candidates N`, and
+//! `--f32` (f32 vector codes instead of int8).
+//!
+//! `--dry-run` builds with a cap of 0 tokens in scratch state and prints what
+//! embedding would take. It needs only the tokenizer download. `--top FILE` writes
+//! every question's top 10 per mode as JSON lines (`-` prints them last).
+//! `--voyage-key-stdin` reads the key from standard input instead of the environment.
+//!
+//! `--model hash` runs offline with the non-semantic hash embedder to exercise the
+//! harness. Its lexical column is the real lexical result. `--model local`,
+//! `local:MODEL`, `local:PRECISION` or `local:MODEL:PRECISION` runs a local model
+//! with `--features local-embed`, in int8 by default or f32.
 mod support;
 
 use arko_ai::EmbeddingClient;
@@ -112,10 +109,6 @@ fn rank(hits: &[SearchHit], targets: &[Target]) -> Option<usize> {
         .map(|i| i + 1)
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-}
-
 struct Args {
     corpus: PathBuf,
     eval_dir: PathBuf,
@@ -130,10 +123,11 @@ struct Args {
     top: Option<PathBuf>,
 }
 
-fn parse_args() -> Result<Args, Error> {
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Error> {
+    let (mut corpus, mut eval_dir) = (None, None);
     let mut a = Args {
-        corpus: home().join("Desktop/auto-research-forge/port-check/eval/arko-snapshot"),
-        eval_dir: home().join("Desktop/auto-research-forge/eval"),
+        corpus: PathBuf::new(),
+        eval_dir: PathBuf::new(),
         state: None,
         model: "voyage-code-4".into(),
         dimensions: None,
@@ -146,12 +140,12 @@ fn parse_args() -> Result<Args, Error> {
     };
     let (mut method, mut rrf_k, mut lexical_weight, mut dense_weight) =
         ("rrf".to_owned(), None::<f64>, None::<f64>, None::<f64>);
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
-            "--corpus" => a.corpus = value()?.into(),
-            "--eval-dir" => a.eval_dir = value()?.into(),
+            "--corpus" => corpus = Some(value()?.into()),
+            "--eval-dir" => eval_dir = Some(value()?.into()),
             "--state" => a.state = Some(value()?.into()),
             "--model" => a.model = value()?,
             "--dimensions" => a.dimensions = Some(value()?.parse()?),
@@ -172,13 +166,17 @@ fn parse_args() -> Result<Args, Error> {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--f32] [--dry-run] [--top FILE] [--voyage-key-stdin]"
+                    "usage: dense_live_check --corpus DIR --eval-dir DIR [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--f32] [--dry-run] [--top FILE] [--voyage-key-stdin]"
                 );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown option {other}").into()),
         }
     }
+    a.corpus = corpus.ok_or("--corpus DIR is required. Choose the source tree to index.")?;
+    a.eval_dir = eval_dir.ok_or(
+        "--eval-dir DIR is required. Choose the folder containing breadth-depth-arko.json and behaviour-arko.json.",
+    )?;
     a.fusion = match method.as_str() {
         "rrf" => Fusion::Rrf {
             k: rrf_k.unwrap_or(60.0),
@@ -236,15 +234,19 @@ fn show(rank: Option<usize>) -> String {
     rank.map_or("-".into(), |r| r.to_string())
 }
 
+fn state_dir(args: &Args) -> PathBuf {
+    args.state.clone().unwrap_or_else(|| {
+        let dims = args.dimensions.map_or("default".into(), |d| d.to_string());
+        args.eval_dir
+            .join(".dense-live-check")
+            .join(format!("{}-{dims}", args.model.replace(['/', ':'], "-")))
+    })
+}
+
 fn main() -> Result<(), Error> {
-    let args = parse_args()?;
+    let args = parse_args(std::env::args().skip(1))?;
     let cases = load_cases(&args.eval_dir)?;
-    let dims_name = args.dimensions.map_or("default".into(), |d| d.to_string());
-    let state = args.state.clone().unwrap_or_else(|| {
-        home()
-            .join("Desktop/arko-framework-work/scratch/dense-live-check")
-            .join(format!("{}-{dims_name}", args.model))
-    });
+    let state = state_dir(&args);
     let progress = |p: &EmbedProgress| {
         eprintln!(
             "embedded {}/{} texts, {} tokens, {} requests",
@@ -264,7 +266,7 @@ fn main() -> Result<(), Error> {
         let s = build(&args.corpus, &scratch, &Options::default(), &settings)?;
         let d = s.dense.expect("built with embeddings");
         println!(
-            "dry run: {} chunks, {} distinct texts; {} would be embedded: {} tokens counted ({} cached)",
+            "dry run found {} chunks, {} distinct texts, {} to embed, {} tokens counted ({} cached)",
             d.docs, d.texts, d.not_embedded, d.not_embedded_tokens, d.cached
         );
         std::fs::remove_dir_all(&scratch)?;
@@ -302,7 +304,7 @@ fn main() -> Result<(), Error> {
         d.tokens,
         if d.cap_reached {
             format!(
-                "; STOPPED AT THE CAP: {} texts ({} tokens) not embedded",
+                ". Stopped at the cap with {} texts ({} tokens) not embedded",
                 d.not_embedded, d.not_embedded_tokens
             )
         } else {
@@ -328,7 +330,7 @@ fn main() -> Result<(), Error> {
     let mut totals = [[0usize; 4]; 3];
     let (mut n_depth, mut n_def, mut n_callers, mut n_behaviour) = (0, 0, 0, 0);
     println!(
-        "\ncase  kind       lexical  dense  hybrid  (rank of the expected chunk in the top 10; breadth: definition, then callers found)"
+        "\ncase  kind       lexical  dense  hybrid  (rank of the expected chunk in the top 10, breadth shows the definition and then callers found)"
     );
     for (case, vector) in cases.iter().zip(&embedded.vectors) {
         let mut cells = Vec::new();
@@ -391,7 +393,7 @@ fn main() -> Result<(), Error> {
             case.id, case.kind, cells[0], cells[1], cells[2], case.query
         );
     }
-    println!("(depth cells: expected rank / best distractor rank)\n");
+    println!("(depth cells show expected rank / best distractor rank)\n");
     println!("mode     depth  definitions  callers  behaviour");
     for (m, mode) in modes.iter().enumerate() {
         let t = totals[m];
@@ -409,10 +411,10 @@ fn main() -> Result<(), Error> {
         );
     }
     println!(
-        "\nearlier evaluation (2026-10-04, no headers): lexical 4/9, 4/4, 5/7, 4/6; dense (path + source) 9/9, 4/4, 2/7, 5/6"
+        "\nearlier evaluation (2026-10-04, no headers) had lexical 4/9, 4/4, 5/7, 4/6 and dense (path + source) 9/9, 4/4, 2/7, 5/6"
     );
     println!(
-        "tokens: index build {} (this run), queries {query_tokens}; total {}",
+        "tokens used for index build {} (this run), queries {query_tokens}, total {}",
         d.tokens,
         d.tokens + query_tokens
     );
@@ -426,4 +428,64 @@ fn main() -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(flags: &[&str]) -> Result<Args, Error> {
+        parse_args(flags.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn requires_corpus_and_evaluation_paths() {
+        assert_eq!(
+            args(&[]).err().unwrap().to_string(),
+            "--corpus DIR is required. Choose the source tree to index."
+        );
+        assert_eq!(
+            args(&["--corpus", "source"]).err().unwrap().to_string(),
+            "--eval-dir DIR is required. Choose the folder containing breadth-depth-arko.json and behaviour-arko.json."
+        );
+        assert!(args(&["--eval-dir", "evaluation"]).is_err());
+    }
+
+    #[test]
+    fn state_defaults_to_evaluation_folder_and_accepts_override() {
+        let parsed = args(&["--corpus", "source", "--eval-dir", "evaluation"]).unwrap();
+        assert_eq!(parsed.corpus, PathBuf::from("source"));
+        assert_eq!(parsed.eval_dir, PathBuf::from("evaluation"));
+        assert_eq!(
+            state_dir(&parsed),
+            PathBuf::from("evaluation/.dense-live-check/voyage-code-4-default")
+        );
+        let parsed = args(&[
+            "--corpus",
+            "source",
+            "--eval-dir",
+            "evaluation",
+            "--state",
+            "saved",
+        ])
+        .unwrap();
+        assert_eq!(state_dir(&parsed), PathBuf::from("saved"));
+    }
+
+    #[test]
+    fn model_names_stay_in_one_state_subdirectory() {
+        let parsed = args(&[
+            "--corpus",
+            "source",
+            "--eval-dir",
+            "evaluation",
+            "--model",
+            "local:org/model",
+        ])
+        .unwrap();
+        assert_eq!(
+            state_dir(&parsed),
+            PathBuf::from("evaluation/.dense-live-check/local-org-model-default")
+        );
+    }
 }

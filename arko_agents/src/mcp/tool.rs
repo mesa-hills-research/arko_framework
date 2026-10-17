@@ -134,7 +134,7 @@ fn extract_parameters_from_schema(schema: &Value) -> Vec<ToolParameterDefinition
 #[async_trait]
 impl Tool for McpTool {
     /// A tool the server marks read-only runs again when its call was
-    /// running as the task stopped; any other is in doubt.
+    /// running as the task stopped. Any other is in doubt.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         if self.definition.parallel_safe {
             crate::tool::ToolRecovery::Rerun
@@ -214,7 +214,7 @@ impl Tool for McpTool {
                             images.push(ToolImage::base64(uri.clone(), blob.clone(), mime_type))
                         }
                         None => push(&format!(
-                            "[Resource {uri}: binary content ({}) that can't be shown.]",
+                            "[Resource {uri} has binary content ({}) that can't be shown.]",
                             mime_type.as_deref().unwrap_or("of an unknown type")
                         )),
                     },

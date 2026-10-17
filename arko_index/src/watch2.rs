@@ -1,31 +1,31 @@
-//! Scaling prototype of the watcher (Linux only): inotify events and metadata
-//! reconciliation decide *which* files to look at; per-file records and an
+//! A Linux watcher using inotify events and metadata
+//! reconciliation decide *which* files to look at. Per-file records and an
 //! append-only journal make each commit proportional to the change, not the repo.
 //!
-//! Durability model (same guarantees as `watch.rs`, different storage):
+//! The durability model has the same guarantees as `watch.rs`, with different storage:
 //! * `watch2.snap` is a full checkpoint written atomically (tmp, fsync, rename, fsync dir).
 //!   It holds the file table (path -> metadata, content hash, record location) and the
 //!   undelivered/unacknowledged deltas, not the chunks.
 //! * `watch2.recs.N` (the record store) holds each file version's chunks, appended
 //!   and fdatasync'ed before the journal record that references them. Only the
-//!   file table stays in memory; a file's chunks are read back when it changes.
+//!   file table stays in memory. A file's chunks are read back when it changes.
 //!   On open the store is cut back to the end of its last referenced record (an
 //!   uncommitted tail is garbage). When dead versions dominate and no delta is
 //!   pending, the live records are copied to `watch2.recs.N+1` and a checkpoint
 //!   switches to it.
 //! * `watch2.wal` holds one JSON line per transaction, appended and fdatasync'ed
-//!   **before** the delta is delivered. Every record carries a log sequence number;
-//!   replay skips records already folded into the checkpoint and ignores a torn tail.
+//!   **before** the delta is delivered. Every record carries a log sequence number.
+//!   Replay skips records already folded into the checkpoint and ignores a torn tail.
 //!   A delta is stored as the (old, new) record versions of the files it covers and
-//!   rendered from the store when delivered: the same per-file diff as before.
+//!   rendered from the store when delivered, with the same per-file diff as before.
 //! * Startup (and inotify queue overflow, and any directory-level event) runs a full
-//!   reconciliation: walk + lstat every file; a file is re-read and re-hashed only if
+//!   reconciliation walks and stats every file. A file is re-read and re-hashed only if
 //!   its (size, mtime, ctime, inode, device) differ from the record or the record is
 //!   "racy" (ctime within RACY_NS of when it was hashed, the racy-git rule), so
 //!   same-size, mtime-restoring edits are still found (they change ctime).
 //! * File events re-list only the affected directories (their direct files), walking
 //!   from the root so every file selection rule applies exactly as in a full walk.
-//! * Rule changes: a `CACHEDIR.TAG` event (also in an excluded, tagged directory, which
+//! * Rule changes. A `CACHEDIR.TAG` event (also in an excluded, tagged directory, which
 //!   keeps a watch for its tag only) and, when ignore files are honoured, a
 //!   `.gitignore`/`.ignore` event or a change of `.git/info/exclude` (each `.git/info`
 //!   directory gets a watch for that file only) run a full reconciliation.
@@ -84,7 +84,7 @@ fn now_ns() -> i128 {
         .unwrap_or(0)
 }
 
-/// (offset, length) of one file version's records in the record store; length 0
+/// (offset, length) of one file version's records in the record store. Length 0
 /// means no chunks.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 struct Loc(u64, u64);
@@ -94,8 +94,8 @@ impl Loc {
     }
 }
 
-/// SHA-256 of a file's bytes, inline (no heap allocation per file), written as hex;
-/// all zeros (written "") means unknown and never matches.
+/// SHA-256 of a file's bytes, inline (no heap allocation per file), written as hex.
+/// All zeros (written "") means unknown and never matches.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 struct Hash32([u8; 32]);
 impl Serialize for Hash32 {
@@ -280,7 +280,7 @@ fn diff<'a>(old: &[EntryChunk<'a>], new: &[EntryChunk<'a>]) -> FileDiff<'a> {
     d
 }
 
-/// The record store: appends are buffered and written with `pwrite`; `sync` makes
+/// The record store: appends are buffered and written with `pwrite`. `sync` makes
 /// everything appended so far durable (before the journal record that refers to it).
 struct Store {
     file: File,
@@ -413,7 +413,7 @@ struct Inotify {
     fd: i32,
     wd_dir: HashMap<i32, String>, // wd -> relative dir ("" = root)
     dir_wd: HashMap<String, i32>,
-    /// Watches kept for one file name only: excluded CACHEDIR.TAG directories
+    /// Watches kept for one file name only, for excluded CACHEDIR.TAG directories
     /// (`CACHEDIR.TAG`) and, when ignore files are honoured, `.git/info` (`exclude`).
     trigger_only: HashMap<i32, &'static [u8]>,
 }
@@ -442,7 +442,7 @@ impl Inotify {
             trigger_only: HashMap::new(),
         })
     }
-    /// Adds (or refreshes) the watch of `rel`; `None` if it failed, as for walked
+    /// Adds (or refreshes) the watch of `rel`. `None` if it failed, as for walked
     /// directories (a vanished directory's parent event triggers a rescan).
     fn watch(&mut self, root: &Path, rel: &str) -> Option<i32> {
         let abs = if rel.is_empty() {
@@ -559,7 +559,7 @@ pub struct Watcher2 {
     live_bytes: u64,
     /// Compact when the store exceeds twice `live_bytes` plus this.
     store_slack: u64,
-    /// Set when a durable write failed midway; every later operation errors.
+    /// Set when a durable write failed midway. Every later operation errors.
     poisoned: Option<String>,
     /// Number of tracked paths per (device, inode), for hard-linked siblings.
     inodes: HashMap<(u64, u64), u32>,
@@ -574,7 +574,7 @@ pub struct Watcher2 {
     /// `report` changed since `report.json` was written.
     report_dirty: bool,
     /// The report's warnings for files whose parser failed (they were split as text),
-    /// by path: kept while the file is unchanged, in this process.
+    /// by path, kept while the file is unchanged in this process.
     parse_warnings: BTreeMap<String, String>,
     _lock: File,
     pub stats: BTreeMap<&'static str, f64>,
@@ -631,7 +631,7 @@ fn release_memory() {
     }
 }
 
-/// One candidate's outcome: `None` if it vanished or is not text; otherwise its new
+/// One candidate's outcome: `None` if it vanished or is not text. Otherwise its new
 /// record, with the encoded chunks if its content hash changed.
 type Update = Option<(FileRec, Option<Vec<u8>>)>;
 
@@ -686,7 +686,7 @@ impl Watcher2 {
                 let v: Version = serde_json::from_slice(&raw)?;
                 if v.version != SNAP_VERSION {
                     return Err(format!(
-                        "watch2 state version {} is from an earlier prototype; remove {} to rebuild it",
+                        "watch2 state version {} is from an earlier prototype. Remove {} to rebuild it",
                         v.version,
                         dir.display()
                     )
@@ -809,13 +809,13 @@ impl Watcher2 {
         Ok(w)
     }
 
-    /// What the latest reconciliation indexed and skipped; also kept in
+    /// What the latest reconciliation indexed and skipped. Also kept in
     /// `STATE_DIR/report.json`. Pattern counts are refreshed by full reconciliations.
     pub fn report(&self) -> &Report {
         &self.report
     }
     /// Whether this open found a state written with different file selection rules
-    /// (or by a version that did not record them); the open reconciled to the new rules.
+    /// (or by a version that did not record them). The open reconciled to the new rules.
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
     }
@@ -863,7 +863,7 @@ impl Watcher2 {
     fn healthy(&self) -> Result<(), Error> {
         match &self.poisoned {
             Some(why) => Err(format!(
-                "watch state uncertain after a failed write ({why}); reopen the watcher"
+                "watch state uncertain after a failed write ({why}). Reopen the watcher"
             )
             .into()),
             None => Ok(()),
@@ -1309,7 +1309,7 @@ impl Watcher2 {
         Ok(())
     }
 
-    /// Waits up to `timeout` for the next undelivered delta; returns its index in
+    /// Waits up to `timeout` for the next undelivered delta. Returns its index in
     /// `snap.pending`.
     fn next_pending(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         self.write_report()?;
@@ -1373,7 +1373,7 @@ impl Watcher2 {
     }
 
     /// Writes the next delta as one JSON line (exactly `serde_json` of [`Delta`] plus a
-    /// newline) without holding its chunks in memory; returns its sequence.
+    /// newline) without holding its chunks in memory. Returns its sequence.
     pub fn next_change_to(
         &mut self,
         timeout: Duration,
@@ -1452,7 +1452,7 @@ mod tests {
             model.insert(c.id.clone(), c.clone());
         }
     }
-    /// Collects deltas until none arrives for `idle`; checks that the materialized
+    /// Collects deltas until none arrives for `idle`. Checks that the materialized
     /// delta re-serializes to the streamed line.
     fn drain(w: &mut Watcher2, model: &mut Map<String, Chunk>, idle: Duration) -> usize {
         let mut n = 0;

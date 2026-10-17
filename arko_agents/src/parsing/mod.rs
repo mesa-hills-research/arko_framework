@@ -24,7 +24,7 @@ pub struct ToolParsingConfig {
     pub tag_close: String,
     pub batched_tool_call_tag: String,
     /// Marks a tag the model writes literally, not as a tool call. Default
-    /// [`DEFAULT_ESCAPE_PREFIX`] (also when omitted in JSON); `None`
+    /// [`DEFAULT_ESCAPE_PREFIX`] (also when omitted in JSON). `None`
     /// (explicit `null`) turns escaping off.
     pub escape_prefix: Option<String>,
 }
@@ -513,7 +513,7 @@ pub enum ToolCallGroup {
 /// Errors that can occur during tool call assembly.
 #[derive(Error, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolAssemblyError {
-    #[error("Mismatched tool closing tag: expected '{expected}', got '{actual}' during assembly.")]
+    #[error("Mismatched tool closing tag. Expected '{expected}', got '{actual}' during assembly.")]
     MismatchedClosingTag { expected: String, actual: String },
     #[error("Batch tool calls must all be for the same tool, found mixed types.")]
     MixedToolsInBatch,
@@ -688,7 +688,7 @@ mod tests {
     use super::*;
 
     /// Fields omitted in JSON or YAML take the `Default` values (an omitted
-    /// `escape_prefix` once meant no escaping); an explicit `null` still
+    /// `escape_prefix` once meant no escaping). An explicit `null` still
     /// turns escaping off, and configs saved with every field load as
     /// saved.
     #[test]

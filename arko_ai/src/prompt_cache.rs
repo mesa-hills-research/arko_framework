@@ -1,6 +1,6 @@
 //! How long providers keep prompt-cache entries.
 //!
-//! A cache entry expires once it has gone unused for its lifetime; every
+//! A cache entry expires once it has gone unused for its lifetime. Every
 //! request that hits it restarts the clock. Anthropic: "the cache is
 //! refreshed for no additional cost each time the cached content is used".
 //! OpenAI: "Reusing the prefix refreshes its lifetime without another
@@ -10,12 +10,12 @@
 //!
 //! Sources:
 //! - Anthropic: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
-//!   (5 minutes by default, 1 hour with `ttl: "1h"`); OpenRouter passes
+//!   (5 minutes by default, 1 hour with `ttl: "1h"`). OpenRouter passes
 //!   Claude models' `cache_control`, `ttl` included, through to Anthropic.
 //! - OpenAI: <https://developers.openai.com/api/docs/guides/prompt-caching>.
 //!   In-memory retention keeps entries "around 5 to 10 minutes of
 //!   inactivity" (the default before GPT-5.6 for organizations with Zero Data
-//!   Retention; others get extended retention, "around 30 minutes and ...
+//!   Retention, others get extended retention, "around 30 minutes and ...
 //!   up to 24 hours"). GPT-5.6 and later take `prompt_cache_options.ttl`,
 //!   whose "only supported value, `30m`, is also the default". This module
 //!   reports API-key requests as a conservative 5 minutes on every model, on
@@ -38,7 +38,7 @@ use crate::model::{Model, Provider};
 /// as far as the provider documents it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptCacheLifetime {
-    /// Entries last this long after their last use; every cache hit starts
+    /// Entries last this long after their last use. Every cache hit starts
     /// the lifetime again.
     Known(Duration),
     /// The provider may cache the prompt, but documents no lifetime for this
@@ -83,7 +83,7 @@ impl AnthropicCacheTtl {
 }
 
 /// The prompt-cache lifetime of requests for `model` with `config`, from a
-/// conversation with caching enabled (the default; a conversation with
+/// conversation with caching enabled (the default, a conversation with
 /// [`Conversation::enable_cache`] off matches `config.prompt_caching` set to
 /// `Some(false)`). `openai_chatgpt_oauth` says whether OpenAI requests go
 /// through ChatGPT OAuth ([`LLMClient::prompt_cache_lifetime`] reads it from
@@ -92,10 +92,10 @@ impl AnthropicCacheTtl {
 /// - A model without cache support: `Disabled`.
 /// - Anthropic, and Claude models on OpenRouter: `Disabled` when
 ///   [`GenerationConfig::prompt_caching`] is off, since no `cache_control` is
-///   sent; otherwise [`GenerationConfig::anthropic_cache_ttl`]'s lifetime, 5
+///   sent. Otherwise [`GenerationConfig::anthropic_cache_ttl`]'s lifetime, 5
 ///   minutes by default.
 /// - OpenAI with an API key: [`OPENAI_PROMPT_CACHE_LIFETIME`], a
-///   conservative 5 minutes, on every model; `Disabled` only for GPT-5.6
+///   conservative 5 minutes, on every model. `Disabled` only for GPT-5.6
 ///   and later with caching off (explicit mode without breakpoints).
 ///   Earlier models cache automatically, so turning caching off doesn't
 ///   change them.
@@ -103,7 +103,7 @@ impl AnthropicCacheTtl {
 ///   minutes, on every model. The backend caches implicitly, so turning
 ///   caching off doesn't change it.
 /// - Claude Code: `anthropic_cache_ttl`'s lifetime when set (passed on as
-///   its `promptCacheTtl`); otherwise `Unknown`, since Claude Code chooses:
+///   its `promptCacheTtl`). Otherwise `Unknown`, since Claude Code chooses:
 ///   1 hour on a Claude subscription within its usage limits, 5 minutes on
 ///   an API key.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
@@ -220,7 +220,7 @@ mod tests {
     }
 
     /// OpenAI with an API key is a conservative 5 minutes on every model,
-    /// and over ChatGPT OAuth 30 minutes; only an API-key request that turns
+    /// and over ChatGPT OAuth 30 minutes. Only an API-key request that turns
     /// caching off is uncached.
     #[test]
     fn openai_lifetimes_depend_on_the_auth() {
@@ -263,7 +263,7 @@ mod tests {
     }
 
     /// The host's lifetime replaces the provider's, known or not, on any
-    /// auth; an uncached request stays uncached, and zero reports none.
+    /// auth. An uncached request stays uncached, and zero reports none.
     #[test]
     fn the_hosts_lifetime_replaces_the_providers() {
         let hour = GenerationConfig::default().with_prompt_cache_lifetime(60 * MINUTE);

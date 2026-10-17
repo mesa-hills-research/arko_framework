@@ -47,7 +47,7 @@ fn tls_config() -> rustls::ClientConfig {
         // TLS backend: HTTPS requests then fail certificate verification.
         Err(error) => {
             log::error!(
-                "arko_ai: system CA certificates are unavailable ({error}); HTTPS requests will fail"
+                "arko_ai: system CA certificates are unavailable ({error}). HTTPS requests will fail"
             );
             versions()
                 .with_root_certificates(rustls::RootCertStore::empty())
@@ -118,7 +118,7 @@ pub struct GenerationResponse {
     /// Sticky-routing token the ChatGPT backend returned for this call in
     /// the `x-codex-turn-state` response header.
     /// [`Conversation::add_assistant_message_from_response`] keeps it so the
-    /// rest of the turn echoes it; see [`Conversation::openai_turn_state`].
+    /// rest of the turn echoes it. See [`Conversation::openai_turn_state`].
     ///
     /// [`Conversation::add_assistant_message_from_response`]: crate::Conversation::add_assistant_message_from_response
     /// [`Conversation::openai_turn_state`]: crate::Conversation::openai_turn_state
@@ -127,14 +127,14 @@ pub struct GenerationResponse {
 }
 
 impl GenerationResponse {
-    /// The model the provider reports having served; see
+    /// The model the provider reports having served. See
     /// [`ModelCallUsage::served_model`].
     pub fn served_model(&self) -> Option<&str> {
         self.model_call_usage.served_model.as_deref()
     }
 
     /// Whether the provider served a different model than the one
-    /// requested; see [`ModelCallUsage::served_model_changed`].
+    /// requested. See [`ModelCallUsage::served_model_changed`].
     pub fn rerouted(&self) -> bool {
         self.model_call_usage.served_model_changed()
     }

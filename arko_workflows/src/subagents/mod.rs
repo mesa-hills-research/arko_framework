@@ -1,4 +1,4 @@
-//! Background subagents: agent runs that an agent starts and that run while
+//! Background subagents are agent runs that an agent starts and that run while
 //! it goes on with its own work.
 //!
 //! With [`WorkflowBuilder::subagents`](crate::WorkflowBuilder::subagents),
@@ -11,7 +11,7 @@
 //! to talk with the run that started it (its lead) and, when the lead
 //! allows it, with the lead's other runs (its peers).
 //!
-//! A subagent is an ordinary run of the same workflow: its costs go into the
+//! A subagent is an ordinary run of the same workflow. Its costs go into the
 //! workflow's ledger, its result is checkpointed with the others, and the
 //! workflow's budget, policies, hooks and notes apply to it. It is not
 //! inside a tool call of its lead, so the lead's run can end, or be stopped,
@@ -19,19 +19,19 @@
 //!
 //! Reports, failures, stops and messages go through a mailbox kept per run.
 //! An item reaches its recipient in the first way that applies:
-//! - a `wait_for_agents` call that waits for it returns it, whole;
+//! - a `wait_for_agents` call that waits for it returns it, whole.
 //! - while the recipient runs, at its next turn boundary, in its
 //!   `# Workflow context update` (a long item as an excerpt, with the file
-//!   that holds all of it);
+//!   that holds all of it).
 //! - otherwise it waits in the mailbox. A subagent that had finished is
 //!   continued with it. For a run the host drives, the workflow sends
-//!   [`SubagentEventKind::NewsWaiting`]: the host continues the run (with
+//!   [`SubagentEventKind::NewsWaiting`], and the host continues the run (with
 //!   [`Workflow::continue_agent`](crate::Workflow::continue_agent), say),
 //!   and the news arrives at the continuation's first turn boundary, or the
 //!   host takes it with [`Workflow::take_news`](crate::Workflow::take_news).
 //!
 //! The runs, their mailboxes and their workspaces are saved in checkpoints.
-//! After a resume, the runs that were running are `interrupted`:
+//! After a resume, the runs that were running are `interrupted`.
 //! [`Workflow::resume_subagents`](crate::Workflow::resume_subagents)
 //! relaunches them, and a message to one restarts it.
 
@@ -64,35 +64,35 @@ pub(crate) use tools::{
 };
 pub use workspace::{GitWorktreeProvider, IsolatedWorkspace, WorkspaceProvider, WorkspaceRequest};
 
-/// The default [`SubagentsConfig::max_running`]: 4.
+/// The default [`SubagentsConfig::max_running`] of 4.
 pub const DEFAULT_MAX_RUNNING: usize = 4;
 
-/// The default [`SubagentsConfig::max_peer_messages`]: 20.
+/// The default [`SubagentsConfig::max_peer_messages`] of 20.
 pub const DEFAULT_MAX_PEER_MESSAGES: u32 = 20;
 
-/// The longest mailbox item a context update shows whole, in bytes: 16 KiB.
+/// The longest mailbox item a context update shows whole, 16 KiB in bytes.
 /// A longer one is shown as an excerpt, with the file that holds all of it
 /// (`wait_for_agents` returns it whole).
 pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 
-/// About this many bytes of mail go into one context update; the rest come
+/// About this many bytes of mail go into one context update. The rest come
 /// at the next turn boundary. The first item always goes.
 pub const UPDATE_MAX_MAIL_BYTES: usize = 48 * 1024;
 
-/// How background subagents work in a workflow; see the [module](self).
+/// How background subagents work in a workflow. See the [module](self).
 ///
 /// Who may start which agent is
 /// [`WorkflowServicesConfig`](crate::services::WorkflowServicesConfig)'s
 /// callers and targets.
 #[derive(Clone)]
 pub struct SubagentsConfig {
-    /// At most this many subagents run at once, workflow-wide; a start (or a
-    /// restart) over it waits in a queue, first come first served. `None`:
+    /// At most this many subagents run at once, workflow-wide. A start (or a
+    /// restart) over it waits in a queue, first come first served. `None` allows
     /// any number. Default [`DEFAULT_MAX_RUNNING`].
     pub max_running: Option<NonZeroUsize>,
-    /// How deep subagents may nest: a run may start subagents while its own
+    /// How deep subagents may nest. A run may start subagents while its own
     /// depth is less than this (a run the host starts has depth 0, its
-    /// subagents depth 1). Default 1: subagents start no subagents and are
+    /// subagents depth 1). With the default of 1, subagents start no subagents and are
     /// not offered `run_workflow_agent`.
     pub max_depth: u32,
     /// The lead may let its subagents message each other (`start_agent`'s
@@ -112,7 +112,7 @@ pub struct SubagentsConfig {
     /// completion inside the call). Default on.
     pub offer_blocking_tool: bool,
     /// A subagent's `ask_user` question goes to its lead as a message, and
-    /// the lead's next message to it is the answer. Default on. Off: the
+    /// the lead's next message to it is the answer. On by default. When off, the
     /// question goes to the workflow's
     /// [`UserInputHandler`](crate::user_input::UserInputHandler), as other
     /// runs' questions do.
@@ -122,7 +122,7 @@ pub struct SubagentsConfig {
     /// Adjusts a subagent's configuration as it starts.
     pub hook: Option<Arc<dyn SubagentHook>>,
     /// Context for each run's first message, such as the project's
-    /// instructions; see [`StartContext`].
+    /// instructions. See [`StartContext`].
     pub start_context: Option<StartContext>,
     /// The host's own `start_agent` parameters, whose values the
     /// [hook](Self::hook) receives.
@@ -179,7 +179,7 @@ impl std::fmt::Debug for SubagentsConfig {
 }
 
 impl SubagentsConfig {
-    /// At most `max` subagents run at once (at least 1); see
+    /// At most `max` subagents run at once (at least 1). See
     /// [`max_running`](Self::max_running).
     pub fn max_running(mut self, max: usize) -> Self {
         self.max_running = NonZeroUsize::new(max.max(1));
@@ -240,14 +240,14 @@ impl SubagentsConfig {
         self
     }
 
-    /// Adjusts each subagent's configuration as it starts; see
+    /// Adjusts each subagent's configuration as it starts. See
     /// [`SubagentHook`].
     pub fn hook(mut self, hook: Arc<dyn SubagentHook>) -> Self {
         self.hook = Some(hook);
         self
     }
 
-    /// Gives each run context in its first message; see [`StartContext`].
+    /// Gives each run context in its first message. See [`StartContext`].
     pub fn start_context(mut self, context: StartContext) -> Self {
         self.start_context = Some(context);
         self
@@ -314,7 +314,7 @@ pub trait SubagentHook: Send + Sync {
     ///
     /// When a workflow resumes from a checkpoint, the hook is called again
     /// for each saved subagent run, so that its saved configuration can be
-    /// checked against the registered one with the same changes: it should
+    /// checked against the registered one with the same changes. It should
     /// make the same changes for the same request.
     fn prepare(&self, request: &StartRequest, config: &mut AgentConfig) -> Result<(), String>;
 }
@@ -329,7 +329,7 @@ where
 }
 
 /// Gives a subagent run context in its first message as it starts, such as
-/// the project's instructions: the message starts with the text it returns
+/// the project's instructions. The message starts with the text it returns
 /// (under the host's own headings), and the task follows under `# Your
 /// task`. `None`, or blank text, leaves the message as it is without it.
 /// Set with [`SubagentsConfig::start_context`].
@@ -337,7 +337,7 @@ where
 /// It is called once per run, as the run starts (or, when it was stopped
 /// before it started, as it starts later), so a change in the host's
 /// context reaches the runs started after it. The text is part of the
-/// run's task prompt: a handover restates it, and the run keeps it when it
+/// run's task prompt. A handover restates it, and the run keeps it when it
 /// is continued or resumed.
 pub type StartContext = Arc<dyn Fn(&StartRequest) -> Option<String> + Send + Sync>;
 
@@ -348,7 +348,7 @@ pub enum SubagentState {
     /// Waiting for a place under [`SubagentsConfig::max_running`].
     Queued,
     Running,
-    /// It completed: its report went to its lead. A message continues it.
+    /// It completed. Its report went to its lead. A message continues it.
     Finished,
     /// It ended without finishing (an error, or a pause no one can answer).
     /// A message continues it if its run can go on.
@@ -360,7 +360,7 @@ pub enum SubagentState {
     /// [`Workflow::resume_subagents`](crate::Workflow::resume_subagents) or a
     /// message restarts it.
     Interrupted,
-    /// Its isolated workspace was removed: it can't run again.
+    /// Its isolated workspace was removed. It can't run again.
     Closed,
 }
 
@@ -405,7 +405,7 @@ pub struct SubagentRecord {
     /// The run that started it (its lead), and its agent.
     pub caller_run_id: Uuid,
     pub caller_agent: String,
-    /// Its depth: its lead's plus one.
+    /// Its depth, one more than its lead's.
     pub depth: u32,
     /// The task as its lead gave it.
     pub task: String,
@@ -448,7 +448,7 @@ pub struct SubagentRecord {
     pub asking: bool,
     /// Its lead's conversation was cut back to before the call that started
     /// it (`ContinueOptions::cut_back_to`), so that conversation never
-    /// started it: its mail stays here, withheld from its lead
+    /// started it, so its mail stays here, withheld from its lead
     /// ([`MailItem::withheld`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
@@ -468,11 +468,11 @@ pub enum MailSender {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailKind {
-    /// A subagent finished: the body is its report.
+    /// A subagent finished. The body is its report.
     Report,
-    /// A subagent ended without finishing: the body says why.
+    /// A subagent ended without finishing. The body says why.
     Failed,
-    /// A subagent was stopped: the body says why, with its progress report.
+    /// A subagent was stopped. The body says why, with its progress report.
     Stopped,
     /// A message.
     Message,
@@ -484,7 +484,7 @@ pub enum MailKind {
 
 impl MailKind {
     /// Whether an item of this kind ends a wait and starts a turn of a
-    /// recipient that isn't running: every kind but a copy.
+    /// recipient that isn't running, for every kind but a copy.
     pub fn wakes(self) -> bool {
         self != Self::Copy
     }
@@ -499,13 +499,13 @@ pub struct MailItem {
     pub to: Uuid,
     pub from: MailSender,
     pub kind: MailKind,
-    /// What the item is, as its recipient is told: "r1 (agent `coder`)
+    /// What the item is, as its recipient is told, such as "r1 (agent `coder`)
     /// finished. Its report:".
     pub heading: String,
     /// The report, message or reason, whole.
     pub body: String,
     pub at: DateTime<Utc>,
-    /// When it reached its recipient: in a context update, a wait's result
+    /// When it reached its recipient in a context update, a wait's result
     /// or a continuation's prompt, or taken by the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<DateTime<Utc>>,
@@ -513,7 +513,7 @@ pub struct MailItem {
     /// [`MAX_MAIL_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
-    /// Not given to its recipient: it is from a subagent the recipient's
+    /// Not given to its recipient. It is from a subagent the recipient's
     /// conversation no longer started ([`SubagentRecord::detached`]). It
     /// stays in the records for the host to show, and `delivered_at` is when
     /// it was set aside.
@@ -528,13 +528,13 @@ impl MailItem {
         format!("[mail {}]", self.id)
     }
 
-    /// The item whole: its marker, heading and body.
+    /// The whole item with its marker, heading and body.
     pub fn text(&self) -> String {
         format!("{} {}\n\n{}", self.marker(), self.heading, self.body.trim())
     }
 
     /// The item as a context update shows it: whole, or for a long body an
-    /// excerpt with the file holding all of it; every line after the first
+    /// excerpt with the file holding all of it. Every line after the first
     /// indented.
     pub(crate) fn excerpt(&self) -> String {
         let body = self.body.trim();
@@ -558,7 +558,7 @@ impl MailItem {
     }
 }
 
-/// The subagents as a checkpoint saves them:
+/// The subagents as a checkpoint saves them in
 /// [`WorkflowState::subagents`](crate::persistence::state::WorkflowState::subagents).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubagentsSnapshot {
@@ -575,7 +575,7 @@ pub struct SubagentsSnapshot {
     #[serde(default)]
     pub last_mail: u64,
     /// Messages two subagents sent each other since their lead last
-    /// messaged either: `(run, run, count)`, the smaller id first.
+    /// messaged either, as `(run, run, count)`, the smaller id first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peer_counts: Vec<(Uuid, Uuid, u32)>,
 }
@@ -607,24 +607,24 @@ pub enum SubagentEventKind {
     Queued,
     /// Its run started.
     Started,
-    /// Its run goes on again: continued with a message, restarted or
+    /// Its run goes on again, continued with a message, restarted or
     /// recovered.
     Resumed,
     /// It completed with this report.
     Finished { summary: String },
     /// It ended without finishing.
     Failed { error: String },
-    /// It was stopped: by its lead (`by_caller`), else by the host or with
+    /// It was stopped by its lead (`by_caller`), else by the host or with
     /// the workflow.
     Stopped { reason: String, by_caller: bool },
     /// A message went from run `from` to run `to` (mailbox item `mail_id`).
     Message { mail_id: u64, from: Uuid, to: Uuid },
     /// Mailbox items reached run `to`.
     Delivered { to: Uuid, mail_ids: Vec<u64> },
-    /// The lead (`caller_run_id`) isn't running and has news waiting:
+    /// The lead (`caller_run_id`) isn't running and has news waiting, and
     /// mailbox items `mail_ids` are for it. Start a turn of it (continue
     /// or restart its run), and the news arrives at its first turn
-    /// boundary. It may come more than once for the same news: check
+    /// boundary. It may come more than once for the same news. Check
     /// [`Workflow::pending_news`](crate::Workflow::pending_news).
     NewsWaiting { mail_ids: Vec<u64> },
     /// Its isolated workspace was removed.

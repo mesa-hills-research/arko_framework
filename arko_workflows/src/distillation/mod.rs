@@ -520,7 +520,7 @@ pub(crate) mod tests {
         assert_eq!(records.len(), 1);
         let rejection = records[0].rejection.as_deref().unwrap();
         assert!(
-            rejection.starts_with("skipped: the input (about 16"),
+            rejection.starts_with("skipped because the input (about 16"),
             "{rejection}"
         );
         assert!(
@@ -698,7 +698,7 @@ impl DistillationConfig {
     /// registered under with
     /// [`WorkflowBuilder::agent`](crate::WorkflowBuilder::agent), not its
     /// `AgentConfig::name`. A distiller needs at least one target agent and
-    /// one target tool: `build` rejects one without.
+    /// one target tool. `build` rejects one without.
     pub fn target_agent(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self
@@ -718,13 +718,13 @@ impl DistillationConfig {
     }
 
     /// Sets the output-token limit, sent with every request (see
-    /// [`max_output_tokens`](Self::max_output_tokens)); `build` rejects zero.
+    /// [`max_output_tokens`](Self::max_output_tokens)). `build` rejects zero.
     pub fn max_output_tokens(mut self, tokens: usize) -> Self {
         self.max_output_tokens = Some(tokens);
         self
     }
 
-    /// The limit sent when none is set: [`DEFAULT_MAX_OUTPUT_TOKENS`], or the
+    /// The limit sent when none is set, `DEFAULT_MAX_OUTPUT_TOKENS` (16,000), or the
     /// model's output limit when that is known and smaller.
     pub fn default_max_output_tokens(&self) -> usize {
         // 0 means the limit is unknown (an OpenRouter model without catalog
@@ -771,7 +771,7 @@ impl DistillationConfig {
         Ok(())
     }
 
-    /// The settings of a distillation request; `chatgpt_oauth` when the
+    /// The settings of a distillation request. `chatgpt_oauth` when the
     /// request goes to the ChatGPT OAuth backend.
     ///
     /// Without a set limit, the default limit is sent where the provider
@@ -921,7 +921,7 @@ fn complete_summary(response: &arko_ai::GenerationResponse) -> Result<String, Re
 
 pub(crate) struct DistillationInterceptor {
     /// The name the agent is registered under in the workflow, which target
-    /// filters and records use; `TaskContext::agent_name` is the
+    /// filters and records use. `TaskContext::agent_name` is the
     /// configuration's display name.
     pub agent_name: String,
     pub config: DistillationConfig,
@@ -968,10 +968,10 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 .unwrap_or_else(|| self.config.default_max_output_tokens());
             if input.saturating_add(output) > limit {
                 let reason = format!(
-                    "skipped: the input (about {input} tokens) and output limit ({output} tokens) are over the distiller model's input limit ({limit} tokens)"
+                    "skipped because the input (about {input} tokens) and output limit ({output} tokens) are over the distiller model's input limit ({limit} tokens)"
                 );
                 log::warn!(
-                    "Task {}: distiller '{}' {reason} for tool '{}'; keeping the tool output",
+                    "Task {}: distiller '{}' {reason} for tool '{}'. Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name
@@ -1003,7 +1003,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             // moderation 403) would repeat like any other refusal.
             Err(arko_ai::Error::Refusal(refusal)) => {
                 log::warn!(
-                    "Task {}: distiller '{}' request for tool '{}' was {refusal}; keeping the tool output",
+                    "Task {}: distiller '{}' request for tool '{}' was {refusal}. Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name
@@ -1081,7 +1081,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 retryable: false,
             }) => {
                 log::warn!(
-                    "Task {}: distiller '{}' result for tool '{}' not used ({reason}); keeping the tool output",
+                    "Task {}: distiller '{}' result for tool '{}' not used ({reason}). Keeping the tool output",
                     task_context.task_id,
                     self.config.name,
                     tool_name

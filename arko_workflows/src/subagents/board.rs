@@ -69,7 +69,7 @@ pub(crate) struct Board {
 }
 
 impl Board {
-    /// The board of a workflow run; `restored` from its checkpoint, with
+    /// The board of a workflow run. `restored` from its checkpoint, with
     /// the results it recorded (`results`): records that were running are
     /// settled by the outcome their runs recorded.
     pub(crate) fn new(
@@ -107,7 +107,7 @@ impl Board {
         self.config.as_ref()
     }
 
-    /// The state a checkpoint saves; `None` while there is nothing.
+    /// The state a checkpoint saves. `None` while there is nothing.
     pub(crate) fn snapshot(&self) -> Option<SubagentsSnapshot> {
         let state = self.state.lock();
         (*state != SubagentsSnapshot::default()).then(|| state.clone())

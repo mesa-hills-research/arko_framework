@@ -91,13 +91,13 @@ pub enum AgentEvent {
     /// [`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message),
     /// replied in plain text without a tool call. Nothing waits for an
     /// answer, and the task's state doesn't change. For a call, it follows
-    /// the call's `ToolCallFormatted` and comes before its `ToolResult`; a
+    /// the call's `ToolCallFormatted` and comes before its `ToolResult`. A
     /// reply in plain text has already streamed as `AssistantResponseChunk`
     /// events.
     MessageToUser {
         /// The message, as the agent wrote it.
         message: String,
-        /// The `message_user` call that sent it; `None` for a reply in
+        /// The `message_user` call that sent it. `None` for a reply in
         /// plain text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<Uuid>,
@@ -116,7 +116,7 @@ pub enum AgentEvent {
     ///
     /// Emitted immediately after the corresponding `ToolResult` event
     /// when interception produced a different result. The `intercepted_output`
-    /// is what the agent's conversation will contain; `original_output`
+    /// is what the agent's conversation will contain. `original_output`
     /// matches the preceding `ToolResult.output`.
     ToolResultIntercepted {
         tool_call_id: Uuid,
@@ -136,7 +136,7 @@ pub enum AgentEvent {
         requires_approval_to_retry: bool,
         tool_call_id: Option<Uuid>,
         /// The kind of a failed model request, when it was classified
-        /// ([`arko_ai::Error::kind`]); `None` for other errors, unclassified
+        /// ([`arko_ai::Error::kind`]). `None` for other errors, unclassified
         /// ones, and in events saved by an older version.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<arko_ai::ErrorKind>,
@@ -145,7 +145,7 @@ pub enum AgentEvent {
     /// by the overflow guard, by an opt-in cap, or to recover from a
     /// request the provider found over the model's input limit (see
     /// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). The
-    /// `ToolResult` event before it has the whole output; the conversation
+    /// `ToolResult` event before it has the whole output. The conversation
     /// holds the head and tail kept and a notice.
     ToolResultShortened {
         /// The provider's id of the call the result answers.
@@ -161,7 +161,7 @@ pub enum AgentEvent {
     /// refusal is handled as a non-retryable error (an `ErrorEncountered`
     /// event and task state change follow). For a model's own refusal
     /// ([`arko_ai::RefusalSource::Model`]) the turn stays in history with the
-    /// refusal explanation as its text; classifier and content-filter
+    /// refusal explanation as its text. Classifier and content-filter
     /// refusals are removed from history. With the opt-in refusal fallback,
     /// `RefusalFallback` follows instead and the task continues.
     RefusalReceived(Refusal),
@@ -172,9 +172,9 @@ pub enum AgentEvent {
     RefusedInput(RefusedInput),
     /// The refused turn is sent again, once, to the opt-in fallback model
     /// ([`AgentConfig::refusal_fallback`](crate::agent_config::AgentConfig::refusal_fallback)).
-    /// Follows `RefusalReceived`; the refused turn is not kept.
+    /// Follows `RefusalReceived`. The refused turn is not kept.
     RefusalFallback { model_id: String },
-    /// A retry is scheduled; delay includes any provider minimum.
+    /// A retry is scheduled. Delay includes any provider minimum.
     RetryScheduled {
         attempt: u32,
         delay_ms: u64,
@@ -235,13 +235,13 @@ pub enum AgentEvent {
     /// Emitted once per LLM call, immediately after `UsageReported`.
     ModelCallUsageReported(ModelCallUsage),
     /// Subscription plan usage the provider reported with a model call (the
-    /// ChatGPT backend on ChatGPT OAuth calls; see
+    /// ChatGPT backend on ChatGPT OAuth calls, see
     /// [`ModelCallUsage::plan_usage`]). Emitted after
     /// `ModelCallUsageReported` for every call that reports it.
     PlanUsageReported(PlanUsage),
     /// Plan usage reached the opt-in threshold
     /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage)),
-    /// before a model request. Reported once per window and reset; `action`
+    /// before a model request. Reported once per window and reset. `action`
     /// follows.
     PlanUsageThresholdReached {
         /// `"primary"` or `"secondary"`.
@@ -289,7 +289,7 @@ pub enum AgentEvent {
     /// A model response ended at its output-token limit
     /// ([`arko_ai::StopReason::MaxTokens`]): its text may be cut short, and a
     /// tool call still being written when the limit was reached was dropped.
-    /// Emitted after the call's usage events; the response is then handled
+    /// Emitted after the call's usage events. The response is then handled
     /// as usual (a turn without a tool call gets the runtime's note). A host
     /// can tell the user, who can ask the agent to continue. `max_tokens` in
     /// the model's generation settings raises the limit where the model
@@ -304,7 +304,7 @@ pub enum AgentEvent {
     /// rate limit whose reset is further off than
     /// [`LLMRateLimitRetryConfig::max_wait_ms`](crate::agent_config::LLMRateLimitRetryConfig::max_wait_ms)).
     /// Under [`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)
-    /// the runtime waits until `waiting_until_unix_ms` and retries; otherwise
+    /// the runtime waits until `waiting_until_unix_ms` and retries. Otherwise
     /// it stops retrying (a task state change and `ErrorEncountered` follow).
     UsageLimitReached {
         /// When the limit resets, in Unix milliseconds, when the provider
@@ -320,7 +320,7 @@ pub enum AgentEvent {
     /// [`crate::handover`].
     HandoverRequested {
         /// The input size of the latest request of the conversation being
-        /// replaced; 0 when a host asked before any request.
+        /// replaced. 0 when a host asked before any request.
         input_tokens: usize,
     },
     /// A context update joined the conversation: content the host sent with
@@ -334,7 +334,7 @@ pub enum AgentEvent {
         /// The host's identifiers of the items the update holds
         /// ([`TurnContext::ids`](crate::runtime::TurnContext::ids), and
         /// [`TurnContextSource::identify`](crate::runtime::TurnContextSource::identify)
-        /// for injected content), in the order they were added; empty when
+        /// for injected content), in the order they were added. Empty when
         /// the host identified none. arko_workflows uses `note:<seq>` for a
         /// note, `message:<id>` for an agent message and `mail:<id>` for a
         /// subagent mailbox item.

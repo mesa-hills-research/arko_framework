@@ -19,7 +19,7 @@ use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default Messages API base URL; requests go to `{base}/v1/messages`.
+/// Default Messages API base URL. Requests go to `{base}/v1/messages`.
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Clone)]
@@ -89,7 +89,7 @@ impl AnthropicClient {
             && !conversation.model.supports_anthropic_fast_mode()
         {
             return Err(Error::InvalidRequest(format!(
-                "Fast mode is not supported for model '{}' (supported: Claude Opus 5.5, Opus 5 and Opus 4.8; Opus 4.6 would silently run at standard speed).",
+                "Fast mode is not supported for model '{}'. Use Claude Opus 5.5, Opus 5 or Opus 4.8. Opus 4.6 would silently run at standard speed.",
                 conversation.model.id
             )));
         }
@@ -118,7 +118,7 @@ impl AnthropicClient {
             && conversation.model.supports_cache
     }
 
-    /// Top-level automatic caching; `ttl` defaults to 5 minutes when omitted.
+    /// Top-level automatic caching. `ttl` defaults to 5 minutes when omitted.
     /// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
     fn apply_cache_control(
         json: &mut Value,
@@ -175,7 +175,7 @@ impl AnthropicClient {
 
     /// Beta headers. The 1M-context beta (`context-1m-2025-08-07`, retired for
     /// Sonnet 4/4.5 on 2026-04-30) and the effort betas (`effort-2025-11-24`,
-    /// not required since 2026-02-05; `max-effort-2026-01-24`, undocumented) are
+    /// not required since 2026-02-05, `max-effort-2026-01-24`, undocumented) are
     /// no longer sent. https://platform.claude.com/docs/en/release-notes/overview
     fn compute_betas(conversation: &Conversation, config: &GenerationConfig) -> Vec<&'static str> {
         let mut betas = Vec::new();
@@ -227,7 +227,7 @@ impl AnthropicClient {
         if config.long_context == Some(true) && !conversation.model.supports_long_context() {
             if conversation.model.had_retired_anthropic_long_context_beta() {
                 return Err(Error::InvalidRequest(format!(
-                    "The 1M-context beta for model '{}' was retired on 2026-04-30; requests over 200K tokens now fail. Use a Claude 4.6 or later model for 1M context.",
+                    "The 1M-context beta for model '{}' was retired on 2026-04-30. Requests over 200K tokens now fail. Use a Claude 4.6 or later model for 1M context.",
                     conversation.model.id
                 )));
             }
@@ -410,7 +410,7 @@ impl AnthropicClient {
                 // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
                 if conversation.model.is_opus_4_6() && Self::uses_manual_thinking(config) {
                     return Err(Error::InvalidRequest(
-                        "Claude Opus 4.6 does not interleave thinking with manual budget_tokens; use adaptive thinking instead."
+                        "Claude Opus 4.6 does not interleave thinking with manual budget_tokens. Use adaptive thinking instead."
                             .to_string(),
                     ));
                 }
@@ -483,7 +483,7 @@ impl AnthropicClient {
     }
 
     /// Marks a classifier refusal that Anthropic does not charge for. A
-    /// refusal before any output is billed only for the categories below; one
+    /// refusal before any output is billed only for the categories below. One
     /// in any other category, or with no category, is not billed, though its
     /// tokens are still reported. A mid-stream refusal bills the input and the
     /// output already streamed, which is what `usage` reports.
@@ -647,7 +647,7 @@ impl ProviderClient for AnthropicClient {
 
 impl AnthropicClient {
     /// Parses an Anthropic Messages SSE byte stream. `End` is emitted only for
-    /// the `message_delta` event that carries the stop reason; a stream that
+    /// the `message_delta` event that carries the stop reason. A stream that
     /// ends earlier yields [`Error::StreamTruncated`].
     fn stream_events<S, B, E>(
         bytes: S,
@@ -923,7 +923,7 @@ impl AnthropicClient {
             let id = &conversation.model.id;
             crate::notice::warn_once(&format!("anthropic:temperature:{id}"), || {
                 format!(
-                    "arko_ai: Claude model '{id}' takes no temperature; GenerationConfig::temperature is ignored for it."
+                    "arko_ai: Claude model '{id}' takes no temperature. GenerationConfig::temperature is ignored for it."
                 )
             });
         }
@@ -1362,7 +1362,7 @@ impl AnthropicClient {
         (message, reasoning_artifact)
     }
 
-    /// Anthropic's `input_tokens` counts only uncached input; arko's
+    /// Anthropic's `input_tokens` counts only uncached input. Arko's
     /// `UsageInfo::input_tokens` is the total, so cache reads and writes are
     /// added back. The 1-hour share of cache writes, fast mode (`speed`) and
     /// `inference_geo` select price variants. The counts come from the
@@ -1635,7 +1635,7 @@ struct AnthropicCacheCreation {
     ephemeral_1h_input_tokens: Option<usize>,
 }
 
-/// Overlays usage fields from a later stream event; `message_delta` carries
+/// Overlays usage fields from a later stream event. `message_delta` carries
 /// cumulative counts that replace the `message_start` values.
 fn merge_usage(fields: &mut serde_json::Map<String, Value>, update: &Value) {
     if let Some(update) = update.as_object() {

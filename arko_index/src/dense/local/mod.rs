@@ -1,11 +1,11 @@
-//! Local embedding models (feature `local-embed`): [`LocalEmbedder`] runs a small
+//! Local embedding models (feature `local-embed`). [`LocalEmbedder`] runs a small
 //! code-embedding model on this machine, in pure Rust, behind the same [`Embedder`]
 //! interface as a provider, so dense and hybrid search work with no API and no
 //! per-token cost.
 //!
 //! [`MODELS`] lists the models it runs, each pinned to a Hugging Face commit with the
 //! size and SHA-256 of every file. The library reads the files from a directory
-//! ([`LocalEmbedder::load`]) and checks them. Fetching them is the caller's: the
+//! ([`LocalEmbedder::load`]) and checks them. The caller fetches them. The
 //! examples download into the Hugging Face cache (`examples/support/local.rs`).
 //!
 //! A batch of texts is tokenized with the model's own tokenizer, run through the
@@ -14,8 +14,8 @@
 //! special tokens, and its vector is their mean weighted by the text tokens each holds,
 //! at unit length. On the CPU the texts run packed together without padding, the linear
 //! layers in int8 by default ([`Precision`]), spread over a dedicated thread pool
-//! ([`LocalEmbedder::with_threads`]; by default [`threads`](crate::threads)). With the
-//! features `local-embed-gpu` (wgpu: Vulkan, Metal, DirectX 12) and `local-embed-cuda`
+//! ([`LocalEmbedder::with_threads`], by default [`threads`](crate::threads)). With the
+//! features `local-embed-gpu` (wgpu through Vulkan, Metal or DirectX 12) and `local-embed-cuda`
 //! the same models run on a GPU ([`Device`]), in `f32`, `f16` or `bf16`, in padded
 //! batches of texts of similar length. Both devices split and combine long texts the
 //! same way.
@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-/// One file of a model: its name in the repository, its size and SHA-256 (hex).
+/// One file of a model, with its name in the repository, its size and SHA-256 (hex).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelFile {
@@ -50,7 +50,7 @@ pub struct ModelFile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LocalModel {
-    /// The short name: the repository's model name, such as `CodeRankEmbed`.
+    /// The repository's short model name, such as `CodeRankEmbed`.
     pub name: &'static str,
     /// The Hugging Face repository, such as `nomic-ai/CodeRankEmbed`.
     pub repo: &'static str,
@@ -71,7 +71,7 @@ pub struct LocalModel {
     pub files: &'static [ModelFile],
 }
 
-/// `nomic-ai/CodeRankEmbed`: 137M parameters, 768 dimensions, MIT. A code retriever
+/// `nomic-ai/CodeRankEmbed` has 137M parameters and 768 dimensions, under MIT. A code retriever
 /// trained from Arctic-Embed-M-Long on 21M code pairs. Queries take the prefix
 /// `Represent this query for searching relevant code: `.
 pub const CODE_RANK_EMBED: LocalModel = LocalModel {
@@ -104,8 +104,8 @@ pub const CODE_RANK_EMBED: LocalModel = LocalModel {
     ],
 };
 
-/// `jinaai/jina-embeddings-v2-base-code`: 161M parameters, 768 dimensions,
-/// Apache-2.0. A code-and-English BERT with ALiBi positions (8,192 tokens) and a
+/// `jinaai/jina-embeddings-v2-base-code` has 161M parameters and 768 dimensions,
+/// under Apache-2.0. A code-and-English BERT with ALiBi positions (8,192 tokens) and a
 /// tokenizer trained on code. No query or document prefixes.
 pub const JINA_CODE_V2: LocalModel = LocalModel {
     name: "jina-embeddings-v2-base-code",
@@ -137,17 +137,17 @@ pub const JINA_CODE_V2: LocalModel = LocalModel {
     ],
 };
 
-/// The arithmetic a local model runs in. On the CPU: `int8` (the default) or `f32`.
-/// On a GPU (features `local-embed-gpu` and `local-embed-cuda`): `f32`, `f16` or
+/// The arithmetic a local model runs in. The CPU runs `int8` (the default) or `f32`.
+/// A GPU (features `local-embed-gpu` and `local-embed-cuda`) runs `f32`, `f16` or
 /// `bf16` (CUDA only). The precision is part of the vectors' identity
 /// ([`LocalModel::descriptor`]), so an index never mixes vectors of two precisions. The
-/// device is not: `f32` vectors from the CPU and from a GPU differ only by rounding, and
+/// device is not. `f32` vectors from the CPU and from a GPU differ only by rounding, and
 /// one index takes both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Precision {
     /// CPU only. The linear layers after attention (the output projection and
-    /// feed-forward layers, which hold most of the weights and work) run on integers:
+    /// feed-forward layers, which hold most of the weights and work) run on integers, with
     /// weights rotated by a block Hadamard matrix and quantized per output channel to
     /// 7 bits at load, activations rotated the same way and quantized per token to 8
     /// bits at run time, products summed exactly in 32-bit integers. The query, key and
@@ -157,11 +157,11 @@ pub enum Precision {
     Int8,
     /// 32-bit floats, as the model was trained.
     F32,
-    /// GPU only: every matrix product (the linear layers and attention's two) takes
+    /// On a GPU only, every matrix product (the linear layers and attention's two) takes
     /// 16-bit floats (IEEE half precision), with the weights stored in it. Layer norms,
     /// softmax, residual sums, pooling and normalization run in `f32`.
     F16,
-    /// CUDA only: as [`F16`](Self::F16) with bfloat16, which has `f32`'s range and
+    /// On CUDA only, as [`F16`](Self::F16) with bfloat16, which has `f32`'s range and
     /// fewer mantissa bits.
     Bf16,
 }
@@ -220,7 +220,7 @@ impl std::str::FromStr for Precision {
         Precision::ALL
             .into_iter()
             .find(|p| p.as_str().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown precision {s:?}: use int8, f32, f16 or bf16").into())
+            .ok_or_else(|| format!("unknown precision {s:?}. Use int8, f32, f16 or bf16").into())
     }
 }
 
@@ -228,7 +228,7 @@ impl std::str::FromStr for Precision {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Device {
-    /// The CPU for `int8`. For `f32`: CUDA when this build has it (feature
+    /// The CPU for `int8`. For `f32`, CUDA when this build has it (feature
     /// `local-embed-cuda`) and the machine an NVIDIA GPU with its driver and NVRTC,
     /// else a discrete GPU through wgpu (feature `local-embed-gpu`), else the CPU. For
     /// `f16` and `bf16`, as [`Gpu`](Self::Gpu).
@@ -238,10 +238,10 @@ pub enum Device {
     Cpu,
     /// CUDA when available, else any GPU wgpu finds, discrete ones first.
     Gpu,
-    /// An NVIDIA GPU through CUDA (feature `local-embed-cuda`): the first one the
+    /// The first NVIDIA GPU through CUDA (feature `local-embed-cuda`) that the
     /// driver lists (`CUDA_VISIBLE_DEVICES` picks another).
     Cuda,
-    /// A GPU through wgpu (feature `local-embed-gpu`): Vulkan, Metal or DirectX 12,
+    /// A GPU through wgpu (feature `local-embed-gpu`), using Vulkan, Metal or DirectX 12,
     /// discrete GPUs first, then integrated and virtual ones, then wgpu's CPU adapters.
     Wgpu,
 }
@@ -267,7 +267,7 @@ impl Device {
         }
     }
 
-    /// The precision a model runs in when none is named: `int8` on the CPU (and
+    /// The precision a model runs in when none is named, `int8` on the CPU (and
     /// [`Auto`](Self::Auto)), `f32` on a GPU.
     pub fn default_precision(self) -> Precision {
         match self {
@@ -290,11 +290,11 @@ impl std::str::FromStr for Device {
         Device::ALL
             .into_iter()
             .find(|d| d.as_str().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown device {s:?}: use auto, cpu, gpu, cuda or wgpu").into())
+            .ok_or_else(|| format!("unknown device {s:?}. Use auto, cpu, gpu, cuda or wgpu").into())
     }
 }
 
-/// The models the local embedder runs; the first is [`DEFAULT_MODEL`].
+/// The models the local embedder runs. The first is [`DEFAULT_MODEL`].
 pub const MODELS: &[LocalModel] = &[CODE_RANK_EMBED, JINA_CODE_V2];
 
 /// The model `--embed local` picks when none is named.
@@ -331,7 +331,7 @@ impl LocalModel {
             .map(|p| (model, p))
             .ok_or_else(|| {
                 format!(
-                    "{} was embedded with another revision or settings of {} ({:?}); this build runs revision {}",
+                    "{} was embedded with another revision or settings of {} ({:?}). This build runs revision {}",
                     descriptor.display(),
                     model.repo,
                     descriptor.revision,
@@ -415,11 +415,11 @@ enum Engine {
 #[non_exhaustive]
 pub struct BatchStats {
     pub passes: u64,
-    /// The sequences the passes ran: texts, or windows of longer texts.
+    /// The texts or windows of longer texts that the passes ran.
     pub texts: u64,
     /// The sequences' tokens.
     pub tokens: u64,
-    /// The tokens the passes computed: on a GPU the sequences' tokens and their
+    /// The tokens the passes computed. On a GPU, the sequences' tokens and their
     /// padding, on the CPU (which packs them without padding) the same as `tokens`.
     pub padded_tokens: u64,
 }
@@ -489,7 +489,7 @@ impl LocalEmbedder {
                 .collect();
             if bytes.len() as u64 != file.size || digest != file.sha256 {
                 return Err(format!(
-                    "{}: not the pinned file of {} at {} (size or SHA-256 differs); delete it to download it again",
+                    "{} is not the pinned file of {} at {} (size or SHA-256 differs). Delete it to download it again",
                     path.display(),
                     model.repo,
                     model.revision
@@ -568,7 +568,7 @@ impl LocalEmbedder {
         })
     }
 
-    /// Threads for tokenizing and, on the CPU, inference (default:
+    /// Threads for tokenizing and, on the CPU, inference (defaults to
     /// [`threads`](crate::threads)).
     pub fn with_threads(mut self, threads: usize) -> Result<Self, Error> {
         self.threads = threads.max(1);
@@ -577,7 +577,7 @@ impl LocalEmbedder {
     }
 
     /// Tokens per forward pass. On the CPU (default [`DEFAULT_BATCH_TOKENS`]) larger
-    /// batches keep more threads busy and take more memory: about 58 KB per token for a
+    /// batches keep more threads busy and take more memory, about 58 KB per token for a
     /// model with 768 dimensions. On a GPU (default [`DEFAULT_GPU_BATCH_TOKENS`]) the
     /// count includes padding, and memory grows with the batch and with its texts'
     /// lengths (attention).
@@ -602,7 +602,7 @@ impl LocalEmbedder {
         self.batch_tokens
     }
 
-    /// Where the model runs, for messages: `CPU`, `CUDA: NAME` or
+    /// Where the model runs, for messages. Returns `CPU`, `CUDA: NAME` or
     /// `wgpu: NAME (API, type)`.
     pub fn device(&self) -> &str {
         match &self.engine {
@@ -691,7 +691,7 @@ impl LocalEmbedder {
         Ok(vectors)
     }
 
-    /// One forward pass over `batch` on the CPU; each sequence's unit vector.
+    /// One forward pass over `batch` on the CPU. Each sequence's unit vector.
     fn run(&self, encoder: &Encoder, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>, Error> {
         let lens: Vec<usize> = batch.iter().map(|ids| ids.len()).collect();
         let ids = batch.concat();
@@ -807,7 +807,7 @@ fn choose_gpu(device: Device, precision: Precision) -> Result<Option<GpuChoice>,
         Device::Cpu => cpu_only(precision).map(|()| None),
         Device::Auto if precision == Precision::Int8 => Ok(None),
         _ if precision == Precision::Int8 => {
-            Err("int8 runs on the CPU: a GPU runs f32, f16 or bf16".into())
+            Err("int8 runs on the CPU. A GPU runs f32, f16 or bf16".into())
         }
         _ => gpu::choose(device, precision),
     }
@@ -830,7 +830,7 @@ fn cpu_only(precision: Precision) -> Result<(), Error> {
         Ok(())
     } else {
         Err(format!(
-            "{precision} runs on a GPU (features local-embed-gpu and local-embed-cuda): the CPU runs int8 and f32"
+            "{precision} runs on a GPU (features local-embed-gpu and local-embed-cuda). The CPU runs int8 and f32"
         )
         .into())
     }
@@ -844,10 +844,10 @@ pub struct Placement {
 }
 
 impl Placement {
-    /// Where `device` runs `precision` on this machine: a GPU when one is named or
+    /// Where `device` runs `precision` on this machine. A GPU when one is named or
     /// [`Device::Auto`] finds one, else the CPU. Errors when the named device can't,
     /// or when `precision` needs a GPU and there is none. The CPU is found without
-    /// looking for a GPU: `int8` on [`Device::Auto`] or anything on [`Device::Cpu`].
+    /// looking for a GPU when using `int8` on [`Device::Auto`] or anything on [`Device::Cpu`].
     pub fn find(device: Device, precision: Precision) -> Result<Self, Error> {
         Ok(Self {
             gpu: choose_gpu(device, precision)?,
@@ -863,7 +863,7 @@ impl Placement {
         self.gpu.is_some()
     }
 
-    /// The device, for messages: `CPU`, `CUDA: NAME` or `wgpu: NAME (API, type)`.
+    /// The device, for messages. Returns `CPU`, `CUDA: NAME` or `wgpu: NAME (API, type)`.
     pub fn name(&self) -> String {
         #[cfg(any(feature = "local-embed-gpu", feature = "local-embed-cuda"))]
         if let Some(choice) = &self.gpu {

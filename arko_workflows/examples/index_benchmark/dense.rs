@@ -474,7 +474,7 @@ pub async fn query_command(query: &str, limit: usize) -> BenchResult<()> {
     {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let socket = std::env::var(SOCKET_VARIABLE).map_err(|_| {
-            format!("{SOCKET_VARIABLE} is not set: arko_index_dense runs inside the benchmark")
+            format!("{SOCKET_VARIABLE} is not set. arko_index_dense runs inside the benchmark")
         })?;
         let repo =
             std::env::var(REPO_VARIABLE).map_err(|_| format!("{REPO_VARIABLE} is not set"))?;

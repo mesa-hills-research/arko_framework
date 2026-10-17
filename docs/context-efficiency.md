@@ -3,11 +3,11 @@
 Arko keeps an agent's context accurate and compact with four mechanisms:
 versioned memory reads, file-tree change notices, opt-in tool-result distillation,
 and background shell jobs with completion notices. Large tool results have a safety
-net too: the overflow guard, below. State that changes during a run
+net too, the overflow guard described below. State that changes during a run
 is delivered as exact, deterministic changes. Model-written summaries are reserved
 for bulk tool output, and only where a workflow opts in by naming the agents and
 tools to distill. The original output is reported in the interception events (and
-kept in the event log when the workflow persists its run); an agent that needs the
+kept in the event log when the workflow persists its run). An agent that needs the
 exact text of a distilled result (for example a distilled `read_file`) can't get it
 by calling the tool again.
 
@@ -18,7 +18,7 @@ In an agent runtime, the `read_memory` tool from
 the first read of a tier. Later reads return the exact change since the last
 snapshot the agent received, or an unchanged record. `full: true` requests a fresh
 snapshot. When the new text extends the previous text, as appends do, the change
-is the exact appended text; otherwise it is a single line replacement, which can
+is the exact appended text. Otherwise it is a single line replacement, which can
 include deletions. When a full snapshot would be no larger than the change, the
 tool returns the snapshot instead.
 
@@ -29,8 +29,8 @@ Responses are JSON records with `tier`, `version`, and `kind`:
 | `full` | `content` is the complete current text. |
 | `append` | Append `content` to the text at `base_version`. |
 | `replace` | At `base_version`, replace `delete_lines` lines starting at zero-based `start_line` with `content`. |
-| `unchanged` | The text is unchanged; adopt the returned `version`. |
-| `partial` | `max_chars` truncated the text: `content` is the trailing window of `total_chars` characters. |
+| `unchanged` | The text is unchanged. Adopt the returned `version`. |
+| `partial` | `max_chars` truncated the text, and `content` is the trailing window of `total_chars` characters. |
 
 Lines keep their newline terminators, so applying a change reproduces the current
 text byte for byte. A version counts the tier's accepted writes. A `partial`
@@ -38,7 +38,7 @@ response is not a complete snapshot and does not establish a baseline. The
 [API index](../arko_workflows/INDEX.md#memory) documents the full record contract.
 
 Baselines are kept per task and tier, and advance only once the exact result has
-entered that task's conversation; reads still waiting on a tool batch do not
+entered that task's conversation. Reads still waiting on a tool batch do not
 advance them. Restarting or resuming a runtime resets its baselines, so the next
 read is full. A conversation handover (`AgentConfig::handover`) resets them in
 place, so the fresh conversation's next read is full too. An application that
@@ -49,7 +49,7 @@ conservatively return full snapshots. Both callbacks are synchronous and only
 track delivery.
 
 Memory read results bypass result interceptors, including distillers. The
-versioned protocol belongs to the agent tool: `MemoryStore::read` and the Python
+versioned protocol belongs to the agent tool, while `MemoryStore::read` and the Python
 `read_memory` method return plain text.
 
 ## File-tree context
@@ -58,7 +58,7 @@ When file-tree environment details are enabled in `EnvironmentDetailsConfig`,
 `file_tree_mode` defaults to `diff`. Before the first model call the runtime sends
 the complete tree, within the configured depth (3 when unset) and ignore rules.
 Before later calls it sends only visible additions, removals, type changes, and
-identifiable moves; an unchanged tree adds no message. This works with native and
+identifiable moves. An unchanged tree adds no message. This works with native and
 text-based tool calling. Configurations without `file_tree_mode` use diff mode.
 
 Diff mode sends tree context as user messages at model-call boundaries, regardless
@@ -70,52 +70,58 @@ snapshot.
 Tree entries are sorted. The scanner does not follow symlinked directories or read
 file contents, so the notices describe the visible inventory, not edits to file
 contents. On Unix, moves are detected from filesystem identity and metadata when
-the match is unambiguous; other platforms, and uncertain matches, report a removal
+the match is unambiguous. Other platforms, and uncertain matches, report a removal
 and an addition. Changing ignore rules or depth also changes the visible
-inventory. A failed scan keeps the last successful baseline; the runtime reports
+inventory. A failed scan keeps the last successful baseline. The runtime reports
 the failure and scans again before the next call.
 
 ## Large tool results
 
-A tool result goes into the conversation whole: `read_file` returns the whole file and
+A tool result goes into the conversation whole. `read_file` returns the whole file and
 `list_files` the whole tree, and command and MCP tools return everything they print.
 An 8 MB data file is about two million tokens, more than any model takes, and a request
 that carries it fails.
 
-**Read big files through the terminal.** An agent with the
+### Read big files through the terminal
+
+An agent with the
 [terminal tools](interactive-terminals.md) should look at a large or generated file
-(data, logs, minified code, generated sources) in parts: `wc -l` for its size,
+(data, logs, minified code, generated sources) in parts, with `wc -l` for its size,
 `grep -n` to find what it needs, `head`, `sed -n '100,200p'` for a range, or a short
 script that prints only what matters. Terminal output is already bounded (a window of
 recent output, with the full log on disk), so this never floods the context. When an
 agent is offered both `read_file` and the terminal tools, `read_file`'s description says
-so in one sentence; say it in the role's instructions too where large files are
+so in one sentence. Say it in the role's instructions too where large files are
 expected.
 
-**The overflow guard is the safety net** (`AgentToolConfig::result_limits`, on by
+### The overflow guard is the safety net
+
+The overflow guard is the safety net (`AgentToolConfig::result_limits`, on by
 default in arko's own runtime with native tool calling). It changes nothing until a
 turn's results would certainly put the next request over the model's input limit
-(272,000 tokens on ChatGPT OAuth; it counts what the turn added at 10 bytes per token,
+(272,000 tokens on ChatGPT OAuth, counting what the turn added at 10 bytes per token,
 more than any text packs into one, so a request that may fit is sent and the provider
-decides); then it shortens the largest results to a head-and-tail preview with
+decides). Then it shortens the largest results to a head-and-tail preview with
 a notice that names terminal commands for the rest (without a terminal, `read_file`'s
 line ranges when they are on, or else it asks for less), and if the provider still
 finds the request too long, it shortens the largest
-new result further and resends, at most twice. It is not a strategy: a result just
+new result further and resends, at most twice. It isn't a strategy. A result just
 under the limit is kept whole and fills the context for one turn, then the next
 handover discards it. The handover check estimates the request about to be sent, so a
 turn whose results take the conversation over the handover threshold hands over before
 that request.
 
-**Tighter caps are opt-in**, for roles that should never pull large outputs or for one
-tool that returns too much: `ToolResultLimits::max_result_tokens` for every tool, or
+Tighter caps are opt-in, for roles that should never pull large outputs or for one
+tool that returns too much, with `ToolResultLimits::max_result_tokens` for every tool, or
 `PerToolConfigOverride::max_result_tokens` for one. A capped result keeps its head and
 tail up to the cap, with the same notice. Prefer a cap to a hook that refuses large
-reads: the notice already tells the agent how to get the rest. See
-[Tool result size](../arko_agents/README.md#tool-result-size) for the settings and the
+reads, because the notice already tells the agent how to get the rest. See
+[Tool result size](arko_agents-guide.md#tool-result-size) for the settings and the
 notice text.
 
-**Ranges for agents without a terminal.** `AgentToolConfig::read_file_line_ranges`
+### Ranges for agents without a terminal
+
+`AgentToolConfig::read_file_line_ranges`
 (off by default) adds `start_line` and `end_line` to `read_file`. Agents offered
 ranges tend to read in short pieces, so turn it on only for agents that need to read
 large files and have no terminal.
@@ -127,9 +133,9 @@ selects its model, reasoning, target agents and tools, minimum input size (in
 Unicode characters), maximum output tokens, and instructions. Target agents are
 the names the agents are registered under with `WorkflowBuilder::agent`, not
 their `AgentConfig::name`, and `build` rejects a target that is not a registered
-agent. A distiller needs at least one target agent and one target tool: `build`
+agent. A distiller needs at least one target agent and one target tool, and `build`
 rejects one without. Any tool whose results may be intercepted can be a target,
-`read_file` included, for a large file an agent wants specific details from; the
+`read_file` included, for a large file an agent wants specific details from. The
 agent then works from the summary, so target it only where that suits.
 
 ```rust,ignore
@@ -157,21 +163,21 @@ tokens (or the model's output limit, when smaller) where the provider takes a li
 Without an explicit reasoning setting, the provider's default applies. The reasoning
 configuration must match the model's provider, and the output limit must be
 positive. Prompt caching is turned off for distillation requests where the provider
-allows it, since each is a one-off; on ChatGPT OAuth, which caches implicitly and
+allows it, since each is a one-off. On ChatGPT OAuth, which caches implicitly and
 rejects an output limit, neither setting is sent unless the limit is set
 explicitly.
 
 Reasoning tokens count against the output limit with OpenAI API keys and on
 Anthropic, and some models reason by default (for example GPT-5.5 and later, and
 Claude Opus 5.5). Leave room for reasoning as well as the summary, as the example does by
-setting the model's own limit: a limit that is too small produces truncated
+setting the model's own limit. A limit that is too small produces truncated
 summaries, which are billed but not used.
 
 A distiller sees the task prompt, the tool name and parameters, and the raw
 result. Its output is model-written, not a guaranteed-accurate transformation, so
 keep source evidence reachable through tools. Interception events and the
-`PostToolResultInterception` hook expose both the original and the delivered text;
-use a hook to retain source artifacts when needed.
+`PostToolResultInterception` hook expose both the original and the delivered text.
+Use a hook to retain source artifacts when needed.
 
 Only a finished summary replaces the tool result, and every call is billed:
 
@@ -185,9 +191,9 @@ Only a finished summary replaces the tool result, and every call is billed:
 Once the workflow run is stopped, cancelled or aborted by a hook, distillers make
 no further requests and leave tool output unchanged.
 
-The order is: the tool's output, then interceptors, then distillers, then the
+The order is the tool's output, then interceptors, then distillers, then the
 agent's overflow guard, then the request. A distiller never sends a request over its
-own model's input limit: an output that large is kept unchanged and unbilled, a record
+own model's input limit. An output that large is kept unchanged and unbilled, a record
 notes the skip, and the overflow guard shortens it if the agent's own model can't take
 it either. To distill very large outputs, give the distiller a model with a large input
 limit, or bound the output in the tool.
@@ -205,29 +211,29 @@ The [interactive terminal tools](interactive-terminals.md) in
 `arko_agents::terminal` run commands as background jobs on Linux, macOS, and
 Windows, accept input while they run, and notify the owning agent on completion.
 
-A workflow that provides its own shell tool should follow the same pattern: long
+A workflow that provides its own shell tool should follow the same pattern. Long
 commands start in the background and return a job handle immediately, while quick
 commands stay convenient through a short, configurable foreground wait that
 returns the handle when it expires. The foreground wait and the execution deadline
 are separate settings. The host runtime owns background jobs, so they outlive the
 tool call that started them. A complete design provides:
 
-- **Start**: returns a stable job ID, status, working directory, and log or
+- Starting a job returns a stable job ID, status, working directory, and log or
   artifact paths. Concurrency limits and execution deadlines are configurable.
-- **Completion notices**: a compact notice with the job ID, final status, exit
+- A completion notice is compact, with the job ID, final status, exit
   code, relevant diagnostic excerpts, and log or artifact references, preserving
   failure and cancellation details. Truncation is reported, logs support bounded
   range or cursor reads, and repeated progress reads return only new output.
-- **Delivery**: the host monitors jobs and delivers notices through
+- The host monitors jobs and delivers notices through
   `SharedContext.messages` (`MessageBus::send` for a named recipient, or
   `inject_task` for an active task). A queued message does not start a model run
   on its own, so an idle owner needs a host continuation policy. Agents should not
   poll in a loop, and no separate polling agent is needed.
-- **Resume**: workflows that support resume persist job ownership and
+- Workflows that support resume persist job ownership and
   notification IDs, checkpoint queued deliveries before acknowledging them,
   deduplicate replayed notices by job or event ID, and reconcile interrupted jobs
   against recorded state and artifacts before retrying commands with side effects.
-- **Control**: status, bounded wait, log reads, and cancellation, with documented
+- The controls are status, bounded wait, log reads, and cancellation, with documented
   pause and shutdown behavior, a statement of which shell state persists between
   invocations, and explicit termination of owned processes when cancellation
   requires it.
@@ -239,5 +245,5 @@ Reusable agent instructions:
 > outcome and where to retrieve details. If the next step depends on a job, use the
 > host's bounded wait or yield mechanism. Inspect progress only when it informs a
 > decision, and cancel work that is no longer needed. Save substantial output and
-> checkpoints to artifacts. Keep model turns purposeful; avoid turns whose only
+> checkpoints to artifacts. Keep model turns purposeful. Avoid turns whose only
 > purpose is to keep a prompt cache warm.

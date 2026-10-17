@@ -175,7 +175,7 @@ pub(crate) mod tests {
         out
     }
 
-    /// Round to nearest half (normal range only; enough for test weights).
+    /// Round to nearest half (normal range only, enough for test weights).
     fn f32_to_f16(v: f32) -> u16 {
         if v == 0.0 {
             return 0;

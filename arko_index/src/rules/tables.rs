@@ -3,7 +3,7 @@ use super::{Content, Keyed, Label, Role, Table, tags};
 
 const D: Table = Table::DEFAULT;
 
-/// The table of a parser key (`languages::PARSERS`); `text` and unknown keys get an
+/// The table of a parser key (`languages::PARSERS`). `text` and unknown keys get an
 /// empty table.
 pub(crate) fn table(parser: &str) -> &'static Table {
     match parser {

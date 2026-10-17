@@ -1,4 +1,4 @@
-/// Serializable workflow state for checkpointing.
+//! Serializable workflow state for checkpointing.
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub struct WorkflowState {
     #[serde(default)]
     pub freshness_snapshot: Option<FreshnessSnapshot>,
     /// Finalized agent results with their tasks, as checkpoints before
-    /// [`agent_runs`](Self::agent_runs) held them; empty in newer ones.
+    /// [`agent_runs`](Self::agent_runs) held them. Empty in newer ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_results: Vec<AgentResult>,
     /// Finalized agent results, each referring to the version of its task
@@ -41,7 +41,7 @@ pub struct WorkflowState {
     /// stored once, however many checkpoints refer to it).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_runs: Vec<AgentRunRecord>,
-    /// The agent runs whose latest task state could not be saved: their
+    /// The agent runs whose latest task state could not be saved. Their
     /// records in [`agent_runs`](Self::agent_runs) refer to their last
     /// saved state instead, and a run with none is left out. Resuming from
     /// the checkpoint restores them as last saved, with a warning.
@@ -64,7 +64,7 @@ pub struct WorkflowState {
     /// The notes posted to the run's agents, what each agent run has been
     /// given, and how much of the control folder has been read. Absent
     /// while there is nothing to record, and in checkpoints from before
-    /// notes existed: a resume then starts with none.
+    /// notes existed. A resume then starts with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<crate::notes::NotesSnapshot>,
     /// The budget limits in force at the checkpoint, which may have been
@@ -91,7 +91,7 @@ pub struct WorkflowState {
 /// The budget limits a checkpoint records.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BudgetLimits {
-    /// The workflow's limit in dollars; `None`: no limit.
+    /// The workflow's limit in dollars. `None` means no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<f64>,
     /// The agents' own limits in dollars, by agent name.
@@ -110,11 +110,11 @@ pub struct AgentRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The version of the task the checkpoint recorded, relative to the
-    /// run directory: `agents/<agent_run_id>/<content hash>.json`, or, for
+    /// run directory, `agents/<agent_run_id>/<content hash>.json`, or, for
     /// a run that was running, its live file (`agents/<agent_run_id>/live.json`)
     /// in the live checkpoint.
     pub task_file: String,
-    /// For a run that was running (status `Interrupted`): how many entries
+    /// For a run that was running (status `Interrupted`), how many entries
     /// of its task's `usage_history` the checkpoint's cost ledger has
     /// charged. Resuming charges the rest. Absent for a finished run, and in
     /// checkpoints from before it existed.
@@ -160,12 +160,12 @@ pub struct MissingTaskState {
 }
 
 impl WorkflowState {
-    /// The checkpoint's agent results, with their tasks: those it holds (a
+    /// The checkpoint's agent results, with their tasks, including those it holds (a
     /// checkpoint written before task files were referenced), then those
     /// whose tasks are in the task files of `run_dir`, the directory
     /// holding the checkpoint. A run whose latest state the checkpoint
     /// lacks ([`missing_task_states`](Self::missing_task_states)) is
-    /// restored as last saved, and one never saved isn't; each is logged
+    /// restored as last saved, and one never saved isn't. Each is logged
     /// as a warning.
     pub fn agent_results_in(
         &self,
@@ -222,7 +222,7 @@ impl WorkflowState {
                 let mut result = AgentResult::of_task(record.agent_name.clone(), task);
                 result.stopped_by = record.stopped_by.clone();
                 warnings.push(format!(
-                    "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}): it was {:?}, but resumes as last saved, {:?}, from {}.",
+                    "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}). It was {:?}, but resumes as last saved, {:?}, from {}.",
                     record.agent_name,
                     record.agent_run_id,
                     missing.reason,
@@ -262,7 +262,7 @@ impl WorkflowState {
         for missing in &self.missing_task_states {
             if missing.last_saved.is_none() {
                 warnings.push(format!(
-                    "The checkpoint lacks agent '{}' ({}): no state of its task could be saved ({}), so it is not restored.",
+                    "The checkpoint lacks agent '{}' ({}). No state of its task could be saved ({}), so it is not restored.",
                     missing.agent_name, missing.agent_run_id, missing.reason
                 ));
             }
@@ -365,7 +365,7 @@ mod tests {
 
     /// A checkpoint from before the task journal (its run records without
     /// `usage_charged`, its tasks without `parent` or running calls) still
-    /// loads; a record of a run that was running loads interrupted, without
+    /// loads. A record of a run that was running loads interrupted, without
     /// a warning, whatever state its task was saved in.
     #[test]
     fn records_from_before_the_task_journal_still_load() {
@@ -442,7 +442,7 @@ mod tests {
     }
 
     /// An agent cancelled before cancellation had its own task state was
-    /// saved as failed with the runtime's cancellation reason; it loads as
+    /// saved as failed with the runtime's cancellation reason. It loads as
     /// cancelled.
     #[test]
     fn a_checkpointed_legacy_cancellation_loads_as_cancelled() {

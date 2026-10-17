@@ -1,9 +1,18 @@
-# Prompting guides
+# Writing prompts for framework agents
 
-Use the guide that matches the model running the agent. To choose the model for a role, see the [model-choice guidance](../guides/agent-design.md#model-choice).
+An agent's prompt should describe its job and the result you need. Put the current
+request in the task, and keep reusable role instructions in the agent configuration.
+See the [agent guide](../arko_agents-guide.md) for configuration and task examples.
 
-- [Opus 5.5](opus-5.5.md): also applies to Fable 5.1.
-- [Astra 6](astra-6.md): model-specific prompting guidance for Astra 6.
-- Sonnet 5.5: no dedicated guide. Use it only for a select few roles; GPT-6.1 Sol has largely taken over its main one, codebase-exploration subagents.
+Choose tools and permissions in the configuration rather than relying on a prompt
+to enforce them. The [defaults reference](../defaults-reference.md) explains approval,
+recovery, tool-result limits and task completion.
 
-These guides focus on practical prompt design, instruction scope, long-run steering, and checking results. Load only the guide relevant to the selected model.
+For a workflow, tell each agent which part of the job it owns and what its report
+should contain. Use the workflow's messaging and completion APIs to coordinate runs.
+See the [workflow guide](../arko_workflows-guide.md) for those APIs and the
+[agent-design guide](../guides/agent-design.md) for choosing roles and models.
+
+When a prompt needs changing, try it on representative tasks and inspect both the
+result and the tool calls. Keep instructions that solve a concrete problem in those
+runs.

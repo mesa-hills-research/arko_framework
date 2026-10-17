@@ -1329,7 +1329,7 @@ fn rule_refusals_explain_the_rule() {
     assert_eq!(refusal.target, "git push origin main");
     assert_eq!(
         refusal.message,
-        "Refused: `git push origin main` isn't one of the `git` commands allowed here: `git status *`, `git *` (in `scratch`). Use one of those, or do the work another way; other commands need the user's permission in the terminal settings."
+        "Refused: `git push origin main` isn't one of the `git` commands allowed here: `git status *`, `git *` (in `scratch`). Use one of those, or do the work another way. Other commands need the user's permission in the terminal settings."
     );
     let refusal = guard
         .check_on(&linux(), ShellDialect::Posix, "cargo publish --dry-run")

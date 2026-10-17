@@ -1,4 +1,4 @@
-//! Scaling prototype: a disk-resident inverted index that scores exactly like
+//! A disk-resident inverted index that scores exactly like
 //! `search::search` (same tokens, same BM25 expression, same tie-break) but reads
 //! only the postings of the query terms instead of deserializing every document.
 //! [`BuildOptions::lexical_scope`] (off by default) also indexes each chunk's scope,
@@ -15,7 +15,7 @@
 //!   post.dat   per term: (varint doc delta, varint tf)*
 //!   files.dat  per file with chunks: u32 LE first doc, u32 LE path length, path
 //!              (for path and language filters)
-//! With embeddings ([`BuildOptions::dense`]) also:
+//! With embeddings ([`BuildOptions::dense`]), the following files are also written:
 //!   dense.json  the generation's embedding model, settings and vector store
 //!               ([`DenseIndexInfo`]), with the coverage it had when published
 //!   vkeys.dat   per doc, sorted by vector id: u128 BE id, u32 LE doc
@@ -23,17 +23,17 @@
 //!   embed.spool the texts the cache lacked when the generation was built, until a
 //!               run has embedded them all
 //! The vectors themselves are in a store beside the generations,
-//! `STATE_DIR/vectors-<digest of model and settings>/` ([`CaprockStore`]): a doc's vector
+//! In `STATE_DIR/vectors-<digest of model and settings>/` ([`CaprockStore`]), a doc's vector
 //! id is a digest of its path and its embedded text, so an unchanged chunk keeps its
 //! vector, whatever its doc id, and a stored vector always embeds its doc's current text.
 //! A build publishes its generation as soon as the lexical files are written. An
 //! embedding run ([`embed`], or the build itself unless [`DenseBuild::embed_later`])
-//! then brings the store up to date for the current generation: it removes the vectors
+//! then brings the store up to date for the current generation. It removes the vectors
 //! the generation lacks, adds the ones the cache holds, embeds the rest request by
 //! request, and records the coverage in `STATE_DIR/embed-progress.json` after each
 //! commit of the store. A run stops when a newer generation is published.
-//! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
-//! to a sorted run file; runs cover increasing doc ranges and are merged by term.
+//! Build memory is bounded. Postings accumulate up to `mem_budget` bytes, then spill
+//! to a sorted run file. Runs cover increasing doc ranges and are merged by term.
 //! Texts to embed are spooled to disk.
 use crate::{
     bench_v1::{Chunk, Error, Options},
@@ -333,7 +333,7 @@ fn file_docs(
 
 struct RunReader {
     r: BufReader<File>,
-    /// (first doc, last doc, df, postings bytes) of the current term; the term
+    /// (first doc, last doc, df, postings bytes) of the current term. The term
     /// itself lives in the merge heap.
     head: Option<(u32, u32, u32, Vec<u8>)>,
 }
@@ -373,7 +373,7 @@ pub struct BuildStats {
     pub dense: Option<EmbedStats>,
 }
 
-/// Settings of [`build`]. `Default`: [`threads()`](crate::threads), a 256 MB postings
+/// Settings of [`build`]. Defaults to [`threads()`](crate::threads), a 256 MB postings
 /// budget, the default [`FileRules`], no scope terms, no embeddings.
 #[non_exhaustive]
 pub struct BuildOptions<'a> {
@@ -386,7 +386,7 @@ pub struct BuildOptions<'a> {
     /// a Markdown heading chain) for lexical search, beside its path and source.
     /// Off by default.
     pub lexical_scope: bool,
-    /// Embed the chunks too (dense search). `None`: lexical only. Opt-in: embedding
+    /// Embed the chunks too (dense search). `None` means lexical only. Embedding
     /// calls the embedder's provider, which may bill for it.
     pub dense: Option<DenseBuild<'a>>,
 }
@@ -465,7 +465,7 @@ pub fn index_with(
 }
 
 /// Builds a new generation and publishes it. With [`BuildOptions::dense`] the chunks
-/// are also embedded: texts the state's embedding cache holds for the embedder's
+/// are also embedded. These are texts the state's embedding cache holds for the embedder's
 /// model are reused, the others are embedded (stopping cleanly at the token cap), the
 /// vector store of the model and settings is brought up to date, and the settings are
 /// saved as the index's [`DenseConfig`]. Without it, a saved config is left as it is.
@@ -854,7 +854,7 @@ pub fn build(
         (Some(d), Some(published)) if !d.embed_later => {
             let run = embed_run(&state_dir, d, Some(&generation)).map_err(|e| {
                 format!(
-                    "{e} (the build published its generation: lexical search works, and a later embedding run continues where this one stopped)"
+                    "{e} (the build published its generation, so lexical search works, and a later embedding run continues where this one stopped)"
                 )
             })?;
             // Superseded before it began: what the build published.
@@ -988,7 +988,7 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 /// in progress to finish, or to stop because this call's generation is newer. Then the
 /// store's vectors of chunks the generation lacks are removed, the vectors the
 /// embedding cache holds are added, and the remaining texts are embedded request by
-/// request: each request's vectors are stored and committed at once, so dense and
+/// request. Each request's vectors are stored and committed at once, so dense and
 /// hybrid search use them while the run goes on.
 ///
 /// The run returns when every chunk has a vector (except texts over the model's input
@@ -996,7 +996,7 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 /// set ([`EmbedStats::stopped`]), or when a newer generation is published
 /// ([`EmbedStats::superseded`]). What it embedded stays in the cache, so a later run
 /// continues without paying for it again. Only the embedder, the cap, the progress
-/// callback and the stop flag of `dense` apply: the quantization, vector index and
+/// callback and the stop flag of `dense` apply. The quantization, vector index and
 /// embedded text are the generation's. An error when the generation has no embeddings
 /// or embeds with another model.
 pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Error> {
@@ -1038,7 +1038,7 @@ fn embed_run(
         read => read?,
     };
     let (info, (hashes, keys, files)) = read.ok_or(
-        "the index's current generation has no embeddings: build it with them (index2 --embed)",
+        "the index's current generation has no embeddings. Build it with them (index2 --embed)",
     )?;
     check_dense_format(&info)?;
     if info.embedder != descriptor {
@@ -1054,7 +1054,7 @@ fn embed_run(
     let dir = &generation.dir;
     if hashes.len() as u64 != info.docs || keys.len() as u64 != info.docs {
         return Err(
-            "the generation's vector keys do not match its chunks: rebuild the index".into(),
+            "the generation's vector keys do not match its chunks. Rebuild the index".into(),
         );
     }
     let live: HashSet<[u8; 32]> = hashes.iter().copied().collect();
@@ -1264,7 +1264,7 @@ fn read_hashes(dir: &Path) -> Result<Vec<[u8; 32]>, Error> {
     let raw = std::fs::read(dir.join(VHASH)).map_err(|e| {
         std::io::Error::new(
             e.kind(),
-            format!("{e}: this generation was built by an earlier version; rebuild the index (index2) to embed it"),
+            format!("{e}. This generation was built by an earlier version. Rebuild the index (index2) to embed it"),
         )
     })?;
     if raw.len() % 32 != 0 {
@@ -1298,7 +1298,7 @@ const UPSERT_BATCH: usize = 1024;
 
 /// Removes every vector store directory but `keep`. Each is first renamed to a name no
 /// settings produce (`vectors-removed-...`), so a removal that stops halfway never
-/// leaves part of a store under a name a build would open; the next build removes it.
+/// leaves part of a store under a name a build would open. The next build removes it.
 fn remove_other_stores(state_dir: &Path, keep: Option<&str>) -> Result<(), Error> {
     let mut names = Vec::new();
     for e in std::fs::read_dir(state_dir)? {
@@ -1422,7 +1422,7 @@ pub(crate) fn check_dense_format(info: &DenseIndexInfo) -> Result<(), Error> {
         return Ok(());
     }
     Err(format!(
-        "this index's vectors were stored by an earlier version of arko_index (format {}): rebuild the index (index2) to search it densely, or search lexically",
+        "this index's vectors were stored by an earlier version of arko_index (format {}). Rebuild the index (index2) to search it densely, or search lexically",
         info.version
     )
     .into())
@@ -1556,7 +1556,7 @@ fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
         std::io::Error::new(
             e.kind(),
             format!(
-                "{e}: this index has no file table (built by an earlier version); rebuild it to filter"
+                "{e}. This index has no file table (built by an earlier version). Rebuild it to filter"
             ),
         )
     })?;
@@ -1633,12 +1633,11 @@ impl Generation {
             return Err(format!("bad vector store name {:?}", info.store).into());
         }
         let dir = self.state_dir.join(&info.store);
-        let store = CaprockStore::open(&dir).map_err(|e| {
-            format!("{e} (the vector store of this index: rebuild the index to restore it)")
-        })?;
+        let store = CaprockStore::open(&dir)
+            .map_err(|e| format!("{e} (rebuild the index to restore its vector store)"))?;
         if !store.matches(&info.store_config()) {
             return Err(format!(
-                "the vector store {} does not hold this index's model and settings ({}): rebuild the index",
+                "the vector store {} does not hold this index's model and settings ({}). Rebuild the index",
                 dir.display(),
                 info.embedder.display()
             )
@@ -1650,7 +1649,7 @@ impl Generation {
         // search starts over on that.
         if (store.len() as u64) < info.embedded {
             return Err(format!(
-                "the vector store {} holds {} of this index's {} vectors (an embedding run is replacing it, or one stopped while it did): rebuild the index",
+                "the vector store {} holds {} of this index's {} vectors (an embedding run is replacing it, or one stopped while it did). Rebuild the index",
                 dir.display(),
                 store.len(),
                 info.embedded

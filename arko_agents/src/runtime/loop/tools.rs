@@ -5,14 +5,14 @@
 
 use super::*;
 
-/// Why running tool calls were stopped; see [`AgentLoop::run_group`].
+/// Why running tool calls were stopped. See [`AgentLoop::run_group`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolsStopped {
     Cancelled,
     Suspended,
 }
 
-/// How a group of calls ended; see [`AgentLoop::run_group`].
+/// How a group of calls ended. See [`AgentLoop::run_group`].
 pub(super) struct GroupRun {
     /// Each call's outcome, in order: `None` for a call a stop ended before
     /// it finished.
@@ -26,11 +26,11 @@ pub(super) enum PathCheck {
     Inside,
     /// This parameter's path is outside the workspace.
     Outside(String),
-    /// A path couldn't be judged; the call is rejected with this reason.
+    /// A path couldn't be judged. The call is rejected with this reason.
     Invalid(String),
 }
 
-/// A call's paths under the path-safety policy; see
+/// A call's paths under the path-safety policy. See
 /// [`AgentLoop::path_verdict`].
 pub(super) enum PathVerdict {
     /// The paths don't stop the call.
@@ -41,7 +41,7 @@ pub(super) enum PathVerdict {
     /// This parameter's path is outside the workspace, and the policy
     /// rejects the call.
     Outside(String),
-    /// A path couldn't be judged; the call is rejected with this reason.
+    /// A path couldn't be judged. The call is rejected with this reason.
     Invalid(String),
 }
 
@@ -51,7 +51,7 @@ pub(super) enum PathVerdict {
 const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME];
 
 impl AgentLoop {
-    /// What the task's tool calls see of it; see [`RunEnvironment`].
+    /// What the task's tool calls see of it. See [`RunEnvironment`].
     fn run_environment(&self) -> Arc<RunEnvironment> {
         Arc::new(RunEnvironment {
             task_id: self.task.id,
@@ -162,10 +162,10 @@ impl AgentLoop {
     /// context sent meanwhile is kept for the next boundary, and
     /// `CancelTask` or `SuspendTask` stops the calls (dropping them, which
     /// kills a command they started) and is returned. Each call's outcome is
-    /// returned in order otherwise; an error is a middleware's own failure.
+    /// returned in order otherwise. An error is a middleware's own failure.
     /// A group with a call that isn't [interruptible](crate::tool::Tool::interruptible)
     /// runs to its end, and a stop that arrived meanwhile is returned with
-    /// the outcomes; either way the calls' stop signal fires
+    /// the outcomes. Either way the calls' stop signal fires
     /// ([`TaskContext::stop`](crate::tool::TaskContext::stop)), so such a
     /// call can wind down. A closed channel doesn't stop the calls: the
     /// boundary after them handles it.
@@ -294,7 +294,7 @@ impl AgentLoop {
 
     /// A middleware stopped the task at a call: it fails, or with `cancel`
     /// is cancelled, unless it already ended (another call of the same
-    /// group stopped it first); the call is reported rejected either way.
+    /// group stopped it first). The call is reported rejected either way.
     pub(super) async fn stop_by_middleware(
         &mut self,
         tool_call_id: Uuid,
@@ -393,7 +393,7 @@ impl AgentLoop {
 
     /// Checks a call's `is_path` parameters against the workspace, as
     /// [`crate::utils::is_path_in_workspace`] resolves them. A missing,
-    /// null or empty value is not checked; any other non-string value is
+    /// null or empty value is not checked. Any other non-string value is
     /// invalid, since a tool could read it as a path the check never saw.
     pub(super) fn check_path_parameters(
         &self,
@@ -407,7 +407,7 @@ impl AgentLoop {
                 Some(Value::String(path)) => path,
                 Some(other) => {
                     return PathCheck::Invalid(format!(
-                        "Path validation failed for parameter '{}': a path must be a string, not {other}.",
+                        "Path validation failed for parameter '{}'. A path must be a string, not {other}.",
                         param_def.name
                     ));
                 }
@@ -586,7 +586,7 @@ impl AgentLoop {
     /// Ends a batch begun with [`begin_tool_batch`](Self::begin_tool_batch):
     /// pauses once on its tool errors, with any a batch of the same turn
     /// left while calls awaited approval. While calls of the turn still
-    /// await approval the pause waits for their decisions; a task that
+    /// await approval the pause waits for their decisions. A task that
     /// stopped doesn't pause.
     pub(super) async fn end_tool_batch(&mut self) -> Result<(), ArkoAgentsError> {
         self.deferring_tool_errors = false;

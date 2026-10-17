@@ -70,7 +70,7 @@ impl MockServer {
                 });
             }
         });
-        eprintln!("mock model listening at {url} (dry run: no model calls)");
+        eprintln!("mock model listening at {url} (dry run without model calls)");
         Ok(Self { url, task })
     }
 

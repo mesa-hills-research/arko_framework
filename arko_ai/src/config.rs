@@ -14,7 +14,7 @@ pub enum Verbosity {
 /// YAML config (for example `{"max_tokens": 4096}`) is valid.
 ///
 /// Configs saved by earlier versions carry a `temperature_specified` flag next
-/// to `temperature`; they still load: `temperature_specified: false` means no
+/// to `temperature`. They still load: `temperature_specified: false` means no
 /// temperature, whatever `temperature` holds.
 ///
 /// One config can serve models of several providers. A setting the model's
@@ -28,7 +28,7 @@ pub enum Verbosity {
 pub struct GenerationConfig {
     /// Sampling temperature. `None` (the default) sends none, so the model's
     /// default applies. OpenAI reasoning models and Google's Interactions API
-    /// take no temperature, so a set one is an error for requests to them;
+    /// take no temperature, so a set one is an error for requests to them.
     /// Claude models that take no sampling parameters (Fable 5.x, Mythos 5.1,
     /// Opus 4.7 and later, Sonnet 5 and later, Haiku 5.5) drop it, with a
     /// warning logged once per model.
@@ -36,7 +36,7 @@ pub struct GenerationConfig {
     pub temperature: Option<f64>,
     /// Output token limit. `None` (the default) lets the model produce up to
     /// its maximum: OpenAI (API key), Anthropic and Gemini requests send the
-    /// model's registered maximum, since Anthropic requires a value; OpenRouter
+    /// model's registered maximum, since Anthropic requires a value. OpenRouter
     /// requests send none. ChatGPT OAuth requests never send one, because the
     /// backend rejects `max_output_tokens`: a set limit is ignored there, with
     /// a warning logged once.
@@ -61,7 +61,7 @@ pub struct GenerationConfig {
     /// inherits [`Conversation::enable_cache`], which defaults to enabled.
     ///
     /// Caching is on by default. Turning it off takes effect where the
-    /// provider offers a switch; where caching is implicit it stays on:
+    /// provider offers a switch. Where caching is implicit it stays on:
     ///
     /// - **Anthropic**, and Claude models on OpenRouter: caching happens only
     ///   through the `cache_control` this client sends while caching is
@@ -72,18 +72,18 @@ pub struct GenerationConfig {
     /// - **OpenAI models before GPT-5.6**: caching is automatic and can't be
     ///   turned off.
     /// - **ChatGPT OAuth** (any model): the backend caches implicitly and
-    ///   takes no cache options; disabled caching is ignored, with a warning
+    ///   takes no cache options. Disabled caching is ignored, with a warning
     ///   logged once.
-    /// - **Gemini**: implicit caching, managed by Google; it can't be turned
+    /// - **Gemini**: implicit caching, managed by Google. It can't be turned
     ///   off.
     /// - **OpenRouter**: enabled sends `prompt_cache_key` and, on Claude
-    ///   models, a top-level `cache_control`; disabled sends neither, and on
+    ///   models, a top-level `cache_control`. Disabled sends neither, and on
     ///   OpenAI models that bill cache writes (GPT-5.6 and later) also
     ///   `prompt_cache_options.mode: "explicit"`. Other upstreams that cache
     ///   implicitly (Gemini, earlier OpenAI models and others) keep caching.
     ///
     /// Every OpenAI request, and every OpenRouter request as `session_id`,
-    /// carries the conversation's `prompt_cache_key` either way; it routes
+    /// carries the conversation's `prompt_cache_key` either way. It routes
     /// requests but doesn't enable caching by itself.
     ///
     /// [`Conversation::enable_cache`]: crate::conversation::Conversation::enable_cache
@@ -97,7 +97,7 @@ pub struct GenerationConfig {
     /// thinking models summarized text is already the default and nothing extra
     /// is sent.
     /// `None` and `Some(false)` keep the provider default.
-    /// https://platform.claude.com/docs/en/build-with-claude/thinking
+    /// <https://platform.claude.com/docs/en/build-with-claude/thinking>
     pub anthropic_summarized_thinking: Option<bool>,
     /// Requests the 1M-token context window on Anthropic models.
     ///
@@ -133,7 +133,7 @@ pub struct GenerationConfig {
     /// must be offered by the model (see [`ModelPricing::service_tiers`]).
     /// Over ChatGPT OAuth, as in Codex, only Fast mode is available, on the
     /// models Codex offers it for (GPT-6 Astra, Sol, Luna and 6.1 Sol,
-    /// GPT-5.6 Sol, Terra and Luna, GPT-5.5); `Default` sends no tier there,
+    /// GPT-5.6 Sol, Terra and Luna, GPT-5.5). `Default` sends no tier there,
     /// and Flex and Auto are [`Error::UnsupportedFeature`].
     /// `None` sends nothing, so the project (or plan) default applies.
     ///
@@ -145,7 +145,7 @@ pub struct GenerationConfig {
     /// Anthropic prompt-cache lifetime for the automatic `cache_control` this
     /// client sends when caching is enabled. `None` sends no `ttl`, which is the
     /// provider's 5-minute default. 1-hour writes cost 2x base input (5-minute
-    /// writes 1.25x). https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    /// writes 1.25x). <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
     /// Also the `ttl` of the `cache_control` sent for Claude models on OpenRouter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_cache_ttl: Option<AnthropicCacheTtl>,
@@ -162,22 +162,22 @@ pub struct GenerationConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_lifetime_seconds: Option<u64>,
     /// Anthropic fast mode (`speed: "fast"` with the `fast-mode-2026-02-01` beta
-    /// header; research preview, Claude API only). Supported on Claude Opus 5.5,
+    /// header, research preview, Claude API only). Supported on Claude Opus 5.5,
     /// Opus 5 and Opus 4.8 and rejected locally for other models. Priced at the
-    /// model's fast-mode rates; the response's `usage.speed` decides the price.
+    /// model's fast-mode rates. The response's `usage.speed` decides the price.
     /// `None` and `Some(false)` send nothing.
-    /// https://platform.claude.com/docs/en/build-with-claude/fast-mode
+    /// <https://platform.claude.com/docs/en/build-with-claude/fast-mode>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_fast_mode: Option<bool>,
-    /// Anthropic `inference_geo` (where inference runs), for Claude 4.6 and later;
-    /// older models reject it. `None` sends nothing, so the workspace default
-    /// applies. US-only inference costs 1.1x; the response's `usage.inference_geo`
-    /// decides the price. https://platform.claude.com/docs/en/manage-claude/data-residency
+    /// Anthropic `inference_geo` (where inference runs), for Claude 4.6 and later.
+    /// Older models reject it. `None` sends nothing, so the workspace default
+    /// applies. US-only inference costs 1.1x. The response's `usage.inference_geo`
+    /// decides the price. <https://platform.claude.com/docs/en/manage-claude/data-residency>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_inference_geo: Option<AnthropicInferenceGeo>,
     /// OpenRouter routing and request options for this request. Fields set
     /// here override the client's defaults
-    /// ([`OpenRouterClient::with_default_options`]) field by field; see
+    /// ([`OpenRouterClient::with_default_options`]) field by field. See
     /// [`OpenRouterOptions`]. Other providers drop it with a warning.
     ///
     /// [`OpenRouterClient::with_default_options`]: crate::providers::openrouter::OpenRouterClient::with_default_options
@@ -206,8 +206,8 @@ pub enum AnthropicInferenceGeo {
 }
 
 /// OpenAI `service_tier` request values.
-/// https://developers.openai.com/api/docs/guides/flex-processing
-/// https://developers.openai.com/api/docs/guides/fast-mode
+/// <https://developers.openai.com/api/docs/guides/flex-processing>
+/// <https://developers.openai.com/api/docs/guides/fast-mode>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenAIServiceTier {
@@ -217,7 +217,7 @@ pub enum OpenAIServiceTier {
     Default,
     /// Discounted, lower-priority processing.
     Flex,
-    /// Fast mode (formerly Priority processing); sent as `priority`.
+    /// Fast mode (formerly Priority processing). Sent as `priority`.
     #[serde(rename = "priority")]
     Fast,
 }

@@ -113,7 +113,7 @@ impl VariantSpec {
             Arm::Variant(_) => {}
             _ => {
                 return Err(format!(
-                    "variant {:?}: A, B and C are the built-in arms; choose another name",
+                    "variant {:?} is a built-in arm (A, B or C). Choose another name",
                     self.name
                 )
                 .into());
@@ -134,7 +134,7 @@ impl VariantSpec {
         if let Some(base) = &self.base {
             if !self.index.is_empty() {
                 return Err(format!(
-                    "variant {}: a variant with a base uses its base's index: leave out `index`",
+                    "variant {} has a base and uses its index. Leave out `index`",
                     self.name
                 )
                 .into());
@@ -197,7 +197,7 @@ pub fn parse_specs(text: &str) -> BenchResult<Vec<VariantSpec>> {
             && target.base.is_some()
         {
             return Err(format!(
-                "variant {}: base {base} has a base itself; name the variant with the index",
+                "variant {} has base {base}, which has a base itself. Name the variant with the index",
                 spec.name
             )
             .into());
@@ -278,7 +278,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
     let layout = options.layout;
     let _lock = crate::ledger::DirLock::acquire(&layout.variants_lock_dir(), "a prepare-variants")?;
     if let Some(pid) = crate::ledger::DirLock::holder(&layout.out.join("prepare")) {
-        return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+        return Err(format!("`prepare` is running (pid {pid}). Wait for it").into());
     }
     let cli_sha = crate::repos::sha256_file(&options.index_cli)?;
     let mut prepared = load_prepared(layout)?;
@@ -327,7 +327,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
                 });
             if reads_these {
                 return Err(format!(
-                    "{} is in use by process {pid} and reads indexes this would rebuild; wait for it, or stop it",
+                    "{} is in use by process {pid} and reads indexes this would rebuild. Wait for it, or stop it",
                     run.path().display()
                 )
                 .into());
@@ -374,7 +374,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
                 "B" | "C" => {
                     if base == "C" && repo.dense.is_none() {
                         return Err(format!(
-                            "variant {}: arm C's dense index of {id} is missing; run `prepare --dense`",
+                            "variant {} lacks arm C's dense index of {id}. Run `prepare --dense`",
                             spec.name
                         )
                         .into());
@@ -387,7 +387,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
                     .cloned()
                     .ok_or_else(|| {
                         format!(
-                            "variant {}: base {variant} has no index of {id}; prepare {variant} first",
+                            "variant {} has base {variant}, which has no index of {id}. Prepare {variant} first",
                             spec.name
                         )
                     })?,
@@ -477,7 +477,7 @@ fn build(
         .lines()
         .filter(|line| {
             line.starts_with("indexed ")
-                || line.contains(": embeddings: ")
+                || line.contains(": embeddings ")
                 || line.contains("token cap")
                 || line.contains(" files indexed")
         })
@@ -523,7 +523,7 @@ pub fn for_arms(
         let mut variant = prepared
             .get(name)
             .ok_or_else(|| {
-                format!("arm {name} is not a prepared variant: run `prepare-variants` with a variants file that defines it")
+                format!("arm {name} is not a prepared variant. Run `prepare-variants` with a variants file that defines it")
             })?
             .clone();
         // variants.json holds a copy of the base's records from when this
@@ -539,7 +539,7 @@ pub fn for_arms(
                     .get(other)
                     .ok_or_else(|| {
                         format!(
-                            "variant {name}: its base {other} is not prepared: run `prepare-variants` for it"
+                            "variant {name}'s base {other} is not prepared. Run `prepare-variants` for it"
                         )
                     })?
                     .repos
@@ -571,7 +571,7 @@ pub fn for_arms(
             if index.commit != repo.commit {
                 let short = |commit: &str| commit[..commit.len().min(10)].to_string();
                 return Err(format!(
-                    "variant {name}'s index of {id} is of commit {}, but the checkout is of {}: run `prepare-variants` for {whose} again",
+                    "variant {name}'s index of {id} is of commit {}, but the checkout is of {}. Run `prepare-variants` for {whose} again",
                     short(&index.commit),
                     short(&repo.commit)
                 )
@@ -594,7 +594,7 @@ pub fn check_embedding_key(
         .is_some_and(|key| !key.to_string_lossy().trim().is_empty());
     match voyage_variant(variants, task_repos)? {
         Some((name, id)) if !key_set => Err(format!(
-            "variant {name}'s index of {id} embeds with Voyage: its searches need VOYAGE_API_KEY (or prepare-variants --mock-embeddings for a dry run)"
+            "variant {name}'s index of {id} embeds with Voyage. Its searches need VOYAGE_API_KEY (or prepare-variants --mock-embeddings for a dry run)"
         )
         .into()),
         _ => Ok(()),
@@ -819,7 +819,7 @@ pub async fn search_command(variant: &str, args: &[String]) -> BenchResult<i32> 
         use std::io::Write;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let socket = std::env::var(SOCKET_VARIABLE).map_err(|_| {
-            format!("{SOCKET_VARIABLE} is not set: this arko_index runs inside the benchmark")
+            format!("{SOCKET_VARIABLE} is not set. This arko_index runs inside the benchmark")
         })?;
         let args = match args.split_first() {
             Some((first, rest)) if first == "search2" => rest.to_vec(),

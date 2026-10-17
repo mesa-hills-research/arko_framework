@@ -51,7 +51,7 @@ pub(super) struct RequestMark {
 }
 
 /// How many times a request the provider found over the model's input
-/// limit is sent again after shortening a tool result; see
+/// limit is sent again after shortening a tool result. See
 /// [`AgentLoop::recover_from_overflow`].
 const MAX_OVERFLOW_RECOVERIES: u32 = 2;
 
@@ -176,7 +176,7 @@ impl AgentLoop {
     /// result over its cap, or among the largest when the turn's results
     /// would certainly put the next request over the model's input limit
     /// (see [`result_budget::plan`]), is shortened to its head and tail
-    /// with a notice, and `ToolResultShortened` reports it; any other result
+    /// with a notice, and `ToolResultShortened` reports it. Any other result
     /// is left alone.
     pub(super) async fn limit_tool_results(&mut self) -> Result<(), ArkoAgentsError> {
         if self.task.pending_native_tool_results.is_empty() {
@@ -327,9 +327,9 @@ impl AgentLoop {
     /// [`MAX_OVERFLOW_RECOVERIES`] times in a row. When that can't help
     /// (after those attempts, or with no result large enough to have caused
     /// it), an agent that hands over does so without the step that made the
-    /// request too large; see
+    /// request too large. See
     /// [`hand_over_without_the_step`](Self::hand_over_without_the_step).
-    /// Returns whether a request is sent again; otherwise recovery goes on
+    /// Returns whether a request is sent again. Otherwise recovery goes on
     /// as for any error that retrying can't fix, and the task stops with
     /// the error's kind.
     pub(super) async fn recover_from_overflow(

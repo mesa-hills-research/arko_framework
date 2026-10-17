@@ -13,7 +13,7 @@ const RENDER_LIMIT: usize = 24_000;
 thread_local! { static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new()); }
 
 /// The `language` of a file's chunks, from its path alone (`.pl` and `.t` count as Perl
-/// here; chunking also checks their content).
+/// here, chunking also checks their content).
 pub(crate) fn language(path: &Path) -> &'static str {
     crate::languages::detect_path(path).name
 }
@@ -139,7 +139,7 @@ fn contains_definition(n: Node, text: &str, rules: &Rules) -> bool {
     }
 }
 /// A node's name: the first of the table's name fields, else its kind's name paths
-/// (at most 200 bytes, whitespace collapsed); else, for declarator kinds, the
+/// (at most 200 bytes, whitespace collapsed). Else, for declarator kinds, the
 /// identifier at the end of C's declarator chain.
 fn name(n: Node, text: &str, rules: &Rules) -> Option<String> {
     let t = rules.table;
@@ -390,9 +390,9 @@ fn impl_label(n: Node, text: &str) -> Option<String> {
     })
 }
 /// The scope of parts merged into one chunk (a function family, a group of tiny
-/// definitions): their own scope when they share it; otherwise the enclosing scope
+/// definitions): their own scope when they share it. Otherwise the enclosing scope
 /// followed by the members' own labels joined with ` | ` (bounded by `cap` bytes,
-/// then `…`), as `symbol_path` joins symbols; the enclosing scope alone when a member
+/// then `…`), as `symbol_path` joins symbols. The enclosing scope alone when a member
 /// has no label of its own.
 fn merged_scope(parent: &str, members: &[Part], cap: usize) -> String {
     if members.iter().all(|m| m.scope == members[0].scope) {

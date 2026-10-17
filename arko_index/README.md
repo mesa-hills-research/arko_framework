@@ -4,7 +4,7 @@ arko_index splits source repositories into chunks along their syntax, searches t
 BM25, and keeps the chunks current with durable watchers that turn file changes into chunk
 deltas. Code, prose, markup and data in 53 languages are parsed with tree-sitter and chunked
 along their structure, and other UTF-8 text is split by a strictly bounded fallback. Every
-chunk carries a context header: its enclosing definitions (`impl Display for Point › fn fmt`)
+chunk carries a context header with its enclosing definitions (`impl Display for Point › fn fmt`)
 or, in Markdown, the document's title and heading chain. Chunking, lexical search and
 watching run entirely on your machine.
 
@@ -15,7 +15,7 @@ Lexical search works as soon as a build has chunked the tree, and dense results 
 the chunks are embedded, however long a slow model takes. The vectors
 live in [Caprock](https://github.com/mesa-hills-research/caprock), a pure-Rust store
 updated in place as they arrive. A search scans int8 codes held in memory and rescores the
-best candidates at full precision: on 199,999 code chunks it took 13.5 ms per query and
+best candidates at full precision. On 199,999 code chunks it took 13.5 ms per query and
 returned the exact top ten
 ([measurements](../docs/arko_index-reference.md#vector-store-measurements)).
 
@@ -28,26 +28,26 @@ and a watcher reports each change to the tree as chunk deltas.
 On 19 retrieval questions about a snapshot of this repository, the expected code was in the
 top ten results this often (dense with voyage-code-4):
 
-| Mode | Depth (9) | Breadth: definitions (4) | Breadth: callers (7) | Behaviour (6) |
+| Mode | Depth (9) | Breadth, definitions (4) | Breadth, callers (7) | Behaviour (6) |
 |---|---|---|---|---|
 | Lexical (BM25) | 4 | 4 | 5 | 4 |
 | Dense | 9 | 4 | 2 | 4 |
 | Hybrid | 9 | 4 | 3 | 4 |
 
 Dense search finds code that uses other words than the question, and lexical search finds
-callers by name. The [retrieval evaluation](../docs/arko_index-verification.md#retrieval-evaluation)
-has the questions, the method and an earlier run.
+callers by name. The [retrieval evaluation](../docs/arko_index-evaluation.md#retrieval-evaluation)
+describes the questions and the method.
 
 ## Install
 
-arko_index is a crate of this workspace:
+The crate isn't on crates.io yet, so add it from this repository:
 
 ```toml
 [dependencies]
-arko_index = { path = "../arko_index" }
+arko_index = { git = "https://github.com/mesa-hills-research/arko_framework" }
 ```
 
-The library needs no C compiler: it parses with
+The library needs no C compiler, because it parses with
 [Mesquite](https://github.com/mesa-hills-research/mesquite), a pure-Rust port of
 tree-sitter, and stores vectors with Caprock, also pure Rust. Its examples use arko_ai
 for Voyage, a dev-dependency whose dependencies need one, so building the tests and examples
@@ -98,7 +98,7 @@ as `FileRules`. See [File selection](../docs/arko_index-reference.md#file-select
 
 ## Context headers
 
-A chunk's `scope` names where it sits: the chain of definitions that enclose it, from the
+A chunk's `scope` names where it sits, as the chain of definitions that enclose it, from the
 syntax tree, or in Markdown the document's title and heading chain. A search result shows it
 as its header, `path:start_line-end_line · scope`:
 
@@ -110,7 +110,7 @@ include/router.h:18-26 · namespace net › namespace http › class Router › 
 docs/guide.md:14-21 · Guide › ## Install › ### Linux
 ```
 
-Headers are metadata: they never change chunk boundaries or IDs. Each language's labels are
+Headers are metadata and never change chunk boundaries or IDs. Each language's labels are
 in [arko_index languages](../docs/arko_index-languages.md), and the limits and formats in
 [Context headers](../docs/arko_index-reference.md#context-headers).
 
@@ -123,8 +123,9 @@ arithmetic in int8: about 1.4 times as fast as f32 (`local:f32`), with vectors w
 cosine similarity of 0.998 of the f32 ones. The first build downloads the pinned
 files (548 MB) into the Hugging Face cache. On the retrieval questions above it finds what
 voyage-code-4 finds. On 6 cores of a laptop's i9-13980HX it embeds about 7.6 chunks a
-second, so the 7,521 chunks of this repository's evaluation snapshot took about 16 minutes,
-once: the cache keeps the vectors, and lexical search works while they fill in.
+second, so the 7,521 chunks of this repository's evaluation snapshot took about 16 minutes.
+That happens once, because the cache keeps the vectors, and lexical search works while they
+fill in.
 With `local-embed-cuda` (NVIDIA, through CUDA) or `local-embed-gpu` (Vulkan, Metal or
 DirectX 12, through wgpu) the same models run on a GPU, in f32, f16 or bf16
 (`--embed local:f16:gpu`). [arko_index local embeddings](../docs/arko_index-local-embeddings.md)
@@ -154,28 +155,22 @@ every language's rules.
 ## Parsing
 
 Parsing uses [Mesquite](https://github.com/mesa-hills-research/mesquite), a pure, safe
-Rust port of tree-sitter 0.25.10 and 58 grammars. When this crate moved to it
-from the C library, its `chunk` output stayed byte-identical on eight trees: 237,312 files,
-18.9 GB of text and 6.5 million chunks. [Verification](../docs/arko_index-verification.md)
-has the details.
-
-<!-- TODO: speed and memory against the C library, measured on dedicated cores. -->
+Rust port of tree-sitter 0.25.10 and 58 grammars, and its chunks are the same as those of
+the C tree-sitter library, which the crate used before.
 
 ## Documentation
 
-- [arko_index reference](../docs/arko_index-reference.md): the API, the CLI, file selection,
-  chunking, context headers, search, dense and hybrid search, the watchers, environment
+- The [arko_index reference](../docs/arko_index-reference.md) covers the API, the CLI, file
+  selection, chunking, context headers, search, dense and hybrid search, the watchers, environment
   variables, defaults, on-disk state, platforms and trade-offs.
-- [arko_index languages](../docs/arko_index-languages.md): which grammar parses a file, the
-  rules of each language, and Markdown front matter.
-- [arko_index verification](../docs/arko_index-verification.md): the tests and validation
-  tools, the checks of the parser switch, and the retrieval evaluation.
-- [arko_index local embeddings](../docs/arko_index-local-embeddings.md): the local models,
-  how they run, their speed and their retrieval quality.
+- [arko_index languages](../docs/arko_index-languages.md) says which grammar parses a file,
+  gives the rules of each language, and describes Markdown front matter.
+- [arko_index tests and evaluation](../docs/arko_index-evaluation.md) gives the test commands
+  and validation tools, and the retrieval evaluation behind the table above.
+- [arko_index local embeddings](../docs/arko_index-local-embeddings.md) describes the local
+  models, how they run, their speed and their retrieval quality.
 
-## Origin
+## License
 
-arko_index was produced by an autonomous research run (as `ar_chunker`), then hardened
-for repository scale and for the file-inclusion rules in the reference. It replaced an
-earlier arko_index that chunked with a language model, embedded with Voyage and searched a
-SQLite database. The new crate cannot read that crate's databases.
+Licensed under either of [Apache License, Version 2.0](../LICENSE-APACHE) or
+[MIT license](../LICENSE-MIT), at your option.

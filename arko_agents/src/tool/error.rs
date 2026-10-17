@@ -39,7 +39,7 @@ pub enum ToolError {
     /// The call ran longer than the host's time limit and was stopped
     /// ([`AgentToolConfig::tool_timeout_seconds`](crate::agent_config::AgentToolConfig::tool_timeout_seconds)).
     #[error(
-        "The tool did not finish within the host's time limit of {} and was stopped; anything it had started may be incomplete.",
+        "The tool did not finish within the host's time limit of {} and was stopped. Anything it had started may be incomplete.",
         describe_limit(*limit)
     )]
     TimedOut { limit: std::time::Duration },

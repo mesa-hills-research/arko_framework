@@ -24,15 +24,15 @@ pub enum RuleAction {
 /// for the commands it allows or refuses.
 ///
 /// The pattern's first word is the program, compared with the base name of
-/// the command's program (`/usr/bin/git` is `git`; case and `.exe` are
+/// the command's program (`/usr/bin/git` is `git`, case and `.exe` are
 /// ignored). The other words match the command's arguments in order: `*`
-/// alone matches any number of words, none included; `*` inside a word
-/// matches any text in that word (`--output*`); any other word matches
+/// alone matches any number of words, none included. `*` inside a word
+/// matches any text in that word (`--output*`). Any other word matches
 /// itself exactly, after the shell's quoting is removed. An argument only
 /// known when the command runs (`$(…)` output) matches only `*`. For git,
 /// the global options `-C <dir>`, `--no-pager`, `-P` and
 /// `--no-optional-locks` are skipped first, so `git log *` matches
-/// `git -C repo log`; other global options (`-c`, `--git-dir`, …) stay.
+/// `git -C repo log`. Other global options (`-c`, `--git-dir`, …) stay.
 ///
 /// ```
 /// use arko_agents::terminal::CommandRule;
@@ -175,7 +175,7 @@ impl<'g> Rules<'g> {
             .find(|rule| rule.rule.action == RuleAction::Deny && matches(rule))
         {
             let reason = rule.rule.reason.clone().unwrap_or_else(|| {
-                "Do the work another way; other commands need the user's permission in the terminal settings.".into()
+                "Do the work another way. Other commands need the user's permission in the terminal settings.".into()
             });
             return Err(refusal(
                 words,
@@ -201,7 +201,7 @@ impl<'g> Rules<'g> {
             .iter()
             .find_map(|rule| rule.rule.reason.clone())
             .unwrap_or_else(|| {
-                "Use one of those, or do the work another way; other commands need the user's permission in the terminal settings.".into()
+                "Use one of those, or do the work another way. Other commands need the user's permission in the terminal settings.".into()
             });
         Err(refusal(
             words,
@@ -282,7 +282,7 @@ fn unknown_program(words: &[Option<String>]) -> CommandRefusal {
     let command = shown(words);
     CommandRefusal {
         message: format!(
-            "Refused: `{command}`: its program is only known when the command runs, so the command rules can't check it. Name the program directly."
+            "Refused `{command}` because its program is only known when the command runs, so the command rules can't check it. Name the program directly."
         ),
         target: command,
         protected: false,
@@ -294,7 +294,7 @@ fn unknown_program(words: &[Option<String>]) -> CommandRefusal {
 pub(super) fn unchecked(what: &str) -> CommandRefusal {
     CommandRefusal {
         message: format!(
-            "Refused: the command {what} runs is only known when it runs, so the command rules can't check it. Write the command out directly."
+            "Refused because the command {what} runs is only known when it runs, so the command rules can't check it. Write the command out directly."
         ),
         target: what.to_string(),
         protected: false,
@@ -304,7 +304,7 @@ pub(super) fn unchecked(what: &str) -> CommandRefusal {
 /// A refusal of shells nested deeper than the guard reads.
 pub(super) fn too_deep() -> CommandRefusal {
     CommandRefusal {
-        message: "Refused: the command nests shells too deeply for the command rules to check it. Write the command out directly.".into(),
+        message: "Refused because the command nests shells too deeply for the command rules to check it. Write the command out directly.".into(),
         target: String::new(),
         protected: false,
     }

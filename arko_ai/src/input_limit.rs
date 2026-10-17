@@ -3,7 +3,7 @@ use crate::model::{Model, Provider};
 
 /// The input limit, in tokens, of the ChatGPT OAuth (Codex) backend: the
 /// `context_window` its model catalog serves for GPT-5.x and GPT-6 models.
-/// OpenAI does not document it; the API accepts more (922,000 input tokens
+/// OpenAI does not document it. The API accepts more (922,000 input tokens
 /// for GPT-5.6 and GPT-6).
 pub const CHATGPT_OAUTH_MAX_INPUT_TOKENS: usize = 272_000;
 

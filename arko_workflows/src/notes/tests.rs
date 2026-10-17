@@ -163,7 +163,7 @@ async fn a_note_reaches_a_running_agent_at_its_next_turn_boundary() {
     assert!(update.contains("# Workflow context update"), "{update}");
     assert!(
         update.contains(
-            "A new note on your task. A note refines your task; it doesn't change your role's rules"
+            "A new note on your task. A note refines your task. It doesn't change your role's rules"
         ),
         "{update}"
     );

@@ -4,7 +4,7 @@
 
 use super::*;
 
-/// What became of one call of an output-based turn; see
+/// What became of one call of an output-based turn. See
 /// [`AgentLoop::handle_text_call`].
 enum TextCall {
     /// Answered or run: the turn goes on with its next call.
@@ -78,7 +78,7 @@ impl AgentLoop {
 
     /// An output-based turn. The parser's events are reported, then the
     /// turn's one call, or batch of calls of one tool, is checked, and in
-    /// order its calls run or wait for approval; their results go into the
+    /// order its calls run or wait for approval. Their results go into the
     /// conversation as one message (or wait with the task). A turn without
     /// a call is the handover report, or a response without a tool call.
     pub(super) async fn text_turn(&mut self, turn: StreamedTurn) -> Result<Flow, ArkoAgentsError> {
@@ -150,7 +150,7 @@ impl AgentLoop {
     }
 
     /// The calls of an output-based turn's group: each is checked and run
-    /// or held for approval, in order, until one ends the batch; then, as
+    /// or held for approval, in order, until one ends the batch. Then, as
     /// in native mode, a turn a call stopped answers the calls awaiting
     /// approval and the calls it didn't reach as not run, and otherwise the
     /// calls awaiting approval wait for it. The batch's tool errors pause
@@ -593,7 +593,7 @@ impl AgentLoop {
         result
     }
 
-    /// The call itself; see [`execute_text_call`](Self::execute_text_call).
+    /// The call itself. See [`execute_text_call`](Self::execute_text_call).
     async fn run_text_call(
         &mut self,
         tool_name: &str,
@@ -667,7 +667,7 @@ impl AgentLoop {
         result
     }
 
-    /// The text result of an output-based call that ran; see
+    /// The text result of an output-based call that ran. See
     /// [`execute_text_call`](Self::execute_text_call).
     async fn finish_text_call(
         &mut self,
@@ -763,7 +763,7 @@ impl AgentLoop {
     /// An output-based call that finished: `ask_user` awaits the answer
     /// (its result is the questions alone, and no message follows), and
     /// `complete_task` completes the task (reported with
-    /// `TaskStateChanged`, as in native mode); the result is formatted with
+    /// `TaskStateChanged`, as in native mode). The result is formatted with
     /// the host's message, and the tool's images wait for the next
     /// message.
     async fn finish_text_result(

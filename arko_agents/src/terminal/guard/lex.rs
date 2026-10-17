@@ -373,7 +373,7 @@ impl Builder {
     }
 
     /// A POSIX subshell closes (`)`). One that holds no command closes with
-    /// nothing to mark; a `)` that closes no subshell (a `case` pattern's)
+    /// nothing to mark. A `)` that closes no subshell (a `case` pattern's)
     /// only ends the command.
     fn close_subshell(&mut self) {
         self.end_command(false, true);
@@ -1157,7 +1157,7 @@ fn powershell_dollar(chars: &[char], i: usize, word: &mut Word) -> usize {
     }
 }
 
-/// `env:X` keeps its scope; other scopes (`global:`, `script:`) are dropped.
+/// `env:X` keeps its scope. Other scopes (`global:`, `script:`) are dropped.
 /// Names are case-insensitive.
 fn scoped_name(name: &str) -> String {
     let name = name.to_ascii_lowercase();

@@ -24,7 +24,7 @@ Read these before you design anything, in order:
 4. Examples: `{arko}/arko_workflows/examples/complete_workflow.rs` (most features together),
    `deepcoder.rs` (a CLI workflow with a shell tool, verifiers, persistence and resume) and
    `claude_code_team.rs` (agents running in Claude Code).
-Exact signatures are in `{arko}/arko_workflows/INDEX.md`, the crate READMEs and the source. Never
+Exact signatures are in `{arko}/arko_workflows/INDEX.md`, `{arko}/docs/*-guide.md` and the source. Never
 guess an API: confirm every type, method and field you use in the source or docs.
 {explorers}
 ## Design
@@ -201,7 +201,7 @@ pub const SUMMARY_REQUEST: &str = "Summarise for the user: the workflow's name a
 /// The explorer's instructions.
 pub const EXPLORER_INSTRUCTIONS: &str = r#"
 You answer one bounded question about the arko framework, whose checkout is at `{arko}`.
-Search the code and docs (`docs/reference-map.md` indexes every public primitive; the crate READMEs
+Search the code and docs (`docs/reference-map.md` indexes every public primitive; `docs/*-guide.md`
 and `arko_workflows/INDEX.md` document them), read the relevant definitions, and answer with:
 - the direct answer;
 - exact signatures, types and field names, copied from the source;

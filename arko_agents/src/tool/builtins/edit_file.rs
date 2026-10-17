@@ -61,7 +61,7 @@ fn text_param<'a>(params: &'a HashMap<String, Value>, name: &str) -> Result<&'a 
         })
 }
 
-/// `replace_all`: a boolean, or the text `true` or `false`; absent or null
+/// `replace_all`: a boolean, or the text `true` or `false`. Absent or null
 /// is `false`.
 fn replace_all_param(params: &HashMap<String, Value>) -> Result<bool, ToolError> {
     match params.get(REPLACE_ALL_PARAM_NAME) {
@@ -332,12 +332,12 @@ impl Tool for EditFileTool {
                 format!("old_string wasn't found in {path}, so the file is unchanged.");
             let mut hinted = false;
             if starts_with_line_number(&old) {
-                message.push_str(" It starts with a line number from read_file's output (`12 | `): leave those prefixes out.");
+                message.push_str(" It starts with a line number from read_file's output (`12 | `). Leave those prefixes out.");
                 hinted = true;
             }
             if let Some((first, last)) = match_apart_from_indentation(text, &old) {
                 message.push_str(&format!(
-                    " It matches {} apart from indentation: copy the indentation exactly as the file has it.",
+                    " It matches {} apart from indentation. Copy the indentation exactly as the file has it.",
                     line_range(first, last)
                 ));
                 hinted = true;

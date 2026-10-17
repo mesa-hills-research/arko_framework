@@ -147,7 +147,7 @@ impl AgentLoop {
     }
 
     /// Settles the calls a task was running when it stopped (saved at a
-    /// safe point by a host that stopped; see [`Task::running_tool_calls`]),
+    /// safe point by a host that stopped, see [`Task::running_tool_calls`]),
     /// each by its tool's [`recovery_mode`](Tool::recovery_mode):
     /// [`InDoubt`](ToolRecovery::InDoubt) calls are answered with
     /// [`RESTARTED_CALL`], [`Rerun`](ToolRecovery::Rerun) and

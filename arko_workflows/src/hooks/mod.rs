@@ -19,14 +19,14 @@ pub enum HookPoint {
     /// error recovery policy (or the caller) rejected has the pause's cause
     /// in the metadata's `cause` (`non_retryable`, `refusal`, …).
     PostAgentFailure,
-    /// An agent run ended cancelled: stopped with the workflow run, or by the
+    /// An agent run ended cancelled, stopped with the workflow run or by the
     /// workflow over its budget.
     PostAgentCancellation,
     OnUserInputRequired,
     /// An agent paused for a decision the workflow's approval or error
-    /// recovery policy leaves to the caller (`AgentRunStatus::Paused`):
+    /// recovery policy leaves to the caller (`AgentRunStatus::Paused`), which
     /// fires once per pause. `metadata["pause"]` is `"tool_approval"` or
-    /// `"error_recovery"`; an error-recovery pause also sets
+    /// `"error_recovery"`. An error-recovery pause also sets
     /// `metadata["cause"]` and `error_message`, a tool-approval pause
     /// `metadata["tools"]`.
     OnAgentPaused,
@@ -39,7 +39,7 @@ pub enum HookPoint {
     /// (an agent waiting for input or paused), a cancellation, or a stop.
     OnWorkflowFailed,
     /// A [`WorkflowCancelHandle`](crate::workflow::cancel::WorkflowCancelHandle)
-    /// cancelled or [stopped](crate::Workflow::stop) the run; fires once,
+    /// cancelled or [stopped](crate::Workflow::stop) the run. Fires once,
     /// when the run is stopped (after a graceful stop's wrap-up), from the
     /// task that stopped it. For a graceful stop its metadata has
     /// `stop_kind` and `reason`.
@@ -57,7 +57,7 @@ pub enum HookPoint {
 pub enum HookResult {
     /// Continue normal execution.
     Continue,
-    /// Abort the workflow run with this reason: every running agent is
+    /// Abort the workflow run with this reason. Every running agent is
     /// cancelled, and every run call in progress or made later returns
     /// [`WorkflowError::AbortedByHook`](crate::WorkflowError::AbortedByHook).
     Abort(String),
@@ -66,7 +66,7 @@ pub enum HookResult {
     Skip,
     /// Skip the current operation, with the reason. At `PreToolExecution`
     /// the call is rejected and the agent is told this message, so it knows
-    /// why and what to do instead; at other points it acts as `Skip`.
+    /// why and what to do instead. At other points it acts as `Skip`.
     Reject(String),
 }
 

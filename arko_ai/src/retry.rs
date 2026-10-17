@@ -1,6 +1,6 @@
 //! Retry delays shared by the framework's recovery loops.
 //!
-//! arko_ai itself does not retry model calls; callers (arko_agents and the
+//! arko_ai itself does not retry model calls. Callers (arko_agents and the
 //! OpenAI OAuth refresh loop) decide *whether* to retry using
 //! [`Error::retry_class`](crate::Error::retry_class) and use
 //! [`BackoffPolicy`] to decide *how long* to wait.
@@ -41,7 +41,7 @@ impl BackoffPolicy {
     }
 
     /// Delay before retry `attempt` (1 for the first retry). `sample` is any
-    /// uniformly random value; it is a parameter so tests need no random
+    /// uniformly random value. It is a parameter so tests need no random
     /// source (see [`random_sample`]).
     pub fn delay(&self, attempt: u32, server_hint: Option<Duration>, sample: u64) -> Duration {
         let initial = millis(self.initial);

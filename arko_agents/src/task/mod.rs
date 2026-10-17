@@ -96,15 +96,15 @@ pub enum ErrorRecoveryCause {
     /// tool call, or output-based tool calls it couldn't read) up to the
     /// attempt limit.
     UnusableResponses,
-    /// A plan usage limit was reached; when it resets, in Unix
+    /// A plan usage limit was reached. When it resets, in Unix
     /// milliseconds, when the provider said.
     UsageLimit { resets_at_unix_ms: Option<u64> },
     /// The model or a filter around it refused the turn, after the opt-in
     /// refusal fallback, if configured, also refused. The input is in
     /// [`Task::refused_input`].
     Refusal,
-    /// Tool calls failed under `ToolErrorPolicy::PauseAndAwaitApproval`;
-    /// their results report the errors.
+    /// Tool calls failed under `ToolErrorPolicy::PauseAndAwaitApproval`.
+    /// Their results report the errors.
     ToolError,
     /// An opt-in monitor paused the task before a request: the plan usage
     /// threshold or the cache-efficiency monitor.
@@ -118,7 +118,7 @@ pub enum ErrorRecoveryCause {
     /// The host held the task's next model request because a spending
     /// budget is used up
     /// ([`TurnContextSource::hold_request`](crate::runtime::TurnContextSource::hold_request)).
-    /// No request was made; continuing sends it (or the host holds it
+    /// No request was made. Continuing sends it (or the host holds it
     /// again), and approving adds no error note.
     BudgetExceeded,
 }
@@ -129,7 +129,7 @@ pub const CANCELLED_BY_USER: &str = "Task cancelled by user.";
 /// Represents the current state of a task.
 ///
 /// Tasks saved before [`TaskState::Cancelled`] existed recorded a cancelled
-/// task as `Failed` with the reason [`CANCELLED_BY_USER`]; that state loads
+/// task as `Failed` with the reason [`CANCELLED_BY_USER`]. That state loads
 /// as `Cancelled`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(from = "TaskStateRepr")]
@@ -337,7 +337,7 @@ pub struct Task {
     pub id: Uuid,
     pub agent_config_id: String,
     /// The config this task was started with. It is saved with its tool
-    /// calling mode; a task saved without one ran output-based and keeps
+    /// calling mode. A task saved without one ran output-based and keeps
     /// that mode (see [`ToolCallingMode`](crate::agent_config::ToolCallingMode)).
     #[serde(deserialize_with = "crate::agent_config::deserialize_task_agent_config")]
     pub agent_config: AgentConfig,
@@ -420,7 +420,7 @@ pub struct Task {
     pub runtime_text_messages: BTreeSet<usize>,
     /// Set after a refusal when the opt-in refusal fallback will answer the
     /// refused input: the refusal the fallback request answers. The next
-    /// model request goes to the fallback model; saved so a task suspended
+    /// model request goes to the fallback model. Saved so a task suspended
     /// in between still makes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_for: Option<arko_ai::Refusal>,
@@ -433,7 +433,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_usage_threshold_reported: Option<PlanUsageWindowMark>,
     /// The task is paused by a monitor (plan usage or cache threshold)
-    /// rather than an error; approving it adds no error note.
+    /// rather than an error. Approving it adds no error note.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monitor_pause: bool,
     /// Context the runtime has taken from its command channel
@@ -459,7 +459,7 @@ pub struct Task {
     /// its run reports them (`AgentEvent::ImagesUnavailable`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_images: Vec<String>,
-    /// Set while the runtime waits for the agent's handover report; see
+    /// Set while the runtime waits for the agent's handover report. See
     /// [`crate::handover`]. Saved so a task stopped in between still hands
     /// over when it runs again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -553,7 +553,7 @@ pub struct Task {
     pub parent: Option<TaskParent>,
 }
 
-/// The task and tool call a task runs inside; see [`Task::parent`].
+/// The task and tool call a task runs inside. See [`Task::parent`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TaskParent {
     /// The ID of the task whose tool call runs this task.
@@ -639,7 +639,7 @@ pub(crate) fn admit_context_images(
         });
         match fitted {
             Ok(()) => admitted.push(image),
-            Err(reason) => left_out.push(format!("({label}: left out, {reason}.)")),
+            Err(reason) => left_out.push(format!("({label} was left out, {reason}.)")),
         }
     }
     (admitted, left_out)
@@ -666,7 +666,7 @@ pub(crate) fn context_image_content(
     })
 }
 
-/// A tool call that started running and has no recorded result yet; see
+/// A tool call that started running and has no recorded result yet. See
 /// [`Task::running_tool_calls`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunningToolCall {
@@ -706,7 +706,7 @@ pub struct RunningToolCall {
     pub output_images: Vec<crate::tool::ToolImage>,
 }
 
-/// A failed tool call the task will pause on; see
+/// A failed tool call the task will pause on. See
 /// [`Task::deferred_tool_errors`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeferredToolError {
@@ -720,7 +720,7 @@ pub struct DeferredToolError {
     pub middleware_pause: bool,
 }
 
-/// A plan-usage window and its reset; see
+/// A plan-usage window and its reset. See
 /// [`Task::plan_usage_threshold_reported`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanUsageWindowMark {
@@ -1083,7 +1083,7 @@ impl Task {
     /// Adds the tool results waiting for this turn to the conversation as
     /// one user message: the native results, then `text`, then the tool
     /// images, each after its description. Adds nothing when there is
-    /// nothing to add; returns whether a message was added.
+    /// nothing to add. Returns whether a message was added.
     pub(crate) fn add_pending_tool_results(&mut self, text: Option<&str>) -> bool {
         self.add_pending_tool_results_with_images(text, Vec::new())
     }
@@ -1137,7 +1137,7 @@ impl Task {
     }
 
     /// Returns the amount billed across all LLM usage for this task.
-    /// Subscription (ChatGPT OAuth) calls contribute nothing; see
+    /// Subscription (ChatGPT OAuth) calls contribute nothing. See
     /// [`UsageInfo::billed`].
     pub fn total_usage_cost(&self) -> f64 {
         self.total_usage().billed()
@@ -1197,7 +1197,7 @@ impl Task {
     /// indices, a refused input, the ChatGPT turn state) and the user
     /// message count, and marks where the fresh conversation's usage starts.
     /// Pending context injections are kept, to be added to the fresh
-    /// conversation. The runtime calls this during a handover; the caller
+    /// conversation. The runtime calls this during a handover. The caller
     /// adds the fresh conversation's first message.
     pub fn start_fresh_conversation(&mut self) -> usize {
         let replaced = self.conversation.messages.len();
@@ -1542,7 +1542,7 @@ mod tests {
         assert!(task.pending_context_injections.is_empty());
     }
 
-    /// A new configuration without a tool calling mode gets native; a saved
+    /// A new configuration without a tool calling mode gets native. A saved
     /// task records its mode, and one saved without it (by a version whose
     /// default was output-based) keeps output-based.
     #[test]

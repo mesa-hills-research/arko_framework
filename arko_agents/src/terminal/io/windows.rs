@@ -419,7 +419,7 @@ pub(super) fn spawn(
             );
             if result < 0 {
                 return Err(io::Error::other(format!(
-                    "CreatePseudoConsole failed: HRESULT {result:#x}"
+                    "CreatePseudoConsole failed (HRESULT {result:#x})"
                 )));
             }
             group.console = Some(Console(console));

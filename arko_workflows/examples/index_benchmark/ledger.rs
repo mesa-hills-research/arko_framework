@@ -28,7 +28,7 @@ pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> BenchResult<Vec<T>> {
         match serde_json::from_str(line) {
             Ok(record) => records.push(record),
             Err(error) => eprintln!(
-                "warning: {} line {}: skipping a record that doesn't parse ({error}); a write was probably cut short",
+                "{} line {} was skipped because the record doesn't parse ({error}). A write was probably cut short",
                 path.display(),
                 index + 1
             ),
@@ -105,7 +105,7 @@ impl DirLock {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(pid) = Self::holder(dir) {
                         return Err(format!(
-                            "{what} is in progress in another process (pid {pid}): wait for it or stop it, or remove {} if that process isn't this benchmark",
+                            "{what} is in progress in another process (pid {pid}). Wait for it or stop it, or remove {} if that process isn't this benchmark",
                             path.display()
                         )
                         .into());

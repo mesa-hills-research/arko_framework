@@ -120,7 +120,7 @@ fn by_name(name: &str) -> Option<Detected> {
 
 /// The language of `path` from its name alone: the classic extensions first (so their
 /// detection is unchanged), then the other grammars' file names and extensions. `.pl`
-/// and `.t` are Perl here; [`detect`] also checks their content.
+/// and `.t` are Perl here. [`detect`] also checks their content.
 pub(crate) fn detect_path(path: &Path) -> Detected {
     let extension = path
         .extension()

@@ -55,7 +55,7 @@ impl AgentLoop {
 
     /// Answers a `handover_report` call with `arguments`, offered to this
     /// agent: `Ok` with its result when the report is taken (kept in the
-    /// task's handover request for the next turn boundary; a second report
+    /// task's handover request for the next turn boundary, a second report
     /// in the same turn is answered as received and ignored), `Err` with the
     /// reason it was rejected: no report is due, or the call has none.
     pub(super) fn take_report_call(
@@ -84,7 +84,7 @@ impl AgentLoop {
 
     /// Before a model request (not a refusal fallback's): replaces the
     /// conversation when the agent gave its report with `handover_report`
-    /// and the turn's results are in; otherwise asks the agent for its
+    /// and the turn's results are in. Otherwise asks the agent for its
     /// handover report when a host asked for a handover or the current
     /// conversation reached the threshold (the host's, else the configured
     /// one), and a user message can go into the conversation.
@@ -127,7 +127,7 @@ impl AgentLoop {
             if first >= threshold {
                 if !std::mem::replace(&mut self.handover_skip_warned, true) {
                     log::warn!(
-                        "Task {}: No handover: the conversation's first request ({} input tokens) was already over the handover threshold ({}).",
+                        "Task {}: No handover. The conversation's first request ({} input tokens) was already over the handover threshold ({}).",
                         self.task.id,
                         first,
                         threshold
@@ -170,7 +170,7 @@ impl AgentLoop {
     }
 
     /// A reply without tool calls while the handover report is due: its
-    /// text is the report, and the conversation is handed over; a reply
+    /// text is the report, and the conversation is handed over. A reply
     /// without text is answered with a note, like a turn without a tool
     /// call. An agent offered `handover_report` gives the report with it, so
     /// its reply is answered with a note asking for that call.

@@ -42,7 +42,7 @@ pub struct SkillsConfig {
     pub workspace_source: Option<SkillSource>,
 
     /// Zero or more global skill directories (absolute paths).
-    /// Processed in order; earlier sources have priority for deduplication.
+    /// Processed in order. Earlier sources have priority for deduplication.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_sources: Vec<SkillSource>,
 

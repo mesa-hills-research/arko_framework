@@ -14,7 +14,7 @@ use super::options::{ClaudeOptions, HookCallback, PermissionMode};
 use super::protocol::{Message, PermissionHandler, PermissionRequest, ResultMessage};
 use super::tools::ToolServer;
 
-/// How long the CLI gets to answer `initialize`; it waits for MCP servers to
+/// How long the CLI gets to answer `initialize`. It waits for MCP servers to
 /// start first.
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(90);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -64,7 +64,7 @@ const PARENT_BEHAVIOUR_VARIABLES: &[&str] = &[
 /// minutes or hours, and sends no progress while it runs), and an
 /// environment may set a short limit that the CLI would otherwise inherit
 /// (a cloud session sets `MCP_TOOL_TIMEOUT` to 60 seconds). The call limit
-/// is 7 days in milliseconds, below the largest timer the CLI can set; an
+/// is 7 days in milliseconds, below the largest timer the CLI can set. An
 /// idle limit of 0 turns the idle check off.
 const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
     ("MCP_TOOL_TIMEOUT", "604800000"),
@@ -277,7 +277,7 @@ impl ClaudeSession {
         self.write(&message).await.map(|()| uuid)
     }
 
-    /// The next message; `None` once the CLI has exited.
+    /// The next message. `None` once the CLI has exited.
     pub async fn next_message(&mut self) -> Option<Message> {
         self.messages.recv().await
     }
@@ -296,14 +296,14 @@ impl ClaudeSession {
         Err(self.exited())
     }
 
-    /// Stops the running turn; its result still arrives.
+    /// Stops the running turn. Its result still arrives.
     pub async fn interrupt(&self) -> Result<(), ClaudeError> {
         self.control(json!({"subtype": "interrupt"}), CONTROL_TIMEOUT)
             .await
             .map(drop)
     }
 
-    /// Switches the model for later turns; `None` restores the default.
+    /// Switches the model for later turns. `None` restores the default.
     pub async fn set_model(&self, model: Option<&str>) -> Result<(), ClaudeError> {
         self.control(
             json!({"subtype": "set_model", "model": model}),

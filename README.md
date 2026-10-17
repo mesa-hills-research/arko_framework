@@ -1,22 +1,32 @@
 # Arko Framework
 
 Rust crates for calling language models, running tool-using agents, orchestrating
-multi-agent workflows, and indexing source code for retrieval.
+multi-agent workflows, and searching source code.
 
-## Crates
-
-| Crate | Purpose |
+| Crate | What it does |
 | --- | --- |
-| [arko_ai](arko_ai/README.md) | Model clients for OpenAI (API key or ChatGPT OAuth), Anthropic, Google Gemini, and OpenRouter, plus Voyage embeddings. Streaming, tool calls, reasoning controls, and usage and cost reporting. |
-| [arko_agents](arko_agents/README.md) | Agent configuration and runtime, built-in and custom tools, skills, MCP servers, and interactive terminal tools. |
-| [arko_workflows](arko_workflows/README.md) | Multi-agent workflows with shared memory, messaging, budgets, hooks, completion verification, and persistence. Optional Python bindings behind the `python` feature. |
-| [arko_index](arko_index/README.md) | Deterministic tree-sitter chunking of source repositories, offline BM25 code search, and durable watchers that report chunk deltas. No network or model calls. |
+| [arko_ai](arko_ai/README.md) | Clients for OpenAI (API key or ChatGPT sign-in), Anthropic, Google Gemini and OpenRouter, Claude models through the Claude Code CLI, and Voyage embeddings. Streaming, tool calls, reasoning settings, usage and cost. |
+| [arko_agents](arko_agents/README.md) | An agent runtime with built-in and custom tools, skills, MCP servers, interactive terminals, approvals and recovery from failed model calls. |
+| [arko_workflows](arko_workflows/README.md) | Multi-agent workflows in plain Rust, with shared memory, messaging, budgets, hooks, completion verification and persistence. |
+| [arko_index](arko_index/README.md) | Splits source repositories into chunks along their syntax, searches them lexically, densely or both, and keeps them current with durable watchers. |
 
-arko_agents builds on arko_ai; arko_workflows builds on both; arko_index depends on neither.
+arko_agents builds on arko_ai, and arko_workflows builds on both. arko_index stands alone.
+
+## Install
+
+The crates aren't on crates.io yet, so add the ones you need from this repository:
+
+```toml
+[dependencies]
+arko_ai = { git = "https://github.com/mesa-hills-research/arko_framework" }
+arko_agents = { git = "https://github.com/mesa-hills-research/arko_framework" }
+```
+
+Building needs Rust 1.89 or later and a C compiler. As a dependency, arko_index needs no C compiler.
+Each crate's README has a first example, and each crate's `examples/` directory has
+programs you can run.
 
 ## Build and test
-
-Building requires Rust 1.89 or later and a C compiler (arko_index alone needs none).
 
 ```bash
 cargo check --workspace --all-targets --locked
@@ -24,31 +34,28 @@ cargo test --workspace --lib --locked
 cargo test -p arko_index --locked
 ```
 
-Each crate's README starts with a minimal example, and each crate's `examples/`
-directory contains runnable programs.
+The tests make no provider calls. The terminal, MCP and Claude Code tests need Python 3.
 
-## Guides
+## Documentation
 
-- [Defaults reference](docs/reference-map.md): every setting's default across the
-  four crates, the opt-ins, and the behaviours to know before configuring them.
-- [Prompting guides](docs/prompting/README.md): model-specific guidance for Opus 5.5,
-  Fable 5.1, and Astra 6.
-- [General agent design guide](docs/guides/agent-design.md): agent roles, tools,
-  prompting, model selection, and coordination.
-- [General workflow design guide](docs/guides/workflow-design.md): workflow topology,
-  shared state, verification, persistence, and lifecycle design.
-- [Context management](docs/context-efficiency.md): versioned memory reads,
-  file-tree change notices, tool-result distillation, and background shell jobs.
-- [Interactive terminals](docs/interactive-terminals.md): PTY and pipe terminal
-  tools with input requests and completion notifications.
-- [Asynchronous model features](docs/async-model-features.md): a provider comparison
-  of asynchronous tool calling and mid-turn steering.
-- [Arko Workflows API index](arko_workflows/INDEX.md): the complete arko_workflows
-  API reference.
-- [Complete workflow example](arko_workflows/examples/complete_workflow.rs): explicit agent
-  configuration, memory, messaging, verification, distillation, persistence, and resume.
-- [Arko Index reference](docs/arko_index-reference.md): the chunking, search and
-  watcher API, file selection, the example CLI, environment variables and on-disk state.
+- The [reference map](docs/reference-map.md) lists every public type and setting of the four
+  crates, with its default and the file that defines it.
+- The crate guides cover each crate in depth, in [arko_ai](docs/arko_ai-guide.md),
+  [arko_agents](docs/arko_agents-guide.md) and [arko_workflows](docs/arko_workflows-guide.md),
+  with the [arko_workflows API index](arko_workflows/INDEX.md) beside them.
+- The [arko_index reference](docs/arko_index-reference.md) covers chunking, search, the
+  watchers, the CLI and the on-disk state.
+- The [agent design guide](docs/guides/agent-design.md) and the
+  [workflow design guide](docs/guides/workflow-design.md) collect ideas for roles, tools,
+  topology, shared state, verification and persistence.
+- [Writing prompts](docs/prompting/README.md) covers tasks, roles and configuration.
+- [Context management](docs/context-efficiency.md) explains versioned memory reads, file-tree
+  change notices, tool-result distillation and background shell jobs.
+- [Interactive terminals](docs/interactive-terminals.md) describes the PTY and pipe terminal
+  tools, their input requests and their completion notices.
+- [`complete_workflow.rs`](arko_workflows/examples/complete_workflow.rs) is one workflow that
+  uses agent configurations, memory, messaging, verification, distillation, persistence and
+  resume together.
 
 ## License
 

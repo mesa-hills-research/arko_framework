@@ -5,8 +5,8 @@
 //! [`TaskContext::stop`](crate::tool::TaskContext::stop). The signal fires
 //! when the runtime receives `CancelTask` or `SuspendTask` while a call
 //! runs, or when the host fires the signal it gave the runtime
-//! ([`AgentRuntime::with_stop_signal`](crate::runtime::AgentRuntime::with_stop_signal));
-//! a workflow fires it when a graceful stop begins. A tool that watches it
+//! ([`AgentRuntime::with_stop_signal`](crate::runtime::AgentRuntime::with_stop_signal)).
+//! A workflow fires it when a graceful stop begins. A tool that watches it
 //! can save its state and return early instead of being dropped mid-work.
 //!
 //! [`StopAwareCommand`] does this for a child process: the child is told
@@ -29,15 +29,15 @@ use tokio::sync::watch;
 pub const STOP_FILE_ENV: &str = "ARKO_STOP_FILE";
 
 /// How long [`StopAwareCommand`] waits, by default, for its child to exit
-/// after creating the stop file, before it sends `SIGTERM`; see
+/// after creating the stop file, before it sends `SIGTERM`. See
 /// [`StopAwareCommand::grace`].
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// How long [`StopAwareCommand`] waits, by default, after `SIGTERM` before it
-/// kills the child; see [`StopAwareCommand::terminate_grace`].
+/// kills the child. See [`StopAwareCommand::terminate_grace`].
 pub const DEFAULT_TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
-/// Whether a task is being stopped, for a tool to observe; see the
+/// Whether a task is being stopped, for a tool to observe. See the
 /// [module documentation](self).
 ///
 /// Clones observe the same stop. [`never`](Self::never) (also the
@@ -175,7 +175,7 @@ pub struct StopAwareOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// How the child ended when its task was stopping while it ran; `None`
+    /// How the child ended when its task was stopping while it ran. `None`
     /// when it ended without a stop.
     pub stopped: Option<ChildStop>,
 }
@@ -189,10 +189,10 @@ pub struct StopAwareOutput {
 ///
 /// 1. the stop file is created, and the child has [`grace`](Self::grace)
 ///    (default [`DEFAULT_STOP_GRACE`], 10 seconds) to save its state and
-///    exit;
+///    exit.
 /// 2. on Unix, its process group is then sent `SIGTERM`, with
 ///    [`terminate_grace`](Self::terminate_grace) (default
-///    [`DEFAULT_TERMINATE_GRACE`], 5 seconds) to exit;
+///    [`DEFAULT_TERMINATE_GRACE`], 5 seconds) to exit.
 /// 3. then it is killed: `SIGKILL` to its process group on Unix, and
 ///    `TerminateProcess` on the child alone elsewhere.
 ///
@@ -207,7 +207,7 @@ pub struct StopAwareOutput {
 /// group: the terminal's Ctrl-C doesn't reach it (the host's stop does), and
 /// it can't read the terminal: a read stops it (`SIGTTIN`) until it is
 /// killed. Give a child that may read its standard input a null one (or a
-/// file) when it runs with [`status`](Self::status); [`output`](Self::output)
+/// file) when it runs with [`status`](Self::status). [`output`](Self::output)
 /// always does. A host that exits at once (`std::process::exit`, which runs
 /// no destructors) calls [`kill_stop_aware_commands`] first, or the children
 /// keep running.
@@ -225,9 +225,9 @@ pub struct StopAwareOutput {
 ///
 /// The stop file is a fresh path in the system's temporary directory unless
 /// [`stop_file`](Self::stop_file) names one (for a child in a sandbox that
-/// sees only some directories); an existing file at that path is removed
+/// sees only some directories). An existing file at that path is removed
 /// before the child starts. A temporary stop file is removed when the child
-/// has ended; one the caller named is left in place.
+/// has ended. One the caller named is left in place.
 #[derive(Debug)]
 pub struct StopAwareCommand {
     command: tokio::process::Command,
@@ -278,7 +278,7 @@ impl StopAwareCommand {
     ///
     /// Once the child has ended after a stop, output still held open by a
     /// process it started (outside Unix, or one that left its group) is read
-    /// for at most the terminate grace; what was read by then is returned.
+    /// for at most the terminate grace. What was read by then is returned.
     pub async fn output(mut self, stop: &StopSignal) -> io::Result<StopAwareOutput> {
         self.command
             .stdin(Stdio::null())
@@ -441,7 +441,7 @@ async fn wait_with_stop(
 }
 
 /// Kills the process group of every [`StopAwareCommand`] child running in
-/// this process, at once (`SIGKILL`; on Unix, elsewhere it does nothing):
+/// this process, at once (`SIGKILL`, on Unix, elsewhere it does nothing):
 /// for a host about to exit without unwinding. `std::process::exit` runs no
 /// destructors, so the calls' own kill on drop never runs, and since each
 /// child leads its own process group the terminal's Ctrl-C doesn't reach it

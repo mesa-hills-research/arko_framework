@@ -167,7 +167,7 @@ fn main() -> Result<(), Error> {
     let args = parse_args()?;
     let cpu = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     println!(
-        "cpu: {}; {} CPUs available; load average {}",
+        "cpu {}, {} CPUs available, load average {}",
         cpu.lines()
             .find_map(|l| l.strip_prefix("model name"))
             .map_or("unknown", |l| l.trim_start_matches([' ', '\t', ':'])),
@@ -198,7 +198,7 @@ fn main() -> Result<(), Error> {
     let started = Instant::now();
     let dir = support::local::model_dir(args.model)?;
     println!(
-        "model {} at {}: found in {:.1} s",
+        "model {} at {} found in {:.1} s",
         args.model.repo,
         &args.model.revision[..12],
         started.elapsed().as_secs_f64()
@@ -211,7 +211,7 @@ fn main() -> Result<(), Error> {
         let started = Instant::now();
         let mut embedder = local::LocalEmbedder::load_with_precision(args.model, &dir, precision)?;
         println!(
-            "{precision}: verified and loaded in {:.2} s; {}",
+            "{precision} verified and loaded in {:.2} s, {}",
             started.elapsed().as_secs_f64(),
             memory()
         );
@@ -230,7 +230,7 @@ fn main() -> Result<(), Error> {
             let secs = started.elapsed().as_secs_f64();
             vectors = got;
             println!(
-                "{precision} {threads:>3} threads: {} texts, {total} tokens ({:.0} per text) in {requests} requests: {secs:.1} s, {:.2} texts/s, {:.0} tokens/s (tokenizing alone {counted:.2} s); {}",
+                "{precision} {threads:>3} threads, {} texts, {total} tokens ({:.0} per text) in {requests} requests, {secs:.1} s, {:.2} texts/s, {:.0} tokens/s (tokenizing alone {counted:.2} s), {}",
                 refs.len(),
                 total as f64 / refs.len() as f64,
                 refs.len() as f64 / secs,
@@ -261,7 +261,7 @@ fn main() -> Result<(), Error> {
         sims.sort_by(f64::total_cmp);
         let at = |q: f64| sims[((sims.len() - 1) as f64 * q).round() as usize];
         println!(
-            "cosine similarity of {} and {} vectors over {} texts: min {:.5}, 1st percentile {:.5}, median {:.5}, mean {:.5}",
+            "cosine similarity of {} and {} vectors over {} texts, min {:.5}, 1st percentile {:.5}, median {:.5}, mean {:.5}",
             args.precisions[0],
             args.precisions[1],
             sims.len(),
@@ -299,7 +299,7 @@ fn main() -> Result<(), Error> {
             .sum();
         let total = size(state);
         println!(
-            "state {}: {} in all; vectors {}; embedding cache {}; the rest (lexical index, metadata) {}",
+            "state {} has {} in all, vectors {}, embedding cache {}, the rest (lexical index, metadata) {}",
             state.display(),
             mb(total),
             mb(dense),

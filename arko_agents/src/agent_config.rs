@@ -120,11 +120,11 @@ impl DeveloperDefinableEnvironmentDetail {
         }
         Some(match &self.dynamic_provider_name_for_serde {
             Some(provider) => format!(
-                "Environment detail '{}' needs its dynamic content provider '{}', which was not set: providers are not saved with a task or configuration, so set `content_provider` again before running the task.",
+                "Environment detail '{}' needs its dynamic content provider '{}', which was not set. Providers are not saved with a task or configuration, so set `content_provider` again before running the task.",
                 self.name, provider
             ),
             None => format!(
-                "Environment detail '{}' has no content: give it static content or a content provider.",
+                "Environment detail '{}' has no content. Give it static content or a content provider.",
                 self.name
             ),
         })
@@ -166,8 +166,8 @@ pub struct PerToolConfigOverride {
     pub auto_approve_tool_use: Option<bool>,
     /// Whether this tool's calls may run at the same time as other
     /// parallel-safe calls of a response, instead of the tool's own
-    /// [`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
-    /// see [`AgentToolConfig`]. A configuration saved with the former
+    /// [`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe).
+    /// See [`AgentToolConfig`]. A configuration saved with the former
     /// `allow_batched_calls` (which let a tool's calls share a response,
     /// run one after another) loads `false` here and ignores `true`, so no
     /// old setting makes calls run at the same time.
@@ -187,7 +187,7 @@ pub struct PerToolConfigOverride {
     /// [`ToolResultLimits::max_result_tokens`]: `Some(Some(tokens))`, or
     /// `Some(None)` (JSON `null`) for no cap on this tool. `None` (the field
     /// left out) uses the agent's setting. A longer result keeps its start
-    /// and end, up to the cap, with a notice; see [`ToolResultLimits`].
+    /// and end, up to the cap, with a notice. See [`ToolResultLimits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_result_tokens: Option<Option<usize>>,
 }
@@ -238,7 +238,7 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 /// next request: the latest request's reported input tokens, plus every
 /// byte added since (the reply and the results) at 10 bytes per token,
 /// more than any content measured packs into a token (code 3.6 to 4.8
-/// bytes per o200k token, English 3.8 to 4.3, padded tables 8.6; Claude's
+/// bytes per o200k token, English 3.8 to 4.3, padded tables 8.6, Claude's
 /// tokenizer counts more tokens for the same text). Only when even that is
 /// over the limit does it act: the largest results are shortened first,
 /// each to a head-and-tail preview (about 2% of the input limit, between
@@ -249,9 +249,9 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 /// [`margin_tokens`](Self::margin_tokens) free. A shortened result is
 /// followed by a notice: with a terminal tool offered, the notice names
 /// commands to look at the rest (`wc -l`, `head`, `grep -n`,
-/// `sed -n 'a,bp'`, a short script); without one, with
+/// `sed -n 'a,bp'`, a short script). Without one, with
 /// [`AgentToolConfig::read_file_line_ranges`] on, a `read_file` result's
-/// notice names its line ranges; otherwise it says the output was too
+/// notice names its line ranges. Otherwise it says the output was too
 /// large and to ask for less. When the results may fit, none is changed
 /// (unless their text packs more than 10 bytes into a token, as long runs
 /// of spaces can), a result no larger than about 500 tokens is never
@@ -281,7 +281,7 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolResultLimits {
-    /// The overflow guard; `true` by default. `false` adds every result
+    /// The overflow guard. `true` by default. `false` adds every result
     /// whole, as before the guard existed, and turns off its overflow
     /// recovery too.
     pub overflow_guard: bool,
@@ -354,7 +354,7 @@ where
 /// Key behavioral differences from output-based mode:
 /// - One response can call several *different* tools (output-based mode
 ///   restricts batches to the same tool).
-/// - XML usage examples are not sent to the model; only the tool description
+/// - XML usage examples are not sent to the model. Only the tool description
 ///   and JSON Schema parameters are provided.
 /// - Content wrapped in `{{#output_based_only}}...{{/output_based_only}}`
 ///   markers in `instructions` or `role_description` is stripped.
@@ -365,7 +365,7 @@ where
 /// framework parses. It works with models without native tool calling.
 ///
 /// A configuration that doesn't name a mode gets `Native`. The configuration
-/// snapshot saved with a [`Task`] always names its mode; one saved before
+/// snapshot saved with a [`Task`] always names its mode. One saved before
 /// the mode was recorded ran output-based, and loads that way.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ToolCallingMode {
@@ -375,7 +375,7 @@ pub enum ToolCallingMode {
 }
 
 thread_local! {
-    /// Set while a task's configuration snapshot is deserialized; see
+    /// Set while a task's configuration snapshot is deserialized. See
     /// [`deserialize_task_agent_config`].
     static LOADING_TASK_SNAPSHOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -391,7 +391,7 @@ fn loaded_tool_calling_mode() -> ToolCallingMode {
     }
 }
 
-/// The tool configuration of a configuration loaded without one; see
+/// The tool configuration of a configuration loaded without one. See
 /// [`loaded_tool_calling_mode`].
 fn loaded_tool_config() -> AgentToolConfig {
     AgentToolConfig {
@@ -430,7 +430,7 @@ where
 /// has finished. So `[read, read]` run together, and `[read, write, read]`
 /// runs the first read, then the write, then the second read. A tool is
 /// parallel-safe when its definition says
-/// so ([`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
+/// so ([`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe),
 /// the built-in reads are, the built-in writes are not, and an MCP tool is
 /// when its server marks it `readOnlyHint`) unless its
 /// [`PerToolConfigOverride::parallel_safe`] says otherwise.
@@ -440,12 +440,12 @@ where
 /// Approvals keep that order: a call awaiting approval counts as not
 /// finished, and so does a call held behind one. A call that must wait for
 /// one is held (saved with the task) until the approvals are decided, and
-/// then runs with the approved calls, in call order under the same rule;
-/// the calls after a rejected call run all the same. If the wait ends
+/// then runs with the approved calls, in call order under the same rule.
+/// The calls after a rejected call run all the same. If the wait ends
 /// without a decision, a held call's result says an earlier call was still
 /// waiting for approval. Calls of the response after one that ends the turn
 /// (`complete_task`, `ask_user`, or a tool error that fails the task) are
-/// not run, and their results say so; among the calls that run once
+/// not run, and their results say so. Among the calls that run once
 /// approvals are decided, only one that ends the task stops the others.
 ///
 /// `complete_task` after an earlier call of its turn was rejected or failed
@@ -465,7 +465,7 @@ pub struct AgentToolConfig {
     /// Ask for one tool call per response (off by default). In native mode
     /// the request disables parallel tool calls where the provider can
     /// (OpenAI `parallel_tool_calls: false`, Anthropic
-    /// `disable_parallel_tool_use`, OpenRouter `parallel_tool_calls: false`);
+    /// `disable_parallel_tool_use`, OpenRouter `parallel_tool_calls: false`).
     /// Gemini can't, so a Gemini response's calls run one at a time instead,
     /// each after the one before, as every provider's do under this switch.
     /// The native system prompt asks for one call per response. In
@@ -482,8 +482,8 @@ pub struct AgentToolConfig {
     pub default_out_of_workspace_path_policy: PathSafetyPolicy,
     #[serde(default)]
     pub tool_specific_configs: HashMap<String, PerToolConfigOverride>,
-    /// How tool calls are communicated with the LLM. Defaults to `Native`;
-    /// see [`ToolCallingMode`].
+    /// How tool calls are communicated with the LLM. Defaults to `Native`.
+    /// See [`ToolCallingMode`].
     #[serde(default = "loaded_tool_calling_mode")]
     pub tool_calling_mode: ToolCallingMode,
     /// The host-side time limit of a tool call, in seconds: 20 minutes
@@ -491,7 +491,7 @@ pub struct AgentToolConfig {
     /// for none. It is never shown to the model as a parameter. A call that
     /// runs longer is stopped (a command it started is killed), and its
     /// result tells the model it did not finish within the host's time
-    /// limit; the tool-error policy then applies as to any failed call
+    /// limit. The tool-error policy then applies as to any failed call
     /// (`InformAgentAndContinue` by default). Tools with their own wait and
     /// job handling are exempt ([`Tool::uses_host_timeout`](crate::tool::Tool::uses_host_timeout)),
     /// such as the terminal tools. A tool's
@@ -501,17 +501,17 @@ pub struct AgentToolConfig {
     #[serde(default = "default_tool_timeout_seconds")]
     pub tool_timeout_seconds: Option<u64>,
     /// Host-side limits on what tool results add to the conversation: the
-    /// overflow guard (on by default) and opt-in caps; see
+    /// overflow guard (on by default) and opt-in caps. See
     /// [`ToolResultLimits`].
     #[serde(default, skip_serializing_if = "ToolResultLimits::is_default")]
     pub result_limits: ToolResultLimits,
     /// Opt-in (off by default): the built-in `read_file` takes optional
     /// `start_line` and `end_line` parameters (1-based, inclusive) and reads
-    /// only those lines; its schema and description show them, and the
+    /// only those lines. Its schema and description show them, and the
     /// overflow guard's notice for a shortened `read_file` result names
     /// them. Off, they are neither shown nor mentioned, and a call that
     /// passes them anyway reads the whole file. Offering ranges steers
-    /// models to read in short ranges; an agent with a terminal tool is
+    /// models to read in short ranges. An agent with a terminal tool is
     /// better served by it (`sed -n '100,200p'`), which the guard's notice
     /// already points to.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -592,7 +592,7 @@ pub struct AgentToolConfig {
     pub chat: bool,
 }
 
-/// The terminal tool that starts a command; an agent offered it has a
+/// The terminal tool that starts a command. An agent offered it has a
 /// terminal (`TerminalTool::NAMES`).
 const TERMINAL_START_TOOL_NAME: &str = "terminal_start";
 
@@ -642,7 +642,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 log::warn!(
-                    "Agent configurations no longer have `allow_batched_tool_calls`; `false` is ignored. Every tool call of a response now runs, calls to parallel-safe tools at the same time; set `one_tool_call_per_turn: true` to ask for one call per response."
+                    "Agent configurations no longer have `allow_batched_tool_calls`. `false` is ignored. Every tool call of a response now runs, calls to parallel-safe tools at the same time. Set `one_tool_call_per_turn: true` to ask for one call per response."
                 );
             });
         }
@@ -774,14 +774,14 @@ impl AgentToolConfig {
             if let Some(problem) = problem {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentToolConfig".into(),
-                    message: format!("{problem}; turn chat off to offer tools."),
+                    message: format!("{problem}. Turn chat off to offer tools."),
                 });
             }
         }
         if self.text_reply_ends_task && self.text_reply_as_message {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "text_reply_ends_task and text_reply_as_message can't both be on: one makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
+                message: "text_reply_ends_task and text_reply_as_message can't both be on. One makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
             });
         }
         if self.result_limits.max_result_tokens == Some(0)
@@ -792,7 +792,7 @@ impl AgentToolConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "max_result_tokens must be positive; use None (null) for no cap.".into(),
+                message: "max_result_tokens must be positive. Use None (null) for no cap.".into(),
             });
         }
         let invalid = |seconds: Option<u64>| {
@@ -811,7 +811,7 @@ impl AgentToolConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
-                message: "Tool timeouts must be positive and representable; use None (null) for no timeout.".into(),
+                message: "Tool timeouts must be positive and representable. Use None (null) for no timeout.".into(),
             });
         }
         Ok(())
@@ -975,7 +975,7 @@ pub struct LLMRetryConfig {
     /// as the connection stays open, and that is deliberate: models can
     /// reason silently for a long time (GPT Pro models for over an hour),
     /// and a stream may carry nothing until the reasoning ends. A value
-    /// shorter than that cuts healthy responses off; the cut surfaces as a
+    /// shorter than that cuts healthy responses off. The cut surfaces as a
     /// truncated stream, which ordinary recovery sends again, paying for the
     /// work again. If you set one, make it generous (for example two hours).
     /// Only the gaps between data count: there is no total deadline. Never
@@ -999,10 +999,10 @@ impl Default for LLMRetryConfig {
     }
 }
 
-/// Recovery from short rate limits and capacity errors; see
+/// Recovery from short rate limits and capacity errors. See
 /// [`LLMRetryConfig::rate_limit_retry`]. The provider's delay (`Retry-After`,
 /// rate-limit reset headers, a delay in the error body) is a minimum, with
-/// jitter added; without one the delay backs off exponentially.
+/// jitter added. Without one the delay backs off exponentially.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LLMRateLimitRetryConfig {
@@ -1012,7 +1012,7 @@ pub struct LLMRateLimitRetryConfig {
     pub max_delay_ms: u64,
     /// The longest provider delay followed as a short rate limit. A rate
     /// limit asking for a longer wait is handled as a usage limit
-    /// ([`LLMRetryConfig::usage_limit_policy`]); a capacity error asking for
+    /// ([`LLMRetryConfig::usage_limit_policy`]). A capacity error asking for
     /// one gets ordinary bounded recovery.
     pub max_wait_ms: u64,
 }
@@ -1044,7 +1044,7 @@ impl LLMRateLimitRetryConfig {
     }
 }
 
-/// What the runtime does when a plan usage limit is reached; see
+/// What the runtime does when a plan usage limit is reached. See
 /// [`LLMRetryConfig::usage_limit_policy`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum UsageLimitPolicy {
@@ -1056,13 +1056,13 @@ pub enum UsageLimitPolicy {
     /// Opt-in: wait until the limit resets (plus a 1-second margin and up to
     /// 30 seconds of jitter) and retry unchanged, when the provider says
     /// when that is and the whole wait, margin and jitter included, fits in
-    /// `max_wait_ms`; otherwise pause. Applies under every error policy
+    /// `max_wait_ms`. Otherwise pause. Applies under every error policy
     /// (`PauseAndAwaitApproval` and `InformAgentAndContinue` too). The wait
     /// is cancellable and reported with `AgentEvent::UsageLimitReached`.
     ///
     /// A wait longer than the model's prompt-cache lifetime (see
     /// [`PlanUsageAction`]) makes the retried request read the whole context
-    /// uncached, once; it can't be helped once the limit is reached. For an
+    /// uncached, once. It can't be helped once the limit is reached. For an
     /// agent running in Claude Code, the limit is the one Claude Code reports
     /// reached, and the task resumes its session after the wait.
     WaitUntilReset { max_wait_ms: u64 },
@@ -1170,7 +1170,7 @@ pub struct MonitoringConfig {
 /// can't be longer). Above 100% means the provider also cached earlier
 /// output. The first `warmup_calls` calls of the conversation, and calls
 /// whose provider reports no cache figure, are not judged. The rolling
-/// efficiency sums the last `window_calls` judged calls; the thresholds
+/// efficiency sums the last `window_calls` judged calls. The thresholds
 /// apply once that many have been judged, and each triggers once until the
 /// efficiency recovers above it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1254,7 +1254,7 @@ pub struct PlanUsageThreshold {
 /// which uses more of the plan than cached input, more than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
 /// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
 /// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI
-/// with an API key and 30 minutes over ChatGPT OAuth; for a Claude Code
+/// with an API key and 30 minutes over ChatGPT OAuth. For a Claude Code
 /// model, `anthropic_cache_ttl` when set (Claude Code's
 /// `promptCacheTtl`), otherwise Claude Code's choice: 1 hour on a Claude
 /// subscription within its usage limits, 5 minutes on an API key. Claude
@@ -1286,7 +1286,7 @@ pub enum PlanUsageAction {
     /// [`PlanUsageAction`]): a delay that reaches it makes every request after
     /// it miss the cache, which uses the window up faster than no delay at
     /// all. The runtime logs a warning, once per run, for a delay within 30
-    /// seconds of the lifetime; for a Claude Code agent offered the `Agent`
+    /// seconds of the lifetime. For a Claude Code agent offered the `Agent`
     /// or `Task` tool, of its subagents' 5 minutes. For an agent
     /// running in Claude Code, each tool call is held instead (and the
     /// request that follows it with it), since Claude Code makes the
@@ -1310,7 +1310,7 @@ pub enum ReminderInjectionFrequency {
     /// Inject the reminder into every user message.
     EveryUserMessage,
     /// Inject the reminder into the initial task prompt and every Nth user
-    /// message after it. N is at least 1 ([`AgentConfig::validate`]); to
+    /// message after it. N is at least 1 ([`AgentConfig::validate`]). To
     /// turn the reminder off, leave [`AgentConfig::user_reminder`] unset.
     EveryNUserMessages(usize),
 }
@@ -1391,7 +1391,7 @@ pub struct AgentConfig {
     /// ([`UserCommand::HostDeciding`](crate::runtime::command::UserCommand::HostDeciding))
     /// isn't timed, nor is any wait of a run whose host decides all of them
     /// ([`HostDecisions`](crate::runtime::HostDecisions), which a workflow
-    /// sets for the runs it drives; it isn't saved with the task).
+    /// sets for the runs it drives, it isn't saved with the task).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_command_timeout_seconds: Option<u64>,
     /// Optional user-provided reminder to reinforce instructions the agent may stray from.
@@ -1402,14 +1402,14 @@ pub struct AgentConfig {
     /// system prompt. When absent, skills are completely disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_config: Option<SkillsConfig>,
-    /// Opt-in monitors of model calls; see [`MonitoringConfig`].
+    /// Opt-in monitors of model calls. See [`MonitoringConfig`].
     #[serde(default, skip_serializing_if = "MonitoringConfig::is_empty")]
     pub monitoring: MonitoringConfig,
     /// Opt-in: a model (with its generation settings) that a refused turn is
     /// sent to once, unchanged, before the refusal stops the task. The
-    /// refused turn is not kept; the fallback's response continues the task,
+    /// refused turn is not kept. The fallback's response continues the task,
     /// and later turns use `llm_config` again. If the fallback also refuses,
-    /// the refusal stands; a fallback request that fails otherwise is
+    /// the refusal stands. A fallback request that fails otherwise is
     /// recovered from by its own error (retried to the fallback model, or
     /// paused with that error's cause and the fallback still pending). Off
     /// by default.
@@ -1424,7 +1424,7 @@ pub struct AgentConfig {
     /// Its ChatGPT turn-state token is kept apart from the configured
     /// model's, and OpenAI reasoning is replayed between the two models only
     /// when both are in one Codex compaction family (the GPT-5.6 and GPT-6
-    /// models of `Provider::OpenAI`); otherwise it is dropped, with the ids of
+    /// models of `Provider::OpenAI`). Otherwise it is dropped, with the ids of
     /// that response's other items. Anthropic thinking is kept (a model that
     /// can't read another model's thinking ignores it). Replaying Gemini
     /// thought signatures and OpenRouter `reasoning_details` to another model
@@ -1433,7 +1433,7 @@ pub struct AgentConfig {
     pub refusal_fallback: Option<AgentLLMConfig>,
     /// Opt-in: once the context reaches a threshold, the agent writes a
     /// report and continues from it in a fresh conversation, in the same
-    /// task; see [`crate::handover`]. Off by default. With native tool
+    /// task. See [`crate::handover`]. Off by default. With native tool
     /// calling, set means the agent is offered the `handover_report` tool
     /// for the report. A host can ask for a handover with
     /// [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover)
@@ -1441,7 +1441,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover: Option<HandoverConfig>,
     /// How the Claude Code CLI runs, for an agent whose model is a Claude
-    /// Code model; see [`crate::claude_code`]. `None`: the defaults.
+    /// Code model. See [`crate::claude_code`]. `None`: the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeSettings>,
 }
@@ -1611,7 +1611,7 @@ impl AgentConfig {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentConfig".into(),
                     message: format!(
-                        "With handover set, the runtime offers its own '{}' tool for the report; rename the agent's tool of that name.",
+                        "With handover set, the runtime offers its own '{}' tool for the report. Rename the agent's tool of that name.",
                         crate::handover::HANDOVER_REPORT_TOOL_NAME
                     ),
                 });
@@ -1621,7 +1621,7 @@ impl AgentConfig {
         if self.user_command_timeout_seconds == Some(0) {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentConfig".into(),
-                message: "user_command_timeout_seconds must be at least 1 (a timeout of 0 ends every wait at once); leave it unset (None) to wait for commands without a limit.".into(),
+                message: "user_command_timeout_seconds must be at least 1 (a timeout of 0 ends every wait at once). Leave it unset (None) to wait for commands without a limit.".into(),
             });
         }
         if let Some(reminder) = &self.user_reminder
@@ -1629,7 +1629,7 @@ impl AgentConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "UserReminder".into(),
-                message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected); to turn the reminder off, leave user_reminder unset (None).".into(),
+                message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected). To turn the reminder off, leave user_reminder unset (None).".into(),
             });
         }
         for (setting, llm) in std::iter::once(("llm_config", &self.llm_config)).chain(
@@ -1648,7 +1648,7 @@ impl AgentConfig {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "AgentConfig".into(),
                     message: format!(
-                        "{setting}.generation_config.tool_config.tool_choice forces a tool ({choice:?}), which model '{}' doesn't accept with this generation config (Model::supports_forced_tool_choice); use Auto or None.",
+                        "{setting}.generation_config.tool_config.tool_choice forces a tool ({choice:?}), which model '{}' doesn't accept with this generation config (Model::supports_forced_tool_choice). Use Auto or None.",
                         llm.model.id
                     ),
                 });
@@ -1696,13 +1696,13 @@ impl AgentConfig {
                 .find(|name| crate::claude_code::is_built_in_tool(name))
             {
                 return Err(error(format!(
-                    "'{tool}' is a Claude Code built-in tool, offered only to agents whose model is a Claude Code model (Model::claude_code); model '{}' is {:?}.",
+                    "'{tool}' is a Claude Code built-in tool, offered only to agents whose model is a Claude Code model (Model::claude_code). Model '{}' is {:?}.",
                     self.llm_config.model.id, self.llm_config.model.provider
                 )));
             }
             if self.claude_code.is_some() {
                 return Err(error(format!(
-                    "claude_code settings apply only to Claude Code models; model '{}' is {:?}.",
+                    "claude_code settings apply only to Claude Code models. Model '{}' is {:?}.",
                     self.llm_config.model.id, self.llm_config.model.provider
                 )));
             }
@@ -1710,7 +1710,7 @@ impl AgentConfig {
         }
         if tools.tool_calling_mode != ToolCallingMode::Native {
             return Err(error(
-                "a Claude Code agent calls tools natively; set tool_calling_mode to Native.".into(),
+                "a Claude Code agent calls tools natively. Set tool_calling_mode to Native.".into(),
             ));
         }
         if let Some(tool) = tools
@@ -1719,7 +1719,7 @@ impl AgentConfig {
             .find(|name| crate::claude_code::UNSUPPORTED_BUILT_IN_TOOLS.contains(&name.as_str()))
         {
             return Err(error(format!(
-                "Claude Code's '{tool}' can't be offered: it would bypass the host (ask the user with ask_user instead)."
+                "Claude Code's '{tool}' can't be offered. It would bypass the host (ask the user with ask_user instead)."
             )));
         }
         for (tool, config) in &tools.tool_specific_configs {
@@ -1728,12 +1728,12 @@ impl AgentConfig {
             }
             if config.tool_timeout_seconds.is_some() {
                 return Err(error(format!(
-                    "tool_timeout_seconds can't apply to Claude Code's '{tool}': Claude Code runs its built-in tools, and arko can't stop one call."
+                    "tool_timeout_seconds can't apply to Claude Code's '{tool}'. Claude Code runs its built-in tools, and arko can't stop one call."
                 )));
             }
             if config.parallel_safe.is_some() {
                 return Err(error(format!(
-                    "parallel_safe can't apply to Claude Code's '{tool}': Claude Code decides how its built-in tools run."
+                    "parallel_safe can't apply to Claude Code's '{tool}'. Claude Code decides how its built-in tools run."
                 )));
             }
         }
@@ -1800,7 +1800,7 @@ impl AgentConfigBuilder {
         self
     }
 
-    /// Sets the description of `complete_task`'s `summary` parameter; see
+    /// Sets the description of `complete_task`'s `summary` parameter. See
     /// [`AgentConfig::complete_task_summary_prompt_override`].
     pub fn complete_task_summary_prompt_override(mut self, prompt: String) -> Self {
         self.complete_task_summary_prompt_override = Some(prompt);
@@ -1831,7 +1831,7 @@ impl AgentConfigBuilder {
         self
     }
 
-    /// Sets the opt-in command timeout in seconds; see
+    /// Sets the opt-in command timeout in seconds. See
     /// [`AgentConfig::user_command_timeout_seconds`].
     pub fn user_command_timeout_seconds(mut self, timeout: Option<u64>) -> Self {
         self.user_command_timeout_seconds = timeout;
@@ -1856,20 +1856,20 @@ impl AgentConfigBuilder {
         self
     }
 
-    /// Sets the opt-in model a refused turn is sent to once; see
+    /// Sets the opt-in model a refused turn is sent to once. See
     /// [`AgentConfig::refusal_fallback`].
     pub fn refusal_fallback(mut self, config: AgentLLMConfig) -> Self {
         self.refusal_fallback = Some(config);
         self
     }
 
-    /// Sets the opt-in conversation handover; see [`AgentConfig::handover`].
+    /// Sets the opt-in conversation handover. See [`AgentConfig::handover`].
     pub fn handover(mut self, config: HandoverConfig) -> Self {
         self.handover = Some(config);
         self
     }
 
-    /// Sets how the Claude Code CLI runs, for a Claude Code model; see
+    /// Sets how the Claude Code CLI runs, for a Claude Code model. See
     /// [`AgentConfig::claude_code`].
     pub fn claude_code(mut self, settings: ClaudeCodeSettings) -> Self {
         self.claude_code = Some(settings);
@@ -2041,8 +2041,8 @@ mod validation_tests {
     }
 
     /// The tool-result limits: a configuration saved without them loads
-    /// with the guard on and no caps, and they are written only when set;
-    /// a tool's own cap wins (`null`: none), and a zero cap is rejected.
+    /// with the guard on and no caps, and they are written only when set.
+    /// A tool's own cap wins (`null`: none), and a zero cap is rejected.
     #[test]
     fn tool_result_limits_load_by_default_and_tools_override_the_cap() {
         let saved = serde_json::to_value(luna()).unwrap();
@@ -2192,7 +2192,7 @@ mod validation_tests {
     }
 
     /// A zero command timeout (which ended every wait at once) is rejected,
-    /// by the builder too; a saved task holding one still loads.
+    /// by the builder too. A saved task holding one still loads.
     #[test]
     fn a_zero_command_timeout_is_rejected() {
         let mut config = luna();
@@ -2229,7 +2229,7 @@ mod validation_tests {
 
     /// A reminder every zero messages (which was never injected, not even
     /// into the task prompt) is rejected, pointing at unsetting the
-    /// reminder; a saved task holding one still loads.
+    /// reminder. A saved task holding one still loads.
     #[test]
     fn a_reminder_every_zero_messages_is_rejected() {
         let mut config = luna();
@@ -2274,7 +2274,7 @@ mod validation_tests {
     }
 
     /// With handover set, a native agent's own tool can't take the name of
-    /// the runtime's `handover_report` tool; without it, it can.
+    /// the runtime's `handover_report` tool. Without it, it can.
     #[test]
     fn a_tool_named_like_the_report_tool_fails_validation_beside_handover() {
         let mut config = luna();
@@ -2292,7 +2292,7 @@ mod validation_tests {
 
     /// A forced tool choice the configured model (or the refusal fallback)
     /// doesn't take fails validation, so the builder and a task start
-    /// report it before any request; others pass.
+    /// report it before any request. Others pass.
     #[test]
     fn a_forced_tool_choice_the_model_rejects_fails_validation() {
         let with_choice = |choice: arko_ai::ToolChoice| {

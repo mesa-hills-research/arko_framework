@@ -1,11 +1,10 @@
-//! The `wait_for_message` tool: an agent in native tool mode, which must
-//! call a tool every turn, waits for a message from another agent without
+//! The `wait_for_message` tool lets an agent in native tool mode, which must
+//! call a tool every turn, wait for a message from another agent without
 //! polling.
 //!
-//! The wait returns on the first of: an agent message for the run that its
-//! conversation doesn't hold yet; a start or finish of an agent it may
-//! message or that may message it; its time limit; the workflow stopping or
-//! stopping this run. The result names the senders but carries no message:
+//! The wait returns when an agent message arrives that the run's conversation
+//! doesn't hold yet, an agent it can exchange messages with starts or finishes,
+//! the time limit expires, or the workflow stops this run or all runs. The result names the senders, while
 //! the message arrives, once, through the usual context update at the next
 //! turn boundary, and the wait returns only once the message is in the run's
 //! command channel, so that boundary is the very next one.
@@ -31,10 +30,10 @@ pub const WAIT_FOR_MESSAGE_TOOL_NAME: &str = "wait_for_message";
 
 /// The time limit for a 5-minute prompt cache (Anthropic's default, and
 /// OpenAI's as reported), and when the lifetime is unknown or caching is
-/// off: 4 minutes 30 seconds.
+/// off, 4 minutes 30 seconds.
 pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(270);
 
-/// The longest time limit the builder accepts: 24 hours.
+/// The longest time limit the builder accepts, 24 hours.
 pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The least time an automatic limit leaves between the end of a wait and
@@ -50,25 +49,25 @@ const MIN_AUTO_WAIT: Duration = Duration::from_secs(1);
 /// turn boundary. It takes microseconds unless the channel is full.
 const FORWARD_WAIT: Duration = Duration::from_secs(1);
 
-/// How long `wait_for_message` waits at most: the workflow's setting
+/// How long `wait_for_message` waits at most, set by the workflow's setting
 /// ([`WorkflowBuilder::wait_for_message_timeout`]) or an agent's
 /// ([`WorkflowBuilder::agent_wait_for_message_timeout`]).
 ///
 /// Every wait ends with a model request, and a request within the
 /// provider's prompt-cache lifetime finds the prompt cached (a cache hit
-/// restarts the lifetime) and pays only for cheap cached reads; a request
+/// restarts the lifetime) and pays only for cheap cached reads. A request
 /// after it re-reads the whole prompt at full price. So waits are kept short,
-/// and a long wait is several of them: the agent calls `wait_for_message`
+/// and a long wait is several of them. The agent calls `wait_for_message`
 /// again, keeping the cache warm. `Auto` keeps each wait inside the agent's
 /// lifetime, from [`LLMClient::prompt_cache_lifetime`] for its model and
-/// settings: the lifetime minus a margin of a tenth of it, at least 30
+/// settings, calculated as the lifetime minus a margin of a tenth of it, at least 30
 /// seconds. That is 4 minutes 30 seconds for a 5-minute cache (Anthropic's
 /// default, and OpenAI's with an API key, reported conservatively on every
 /// model), 27 minutes for ChatGPT OAuth's 30-minute cache, and 54 minutes
 /// with Anthropic's 1-hour TTL, an explicit opt-in. A host's
 /// `GenerationConfig::prompt_cache_lifetime_seconds` replaces the lifetime.
 /// With an unknown lifetime, or caching off, it is
-/// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]: with nothing to keep warm, a
+/// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]. With nothing to keep warm, a
 /// bounded wait still lets the agent look around now and then.
 ///
 /// An automatic limit counts from the agent's last model request, when the
@@ -139,14 +138,14 @@ impl WaitTimeouts {
     }
 }
 
-/// Waits for a message from another agent; offered to every agent that
+/// Waits for a message from another agent. Offered to every agent that
 /// another agent may message. Its definition names no agent and no time, so
 /// it never changes during a task.
 pub struct WaitForMessageTool {
     context: Arc<SharedContext>,
     agent_name: String,
     llm_client: Arc<LLMClient>,
-    /// Per run, when its conversation last got new messages: just before a
+    /// Per run, when its conversation last got new messages, just before a
     /// model request, which is when its prompt cache was last used.
     last_request: parking_lot::Mutex<HashMap<uuid::Uuid, Instant>>,
 }
@@ -176,7 +175,7 @@ impl WaitForMessageTool {
 
     /// How long run `task_id` may wait: the agent's limit. An automatic
     /// limit counts from the run's last model request, when the cache was
-    /// last used, so the time the model took to answer is included; at least
+    /// last used, so the time the model took to answer is included. At least
     /// a second is left.
     pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
         let limit = self.limit().await;
@@ -209,7 +208,7 @@ impl WaitForMessageTool {
     }
 }
 
-/// Marks a run as waiting for a message while it lives; dropping it (the wait
+/// Marks a run as waiting for a message while it lives. Dropping it (the wait
 /// returned, or its task was aborted) marks the run running again.
 struct AwaitingMessage<'a> {
     registry: &'a AgentRegistry,

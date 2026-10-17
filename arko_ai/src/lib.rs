@@ -1,3 +1,14 @@
+//! Clients for language models from OpenAI (API key or ChatGPT OAuth), Anthropic, Google
+//! Gemini and OpenRouter, for Claude models run through an installed Claude Code CLI, and
+//! for Voyage text embeddings.
+//!
+//! [`LLMClient`] sends a [`Conversation`] to the provider of its model and returns a
+//! [`GenerationResponse`] with the text and reasoning, tool calls, stop reason, refusal,
+//! token usage and cost. [`EmbeddingClient`] embeds text with Voyage.
+//!
+//! The crate's README has a first example, and `docs/arko_ai-guide.md` in the repository
+//! covers each provider, ChatGPT OAuth, usage and cost, and errors and retries.
+
 pub mod client;
 pub mod codex_auth;
 pub mod config;

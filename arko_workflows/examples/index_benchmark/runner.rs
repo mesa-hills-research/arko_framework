@@ -195,7 +195,7 @@ async fn monitor(
             let active = started.elapsed().saturating_sub(control.waited());
             if active > timeout {
                 control.trip(format!(
-                    "time limit: worked {} s, over the limit of {} s",
+                    "time limit reached after working {} s, over the limit of {} s",
                     active.as_secs(),
                     timeout.as_secs()
                 ));
@@ -902,7 +902,7 @@ pub fn watch_signals(stop: Arc<StopState>, active: Arc<ActiveRuns>) {
             stop.raise_to(level, "signal");
             match level {
                 1 => eprintln!(
-                    "\nstopping: no new agent runs start; the {} running finish (signal again to cancel them; they run again on resume)",
+                    "\nStopping. No new agent runs start. The {} running runs finish (signal again to cancel them, and they run again on resume)",
                     active.len()
                 ),
                 2 => {
@@ -964,7 +964,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
         let differences = existing.incompatible_with(&manifest);
         if !differences.is_empty() {
             return Err(format!(
-                "run {} was started with other settings ({}); use another --name, or the same settings",
+                "run {} was started with other settings ({}). Use another --name, or the same settings",
                 settings.name,
                 differences.join(", ")
             )
@@ -1100,7 +1100,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
     let total_solve = solve_queue.len();
     let total_grade_known = grade_queue.len();
     eprintln!(
-        "run {}: {} cells settled before, {} solver runs and {} gradings to do, {} given up; {} at once{}",
+        "run {} has {} cells settled before, {} solver runs and {} gradings to do, {} given up, {} at once{}",
         context.settings.name,
         plan.done,
         total_solve,
@@ -1180,7 +1180,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
                     && is_login_failure(record.failure_kind.as_deref())
                 {
                     eprintln!(
-                        "the ChatGPT login failed ({}); stopping the run. Fix the login, then run again to resume.",
+                        "the ChatGPT login failed ({}). Stopping the run. Fix the login, then run again to resume.",
                         record.detail.as_deref().unwrap_or("")
                     );
                     context.stop.raise_to(1, "login failure");
@@ -1189,7 +1189,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
             Some(Ok(JobDone::Graded(record))) => {
                 if !record.ok && is_login_failure(record.failure_kind.as_deref()) {
                     eprintln!(
-                        "the ChatGPT login failed while grading ({}); stopping the run. Fix the login, then run again to resume.",
+                        "the ChatGPT login failed while grading ({}). Stopping the run. Fix the login, then run again to resume.",
                         record.detail.as_deref().unwrap_or("")
                     );
                     context.stop.raise_to(1, "login failure");
@@ -1262,7 +1262,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
     );
     if let Some(reason) = stopped {
         summary.push_str(&format!(
-            "; stopped ({reason}) with {} solver runs and {} gradings left: run the same command again to resume",
+            ". Stopped ({reason}) with {} solver runs and {} gradings left. Run the same command again to resume",
             solve_queue.len(),
             grade_queue.len()
         ));
@@ -2172,7 +2172,7 @@ mod tests {
             })
             .await
             .unwrap();
-            assert!(summary.contains("stopped (login failure)"), "{summary}");
+            assert!(summary.contains("Stopped (login failure)"), "{summary}");
         }
         let attempts: Vec<AttemptRecord> =
             read_jsonl(&layout.run_dir("main").join("attempts.jsonl")).unwrap();
@@ -2245,7 +2245,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(summary.contains("stopped (login failure)"), "{summary}");
+        assert!(summary.contains("Stopped (login failure)"), "{summary}");
         // The failed grading isn't recorded: both answers are graded on
         // resume, with all their attempts left.
         let grades: Vec<GradeRecord> = read_jsonl(&run_dir.join("grades.jsonl")).unwrap();

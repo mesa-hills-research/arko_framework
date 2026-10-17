@@ -4,8 +4,8 @@ use std::path::Path;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Options {
     pub max_bytes: usize,
-    /// Markdown files: the front matter's `description` joins its `title` at the root
-    /// of every chunk's scope (`Title — Description › ## Section`). Off by default:
+    /// For Markdown files, the front matter's `description` joins its `title` at the root
+    /// of every chunk's scope (`Title — Description › ## Section`). Off by default, so
     /// the root is the title alone.
     #[serde(default)]
     pub front_matter_description: bool,
@@ -26,10 +26,10 @@ pub struct SourceSpan {
     pub end_line: usize,
 }
 /// The version of the chunk JSON format (the `chunk` command's lines, deltas, index
-/// documents). Format 1 had the ten fields up to `token_estimate`; format 2 adds
+/// documents). Format 1 had the ten fields up to `token_estimate`. Format 2 adds
 /// `scope`, serialized only when it is not empty. Boundaries and IDs are the same in
 /// both formats. Format 3 adds file entries ([`FileMetadata`]) to the `chunk`
-/// command's output: a Markdown file's metadata region (front matter, MDX
+/// command's output. A Markdown file's metadata region (front matter, MDX
 /// import/export lines), which its chunks leave out.
 pub const CHUNK_FORMAT: u32 = 3;
 
@@ -45,17 +45,17 @@ pub struct Chunk {
     pub symbol_path: String,
     pub kind: String,
     pub token_estimate: usize,
-    /// The chunk's context: the chain of enclosing definitions from the syntax tree
+    /// The chunk's context, the chain of enclosing definitions from the syntax tree
     /// (`impl Display for Point › fn fmt`, `class X › def y`), or for Markdown the
     /// heading chain at its start (`# Guide › ## Install`), joined with ` › `. Empty
-    /// for top-level text. Metadata only: it never affects boundaries or IDs. Absent
+    /// for top-level text. This metadata never affects boundaries or IDs. Absent
     /// from the JSON when empty, and in data written before chunk format 2.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scope: String,
 }
 
 impl Chunk {
-    /// The context header shown with a search result: `path:start_line-end_line`,
+    /// The context header shown with a search result, `path:start_line-end_line`,
     /// then ` · ` and the scope when there is one.
     pub fn header(&self) -> String {
         let mut header = format!("{}:{}-{}", self.path, self.start_line, self.end_line);
@@ -66,7 +66,7 @@ impl Chunk {
         header
     }
 }
-/// A file's metadata region: bytes that belong to the file's record instead of a
+/// A file's metadata region holds bytes that belong to the file's record instead of a
 /// chunk. A Markdown file has one when it starts with front matter (a YAML `---` or
 /// TOML `+++` block) or, in MDX, with `import`/`export` lines. Every byte of a file is
 /// in exactly one chunk or in this region, which always starts at byte 0. As a line of
@@ -77,7 +77,7 @@ pub struct FileMetadata {
     /// The file's path, as in its chunks.
     pub file: String,
     pub metadata_range: SourceSpan,
-    /// The front matter block as written, delimiter lines included; empty when the
+    /// The front matter block as written, delimiter lines included. Empty when the
     /// region holds only MDX import/export lines.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub front_matter: String,
@@ -107,7 +107,7 @@ pub use crate::files::{FileRules, Report, SkipReason, Skipped};
 pub use crate::watch::Watcher;
 
 /// A file's chunks. A Markdown file's metadata region (see [`FileMetadata`]) is left
-/// out; [`chunk_str_with_metadata`] also returns it.
+/// out. [`chunk_str_with_metadata`] also returns it.
 pub fn chunk_str(path: &Path, text: &str, options: &Options) -> Result<Vec<Chunk>, Error> {
     Ok(crate::syntax::chunk(path, text, options)?.chunks)
 }
@@ -136,11 +136,11 @@ pub fn chunk_file_with_metadata(path: &Path, options: &Options) -> Result<FileCh
 }
 /// Chunks every file the default [`FileRules`] select (see `docs/arko_index-reference.md`,
 /// "File selection").
-/// Files that cannot be indexed are skipped; [`chunk_dir_with`] also returns the report.
+/// Files that cannot be indexed are skipped. [`chunk_dir_with`] also returns the report.
 pub fn chunk_dir(root: &Path, options: &Options) -> Result<Vec<Chunk>, Error> {
     Ok(chunk_dir_with(root, options, &FileRules::default())?.0)
 }
-/// [`chunk_dir`] with explicit file selection rules; also returns what was skipped.
+/// [`chunk_dir`] with explicit file selection rules. Also returns what was skipped.
 pub fn chunk_dir_with(
     root: &Path,
     options: &Options,
@@ -153,7 +153,7 @@ pub fn chunk_dir_with(
     })?;
     Ok((chunks, report))
 }
-/// Scaling prototype: chunks a directory with `threads` workers and hands each file's
+/// Chunks a directory with `threads` workers and hands each file's
 /// chunks to `sink` in the exact order (and with the exact content) of the sequential
 /// `read_dir` + `chunk_str` loop. Memory is bounded by the reorder window, not the tree.
 pub fn chunk_dir_each<S>(
@@ -167,7 +167,7 @@ where
 {
     chunk_dir_each_with(root, options, &FileRules::default(), threads, sink).map(|_| ())
 }
-/// [`chunk_dir_each`] with explicit file selection rules; returns the report.
+/// [`chunk_dir_each`] with explicit file selection rules. Returns the report.
 pub fn chunk_dir_each_with<S>(
     root: &Path,
     options: &Options,
@@ -198,7 +198,7 @@ where
 {
     chunk_dir_map_with(root, options, &FileRules::default(), threads, map, sink).map(|_| ())
 }
-/// [`chunk_dir_map`] with explicit file selection rules; returns the report.
+/// [`chunk_dir_map`] with explicit file selection rules. Returns the report.
 pub fn chunk_dir_map_with<R, M, S>(
     root: &Path,
     options: &Options,
@@ -248,7 +248,7 @@ pub fn open_watch(root: &Path, state_dir: &Path, options: &Options) -> Result<Wa
     Watcher::open(root, state_dir, options)
 }
 /// [`open_watch`] with explicit file selection rules. A restart with rules that differ
-/// from the previous run's reconciles: the first delta removes the chunks of files the
+/// from the previous run's reconciles. The first delta removes the chunks of files the
 /// new rules exclude and adds the newly included ones.
 pub fn open_watch_with(
     root: &Path,

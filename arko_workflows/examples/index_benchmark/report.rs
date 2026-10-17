@@ -792,15 +792,15 @@ fn signed_percent(estimate: &Estimate) -> String {
 pub fn render(report: &Report) -> String {
     let mut text = String::new();
     let run = &report.run;
-    let _ = writeln!(text, "# arko_index agent benchmark: run `{}`\n", run.name);
+    let _ = writeln!(text, "# arko_index agent benchmark run `{}`\n", run.name);
     let _ = writeln!(
         text,
-        "Model `{}` at `{}` effort{}, every agent{}. Arms: {}. Shell output cap {} bytes, {} s per command, {} commands per run; runs stop at {} input tokens{}. Generated {}.\n",
+        "Model `{}` at `{}` effort{}, every agent{}. Arms {}. Shell output cap {} bytes, {} s per command, {} commands per run. Runs stop at {} input tokens{}. Generated {}.\n",
         run.model.model_id,
         run.model.effort,
         if run.model.fast { ", Fast mode" } else { "" },
         if run.mock {
-            " (MOCK MODEL: figures are not real results)"
+            " (mock model, figures are not real results)"
         } else {
             ""
         },
@@ -850,7 +850,7 @@ pub fn render(report: &Report) -> String {
     }
     let _ = writeln!(
         text,
-        "Correctness: **pass** is the blind grader's verdict `correct` (a run that didn't answer fails); **items** is the share of the key's required items the grader found met (0 for no answer); **check** is the deterministic check of the key's locations and files. Intervals are 95%: Wilson for rates (a bootstrap over tasks when tasks have several samples), a bootstrap over tasks for means. Time is working time: wall time less waits for usage limits and retries. Cost is the API list price of the tokens (ChatGPT OAuth itself bills nothing per call).\n"
+        "For correctness, **pass** is the blind grader's verdict `correct` (a run that didn't answer fails). **Items** is the share of the key's required items the grader found met (0 for no answer). **Check** is the deterministic check of the key's locations and files. Intervals are 95%, using Wilson for rates (a bootstrap over tasks when tasks have several samples) and a bootstrap over tasks for means. Working time is wall time less waits for usage limits and retries. Cost is the API list price of the tokens (ChatGPT OAuth itself bills nothing per call).\n"
     );
     let _ = writeln!(text, "## Per arm and kind\n");
     let _ = writeln!(
@@ -1000,7 +1000,7 @@ pub fn render(report: &Report) -> String {
     if agreement.items > 0 {
         let _ = writeln!(
             text,
-            "- Grader and deterministic check agree on {} of {} location items ({:.0}%); grader only: {}, check only: {}.",
+            "- Grader and deterministic check agree on {} of {} location items ({:.0}%), with {} grader-only and {} check-only items.",
             agreement.agree,
             agreement.items,
             agreement.agree as f64 * 100.0 / agreement.items as f64,
@@ -1010,13 +1010,13 @@ pub fn render(report: &Report) -> String {
     }
     let _ = writeln!(
         text,
-        "- Answers not graded yet: {}; failed gradings: {}; runs that ended outside the agent's control (run again): {}.",
+        "- {} answers not graded yet, {} failed gradings, {} runs ended outside the agent's control and can run again.",
         report.ungraded_answers, report.failed_gradings, report.infra_attempts
     );
     if !report.looked_outside.is_empty() {
         let _ = writeln!(
             text,
-            "- **Runs whose commands named the benchmark's own files** (task sets, records, transcripts) outside their checkout: {}. Their answers may come from a key or another arm's answer: check the transcripts (`looked_outside` in attempts.jsonl).",
+            "- **{} runs named the benchmark's own files** (task sets, records, transcripts) outside their checkout in commands. Their answers may come from a key or another arm's answer. Check the transcripts (`looked_outside` in attempts.jsonl).",
             report
                 .looked_outside
                 .iter()

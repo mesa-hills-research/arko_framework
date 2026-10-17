@@ -1,3 +1,15 @@
+//! Tool-using agents built on `arko_ai`.
+//!
+//! An [`AgentConfig`] describes an agent with its role and instructions, model, tools, and
+//! approval and error policies. A [`Task`] holds one run's conversation and state.
+//! [`AgentRuntime`] runs a task, streams [`AgentEvent`]s and takes [`UserCommand`]s for
+//! approvals, answers, error recovery, context updates, cancellation and suspension.
+//! [`ToolRegistry`] holds the built-in and custom tools an agent can be offered.
+//!
+//! The crate's README has a first example, and `docs/arko_agents-guide.md` in the
+//! repository covers tools, approvals, recovery, Claude Code models and conversation
+//! handover.
+
 pub mod agent_config;
 pub mod claude_code;
 pub mod error;

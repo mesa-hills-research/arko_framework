@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 pub enum Message {
     System(SystemMessage),
     Assistant(AssistantMessage),
-    /// A user turn as Claude Code records it; tool results arrive here.
+    /// A user turn as Claude Code records it. Tool results arrive here.
     User(UserMessage),
     /// The end of a turn.
     Result(ResultMessage),
@@ -55,7 +55,7 @@ pub struct UserMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentBlock {
     Text(String),
-    /// Reasoning text; empty when Claude Code omits it.
+    /// Reasoning text. Empty when Claude Code omits it.
     Thinking(String),
     ToolUse {
         id: String,

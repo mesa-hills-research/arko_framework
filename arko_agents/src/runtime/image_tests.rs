@@ -438,7 +438,7 @@ fn tool_images_past_the_request_count_are_left_out() {
     assert!(
         output
             .text
-            .contains("image second, left out: the conversation holds as many images as a request to this model takes (500)"),
+            .contains("image second, which was left out because the conversation holds as many images as a request to this model takes (500)"),
         "{}",
         output.text
     );
@@ -457,7 +457,7 @@ fn tool_images_past_the_request_count_are_left_out() {
     assert!(
         output
             .text
-            .contains("image second, left out: the conversation holds as much image data as a request to this model takes (40 MB)"),
+            .contains("image second, which was left out because the conversation holds as much image data as a request to this model takes (40 MB)"),
         "{}",
         output.text
     );
@@ -636,7 +636,7 @@ fn google_gif_results_are_described_without_blocking_other_images() {
     assert!(
         output
             .text
-            .contains("doesn't take GIF images: convert it to PNG or JPEG")
+            .contains("doesn't take GIF images. Convert it to PNG or JPEG")
     );
 }
 

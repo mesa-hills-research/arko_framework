@@ -8,7 +8,7 @@
 //! [`ResultMessage`]. Over the same pipes the CLI asks the host to approve
 //! tool calls ([`PermissionHandler`]), runs host hook callbacks
 //! ([`Hook`]), and calls tools the host serves in-process
-//! ([`ToolServer`]); the host can interrupt the turn or switch the model or
+//! ([`ToolServer`]). The host can interrupt the turn or switch the model or
 //! permission mode mid-session.
 //!
 //! The CLI runs as published, under the user's own login (or an API key in

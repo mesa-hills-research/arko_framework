@@ -16,7 +16,7 @@ pub const MESSAGE_USER_RESULT: &str = "Your message was sent to the user. Carry 
 /// Shows the user a message without ending the agent's turn: `ask_user`
 /// without the wait. The runtime sends the message to the host as
 /// [`AgentEvent::MessageToUser`](crate::AgentEvent::MessageToUser) and the
-/// task carries on; its state doesn't change.
+/// task carries on. Its state doesn't change.
 ///
 /// A host's own tool registered under the same name replaces this one: it
 /// runs as any other tool, and the runtime sends no `MessageToUser` for its

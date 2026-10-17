@@ -21,7 +21,7 @@ impl AgentLoop {
                 .is_some_and(|tools| !tools.tools.is_empty())
         {
             log::warn!(
-                "Task {}: the model's tool_config lists tool definitions, which native tool calling doesn't send: the agent's tools come from its tool registry. Its tool_choice and parallel_tool_calls apply.",
+                "Task {}: The model's tool_config lists tool definitions, which native tool calling doesn't send. The agent's tools come from its tool registry. Its tool_choice and parallel_tool_calls apply.",
                 self.task.id
             );
         }

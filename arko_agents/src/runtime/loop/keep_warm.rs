@@ -103,7 +103,7 @@ impl AgentLoop {
             Ok(response) => response,
             Err(error) if config.max_tokens.is_some() && refuses_output_cap(&error) => {
                 log::warn!(
-                    "Task {}: the prompt cache refresh's output limit of {} was refused ({error}); sent again with {FALLBACK_OUTPUT_CAP}.",
+                    "Task {}: the prompt cache refresh's output limit of {} was refused ({error}). Sent again with {FALLBACK_OUTPUT_CAP}.",
                     self.task.id,
                     config.max_tokens.unwrap_or_default()
                 );

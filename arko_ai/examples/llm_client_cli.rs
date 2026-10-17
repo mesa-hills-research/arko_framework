@@ -380,7 +380,7 @@ fn create_client(cli: &Cli, env: impl Fn(&str) -> Option<String>) -> Result<LLMC
         (Some(path), _) => path.clone(),
         (None, true) => CodexAuthFile::default_path().ok_or_else(|| {
             Error::AuthenticationFailed(
-                "No home directory to find ~/.codex/auth.json in; pass --codex-auth-json".into(),
+                "No home directory to find ~/.codex/auth.json in. Pass --codex-auth-json".into(),
             )
         })?,
         (None, false) => return LLMClient::from_env_with(env),
@@ -467,7 +467,7 @@ fn get_model(name: &str) -> Result<Model, Error> {
     match aliases().remove(name).as_deref() {
         Some([model]) => Ok(model.clone()),
         Some(models) => Err(Error::ModelNotSupported(format!(
-            "'{name}' names several models; use one of: {}",
+            "'{name}' names several models. Choose one of {}",
             models
                 .iter()
                 .map(|model| model.id.as_str())
@@ -516,7 +516,7 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
         // error; these Claude models get none, so say so.
         if model.provider == Provider::Anthropic && model.omits_anthropic_sampling_parameters() {
             eprintln!(
-                "Warning: {} takes no temperature; --temperature is not sent.",
+                "{} takes no temperature. --temperature is not sent.",
                 model.id
             );
         }
@@ -580,7 +580,7 @@ fn reasoning_config(
     // Outside a Claude token budget, the two flags name the same setting.
     let setting = || match (level, effort) {
         (Some(level), Some(effort)) if level != effort => Err(invalid(format!(
-            "--reasoning-level '{level}' and --reasoning-effort '{effort}' disagree; give one of them."
+            "--reasoning-level '{level}' and --reasoning-effort '{effort}' disagree. Give one of them."
         ))),
         (level, effort) => Ok(level.or(effort)),
     };
@@ -677,7 +677,7 @@ fn reasoning_config(
         }
         Provider::ClaudeCode => {
             return Err(invalid(format!(
-                "{} runs through Claude Code, which this client doesn't drive; see the claude_code_live example.",
+                "{} runs through Claude Code, which this client doesn't drive. See the claude_code_live example.",
                 model.id
             )));
         }
@@ -716,7 +716,7 @@ fn load_image(path: &PathBuf) -> Result<Image, Box<Error>> {
         "webp" => "image/webp",
         _ => {
             eprintln!(
-                "Warning: Unknown image extension '.{}', assuming 'image/png'. Supported: jpg, png, gif, webp",
+                "Unknown image extension '.{}', assuming 'image/png'. Supported formats are jpg, png, gif and webp",
                 extension
             );
             "image/png"

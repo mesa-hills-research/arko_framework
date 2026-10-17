@@ -4,7 +4,7 @@
 //! model (for example `Model::claude_code(Model::anthropic_claude_opus_5_5())`)
 //! runs in a session of the user's installed Claude Code CLI, under its login,
 //! instead of through [`LLMClient`](arko_ai::LLMClient) requests. Claude Code
-//! runs the agent loop; the arko runtime drives the session and keeps the task,
+//! runs the agent loop. The arko runtime drives the session and keeps the task,
 //! its events, commands, approvals and handovers as for any other agent:
 //!
 //! - The agent's arko tools (`complete_task`, `ask_user`, a workflow's
@@ -18,7 +18,7 @@
 //!   an approval wait, the workspace path policy, and (for built-ins) the
 //!   execution middleware's `before`. Claude Code runs a built-in itself, so
 //!   its output can't be intercepted and arko's per-tool time limit doesn't
-//!   apply; [`AgentConfig::validate`](crate::AgentConfig::validate) rejects
+//!   apply. [`AgentConfig::validate`](crate::AgentConfig::validate) rejects
 //!   those settings for built-ins.
 //! - Environment details, reminders, the system prompt (appended to Claude
 //!   Code's, or replacing it), workflow context updates and handovers work as
@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Claude Code built-in tools this crate knows, as of Claude Code 2.1.
-/// `available_tool_names` may name others the installed CLI has; they are
+/// `available_tool_names` may name others the installed CLI has. They are
 /// offered as built-ins too. `AskUserQuestion` is left out: arko's `ask_user`
 /// asks through the host.
 pub const BUILT_IN_TOOLS: &[&str] = &[
@@ -144,12 +144,12 @@ fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| name.to_string()).collect()
 }
 
-/// How an agent's Claude Code session runs; see the [module docs](self).
+/// How an agent's Claude Code session runs. See the [module docs](self).
 /// Only for agents whose model is a Claude Code model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ClaudeCodeSettings {
-    /// The CLI to run; `claude` on the `PATH` when unset.
+    /// The CLI to run. `claude` on the `PATH` when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<PathBuf>,
     /// Arguments before the CLI's own, for a CLI run through an interpreter
@@ -163,7 +163,7 @@ pub struct ClaudeCodeSettings {
     pub setting_sources: Vec<String>,
     /// Replace Claude Code's system prompt with the agent's, instead of
     /// appending the agent's to it (the default). Claude Code's prompt
-    /// explains its built-in tools; an agent without them can do without it.
+    /// explains its built-in tools. An agent without them can do without it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub replace_system_prompt: bool,
     /// Environment variables for the CLI.
@@ -174,7 +174,7 @@ pub struct ClaudeCodeSettings {
     /// one that would delete, move, overwrite or reformat a protected path
     /// (a root, the home directory, system directories) or a path outside the
     /// workspace is refused. This allows destructive commands outside the
-    /// workspace; protected paths stay refused.
+    /// workspace. Protected paths stay refused.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub allow_commands_outside_workspace: bool,
     /// Paths outside the workspace that destructive commands may target.

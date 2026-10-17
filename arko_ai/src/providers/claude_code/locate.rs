@@ -105,7 +105,7 @@ pub(super) fn resolve(program: &Path, environment: &Environment) -> Launch {
         }
     }
     log::warn!(
-        "{} is a launcher script with no Claude Code package next to it; running it directly",
+        "{} is a launcher script with no Claude Code package next to it. Running it directly",
         found.display()
     );
     direct

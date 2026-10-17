@@ -16,7 +16,7 @@ use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default Interactions API base URL; requests go to `{base}/interactions`.
+/// Default Interactions API base URL. Requests go to `{base}/interactions`.
 const GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1";
 
 #[derive(Clone)]
@@ -154,7 +154,7 @@ impl ProviderClient for GoogleClient {
 
 impl GoogleClient {
     /// Parses an Interactions API SSE byte stream. `End` is emitted only after
-    /// the interaction reports a terminal status; a stream that ends earlier
+    /// the interaction reports a terminal status. A stream that ends earlier
     /// yields [`Error::StreamTruncated`].
     fn stream_events<S, B, E>(
         bytes: S,
@@ -561,7 +561,7 @@ impl GoogleClient {
 
     /// Maps an interaction status. The Interactions API reports only
     /// `status` (in_progress, requires_action, completed, failed, cancelled,
-    /// incomplete) with no finish or safety reason; `incomplete` is
+    /// incomplete) with no finish or safety reason. `incomplete` is
     /// documented as "e.g. hitting max_tokens", so it maps to `MaxTokens`.
     /// https://ai.google.dev/api/interactions-api-v1
     fn finish_turn(message: &mut Message, status: &str, trailing_tool_call: bool) -> StopReason {
@@ -718,7 +718,7 @@ impl GoogleClient {
     /// optional in the Interactions API, so without a reasoning configuration
     /// neither is sent and the model's own defaults apply: thinking at its
     /// documented default level (medium on Gemini 3.5 to 3.8 Flash, minimal
-    /// on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro; dynamic
+    /// on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic
     /// on 2.5) and no thought summaries.
     /// https://ai.google.dev/gemini-api/docs/thinking
     /// https://ai.google.dev/static/api/interactions-v1.openapi.json
@@ -812,7 +812,7 @@ impl GoogleClient {
     /// Gemini 2.5 models on the Interactions API accept only LOW, MEDIUM and
     /// HIGH, so a zero budget (thinking off) has no level. 2.5 Pro can't turn
     /// thinking off and 2.5 Flash has no documented off switch there, so they
-    /// are rejected; 2.5 Flash-Lite thinks only when asked, so the level is
+    /// are rejected. 2.5 Flash-Lite thinks only when asked, so the level is
     /// omitted. https://ai.google.dev/gemini-api/docs/thinking
     fn budget_level_without_thinking_levels(
         model: &crate::model::Model,
@@ -824,7 +824,7 @@ impl GoogleClient {
                 if model.is_gemini_2_5_pro() || model.is_gemini_2_5_flash() =>
             {
                 Err(Error::InvalidRequest(format!(
-                    "Thinking can't be disabled for '{}' on the Interactions API; use a positive budget, or -1 for the model default.",
+                    "Thinking can't be disabled for '{}' on the Interactions API. Use a positive budget, or -1 for the model default.",
                     model.id
                 )))
             }
@@ -1323,7 +1323,7 @@ fn first_error(value: &Value) -> Option<&Value> {
 
 /// Classifies an interaction or stream error. A generation-blocked code is a
 /// [`Error::Refusal`] (keeping any text streamed before it as
-/// `partial_output`); otherwise the `code` (string or numeric HTTP-style) and
+/// `partial_output`). Otherwise the `code` (string or numeric HTTP-style) and
 /// `status` (e.g. `UNAVAILABLE`) decide. An error without either stays a
 /// generic, boundedly retryable API error.
 fn interaction_error(label: &str, error: Option<&Value>, partial_output: &str) -> Error {

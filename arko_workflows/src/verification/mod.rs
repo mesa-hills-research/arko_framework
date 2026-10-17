@@ -13,7 +13,7 @@ use crate::freshness::{ActorId, ResourceId};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VerificationKind {
     Correctness,
-    /// Efficiency verifiers are advisory: a reported major issue is coerced
+    /// Efficiency verifiers are advisory. A reported major issue is coerced
     /// to a minor correction and the gate is skipped after its repair cap.
     Efficiency,
 }
@@ -42,10 +42,10 @@ pub struct CompletionVerifierConfig {
     /// How many failed reviews (the verifier's run failed, or its verdict
     /// stayed unusable) of one task are answered by asking the agent to call
     /// `complete_task` again, which starts a new review. On the next failure
-    /// the completion is neither accepted nor rejected: the task pauses and
+    /// the completion is neither accepted nor rejected. The task pauses and
     /// the run call returns
-    /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed);
-    /// continuing it starts the count again. Default 1.
+    /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed).
+    /// Continuing it starts the count again. Default 1.
     #[serde(default = "default_review_retries")]
     pub max_review_retries: u32,
 }
@@ -104,7 +104,7 @@ impl CompletionVerifierConfig {
     }
 
     /// Gate this agent's completions (by registration name). A verifier
-    /// needs at least one target: `build` rejects one without.
+    /// needs at least one target. `build` rejects one without.
     pub fn target(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self
@@ -133,7 +133,7 @@ impl CompletionVerifierConfig {
     }
 
     /// Whether a fresh re-review is given the prior verdict and findings
-    /// (default `true`); `false` makes every review without
+    /// (default `true`). `false` makes every review without
     /// `reuse_conversation` an independent first review.
     pub fn include_prior_findings(mut self, enabled: bool) -> Self {
         self.include_prior_findings = enabled;
@@ -147,7 +147,7 @@ impl CompletionVerifierConfig {
     }
 
     /// How many failed reviews of one task are retried by asking the agent
-    /// to call `complete_task` again (default 1); see
+    /// to call `complete_task` again (default 1). See
     /// [`max_review_retries`](Self::max_review_retries).
     pub fn review_retries(mut self, retries: u32) -> Self {
         self.max_review_retries = retries;
@@ -189,13 +189,13 @@ pub(crate) fn refuse_text_endings(
     for verifier in verifiers {
         if verifier.applies_to(agent) {
             return Err(format!(
-                "agent '{agent}' ends its task with a reply in text (text_reply_ends_task), which completion verifier '{}' can't review: a verifier reviews complete_task calls. Turn the setting off for this agent.",
+                "agent '{agent}' ends its task with a reply in text (text_reply_ends_task), which completion verifier '{}' can't review. A verifier reviews complete_task calls. Turn the setting off for this agent.",
                 verifier.name
             ));
         }
         if verifier.verifier_agent == agent {
             return Err(format!(
-                "completion verifier '{}' runs agent '{agent}', which ends its task with a reply in text (text_reply_ends_task): a verifier gives its verdict with complete_task. Turn the setting off for this agent.",
+                "completion verifier '{}' runs agent '{agent}', which ends its task with a reply in text (text_reply_ends_task). A verifier gives its verdict with complete_task. Turn the setting off for this agent.",
                 verifier.name
             ));
         }

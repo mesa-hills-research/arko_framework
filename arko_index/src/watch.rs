@@ -129,7 +129,7 @@ impl CachedFile {
 }
 
 /// Durable, at-least-once event delivery. Polling deliberately does not depend on an OS
-/// event queue: missed notifications/queue overflow cannot silently lose filesystem changes.
+/// event queue, so missed notifications or queue overflow cannot silently lose filesystem changes.
 pub struct Watcher {
     root: PathBuf,
     dir: PathBuf,
@@ -176,7 +176,7 @@ impl std::fmt::Display for UncertainCommit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "journal rename succeeded but directory sync failed; drop/reopen before continuing: {}",
+            "journal rename succeeded but directory sync failed ({}). Drop and reopen before continuing",
             self.0
         )
     }
@@ -203,7 +203,7 @@ fn sync_parent(dir: &Path) -> std::io::Result<()> {
 impl Watcher {
     fn check_health(&self) -> Result<(), Error> {
         if self.poisoned {
-            return Err("watch commit outcome is uncertain; drop and reopen the watcher".into());
+            return Err("watch commit outcome is uncertain. Drop and reopen the watcher".into());
         }
         Ok(())
     }
@@ -321,12 +321,12 @@ impl Watcher {
         watcher.set_report(report)?;
         Ok(watcher)
     }
-    /// What the latest pass indexed and skipped; also kept in `STATE_DIR/report.json`.
+    /// What the latest pass indexed and skipped. Also kept in `STATE_DIR/report.json`.
     pub fn report(&self) -> &Report {
         &self.report
     }
     /// Whether this open found a state written with different file selection rules
-    /// (or by a version that did not record them); the open reconciled to the new rules.
+    /// (or by a version that did not record them). The open reconciled to the new rules.
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
     }
@@ -498,7 +498,7 @@ impl Watcher {
         self.check_health()?;
         Ok(self.state.chunks.clone())
     }
-    /// Cumulative durable acknowledgement; a later sequence acknowledges every prior delta.
+    /// Cumulative durable acknowledgement. A later sequence acknowledges every prior delta.
     pub fn ack(&mut self, sequence: u64) -> Result<(), Error> {
         self.check_health()?;
         if sequence > self.state.sequence {

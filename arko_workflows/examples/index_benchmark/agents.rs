@@ -43,7 +43,7 @@ impl ModelSettings {
             .ok_or_else(|| format!("unknown model {}", self.model_id))?;
         if model.provider != arko_ai::Provider::OpenAI {
             return Err(format!(
-                "{} is not an OpenAI model; the benchmark runs on ChatGPT OAuth",
+                "{} is not an OpenAI model. The benchmark runs on ChatGPT OAuth",
                 self.model_id
             )
             .into());
@@ -107,7 +107,7 @@ pub fn codex_auth_path(codex_home: Option<&Path>) -> BenchResult<PathBuf> {
         return Ok(home.join("auth.json"));
     }
     CodexAuthFile::default_path()
-        .ok_or_else(|| "no home directory to find ~/.codex/auth.json; pass --codex-home".into())
+        .ok_or_else(|| "no home directory to find ~/.codex/auth.json. Pass --codex-home".into())
 }
 
 /// The client for every agent: ChatGPT OAuth from a Codex `auth.json`
@@ -130,7 +130,7 @@ pub fn build_client(
         let path = codex_auth_path(home)?;
         let auth = CodexAuthFile::load(&path).map_err(|error| {
             format!(
-                "the ChatGPT login at {} could not be read ({error}); run `codex login` (with CODEX_HOME set to the Codex home you pass) first",
+                "the ChatGPT login at {} could not be read ({error}). Run `codex login` (with CODEX_HOME set to the Codex home you pass) first",
                 path.display()
             )
         })?;

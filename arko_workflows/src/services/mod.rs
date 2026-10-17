@@ -29,7 +29,7 @@ pub const RESUME_RUN_PARAMETER: &str = "resume_run";
 
 /// Which agents may run which other agents with `run_workflow_agent`.
 ///
-/// Callers and targets are named explicitly: with none named, no agent is
+/// Callers and targets are named explicitly. With none named, no agent is
 /// offered the tool, and a caller may run no agent. The opt-ins
 /// [`allow_all_callers`](Self::allow_all_callers) and
 /// [`allow_all_targets`](Self::allow_all_targets) admit every agent except
@@ -40,28 +40,28 @@ pub struct WorkflowServicesConfig {
     pub allowed_callers: HashSet<String>,
     /// Agents a caller may run.
     pub allowed_targets: HashSet<String>,
-    /// Opt-in: every agent is a caller, except verifier agents.
+    /// When enabled, every agent is a caller, except verifier agents.
     pub all_callers: bool,
-    /// Opt-in: a caller may run every agent, except itself and verifier
+    /// When enabled, a caller may run every agent, except itself and verifier
     /// agents.
     pub all_targets: bool,
-    /// Calls running at once, workflow-wide (nested delegation included);
-    /// a call over the limit fails at once, or waits for a place with
+    /// Calls running at once, workflow-wide (nested delegation included).
+    /// A call over the limit fails at once, or waits for a place with
     /// [`queue_active_calls`](Self::queue_active_calls). Default
     /// [`DEFAULT_MAX_ACTIVE_CALLS`].
     pub max_active_calls: NonZeroU32,
-    /// Opt-in: no limit on calls running at once
+    /// When enabled, no limit on calls running at once
     /// ([`max_active_calls`](Self::max_active_calls) is ignored).
     pub unlimited_active_calls: bool,
-    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// When enabled, a call over [`max_active_calls`](Self::max_active_calls)
     /// waits until one ends, instead of failing.
     pub queue_active_calls: bool,
-    /// `max_active_calls(0)` was asked for; `WorkflowBuilder::build`
+    /// `max_active_calls(0)` was asked for. `WorkflowBuilder::build`
     /// reports it.
     zero_max_active_calls: bool,
 }
 
-/// The default [`WorkflowServicesConfig::max_active_calls`]: 4.
+/// The default [`WorkflowServicesConfig::max_active_calls`] of 4.
 pub const DEFAULT_MAX_ACTIVE_CALLS: NonZeroU32 = NonZeroU32::new(4).unwrap();
 
 impl Default for WorkflowServicesConfig {
@@ -92,14 +92,14 @@ impl WorkflowServicesConfig {
         self
     }
 
-    /// Opt-in: offer `run_workflow_agent` to every agent except
+    /// Opt in to offering `run_workflow_agent` to every agent except
     /// completion-verifier agents.
     pub fn allow_all_callers(mut self) -> Self {
         self.all_callers = true;
         self
     }
 
-    /// Opt-in: let a caller run every agent except itself and
+    /// Opt in to letting a caller run every agent except itself and
     /// completion-verifier agents.
     pub fn allow_all_targets(mut self) -> Self {
         self.all_targets = true;
@@ -119,13 +119,13 @@ impl WorkflowServicesConfig {
         self
     }
 
-    /// Opt-in: no limit on calls running at once.
+    /// Opt in to unlimited calls running at once.
     pub fn unlimited_active_calls(mut self) -> Self {
         self.unlimited_active_calls = true;
         self
     }
 
-    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// When enabled, a call over [`max_active_calls`](Self::max_active_calls)
     /// waits until one ends, instead of failing.
     pub fn queue_active_calls(mut self) -> Self {
         self.queue_active_calls = true;
@@ -137,7 +137,7 @@ impl WorkflowServicesConfig {
     pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
         if self.zero_max_active_calls {
             return Err(WorkflowError::BuilderInvalid(
-                "max_active_calls needs at least 1; the default is 4".to_string(),
+                "max_active_calls needs at least 1. The default is 4".to_string(),
             ));
         }
         for (role, names) in [
@@ -194,14 +194,14 @@ impl WorkflowServices {
         })
     }
 
-    /// Whether `caller` is offered `run_workflow_agent`: named, or every
+    /// Whether `caller` is offered `run_workflow_agent`, when named or every
     /// agent but verifier agents under `allow_all_callers`.
     pub fn is_allowed(&self, caller: &str) -> bool {
         self.config.allowed_callers.contains(caller)
             || (self.config.all_callers && !self.is_verifier(caller))
     }
 
-    /// Whether `caller` may run `target`: named, or every agent but the
+    /// Whether `caller` may run `target`, when named or every agent but the
     /// caller and verifier agents under `allow_all_targets`.
     pub fn is_target_allowed(&self, caller: &str, target: &str) -> bool {
         self.config.allowed_targets.contains(target)
@@ -288,7 +288,7 @@ impl WorkflowServices {
         }
     }
 
-    /// Counts a call until the guard is dropped; with `refuse`, fails when
+    /// Counts a call until the guard is dropped. With `refuse`, fails when
     /// [`WorkflowServicesConfig::max_active_calls`] are running (or waits
     /// for a place, with [`WorkflowServicesConfig::queue_active_calls`]).
     async fn enter_call(&self, refuse: bool) -> Result<CallGuard, WorkflowError> {
@@ -326,9 +326,9 @@ impl WorkflowServices {
     /// with `prompt` (resuming run `resume_run`, if set) at `depth` when the
     /// workflow stopped: the agent run the call ran ends as the call would
     /// have. A run that completed returns its result without running again
-    /// (the caller's task wasn't saved with it); an interrupted one is
+    /// (the caller's task wasn't saved with it). An interrupted one is
     /// recovered and waited for (as is another recovery of it already
-    /// running); a run that ended otherwise returns its error. When the call
+    /// running). A run that ended otherwise returns its error. When the call
     /// ran no run that was saved with it (it can't have run a tool: runs are
     /// saved before their first), the call runs now: `agent_name` starts,
     /// or run `resume_run` is resumed. The call was admitted before the
@@ -433,8 +433,8 @@ impl WorkflowServices {
     /// must be one `caller_run` started (its parent link names it), or an
     /// orphaned run ([`is_orphaned`]: the run that started it can't resume
     /// it any more). An interrupted run is recovered (the calls it was
-    /// running are settled first); a completed run, or one waiting for an
-    /// answer, continues; a run paused after an error continues with the
+    /// running are settled first). A completed run, or one waiting for an
+    /// answer, continues. A run paused after an error continues with the
     /// message as the note. Its parent link then points at `parent`, so
     /// that a later stop finds it in this call.
     #[allow(clippy::too_many_arguments)]
@@ -691,7 +691,7 @@ impl Drop for CallGuard {
 pub(crate) struct RunWorkflowAgentTool {
     services: WorkflowServices,
     caller: String,
-    /// The depth of the caller's run; the agent it runs is one deeper.
+    /// The depth of the caller's run. The agent it runs is one deeper.
     depth: u32,
 }
 
@@ -739,7 +739,7 @@ impl Tool for RunWorkflowAgentTool {
     }
 
     /// When the calling agent is stopped, the workflow winds the agent this
-    /// call runs down (within its grace period) and records it; the call
+    /// call runs down (within its grace period) and records it. The call
     /// then returns.
     fn interruptible(&self) -> bool {
         false
@@ -935,7 +935,7 @@ mod tests {
     }
 
     /// `max_active_calls(0)` fails the build (it once built a workflow
-    /// whose every call was refused, "active-call limit (0) reached"); the
+    /// whose every call was refused, "active-call limit (0) reached"). The
     /// field can't hold 0, and the default is 4.
     #[test]
     fn zero_max_active_calls_fails_the_build() {
@@ -968,7 +968,7 @@ mod tests {
     }
 
     /// Over the limit a call fails, or waits for a place with
-    /// `queue_active_calls`; `unlimited_active_calls` lifts the limit.
+    /// `queue_active_calls`. `unlimited_active_calls` lifts the limit.
     #[tokio::test]
     async fn calls_over_the_limit_fail_wait_or_run() {
         let services = |config: WorkflowServicesConfig| {

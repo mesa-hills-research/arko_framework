@@ -3,7 +3,7 @@
 //! ChatGPT OAuth refresh tokens rotate: once a refresh succeeds, the previous
 //! refresh token stops working. When arko refreshes credentials loaded from the
 //! file Codex also uses, the new tokens must be written back, or Codex is left
-//! with a dead refresh token; and before refreshing, the file must be read
+//! with a dead refresh token. And before refreshing, the file must be read
 //! again, since Codex may already have refreshed (a second use of a rotated
 //! refresh token makes Codex ask the user to sign in again).
 //!
@@ -62,7 +62,7 @@ impl std::fmt::Debug for CodexAuthFile {
 enum Reconciled {
     Unchanged,
     Saved,
-    /// The file holds newer credentials; `bytes` become the snapshot once
+    /// The file holds newer credentials. `bytes` become the snapshot once
     /// they are adopted.
     Newer {
         credentials: ChatGptOAuthCredentials,
@@ -170,7 +170,7 @@ impl CodexAuthFile {
     /// contents are written atomically (temporary file, then rename).
     ///
     /// Fails without writing when the file changed since it was loaded or last
-    /// written and now holds different credentials; newer credentials written by
+    /// written and now holds different credentials. Newer credentials written by
     /// another process are never overwritten. A change that leaves the
     /// credentials as loaded (formatting or other fields) is not a rotation:
     /// `credentials` are then written onto the file's current contents.
@@ -185,7 +185,7 @@ impl CodexAuthFile {
     /// returned (Codex reads the account's plan and email from it). Without
     /// one, the file keeps its `id_token`.
     ///
-    /// The file is read again just before it is replaced; if it changed in
+    /// The file is read again just before it is replaced. If it changed in
     /// between, the checks start over with its new contents.
     pub fn persist_tokens(
         &mut self,
@@ -201,7 +201,7 @@ impl CodexAuthFile {
                 }
                 if in_file != self.credentials()? {
                     return Err(Error::AuthenticationFailed(format!(
-                        "{} changed since it was loaded; refusing to overwrite newer credentials",
+                        "{} changed since it was loaded. Refusing to overwrite newer credentials",
                         self.path.display()
                     )));
                 }
@@ -259,7 +259,7 @@ impl CodexAuthFile {
             return Ok(CodexAuthSync::Saved);
         }
         Err(Error::AuthenticationFailed(format!(
-            "{} kept changing while rotated credentials were being saved; not overwriting it",
+            "{} kept changing while rotated credentials were being saved. Not overwriting it",
             self.path.display()
         )))
     }
@@ -361,7 +361,7 @@ impl CodexAuthFile {
     /// credentials the client rotated (with `id_token`, the one their refresh
     /// returned, when known), or reports newer credentials another process
     /// wrote. Only credentials of the same account are ever saved or
-    /// reported; both having rotated is an error, since only one rotation can
+    /// reported. Both having rotated is an error, since only one rotation can
     /// be valid.
     /// Credentials holding a refresh token this process knows is spent are
     /// neither reported nor saved.
@@ -384,7 +384,7 @@ impl CodexAuthFile {
                 if *in_client == known {
                     if spent_tokens::credentials_spent(&in_file) {
                         return Err(Error::AuthenticationFailed(format!(
-                            "{} holds a ChatGPT OAuth refresh token that {SPENT}; not loading it (using it again would sign you out)",
+                            "{} holds a ChatGPT OAuth refresh token that {SPENT}. Not loading it (using it again would sign you out)",
                             self.path.display()
                         )));
                     }
@@ -394,7 +394,7 @@ impl CodexAuthFile {
                     });
                 }
                 return Err(Error::AuthenticationFailed(format!(
-                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    "Both {} and this client rotated ChatGPT OAuth credentials. Sign in again",
                     self.path.display()
                 )));
             }
@@ -406,7 +406,7 @@ impl CodexAuthFile {
         }
         if spent_tokens::credentials_spent(in_client) {
             return Err(Error::AuthenticationFailed(format!(
-                "this client holds a ChatGPT OAuth refresh token that {SPENT}; not saving it to {}",
+                "this client holds a ChatGPT OAuth refresh token that {SPENT}. Not saving it to {}",
                 self.path.display()
             )));
         }
@@ -426,7 +426,7 @@ impl CodexAuthFile {
     ///
     /// A client from [`client`](Self::client) or
     /// [`openai_client`](Self::openai_client) keeps the file in step on its
-    /// own; `sync` is for clients configured some other way.
+    /// own. `sync` is for clients configured some other way.
     pub async fn sync(&mut self, client: &LLMClient) -> Result<CodexAuthSync, Error> {
         let Some(in_client) = client.openai_chatgpt_oauth_credentials().await else {
             return Ok(CodexAuthSync::Unchanged);
@@ -463,7 +463,7 @@ impl CodexAuthFile {
                     return Ok(CodexAuthSync::Unchanged);
                 }
                 Err(Error::AuthenticationFailed(format!(
-                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    "Both {} and this client rotated ChatGPT OAuth credentials. Sign in again",
                     self.path.display()
                 )))
             }
@@ -473,7 +473,7 @@ impl CodexAuthFile {
 
 /// A [`CodexAuthFile`] as the [`ChatGptOAuthStore`] of an OpenAI client:
 /// before every refresh the file is read again, and tokens Codex refreshed
-/// are used instead of refreshing (for the same account only; a file now
+/// are used instead of refreshing (for the same account only, a file now
 /// holding another account stops the refresh). Rotated tokens, with the
 /// refresh's `id_token`, are written back as soon as a refresh succeeds
 /// (backup, atomic replace, never over newer tokens).
@@ -481,7 +481,7 @@ impl CodexAuthFile {
 /// This process never sends a refresh token it knows is spent, and neither
 /// the client nor its store adopts or saves credentials holding one. A token
 /// is spent once a refresh with it returned a new one, or the server refused
-/// it as reused, expired or revoked; it is then recorded (as a digest, in
+/// it as reused, expired or revoked. It is then recorded (as a digest, in
 /// one record for the whole process), which the rows below and the client
 /// check before every refresh request. What the record can't know: a
 /// refresh whose answer was lost may have spent a token (the next refresh
@@ -493,7 +493,7 @@ impl CodexAuthFile {
 ///
 /// When rotated tokens can't be written back, they go to a private
 /// recovery file next to `auth.json` (see [`CodexAuthFile::write_recovery`])
-/// and the refresh returns an error naming it; the client keeps using the
+/// and the refresh returns an error naming it. The client keeps using the
 /// new tokens. Every store of the file in this process then knows of this
 /// *unsaved rotation* (the latest one of each account). It is kept (also
 /// when no store of the file is left) until the file holds live credentials
@@ -512,7 +512,7 @@ impl CodexAuthFile {
 /// | spent credentials, and a rotation is unsaved | The rotation is saved over them, and the row for the rotation applies. While it can't be saved, every refresh stops with an error naming its recovery file (so the client holding it doesn't rotate it again before it is saved). |
 /// | spent credentials, and no rotation is unsaved | `C` is saved over them and refreshed. If `C` is spent too (or has no refresh token), the refresh stops (sign in again). |
 /// | `C` | `C` is refreshed. |
-/// | other live credentials | They are adopted instead of refreshing: Codex refreshed, the user signed in again, or `C` was never in the file (credentials the host installed, say; they are not saved over live ones). |
+/// | other live credentials | They are adopted instead of refreshing: Codex refreshed, the user signed in again, or `C` was never in the file (credentials the host installed, say, they are not saved over live ones). |
 ///
 /// Every store of the same file (by canonical path) in this process shares
 /// one [`refresh_lock`](ChatGptOAuthStore::refresh_lock), so clients built
@@ -599,7 +599,7 @@ impl SharedFile {
 struct SharedEntry {
     key: PathBuf,
     shared: Weak<SharedFile>,
-    /// Set while the file has an unsaved rotation; see
+    /// Set while the file has an unsaved rotation. See
     /// [`SharedFile::keep_unsaved`].
     kept: Option<Arc<SharedFile>>,
 }
@@ -614,9 +614,9 @@ fn shared_files() -> std::sync::MutexGuard<'static, Vec<SharedEntry>> {
 
 /// The shared state of the `auth.json` files with a [`CodexAuthStore`] in
 /// this process, by canonical path. An entry lives as long as a store uses
-/// it, or while the file has an unsaved rotation; dead entries are dropped
+/// it, or while the file has an unsaved rotation. Dead entries are dropped
 /// when a store is made. (Locks: a store's own lock, then a file's unsaved
-/// rotation, then this list; never the other way round.)
+/// rotation, then this list, never the other way round.)
 static SHARED_FILES: Mutex<Vec<SharedEntry>> = Mutex::new(Vec::new());
 
 /// The key of the `auth.json` at `path` in this process: its canonical path
@@ -670,16 +670,16 @@ pub(crate) fn spent_refresh_token_error(account_id: Option<&str>) -> Error {
         })
     });
     let refused = format!(
-        "Not using a ChatGPT OAuth refresh token that {SPENT}: using it again would sign you out"
+        "Not using a ChatGPT OAuth refresh token that {SPENT}. Using it again would sign you out"
     );
     Error::AuthenticationFailed(match unsaved {
         Some((path, Some(recovery))) => format!(
-            "{refused}. The newest tokens for {path} could not be saved there; they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+            "{refused}. The newest tokens for {path} could not be saved there. They are in {} ({RECOVERY_FILE_PRIVACY}). Put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
             recovery.display(),
             path = path.display(),
         ),
         Some((path, None)) => format!(
-            "{refused}. The newest tokens for {} could not be saved; sign in to Codex again",
+            "{refused}. The newest tokens for {} could not be saved. Sign in to Codex again",
             path.display()
         ),
         None => format!("{refused}. Use the tokens that refresh returned, or sign in again"),
@@ -710,7 +710,7 @@ impl CodexAuthStore {
 
 fn different_account(path: &Path) -> Error {
     Error::AuthenticationFailed(format!(
-        "{} holds a different ChatGPT account than this client (signed out, or signed in to another account); sign in again",
+        "{} holds a different ChatGPT account than this client (signed out, or signed in to another account). Sign in again",
         path.display()
     ))
 }
@@ -722,11 +722,11 @@ fn with_unsaved_rotation(error: Error, path: &Path, rotation: &UnsavedRotation) 
     let path = path.display();
     Error::AuthenticationFailed(match &rotation.recovery {
         Some(recovery) => format!(
-            "{error}; refreshed ChatGPT OAuth tokens of this account that could not be saved to {path} are in {} ({RECOVERY_FILE_PRIVACY})",
+            "{error}. Refreshed ChatGPT OAuth tokens of this account that could not be saved to {path} are in {} ({RECOVERY_FILE_PRIVACY})",
             recovery.display()
         ),
         None => format!(
-            "{error}; refreshed ChatGPT OAuth tokens of this account could not be saved to {path}, nor to a recovery file"
+            "{error}. Refreshed ChatGPT OAuth tokens of this account could not be saved to {path}, nor to a recovery file"
         ),
     })
 }
@@ -737,11 +737,11 @@ fn unsaved_error(path: &Path, error: &Error, recovery: Option<&Path>) -> Error {
     let path = path.display();
     Error::AuthenticationFailed(match recovery {
         Some(recovery) => format!(
-            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}). They are in {} ({RECOVERY_FILE_PRIVACY}). Put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
             recovery.display()
         ),
         None => format!(
-            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); sign in to Codex again"
+            "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}). Sign in to Codex again"
         ),
     })
 }
@@ -750,7 +750,7 @@ fn unsaved_error(path: &Path, error: &Error, recovery: Option<&Path>) -> Error {
 #[cfg(unix)]
 const RECOVERY_FILE_PRIVACY: &str = "readable only by you";
 #[cfg(not(unix))]
-const RECOVERY_FILE_PRIVACY: &str = "it holds your credentials; keep it private";
+const RECOVERY_FILE_PRIVACY: &str = "keep this credential file private";
 
 impl std::fmt::Debug for CodexAuthStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -796,7 +796,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             // they can still be refreshed.
             if current.refresh_token.is_none() || spent(current) {
                 return Err(Error::AuthenticationFailed(format!(
-                    "{} holds a ChatGPT OAuth refresh token that {SPENT}, and this client holds no newer one (using it again would sign you out); sign in to Codex again",
+                    "{} holds a ChatGPT OAuth refresh token that {SPENT}, and this client holds no newer one (using it again would sign you out). Sign in to Codex again",
                     path.display()
                 )));
             }
@@ -835,7 +835,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             Err(recovery_error) => (
                 None,
                 Error::AuthenticationFailed(format!(
-                    "refreshed ChatGPT OAuth tokens could not be saved to {} ({error}) nor to a recovery file ({recovery_error}); sign in to Codex again",
+                    "refreshed ChatGPT OAuth tokens could not be saved to {} ({error}) nor to a recovery file ({recovery_error}). Sign in to Codex again",
                     file.path.display()
                 )),
             ),
@@ -881,7 +881,7 @@ fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), E
             if error.kind() == std::io::ErrorKind::NotFound {
                 Error::IoError(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("No Codex login at {}: run `codex login`", path.display()),
+                    format!("No Codex login at {}. Run `codex login`", path.display()),
                 ))
             } else {
                 Error::IoError(error)
@@ -988,7 +988,7 @@ fn fill_file(
 }
 
 /// Syncs the directory containing `path`, so a rename into it survives a
-/// crash. Windows cannot open a directory as a file; there this does nothing.
+/// crash. Windows cannot open a directory as a file. There this does nothing.
 fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     /// Fails `store`'s save of `rotated()` (a directory where the backup
-    /// goes); returns the error.
+    /// goes). Returns the error.
     fn fail_save(store: &CodexAuthStore, path: &Path) -> Error {
         std::fs::create_dir(with_suffix(path, ".bak")).unwrap();
         store.save_refreshed(&rotated(), Some("id-2")).unwrap_err()
@@ -1740,7 +1740,7 @@ mod tests {
 
     /// Credentials a client holds that were never in the file (installed by
     /// its host, say) give way to the file's live ones, also after another
-    /// store's unsaved rotation is saved; they are never saved over them.
+    /// store's unsaved rotation is saved. They are never saved over them.
     #[test]
     fn credentials_the_file_never_held_give_way_to_its_live_ones() {
         let (_dir, path) = temp_file(NESTED);
@@ -1803,7 +1803,7 @@ mod tests {
     }
 
     /// A file put back to spent credentials (an old backup restored, say)
-    /// gets the live credentials of the next client to refresh; a client
+    /// gets the live credentials of the next client to refresh. A client
     /// holding only spent ones stops.
     #[test]
     fn a_file_holding_spent_credentials_gets_a_client_s_live_ones() {

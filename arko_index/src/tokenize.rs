@@ -13,7 +13,7 @@ use std::{
 
 /// FxHash (rustc's hasher) with a final rotation that moves the best-mixed bits of
 /// the last multiplication into the low bits hashbrown uses for bucket selection.
-/// Not DoS-resistant; keys are terms from the indexed tree.
+/// Not DoS-resistant. Keys are terms from the indexed tree.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher {
     hash: u64,
@@ -65,7 +65,7 @@ impl Hasher for FxHasher {
 pub(crate) type FxBuild = BuildHasherDefault<FxHasher>;
 pub(crate) type FxMap<K, V> = HashMap<K, V, FxBuild>;
 
-/// Per-document term counts; keys borrow the lower-cased text where possible.
+/// Per-document term counts. Keys borrow the lower-cased text where possible.
 pub(crate) type Counts<'a> = FxMap<Cow<'a, str>, u32>;
 
 #[inline]

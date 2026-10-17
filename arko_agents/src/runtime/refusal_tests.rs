@@ -279,7 +279,7 @@ async fn refused_tool_results_can_be_redacted_and_an_invalid_resolution_keeps_wa
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::ErrorEncountered { error_message, .. }
-            if error_message.contains("Could not resolve the refusal") && error_message.contains("redact")
+            if error_message.contains("Could not resolve the refusal") && error_message.contains("Redact")
     )));
     let result = task.conversation.messages[2].content[0]
         .as_tool_result()

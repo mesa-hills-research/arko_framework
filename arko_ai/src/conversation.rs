@@ -30,7 +30,7 @@ pub struct Conversation {
     /// The model the conversation is sent to. When a conversation is
     /// deserialized, a model the registry knows is replaced by its current
     /// registry entry (see [`Model::get`]), including a saved copy whose
-    /// fields were customized; other ids keep the saved copy. To keep custom
+    /// fields were customized. Other ids keep the saved copy. To keep custom
     /// pricing or limits, use an id the registry doesn't know.
     #[serde(deserialize_with = "registry_model")]
     pub model: Model,
@@ -38,7 +38,7 @@ pub struct Conversation {
     /// Whether requests use provider prompt caching, unless a request's
     /// [`GenerationConfig::prompt_caching`] says otherwise. On by default
     /// ([`with_cache_disabled`](Self::with_cache_disabled) turns it off).
-    /// Some providers cache implicitly and can't turn caching off; see
+    /// Some providers cache implicitly and can't turn caching off. See
     /// [`GenerationConfig::prompt_caching`] for each provider.
     ///
     /// [`GenerationConfig::prompt_caching`]: crate::config::GenerationConfig::prompt_caching
@@ -48,7 +48,7 @@ pub struct Conversation {
     /// A new conversation gets a random UUID, generated once and serialized
     /// so restored conversations continue to reach the same cache lineage
     /// (conversations saved with an older key form keep theirs). OpenAI
-    /// requests send it as `prompt_cache_key`; ChatGPT OAuth requests also
+    /// requests send it as `prompt_cache_key`. ChatGPT OAuth requests also
     /// send it as the `session-id`, `thread-id` and `x-client-request-id`
     /// headers, since the ChatGPT backend derives cache affinity from
     /// `session-id`. OpenRouter always receives it as `session_id` (its
@@ -68,7 +68,7 @@ pub struct Conversation {
     /// one with [`add_user_message`](Self::add_user_message),
     /// [`add_user_message_with_image`](Self::add_user_message_with_image) or
     /// [`add_user_message_with_contents`](Self::add_user_message_with_contents)
-    /// clears the token; [`add_tool_results`](Self::add_tool_results) and
+    /// clears the token. [`add_tool_results`](Self::add_tool_results) and
     /// [`add_tool_results_with_text`](Self::add_tool_results_with_text) keep
     /// it.
     ///
@@ -78,26 +78,26 @@ pub struct Conversation {
     /// ([`OpenAITurnState::turn_start`] and
     /// [`OpenAITurnState::turn_start_fingerprint`]). Pushing a new user
     /// message, or rewinding and pushing a different one at the same index,
-    /// drops it; rewinding to the unchanged starting message (a retry of the
+    /// drops it. Rewinding to the unchanged starting message (a retry of the
     /// turn) keeps it. Serialized so a task resumed mid-turn keeps its
     /// routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_turn_state: Option<OpenAITurnState>,
 }
 
-/// A ChatGPT backend `x-codex-turn-state` token and the turn it belongs to;
-/// see [`Conversation::openai_turn_state`].
+/// A ChatGPT backend `x-codex-turn-state` token and the turn it belongs to.
+/// See [`Conversation::openai_turn_state`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAITurnState {
     /// Opaque token, echoed unchanged.
     pub token: String,
     /// Index in [`Conversation::messages`] of the user message that started
     /// the turn (the last user message without tool results when the token
-    /// arrived); `None` when there was none.
+    /// arrived). `None` when there was none.
     pub turn_start: Option<usize>,
     /// Hex SHA-256 of that message's JSON serialization, so a different
     /// message at the same index is a different turn. `None` when there was
-    /// no such message; a state saved with an index but no fingerprint is
+    /// no such message. A state saved with an index but no fingerprint is
     /// never echoed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_start_fingerprint: Option<String>,
@@ -142,7 +142,7 @@ impl Conversation {
     }
 
     /// Records a turn-state token from a response. The first token of a
-    /// turn is kept for the rest of it; a token from a new turn replaces the
+    /// turn is kept for the rest of it. A token from a new turn replaces the
     /// previous turn's.
     pub fn record_openai_turn_state(&mut self, token: &str) {
         if self.current_openai_turn_state().is_none() {
@@ -155,7 +155,7 @@ impl Conversation {
         }
     }
 
-    /// Adds a user message; one without tool results starts a new turn.
+    /// Adds a user message. One without tool results starts a new turn.
     fn push_turn_message(&mut self, message: Message) {
         if !has_tool_results(&message.content) {
             self.openai_turn_state = None;
@@ -169,7 +169,7 @@ impl Conversation {
     }
 
     /// Turns provider prompt caching off for this conversation's requests
-    /// where the provider allows it; see [`enable_cache`](Self::enable_cache).
+    /// where the provider allows it. See [`enable_cache`](Self::enable_cache).
     pub fn with_cache_disabled(mut self) -> Self {
         self.enable_cache = false;
         self
@@ -233,11 +233,11 @@ impl Conversation {
     /// changes. Support is per model: OpenRouter names Claude Fable 5.1 and
     /// OpenAI GPT-6 Astra as the first, and Claude Opus 5 as accepting them
     /// too, and rejects models without support with a 400
-    /// (https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#mid-conversation-effort).
+    /// (<https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#mid-conversation-effort>).
     /// Claude rejects an update to [`ReasoningEffort::None`], so the
     /// OpenRouter provider rejects one for `anthropic/` models before
     /// sending. Other providers reject conversations containing an update
-    /// with [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature).
+    /// with [`Error::UnsupportedFeature`].
     /// Updates can't be combined with pro reasoning mode or `-pro` models.
     ///
     /// Providers reject two updates in a row, so calling this again before any
@@ -246,7 +246,7 @@ impl Conversation {
         self.add_configuration_update(ConfigurationUpdate::reasoning_effort(effort))
     }
 
-    /// Appends a [`ConfigurationUpdate`]; see
+    /// Appends a [`ConfigurationUpdate`]. See
     /// [`add_reasoning_effort_update`](Self::add_reasoning_effort_update).
     pub fn add_configuration_update(&mut self, update: ConfigurationUpdate) -> &mut Self {
         match self.messages.last_mut() {
@@ -261,8 +261,8 @@ impl Conversation {
     }
 
     /// Appends the response's assistant message. A refused turn that must not
-    /// remain in history (see [`RefusalSource::keeps_turn`]) is not appended;
-    /// the caller decides what to do with the input that triggered it.
+    /// remain in history (see [`RefusalSource::keeps_turn`]) is not appended.
+    /// The caller decides what to do with the input that triggered it.
     ///
     /// The response's turn-state token is recorded either way (see
     /// [`openai_turn_state`](Self::openai_turn_state)), so a retry in the
@@ -333,7 +333,7 @@ impl Conversation {
 /// the input has to change: rephrase or remove the user's message, or redact
 /// a tool result the model or a filter objected to. Edits that end a turn's
 /// history early also remove the messages after the edited one (the refused
-/// turn and anything after it); tool calls and their results always stay
+/// turn and anything after it). Tool calls and their results always stay
 /// paired. A ChatGPT turn-state token tied to an edited turn start is no
 /// longer echoed (see [`openai_turn_state`](Self::openai_turn_state)).
 impl Conversation {
@@ -375,7 +375,7 @@ impl Conversation {
     /// Replaces the output of the tool result for `call_id` with
     /// `replacement`, keeping its call id, name and error flag, so the call
     /// and its result stay paired. Returns the index of the message holding
-    /// it. Messages after it are kept; truncate `messages` to drop them.
+    /// it. Messages after it are kept. Truncate `messages` to drop them.
     ///
     /// Only the text is redacted: images the result holds
     /// ([`ToolResult::images`]) are kept. Remove those separately, with the

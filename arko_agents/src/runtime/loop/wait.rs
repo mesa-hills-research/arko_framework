@@ -72,7 +72,7 @@ impl AgentLoop {
     /// Takes every command queued at a turn boundary without waiting:
     /// context joins the next request, and `CancelTask`, `SuspendTask`, or a
     /// closed channel stops the loop at once (returns true, with
-    /// `TaskStateChanged`). Context taken before a stop is not lost; see
+    /// `TaskStateChanged`). Context taken before a stop is not lost. See
     /// [`keep_taken_context`](Self::keep_taken_context).
     pub(super) async fn take_queued_commands(&mut self) -> Result<bool, ArkoAgentsError> {
         loop {
@@ -123,7 +123,7 @@ impl AgentLoop {
     }
 
     /// The wait for a command, with its deadline (the opt-in command
-    /// timeout, set when the wait starts; none while the host decides the
+    /// timeout, set when the wait starts, none while the host decides the
     /// run's waits), then the command, or the end of the wait without one.
     pub(super) async fn wait_for_command(&mut self) -> Result<Flow, ArkoAgentsError> {
         let deadline = match self.command_wait {
@@ -181,7 +181,7 @@ impl AgentLoop {
     }
 
     /// A command that arrived during the wait. Context, `HostDeciding` and
-    /// handover requests are taken without ending it; any other command
+    /// handover requests are taken without ending it. Any other command
     /// is applied to the state the task waits in.
     async fn apply_command(&mut self, cmd: UserCommand) -> Result<Flow, ArkoAgentsError> {
         // None of these ends the wait or moves its deadline.

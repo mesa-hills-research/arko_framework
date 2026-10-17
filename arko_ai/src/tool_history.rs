@@ -39,7 +39,7 @@ impl Conversation {
     /// - each call is a line `[Earlier tool call ID: NAME, arguments ARGS]`
     ///   in its assistant message, whose reasoning is left out (it led to
     ///   the calls, and an OpenAI response's output items would replay
-    ///   them);
+    ///   them).
     /// - each message of results opens with [`TOOL_HISTORY_NOTE`], then
     ///   each result as `[Result of tool call ID (NAME):]` (or `(NAME,
     ///   failed)`), its output with every line quoted (`> `) and `[End of

@@ -42,8 +42,8 @@ pub enum WriteMode {
     FullEdit,
 }
 
-/// One write to a tier, with its text: what
-/// [`MemoryStore::entries`] returns.
+/// One write to a tier, with its text, as returned by
+/// [`MemoryStore::entries`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: uuid::Uuid,
@@ -54,7 +54,7 @@ pub struct MemoryEntry {
     pub content: String,
 }
 
-/// One write to a tier, as the tier stores it. Its text is stored once: as
+/// One write to a tier, as the tier stores it. Its text is stored once, as
 /// a range of the tier's `content` while it is there (every write of an
 /// append-only tier, and the latest of a full-edit tier), otherwise here
 /// (an earlier version of a full-edit tier).
@@ -68,7 +68,7 @@ pub struct MemoryWrite {
     /// The text, when it is not in the tier's content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Where the text is in the tier's content: byte offsets, start
+    /// Where the text is in the tier's content, as byte offsets, start
     /// inclusive and end exclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<(usize, usize)>,
@@ -82,10 +82,10 @@ pub struct MemoryTier {
     pub readers: AccessScope,
     pub writers: AccessScope,
     pub write_mode: WriteMode,
-    /// The write history, oldest first; see [`MemoryWrite`].
+    /// The write history, oldest first. See [`MemoryWrite`].
     #[serde(default)]
     pub entries: Vec<MemoryWrite>,
-    /// The most bytes the content may hold; `None` (the default) is no
+    /// The most bytes the content may hold. `None` (the default) is no
     /// limit.
     #[serde(default)]
     pub max_bytes: Option<usize>,
@@ -188,7 +188,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Creates a new memory store from the given tiers. Each write's text is
-    /// stored once (see [`MemoryWrite`]); tiers saved before are converted.
+    /// stored once (see [`MemoryWrite`]). Tiers saved before are converted.
     pub fn new(tiers: Vec<MemoryTier>) -> Self {
         let map = tiers
             .into_iter()
@@ -361,7 +361,7 @@ impl MemoryStore {
     }
 
     /// `(tier_name, can_read, can_write)` for each tier the agent can read
-    /// or write, sorted by name; tiers it can't access are left out.
+    /// or write, sorted by name. Tiers it can't access are left out.
     pub fn list_accessible(&self, agent_name: &str) -> Vec<(String, bool, bool)> {
         let mut accessible = self
             .tiers
@@ -379,7 +379,7 @@ impl MemoryStore {
         accessible
     }
 
-    /// Whether the agent can read any tier, and whether it can write any:
+    /// Whether the agent can read any tier, and whether it can write any, determining
     /// which memory tools it is offered.
     pub fn access_of(&self, agent_name: &str) -> (bool, bool) {
         self.tiers
@@ -451,7 +451,7 @@ impl MemoryConfig {
     }
 
     /// Adds a tier readable by all and writable only by `writers`, with a
-    /// byte limit (opt-in; tiers have none by default).
+    /// byte limit (opt-in, tiers have none by default).
     pub fn broadcast_tier_with_limit(
         self,
         name: impl Into<String>,
@@ -469,7 +469,7 @@ impl MemoryConfig {
         })
     }
 
-    /// Adds a global tier with a byte limit (opt-in; tiers have none by
+    /// Adds a global tier with a byte limit (opt-in, tiers have none by
     /// default).
     pub fn global_tier_with_limit(self, name: impl Into<String>, max_bytes: usize) -> Self {
         self.tier(MemoryTier {
@@ -518,7 +518,7 @@ impl MemoryConfig {
 
     /// The store of a resumed run: the configured tiers, each with the
     /// content and history the checkpoint saved under its name (or under a
-    /// name `renames` maps to it); access, limit and write mode come from
+    /// name `renames` maps to it). Access, limit and write mode come from
     /// this configuration. A configured tier the checkpoint lacks starts as
     /// configured. A checkpoint tier matching no configured tier is an error
     /// unless `dropped` names it (it is then discarded).
@@ -535,14 +535,14 @@ impl MemoryConfig {
         for from in renames.keys() {
             if !saved.iter().any(|tier| &tier.name == from) {
                 log::warn!(
-                    "rename_memory_tier_on_resume: the checkpoint has no memory tier '{from}'"
+                    "rename_memory_tier_on_resume failed because the checkpoint has no memory tier '{from}'"
                 );
             }
         }
         for name in dropped {
             if !saved.iter().any(|tier| &tier.name == name) {
                 log::warn!(
-                    "drop_memory_tier_on_resume: the checkpoint has no memory tier '{name}'"
+                    "drop_memory_tier_on_resume failed because the checkpoint has no memory tier '{name}'"
                 );
             }
         }
@@ -563,7 +563,7 @@ impl MemoryConfig {
                             old.name
                         ),
                         None => format!(
-                            "memory tier '{name}' of the checkpoint is not configured: configure it, map it to a configured tier with rename_memory_tier_on_resume(\"{name}\", ..), or discard it with drop_memory_tier_on_resume(\"{name}\")",
+                            "memory tier '{name}' of the checkpoint is not configured. Configure it, map it to a configured tier with rename_memory_tier_on_resume(\"{name}\", ..), or discard it with drop_memory_tier_on_resume(\"{name}\")",
                             name = old.name
                         ),
                     },
@@ -583,7 +583,7 @@ impl MemoryConfig {
                 .is_some_and(|limit| old.content.len() > limit)
             {
                 log::warn!(
-                    "Memory tier '{target}' is restored with {} bytes, over its configured limit of {} bytes; writes that grow it fail until it is smaller",
+                    "Memory tier '{target}' is restored with {} bytes, over its configured limit of {} bytes. Writes that grow it fail until it is smaller",
                     old.content.len(),
                     tier.max_bytes.unwrap_or_default()
                 );
@@ -770,7 +770,7 @@ mod tests {
     }
 
     /// A checkpoint tier matching no configured tier stops the resume,
-    /// unless it is dropped or renamed to a configured tier; two tiers
+    /// unless it is dropped or renamed to a configured tier. Two tiers
     /// can't restore one.
     #[test]
     fn a_checkpoint_tier_without_a_configured_tier_is_refused_unless_mapped_or_dropped() {

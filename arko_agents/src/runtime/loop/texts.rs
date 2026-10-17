@@ -34,7 +34,7 @@ pub(super) const REPORT_NOT_REQUESTED: &str = "This call was not run: no handove
 pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the call had no report. Call handover_report again with the full report in its `report` parameter.";
 
 /// The runtime's notes on a response it can't use, added to the
-/// conversation before it asks again; see
+/// conversation before it asks again. See
 /// [`AgentLoop::handle_model_output_failure`].
 pub(super) const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 /// [`NO_NATIVE_TOOL_CALL`] for an agent whose reply in text ends the task
@@ -49,15 +49,15 @@ pub(super) const TEXT_REPLY_SENT: &str = "Your reply was sent to the user as a m
 
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 pub(super) const INTERRUPTED_CALL: &str =
-    "The model's response was interrupted before this call finished; it was not run.";
+    "The model's response was interrupted before this call finished. It was not run.";
 pub(super) const FAILED_STREAM_CALL: &str =
-    "The model's response failed before this call finished; it was not run.";
+    "The model's response failed before this call finished. It was not run.";
 pub(super) const REFUSED_TURN_CALL: &str = "turn refused";
 pub(super) const UNDELIVERED_CALL: &str =
-    "The model's final response did not include this call; it was not run.";
+    "The model's final response did not include this call. It was not run.";
 pub(super) use crate::task::{RESTARTED_CALL, UNREACHED_CALL};
 /// Why a call awaiting approval was not run, when its wait ended without a
-/// decision; see [`AgentLoop::settle_interrupted_wait`]. For a task saved
+/// decision. See [`AgentLoop::settle_interrupted_wait`]. For a task saved
 /// that way by an older version.
 pub(super) const UNDECIDED_CALL: &str =
     "The approval wait ended without a decision, so this call was not run.";
@@ -78,7 +78,7 @@ pub(super) const TASK_CANCELLED_CALL: &str = "The task was cancelled, so this ca
 /// Results of calls a `SuspendTask` command left unrun.
 pub(super) const TASK_SUSPENDED_CALL: &str = "The task was suspended before this call ran, so it was not run. Call it again if it is still needed.";
 /// Results of calls that were running when `CancelTask` or `SuspendTask`
-/// arrived; see [`AgentLoop::run_group`].
+/// arrived. See [`AgentLoop::run_group`].
 pub(super) const STOPPED_BY_CANCEL: &str = "The task was cancelled while this call was running, so the call was stopped before it finished.";
 pub(super) const STOPPED_BY_SUSPEND: &str = "The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.";
 
@@ -89,7 +89,8 @@ pub(super) const REJECTED_BY_USER: &str = "Rejected by user";
 /// result (output-based).
 pub(super) const NO_DECISION: &str = "No decision provided";
 pub(super) const NO_DECISION_CALL: &str = "No decision provided, implicitly rejected";
-pub(super) const NO_DECISION_TEXT_CALL: &str = "Implicitly rejected: No decision provided.";
+pub(super) const NO_DECISION_TEXT_CALL: &str =
+    "Implicitly rejected because no decision was provided.";
 
 /// The runtime's request to continue after a decision that leaves no
 /// message of its own (a decision on a pause, say).

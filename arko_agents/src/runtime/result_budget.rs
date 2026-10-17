@@ -3,17 +3,17 @@
 //! estimates, which results to shorten, head-and-tail shortening, and the
 //! notices the model reads.
 //!
-//! Tokens are estimated from bytes; no tokenizer is in this crate's
+//! Tokens are estimated from bytes. No tokenizer is in this crate's
 //! dependencies. Two estimates are used:
 //!
 //! - **Whether to act** uses a lower bound: the latest request's reported
 //!   input tokens, plus every byte added since at
 //!   [`LEAST_BYTES_PER_TOKEN`] (10). No content measured packs that many
 //!   bytes into a token (o200k, the GPT-5 and GPT-6 tokenizer: code 3.6 to
-//!   4.8, English 3.8 to 4.3, padded tables 8.6; Claude's tokenizer counts
+//!   4.8, English 3.8 to 4.3, padded tables 8.6, Claude's tokenizer counts
 //!   more tokens for the same text, not fewer), so the guard acts only when
 //!   the next request would certainly be over the model's input limit.
-//!   When it is unsure it sends the request; an underestimate is caught by
+//!   When it is unsure it sends the request. An underestimate is caught by
 //!   the provider's overflow error and the bounded recovery.
 //! - **How much to keep** uses the calibrated estimate: the bytes per token
 //!   of the task's own requests (each request's size in bytes over the
@@ -21,7 +21,7 @@
 //!   (images, reasoning a provider replays) counts in the reported tokens
 //!   only, which lowers the ratio, so a preview errs toward fewer bytes and
 //!   the request toward fitting. The ratio is clamped to
-//!   [`MIN_BYTES_PER_TOKEN`]..[`MAX_BYTES_PER_TOKEN`]; before a task's first
+//!   [`MIN_BYTES_PER_TOKEN`]..[`MAX_BYTES_PER_TOKEN`]. Before a task's first
 //!   request it is [`DEFAULT_BYTES_PER_TOKEN`].
 
 use arko_ai as ai;
@@ -75,7 +75,7 @@ fn bytes(tokens: usize, ratio: f64) -> usize {
 }
 
 /// The ratio a request of `request_bytes` bytes that the provider counted
-/// as `input_tokens` tokens shows, clamped; `None` when it says nothing.
+/// as `input_tokens` tokens shows, clamped. `None` when it says nothing.
 pub(crate) fn calibrated_ratio(request_bytes: usize, input_tokens: usize) -> Option<f64> {
     (request_bytes > 0 && input_tokens > 0).then(|| {
         (request_bytes as f64 / input_tokens as f64).clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN)
@@ -156,7 +156,7 @@ pub fn calibrated_bytes_per_token(request_bytes: usize, input_tokens: usize) -> 
 /// What happens to one result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Cut {
-    /// Tokens of the result to keep (head and tail); 0 keeps none.
+    /// Tokens of the result to keep (head and tail). 0 keeps none.
     pub keep: usize,
     pub reason: ShortenReason,
 }
@@ -184,7 +184,7 @@ pub(crate) struct Room {
 /// (`caps`), and with the overflow guard on, the [`Room`]. A result over
 /// its cap is cut to the cap. Then the guard acts only while the results
 /// certainly overflow (their lower bound is over [`Room::certain`]): the
-/// largest are cut first, each to the preview; if that leaves the overflow
+/// largest are cut first, each to the preview. If that leaves the overflow
 /// certain, the room the calibrated estimate leaves is shared between the
 /// results above [`MIN_KEPT_TOKENS`], a share below it keeping the notice
 /// alone. A result is never replaced by something larger (notices count at
@@ -277,7 +277,7 @@ pub(crate) fn plan(
     cuts
 }
 
-/// What a notice says about a result; see [`notice`].
+/// What a notice says about a result. See [`notice`].
 pub(crate) struct NoticeFacts<'a> {
     pub tool_name: &'a str,
     /// The file a `read_file` call read.
@@ -324,7 +324,7 @@ fn grouped(number: usize) -> String {
 /// The notice after a shortened result, the only part of the guard the
 /// model sees: how large the result was, what of it is shown, and how to
 /// get the rest. With a terminal, it names commands (for a `read_file`
-/// result, on its file); without one, `read_file`'s line ranges when they
+/// result, on its file). Without one, `read_file`'s line ranges when they
 /// are on, or else to ask for less. Read ranges are never mentioned unless
 /// the agent's `read_file` takes them.
 pub(crate) fn notice(facts: &NoticeFacts) -> String {
@@ -346,10 +346,10 @@ pub(crate) fn notice(facts: &NoticeFacts) -> String {
     let shown = if facts.head_lines + facts.tail_lines == 0 {
         "None of it is shown.".to_string()
     } else if facts.tail_lines == 0 {
-        format!("Shown: the first {} lines.", grouped(facts.head_lines))
+        format!("Showing the first {} lines.", grouped(facts.head_lines))
     } else {
         format!(
-            "Shown: the first {} and the last {} lines.",
+            "Showing the first {} and the last {} lines.",
             grouped(facts.head_lines),
             grouped(facts.tail_lines)
         )
@@ -478,7 +478,7 @@ pub(crate) fn head_and_tail(text: &str, keep_bytes: usize) -> Shortened {
 }
 
 /// `output` shortened to about `keep` tokens at `ratio`, followed by its
-/// notice (`facts`, with the lines kept filled in); returns the new text
+/// notice (`facts`, with the lines kept filled in). Returns the new text
 /// and the estimated tokens kept.
 pub(crate) fn shorten(
     output: &str,
@@ -674,7 +674,7 @@ mod tests {
     fn notices_point_to_the_terminal_or_ask_for_less() {
         let with_terminal = notice(&facts(true, false, "read_file"));
         assert!(
-            with_terminal.starts_with("[Shortened: this result is about 2,100,000 tokens (8.2 MB, 81,431 lines), too large for your context. Shown: the first 410 and the last 80 lines."),
+            with_terminal.starts_with("[Shortened: this result is about 2,100,000 tokens (8.2 MB, 81,431 lines), too large for your context. Showing the first 410 and the last 80 lines."),
             "{with_terminal}"
         );
         for command in [

@@ -314,7 +314,7 @@ async fn an_interrupted_run_needs_its_configuration() {
         .unwrap();
     // The error names the fields that changed.
     assert!(
-        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("agent 'coder' configuration changed since its checkpoint (instructions, tool_config.tool_timeout_seconds changed); use the original configuration")),
+        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("agent 'coder' configuration changed since its checkpoint (instructions, tool_config.tool_timeout_seconds changed). Use the original configuration")),
         "{error}"
     );
 }
@@ -614,7 +614,7 @@ async fn a_delegated_run_is_recovered_through_its_parent() {
     );
     let error = resumed.recover_agent(&reviewer).await.unwrap_err();
     assert!(
-        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("recover that run")),
+        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("Recover that run")),
         "{error}"
     );
 
@@ -1907,14 +1907,17 @@ async fn orphan_delegation(
             .unwrap()
     };
     let told = coder(1);
-    assert!(told.contains("budget exceeded"), "{told}");
+    assert!(told.contains("exceeded its budget"), "{told}");
     assert!(told.contains(&format!(
         "Agent run {id} of agent 'reviewer' was interrupted"
     )));
     assert!(told.contains("You can resume it"), "{told}");
     assert_eq!(named_run(told), Some(reviewer.agent_run_id));
     let refused = coder(2);
-    assert!(refused.matches("budget exceeded").count() >= 2, "{refused}");
+    assert!(
+        refused.matches("exceeded its budget").count() >= 2,
+        "{refused}"
+    );
 
     let orphans = resumed.interrupted_runs();
     assert_eq!(orphans.len(), 1);

@@ -9,7 +9,7 @@ pub enum WorkflowError {
     #[error("LLM error: {0}")]
     Llm(#[from] arko_ai::Error),
 
-    #[error("Builder error: missing required field '{field}'")]
+    #[error("Builder is missing required field '{field}'")]
     BuilderMissing { field: String },
 
     #[error("Builder validation error: {0}")]
@@ -28,9 +28,9 @@ pub enum WorkflowError {
 
     /// The host stopped the run alone
     /// ([`Workflow::stop_run`](crate::Workflow::stop_run)), and it was
-    /// cancelled: its wrap-up's time was up, or the stop had none. Its
+    /// cancelled because its wrap-up's time was up, or the stop had none. Its
     /// result ([`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`)
-    /// is `Cancelled`, with `stopped_by` set. Not a failure: the rest of
+    /// is `Cancelled`, with `stopped_by` set. This isn't a failure, so the rest of
     /// the workflow runs on.
     #[error("Agent '{agent}' was stopped: {reason}")]
     AgentStopped {
@@ -40,7 +40,7 @@ pub enum WorkflowError {
     },
 
     /// The agent asked the user a question and no user input handler is
-    /// set: it is suspended, recorded with status `WaitingForInput`; answer
+    /// set. It is suspended, recorded with status `WaitingForInput`. Answer
     /// with `Workflow::continue_agent`. A pause, not a failure.
     #[error("Agent '{agent}' requires user input: {questions}")]
     UserInputRequired {
@@ -50,8 +50,8 @@ pub enum WorkflowError {
     },
 
     /// The agent paused for a decision the workflow's approval or error
-    /// recovery policy leaves to the caller: it is suspended, recorded with
-    /// status `Paused`; continue it with `Workflow::resume_agent`. A pause,
+    /// recovery policy leaves to the caller. It is suspended, recorded with
+    /// status `Paused`. Continue it with `Workflow::resume_agent`. A pause,
     /// not a failure.
     #[error("Agent '{agent}' paused, {pause}")]
     AgentPaused {
@@ -63,10 +63,10 @@ pub enum WorkflowError {
     /// A completion verifier couldn't review the agent's completion (its run
     /// failed, or its verdict stayed unusable) more times than its
     /// `max_review_retries` allow. The completion was neither accepted nor
-    /// rejected: the agent's task is paused (status `Paused`, an
+    /// rejected. The agent's task is paused (status `Paused`, an
     /// error-recovery pause with the cause `Middleware`). Continue it with
     /// [`Workflow::continue_agent`](crate::Workflow::continue_agent) on
-    /// [`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`:
+    /// [`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`, where
     /// the prompt is its next message, and its next `complete_task` is
     /// reviewed again. [`Workflow::resume_agent`](crate::Workflow::resume_agent)
     /// can also continue or fail it.
@@ -81,17 +81,19 @@ pub enum WorkflowError {
     #[error("Memory tier '{0}' not found")]
     MemoryTierNotFound(String),
 
-    #[error("Memory access denied: agent '{agent}' cannot {action} tier '{tier}'")]
+    #[error("Memory access denied because agent '{agent}' cannot {action} tier '{tier}'")]
     MemoryAccessDenied {
         agent: String,
         tier: String,
         action: String,
     },
 
-    #[error("Budget exceeded: spent ${spent:.6}, limit ${limit:.6}")]
+    #[error("Budget exceeded after spending ${spent:.6}, with a limit of ${limit:.6}")]
     BudgetExceeded { spent: f64, limit: f64 },
 
-    #[error("Agent '{agent}' budget exceeded: spent ${spent:.6}, limit ${limit:.6}")]
+    #[error(
+        "Agent '{agent}' exceeded its budget after spending ${spent:.6}, with a limit of ${limit:.6}"
+    )]
     AgentBudgetExceeded {
         agent: String,
         spent: f64,
@@ -99,8 +101,8 @@ pub enum WorkflowError {
     },
 
     /// Under `BudgetExceededPolicy::Cancel`, the plan budget is exceeded
-    /// (`plan`: `ChatGPT` or `Claude Code`, `None` for tracking without a
-    /// plan; `window`: `five-hour` or `seven-day`; points of the window).
+    /// (`plan` is `ChatGPT` or `Claude Code`, `None` for tracking without a
+    /// plan, and `window` is `five-hour` or `seven-day`, points of the window).
     #[error(
         "Plan budget exceeded: {}{window} window used {used:.1} of {limit} points",
         plan.as_ref().map_or(String::new(), |plan| format!("{plan} "))
@@ -112,10 +114,10 @@ pub enum WorkflowError {
         limit: f64,
     },
 
-    #[error("Invalid cost amount {0}: costs must be finite and non-negative")]
+    #[error("Invalid cost amount {0}. Costs must be finite and non-negative")]
     InvalidCost(f64),
 
-    /// A hook returned `HookResult::Abort`; the run is stopped.
+    /// A hook returned `HookResult::Abort`. The run is stopped.
     #[error("Workflow aborted by hook at {hook_point}: {reason}")]
     AbortedByHook { hook_point: String, reason: String },
 

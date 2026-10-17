@@ -143,7 +143,7 @@ impl ToolResultInterceptor for ChainedInterceptor {
             }
             if let Some(error) = last_error {
                 log::warn!(
-                    "Task {}: skipping tool-result interceptor {} of {} for '{}'; the next gets the output so far",
+                    "Task {}: skipping tool-result interceptor {} of {} for '{}'. The next gets the output so far",
                     task_context.task_id,
                     stage + 1,
                     self.interceptors.len(),
@@ -161,7 +161,7 @@ impl ToolResultInterceptor for ChainedInterceptor {
                 )
             } else {
                 format!(
-                    "{current}\n\n[This is the full result: it was to be shortened, but the tool-result interceptor failed ({errors}).]"
+                    "{current}\n\n[This is the full result. It was to be shortened, but the tool-result interceptor failed ({errors}).]"
                 )
             };
             modified = true;
@@ -420,7 +420,7 @@ fn plan_budget_error(ctx: &SharedContext) -> Option<WorkflowError> {
 /// exceeded ([`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)):
 /// once the budget is raised, it continues. A run inside another agent's
 /// tool call (`nested`) waits for the raise, and so does one the host
-/// started under `WorkflowBuilder::wait_for_budget_raise`; any other is
+/// started under `WorkflowBuilder::wait_for_budget_raise`. Any other is
 /// paused for its caller ([`WorkflowError::AgentPaused`]). A stop of the
 /// run ends the wait. Not an automatic recovery: `ErrorRecoveryPolicy`
 /// doesn't count it.
@@ -480,13 +480,13 @@ async fn answer_budget_hold(
 #[derive(Default)]
 struct RecoveryState {
     /// The cause of the error-recovery pause the agent is in (its latest
-    /// state, or the state it was resumed in), if it is in one: an error it
+    /// state, or the state it was resumed in), if it is in one. An error it
     /// reports needing a decision is about that pause.
     paused: Option<arko_agents::ErrorRecoveryCause>,
     /// That pause's error kind, when it recorded one.
     paused_kind: Option<arko_ai::ErrorKind>,
     /// An error needing a decision that arrived before the state change
-    /// giving its cause: answered once that pause arrives, so the decision
+    /// giving its cause, answered once that pause arrives, so the decision
     /// doesn't depend on the order a runtime reports them in.
     unanswered: Option<String>,
     /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
@@ -520,7 +520,7 @@ fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolC
 }
 
 /// The warning for the first call of `agent_name` its configuration marks
-/// for approval that `ApproveAll` approves; `None` for its later ones.
+/// for approval that `ApproveAll` approves. `None` for its later ones.
 pub(super) fn auto_approval_warning(
     ctx: &SharedContext,
     agent_name: &str,
@@ -544,7 +544,7 @@ pub(super) fn auto_approval_warning(
 /// tool error for the delegating agent.
 fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> WorkflowError {
     let reason = format!(
-        "Stopped: agent '{agent_name}' runs inside another agent's tool call and can't be paused, but it needs {needs}. Configure it to auto-approve the tools it uses, or decide such calls with ApprovalPolicy::Handler."
+        "Stopped because agent '{agent_name}' runs inside another agent's tool call and can't be paused, but it needs {needs}. Configure it to auto-approve the tools it uses, or decide such calls with ApprovalPolicy::Handler."
     );
     log::warn!("Workflow '{}': {reason}", ctx.workflow_name);
     WorkflowError::AgentCancelled {
@@ -596,7 +596,7 @@ async fn decide_tool_calls(
 }
 
 /// A nested run's calls under `RespectAgentConfig`: `complete_task` is
-/// approved; any other call is left undecided (`None`), since no one can
+/// approved. Any other call is left undecided (`None`), since no one can
 /// be asked.
 fn approve_nested_completions(
     calls: &[PendingToolCallInfo],
@@ -732,7 +732,7 @@ async fn send_tool_decisions(
 
 /// Answers `error`, reported at an error-recovery pause, under the
 /// workflow's error recovery policy and the pause's cause: continues (after
-/// a wait), fails the task, or pauses the agent for its caller; a `nested`
+/// a wait), fails the task, or pauses the agent for its caller. A `nested`
 /// run (inside another agent's tool call) can't pause, so it fails instead.
 async fn answer_recovery_pause(
     agent_name: &str,
@@ -777,7 +777,7 @@ async fn answer_recovery_pause(
                     },
                 );
                 log::info!(
-                    "Workflow '{}': agent '{agent_name}' paused ({}); continuing in {wait:?}: {error}",
+                    "Workflow '{}': agent '{agent_name}' paused ({}). Continuing in {wait:?}: {error}",
                     ctx.workflow_name,
                     crate::policy::cause_name(&cause)
                 );
@@ -840,8 +840,8 @@ async fn answer_recovery_pause(
 /// budget. Tool hooks and freshness policy are enforced by execution
 /// middleware, so auto-approved and batched calls follow the same path.
 ///
-/// Returns when the agent ends; with [`WorkflowError::UserInputRequired`] or
-/// [`WorkflowError::AgentPaused`] once it is suspended for its caller; or
+/// Returns when the agent ends. With [`WorkflowError::UserInputRequired`] or
+/// [`WorkflowError::AgentPaused`] once it is suspended for its caller. Or
 /// with another error when the workflow must stop it (including the stop's
 /// error once the run is cancelled or aborted), and the caller then stops
 /// the agent.
@@ -895,7 +895,7 @@ pub(crate) async fn drive_event_loop(
     }
 }
 
-/// Resolves with the reason once `stop` is set; never when there is none,
+/// Resolves with the reason once `stop` is set. Never when there is none,
 /// or when what could set it is gone (the run drives on, where it was).
 async fn stop_set(stop: Option<tokio::sync::watch::Receiver<Option<String>>>) -> String {
     if let Some(mut stop) = stop
@@ -1174,7 +1174,7 @@ async fn drive_events(
 }
 
 /// Answers an agent's questions with the workflow's user input handler, or
-/// suspends the agent for its caller (`UserInputRequired`); a nested run
+/// suspends the agent for its caller (`UserInputRequired`). A nested run
 /// without a handler is stopped instead.
 async fn answer_questions(
     drive: &Drive<'_>,
@@ -1239,7 +1239,7 @@ async fn answer_questions(
 /// it when the agent reached it: a recovered agent waits for the command
 /// without announcing the wait again. The tool approvals it awaits are
 /// decided under the approval policy, an error-recovery pause under the
-/// error recovery policy, and its questions by the user input handler; each
+/// error recovery policy, and its questions by the user input handler. Each
 /// may suspend the agent for its caller, as it would have. (A Claude Code
 /// agent doesn't keep a saved approval wait, and approved calls that ran
 /// are recovered by the runtime.)
@@ -1342,18 +1342,18 @@ pub(crate) struct StartOptions {
     pub admitted: bool,
     /// The workflow drives the run from its start, so it decides every wait
     /// (see [`StartedRun::host_decisions`]). Off for `spawn_agent`, whose
-    /// caller chooses: `AgentHandle::wait` turns it on.
+    /// caller chooses. `AgentHandle::wait` turns it on.
     pub driven: bool,
     /// The tool call the run runs inside (a delegated agent's or a
     /// verifier's), recorded in its task ([`Task::parent`]).
     pub parent: Option<arko_agents::TaskParent>,
-    /// A completion verifier's review: it may start during a graceful
+    /// A completion verifier's review, which may start during a graceful
     /// stop's wrap-up, and isn't told to wrap up.
     pub review: bool,
     /// The run's working directory, when not the workflow's workspace (see
     /// [`RunOptions::workspace`](super::RunOptions::workspace)).
     pub workspace: Option<std::path::PathBuf>,
-    /// The run is a background subagent's: its tools are a subagent's (see
+    /// The run is a background subagent's. Its tools are a subagent's (see
     /// [`crate::subagents`]).
     pub subagent: bool,
     /// The configuration it starts with, instead of its agent's registered
@@ -1470,7 +1470,7 @@ pub(crate) fn sendable_images(
         let room = "cut the conversation back or hand it over to make room";
         if held_images + images.len() > limits.max_images {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{agent_name}' can't be sent {}: its conversation holds {held_images} images, and model '{}' takes at most {} in a request ({room})",
+                "agent '{agent_name}' can't be sent {}. Its conversation holds {held_images} images, and model '{}' takes at most {} in a request ({room})",
                 if images.len() == 1 {
                     "another image".to_string()
                 } else {
@@ -1483,7 +1483,7 @@ pub(crate) fn sendable_images(
         if held_bytes + new_bytes > limits.max_request_image_bytes {
             const MIB: f64 = 1024.0 * 1024.0;
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{agent_name}' can't be sent {:.1} MB more of images: its conversation holds {:.1} MB, and a request to model '{}' takes at most {:.1} MB ({room})",
+                "agent '{agent_name}' can't be sent {:.1} MB more of images. Its conversation holds {:.1} MB, and a request to model '{}' takes at most {:.1} MB ({room})",
                 new_bytes as f64 / MIB,
                 held_bytes as f64 / MIB,
                 model.id,
@@ -1654,7 +1654,7 @@ impl Drop for Reservation {
 
 /// Why an interrupted run inside a recovered run's tool call that doesn't
 /// resume it is recorded cancelled.
-pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded: the workflow stopped while this agent ran inside another agent's tool call, and that call was not resumed when its agent was recovered (a completion is reviewed again by a new review).";
+pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded because the workflow stopped while this agent ran inside another agent's tool call, and that call was not resumed when its agent was recovered (a completion is reviewed again by a new review).";
 
 /// Whether `run` was cancelled because another run replaced it (see
 /// [`SUPERSEDED_AFTER_RESTART`]): it is not reopened, as that would do its
@@ -1768,7 +1768,7 @@ pub(crate) struct StartedRun {
     pub event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
     pub cmd_tx: tokio::sync::mpsc::Sender<UserCommand>,
     pub join_handle: AbortOnDrop,
-    /// The task as the run started it: the record of an agent that had to be
+    /// The task as the run started it, the record of an agent that had to be
     /// aborted, unless the task journal saved a later state.
     pub started_task: Task,
     /// Messages delivered in the prompt, acknowledged once the agent
@@ -1780,14 +1780,14 @@ pub(crate) struct StartedRun {
     /// Stops the run when set, with the reason (fail-fast in
     /// `run_agents_parallel`).
     pub batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
-    /// Set while the workflow drives the run: it decides every wait the
+    /// Set while the workflow drives the run. It decides every wait the
     /// agent reaches (under its policies and handlers, however long they
     /// take, also while the workflow is paused) or suspends the agent for
     /// its caller, so the agent's own command timeout doesn't apply. Not
-    /// saved with the task: resumed outside a workflow, it is timed as
+    /// saved with the task. Resumed outside a workflow, it is timed as
     /// configured.
     pub host_decisions: HostDecisions,
-    /// The run was recovered after the workflow stopped while it ran: a
+    /// The run was recovered after the workflow stopped while it ran. A
     /// wait its task was saved in is answered first (see
     /// [`answer_saved_wait`]).
     pub recovered: bool,
@@ -1832,7 +1832,7 @@ impl Drop for AbortOnDrop {
 }
 
 /// When a stopped agent at `depth` is aborted. Every driver of a stopped run
-/// counts from the moment the run stopped; one nested inside another agent's
+/// counts from the moment the run stopped. One nested inside another agent's
 /// tool call gets half its parent's time, so it winds down, and is recorded,
 /// before its parent can be aborted.
 fn stop_deadline(ctx: &SharedContext, depth: u32) -> tokio::time::Instant {
@@ -1911,7 +1911,7 @@ async fn wind_down(
 /// Drives a started agent run to its result: runs the event loop, stops the
 /// agent when the workflow must (aborting it after the run's grace period),
 /// records the final task, and maps it to the call's outcome. Once the run
-/// is stopped the outcome is the stop's error; the agent's result is
+/// is stopped the outcome is the stop's error. The agent's result is
 /// recorded either way.
 ///
 /// Boxed: an agent run's driver is large, and its callers (including a
@@ -2244,7 +2244,7 @@ fn refuse_unless_orphaned(ctx: &SharedContext, run: &AgentResult) -> Result<(), 
             )
         } else {
             format!(
-                "agent run {} was started by a tool call of agent run {}; recover that run, which recovers this one",
+                "agent run {} was started by a tool call of agent run {}. Recover that run, which recovers this one",
                 run.agent_run_id, parent.task_id
             )
         },
@@ -2275,7 +2275,7 @@ async fn recovery_ended(mut recovering: tokio::sync::watch::Receiver<()>) {
 pub(crate) struct Recovery<'a> {
     /// The run's depth (see [`StartedRun::depth`]).
     pub depth: u32,
-    /// Replaces the run's parent link: `Some(None)` releases it (the host
+    /// Replaces the run's parent link. `Some(None)` releases it (the host
     /// recovers an orphaned run), `Some(Some(call))` points it at the tool
     /// call resuming it, so that a later stop finds it there.
     pub parent: Option<Option<arko_agents::TaskParent>>,
@@ -2287,7 +2287,7 @@ pub(crate) struct Recovery<'a> {
     /// When another recovery runs it, wait for that recovery and return
     /// the outcome it recorded, instead of failing.
     pub wait: bool,
-    /// Reopens a cancelled run: it is recovered as an interrupted one
+    /// Reopens a cancelled run. It is recovered as an interrupted one
     /// would be (see [`WorkflowEngine::reopen_agent`]).
     pub reopen: bool,
 }
@@ -2395,13 +2395,13 @@ pub(crate) async fn save_stop_checkpoint(
 }
 
 /// Records `result` in the run's results, replacing an earlier result of
-/// its task (without persistence; see [`PersistenceManager::record_result`]).
+/// its task (without persistence, see [`PersistenceManager::record_result`]).
 pub(crate) fn record_result(ctx: &SharedContext, result: AgentResult) {
     crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
 }
 
 /// Records an agent run that stopped: its result (replacing an earlier one
-/// of the same task), the messages it holds (acknowledged when it completed;
+/// of the same task), the messages it holds (acknowledged when it completed,
 /// `prompt_ids` are the messages its prompt presented), its lifecycle hook,
 /// and, with persistence, its task and a checkpoint.
 pub(crate) async fn finalize_agent_task(
@@ -3003,7 +3003,7 @@ impl WorkflowEngine {
     }
 
     /// Starts the agent runtime on `task` and registers the running agent
-    /// with the message bus and the run's cancellation; `review` for a
+    /// with the message bus and the run's cancellation. `review` for a
     /// completion verifier's review (see [`StartOptions::review`]).
     #[allow(clippy::too_many_arguments)]
     fn launch(
@@ -3225,7 +3225,7 @@ impl WorkflowEngine {
     /// The agents are marked running together before any of them is
     /// prompted, so each one's roster shows the others as running. With a
     /// concurrency cap (`WorkflowBuilder::max_parallel_agents`), at most that
-    /// many run at once: each is marked running when it starts. With
+    /// many run at once. Each is marked running when it starts. With
     /// fail-fast (`WorkflowBuilder::fail_fast`), the first failure stops the
     /// others, and agents not started yet don't start.
     pub async fn run_agents_parallel(
@@ -3450,7 +3450,7 @@ impl WorkflowEngine {
             if !options.images.is_empty() || options.config.is_some() || options.workspace.is_some()
             {
                 return Err(WorkflowError::BuilderInvalid(
-                    "a run whose completion a verifier could not review continues with its message alone: continue it without images or a new configuration, then send them".to_string(),
+                    "a run whose completion a verifier could not review continues with its message alone. Continue it without images or a new configuration, then send them".to_string(),
                 ));
             }
             return self
@@ -3474,7 +3474,7 @@ impl WorkflowEngine {
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
-    /// tool call `parent` (`None` for a run the host continues); `review`
+    /// tool call `parent` (`None` for a run the host continues). `review`
     /// for a completion verifier's review (see [`StartOptions::review`]).
     async fn continue_at(
         &self,
@@ -3501,7 +3501,7 @@ impl WorkflowEngine {
         };
         if !resumable {
             return Err(WorkflowError::BuilderInvalid(
-                "only a completed or user-input-suspended agent run, or one a completion verifier could not review, can be continued; resume a paused one with resume_agent, recover an interrupted one with recover_agent".to_string(),
+                "only a completed or user-input-suspended agent run, or one a completion verifier could not review, can be continued. Resume a paused one with resume_agent, recover an interrupted one with recover_agent".to_string(),
             ));
         }
         let agent_name = &previous.agent_name;
@@ -3702,7 +3702,7 @@ impl WorkflowEngine {
     }
 
     /// Continue paused agent run `previous` at `depth` (see
-    /// [`StartedRun::depth`]); with `parent`, inside that tool call (its
+    /// [`StartedRun::depth`]). With `parent`, inside that tool call (its
     /// parent link points there), else keeping its link.
     async fn resume_at(
         &self,
@@ -3717,7 +3717,7 @@ impl WorkflowEngine {
             .flatten()
             .ok_or_else(|| {
                 WorkflowError::BuilderInvalid(
-                    "only a paused agent run can be resumed; continue a completed or input-waiting run with continue_agent".to_string(),
+                    "only a paused agent run can be resumed. Continue a completed or input-waiting run with continue_agent".to_string(),
                 )
             })?;
         enum Decision {
@@ -3766,7 +3766,7 @@ impl WorkflowEngine {
                         | arko_agents::ErrorRecoveryCause::Unknown
                 ) {
                     return Err(WorkflowError::BuilderInvalid(format!(
-                        "ResolveRefusal answers a refusal; the agent is paused for another error ({}): continue or fail it",
+                        "ResolveRefusal answers a refusal. The agent is paused for another error ({}). Continue or fail it",
                         crate::policy::cause_name(cause)
                     )));
                 }
@@ -3777,7 +3777,7 @@ impl WorkflowEngine {
                 }
                 if previous.task.agent_config.runs_in_claude_code() {
                     return Err(WorkflowError::BuilderInvalid(
-                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation): continue or fail it".to_string(),
+                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation). Continue or fail it".to_string(),
                     ));
                 }
                 Decision::Command(UserCommand::ResolveRefusal { changes })
@@ -3866,7 +3866,7 @@ impl WorkflowEngine {
     /// Continue an agent run that was running when the workflow stopped
     /// (see [`Workflow::recover_agent`](super::Workflow::recover_agent)). A
     /// run started inside another run's tool call is recovered with that
-    /// run, unless it is orphaned ([`is_orphaned`]): then the host recovers
+    /// run, unless it is orphaned ([`is_orphaned`]). Then the host recovers
     /// it, and its parent link is released.
     pub async fn recover_agent(
         &self,
@@ -3896,7 +3896,7 @@ impl WorkflowEngine {
     ) -> Result<arko_agents::CacheRefresh, WorkflowError> {
         if ctx.registry.is_running(previous.agent_run_id) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running (a run waiting in a host handler, for a tool approval or an answer, counts as running): only a run that isn't running is refreshed",
+                "agent run {} is running (a run waiting in a host handler, for a tool approval or an answer, counts as running). Only a run that isn't running is refreshed",
                 previous.agent_run_id
             )));
         }
@@ -3909,7 +3909,7 @@ impl WorkflowEngine {
             Some(record) => record.depth,
             None if task.parent.is_some() => {
                 return Err(WorkflowError::BuilderInvalid(format!(
-                    "agent run {} was started inside another run's tool call, which continues it: it isn't refreshed on its own",
+                    "agent run {} was started inside another run's tool call, which continues it. It isn't refreshed on its own",
                     previous.agent_run_id
                 )));
             }
@@ -3956,10 +3956,10 @@ impl WorkflowEngine {
 
     /// Continue a cancelled agent run (see
     /// [`Workflow::reopen_agent`](super::Workflow::reopen_agent)) where its
-    /// task stopped, with `prompt` after [`REOPENED_NOTE`]: it is recovered
+    /// task stopped, with `prompt` after [`REOPENED_NOTE`]. It is recovered
     /// as an interrupted run is (calls without results are settled in
     /// doubt, and the like), under its run identity. A run started inside
-    /// another run's tool call becomes the host's: its parent link is
+    /// another run's tool call becomes the host's. Its parent link is
     /// released. `options`' images go after `prompt`.
     pub async fn reopen_agent_with(
         &self,
@@ -3971,7 +3971,7 @@ impl WorkflowEngine {
         if options.config.is_some() || options.cut_back_to.is_some() || options.workspace.is_some()
         {
             return Err(WorkflowError::BuilderInvalid(
-                "a reopened run keeps its configuration and conversation: cut it back or reconfigure it with continue_agent_with instead".to_string(),
+                "a reopened run keeps its configuration and conversation. Cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));
         }
         let images = sendable_images(
@@ -3984,13 +3984,13 @@ impl WorkflowEngine {
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
         if current.status != AgentRunStatus::Cancelled {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "only a cancelled agent run can be reopened; agent run {} is {:?}",
+                "only a cancelled agent run can be reopened. Agent run {} is {:?}",
                 previous.agent_run_id, current.status
             )));
         }
         if is_superseded(&current) {
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} was superseded by a run that replaced it after a restart; it is not reopened",
+                "agent run {} was superseded by a run that replaced it after a restart. It is not reopened",
                 previous.agent_run_id
             )));
         }
@@ -4056,7 +4056,7 @@ impl WorkflowEngine {
                     return run_outcome(current);
                 }
                 return Err(WorkflowError::BuilderInvalid(
-                    "only an interrupted agent run can be recovered; continue a completed or input-waiting run with continue_agent, resume a paused one with resume_agent".to_string(),
+                    "only an interrupted agent run can be recovered. Continue a completed or input-waiting run with continue_agent, resume a paused one with resume_agent".to_string(),
                 ));
             }
             if let Some(recovering) = ctx.registry.recovery(agent_run_id) {
@@ -4300,7 +4300,7 @@ struct WorkflowExecutionMiddleware {
     context: Arc<SharedContext>,
     llm_client: Arc<LLMClient>,
     persistence: Option<Arc<PersistenceManager>>,
-    /// The depth of this agent's run; its verifiers run one deeper.
+    /// The depth of this agent's run. Its verifiers run one deeper.
     depth: u32,
 }
 
@@ -4327,7 +4327,7 @@ impl WorkflowExecutionMiddleware {
     /// Answers a review that failed (the verifier's run failed, or its
     /// verdict stayed unusable): within the verifier's `max_review_retries`,
     /// the completion is rejected so the agent calls `complete_task` again
-    /// and a new review runs; after that, the completion is neither accepted
+    /// and a new review runs. After that, the completion is neither accepted
     /// nor rejected: the task is paused for its caller (continuable with
     /// `continue_agent`) and the run call returns `VerifierFailed`. The
     /// count starts again after the pause.
@@ -4369,7 +4369,7 @@ impl WorkflowExecutionMiddleware {
             .insert(execution.task_id, (verifier.name.clone(), reason.clone()));
         ToolExecutionDecision::PauseTask {
             message_to_agent: format!(
-                "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work; the task is paused until the caller decides how to go on.",
+                "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work. The task is paused until the caller decides how to go on.",
                 verifier.name
             ),
             reason: format!(
@@ -4380,7 +4380,7 @@ impl WorkflowExecutionMiddleware {
     }
 
     /// Reviews a completion (`complete_task` call `tool_call_id` with
-    /// `summary`) with each verifier that applies; its reviews run inside
+    /// `summary`) with each verifier that applies. Its reviews run inside
     /// the call.
     async fn verify_completion(
         &self,
@@ -5259,7 +5259,7 @@ mod tests {
         std::fs::remove_dir(&workspace).unwrap();
     }
 
-    /// A distiller's target is the agent's registration name; its display
+    /// A distiller's target is the agent's registration name. Its display
     /// name (`AgentConfig::name`, which the runtime reports) doesn't match.
     #[tokio::test]
     async fn distillers_target_registration_names_not_display_names() {
@@ -5334,7 +5334,7 @@ mod tests {
     }
 
     /// Under a retrying failure policy, a refused or truncated summary is not
-    /// requested (and billed) again; an empty one is. The chain retries the
+    /// requested (and billed) again. An empty one is. The chain retries the
     /// distiller alone, not the interceptor before it, and keeps the tool
     /// output once the retries run out.
     #[tokio::test]
@@ -5410,7 +5410,7 @@ mod tests {
     }
 
     /// A reader whose task finished is not notified of a write (no notice,
-    /// no conflict hook); continuing it sends one message listing what
+    /// no conflict hook). Continuing it sends one message listing what
     /// changed since it read it, advising a reread before editing.
     #[tokio::test]
     async fn a_continued_reader_learns_what_changed_since_it_read() {
@@ -5475,7 +5475,7 @@ mod tests {
         assert_eq!(server.requests(), 3);
     }
 
-    /// Counts its calls; replaces the result with `replacement`, if any.
+    /// Counts its calls. Replaces the result with `replacement`, if any.
     #[derive(Debug, Default)]
     struct Counting {
         calls: std::sync::atomic::AtomicUsize,
@@ -5505,7 +5505,7 @@ mod tests {
         }
     }
 
-    /// Always fails; counts its calls.
+    /// Always fails. Counts its calls.
     #[derive(Debug, Default)]
     struct Failing(std::sync::atomic::AtomicUsize);
 

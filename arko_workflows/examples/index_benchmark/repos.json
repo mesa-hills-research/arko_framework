@@ -5,7 +5,7 @@
     "rev": "8f8569ab6b3a45f3c9546e131fa7e831bc1ffbbf",
     "commit": "8f8569ab6b3a45f3c9546e131fa7e831bc1ffbbf",
     "language": "rust",
-    "description": "arko, a Rust framework for LLM agents and workflows (private repository; pass --source arko=PATH)"
+    "description": "Arko Framework, a Rust framework for LLM agents and workflows (use --source arko=PATH for a local checkout)"
   },
   {
     "id": "redis",

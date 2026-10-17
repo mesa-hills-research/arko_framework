@@ -29,7 +29,7 @@ fn with_approval_message(effective: String, message_to_agent: Option<String>) ->
     }
 }
 
-/// A native call to run, with where its result goes; see
+/// A native call to run, with where its result goes. See
 /// [`AgentLoop::run_native_calls`].
 pub(super) struct NativeRun {
     /// Its position in the turn (or approval batch).
@@ -42,7 +42,7 @@ pub(super) struct NativeRun {
 
 /// The results of a turn's (or an approval's) native calls, recorded in the
 /// task ([`Task::pending_native_tool_results`]) as they are produced, so
-/// that a snapshot taken meanwhile holds them; [`finish`](Self::finish)
+/// that a snapshot taken meanwhile holds them. [`finish`](Self::finish)
 /// puts them in call order.
 pub(super) struct NativeResults {
     /// Where the recorded results start in the task's pending results.
@@ -104,7 +104,7 @@ impl NativeResults {
     }
 }
 
-/// A native turn's calls once checked; see [`AgentLoop::native_turn`].
+/// A native turn's calls once checked. See [`AgentLoop::native_turn`].
 struct NativePlan {
     /// The results recorded so far, in the task.
     results: NativeResults,
@@ -117,7 +117,7 @@ struct NativePlan {
     held: Vec<NativeRun>,
 }
 
-/// What a native call's checks decided; see
+/// What a native call's checks decided. See
 /// [`AgentLoop::classify_native_call`].
 #[allow(
     clippy::large_enum_variant,
@@ -126,7 +126,7 @@ struct NativePlan {
 enum NativeCall {
     /// Answered at once: its result is recorded.
     Answered,
-    /// It waits for approval; `exclusive`: it doesn't run beside other
+    /// It waits for approval. `exclusive`: it doesn't run beside other
     /// calls.
     NeedsApproval {
         pending: PendingToolCallInfo,
@@ -451,7 +451,7 @@ impl AgentLoop {
     }
 
     /// Adds the turn's native results to the conversation if they are due
-    /// now; see [`native_results_are_due`](Self::native_results_are_due).
+    /// now. See [`native_results_are_due`](Self::native_results_are_due).
     pub(super) async fn flush_native_results_if_due(&mut self) -> Result<(), ArkoAgentsError> {
         if self.native_results_are_due() {
             self.flush_native_results_to_conversation(None).await?;
@@ -461,7 +461,7 @@ impl AgentLoop {
 
     /// A native turn. Its calls are checked, and in call order those that
     /// need no approval run (or are held behind a call awaiting approval)
-    /// and those that need it wait for it; every call gets one result. A
+    /// and those that need it wait for it. Every call gets one result. A
     /// turn without calls is the handover report, or a response without a
     /// tool call.
     pub(super) async fn native_turn(
@@ -640,7 +640,7 @@ impl AgentLoop {
     /// `handover_report` (answered by the runtime where it is offered), a
     /// handover report that is due, a tool the run doesn't offer, and its
     /// paths. A call they reject is answered (`ToolRejected` or
-    /// `UnavailableToolAttempted`, and its result recorded); otherwise it
+    /// `UnavailableToolAttempted`, and its result recorded). Otherwise it
     /// needs approval (it waits in the task's pending calls) or runs.
     async fn classify_native_call(
         &mut self,
@@ -799,7 +799,7 @@ impl AgentLoop {
     /// Runs a native turn's planned calls. A turn a call stopped (a tool
     /// error that fails the task, `complete_task` or `ask_user`, a
     /// cancellation or a suspension) answers the calls awaiting approval
-    /// and the held ones as not run; otherwise `complete_task` awaiting
+    /// and the held ones as not run. Otherwise `complete_task` awaiting
     /// approval after a failed call is answered, and with no approval
     /// left to wait for, the held calls run.
     async fn run_planned_calls(&mut self, plan: &mut NativePlan) -> Result<(), ArkoAgentsError> {
@@ -931,7 +931,7 @@ impl AgentLoop {
 
     /// The position of `call` in the turn it belongs to (the conversation's
     /// last assistant message), matched by its provider id, or without one
-    /// by its name and arguments; a call not found sorts last.
+    /// by its name and arguments. A call not found sorts last.
     pub(super) fn turn_position(&self, call: &ai::ToolCall) -> usize {
         self.task
             .conversation

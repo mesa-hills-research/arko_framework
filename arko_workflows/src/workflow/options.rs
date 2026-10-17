@@ -14,13 +14,13 @@ use crate::error::WorkflowError;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RunOptions {
-    /// The run's working directory, instead of the workflow's workspace: the
+    /// The run's working directory, instead of the workflow's workspace. The
     /// directory its shell, terminal and file tools work in and that its path
     /// checks allow (the task's
     /// [`current_working_directory`](arko_agents::Task::current_working_directory)),
     /// and where its skills load from. Saved with the task, so a continued,
     /// resumed or recovered run keeps it. A relative path is resolved against
-    /// the workflow's workspace; the directory must exist.
+    /// the workflow's workspace. The directory must exist.
     pub workspace: Option<PathBuf>,
     /// Images that go with the prompt, after its text in the run's first
     /// message (the task's
@@ -38,7 +38,7 @@ impl RunOptions {
         Self::default()
     }
 
-    /// Runs the agent in `workspace`; see [`RunOptions::workspace`].
+    /// Runs the agent in `workspace`. See [`RunOptions::workspace`].
     pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
         self.workspace = Some(workspace.into());
         self
@@ -92,7 +92,7 @@ impl ContinueOptions {
 
     /// Continues the run with `config` in place of the configuration saved
     /// in its task, such as a switch between a chat (no tools) and an agent
-    /// (tools): the same conversation, with its prompt cache key and run ID,
+    /// (tools), with the same conversation, its prompt cache key and run ID,
     /// under `config`'s tools and a system message written from `config`.
     /// The workflow adds its tools to `config` as it does for a new run
     /// (none to a chat). The model must stay the same. The new tools and
@@ -113,13 +113,13 @@ impl ContinueOptions {
 
     /// Cuts the run's conversation back to just before message `index`,
     /// one of its task's [`user_turns`](arko_agents::Task::user_turns), and
-    /// sends the prompt in its place: an edited message, or the same one
+    /// sends the prompt in its place, as an edited message or the same one
     /// again (regenerate). The messages from `index` on go, with what waited
     /// with them (calls, results, a question, a pause). See
     /// [`Task::cut_back`](arko_agents::Task::cut_back). Index `0` starts the
     /// conversation over from the prompt, as a new run's (with the
     /// workflow's notes and list of recipients), under the same run ID. A
-    /// run that isn't running can be cut back whatever its status:
+    /// run that isn't running can be cut back whatever its status, whether
     /// completed, waiting for input, paused, cancelled, failed or
     /// interrupted. The notes the removed messages gave it are given again,
     /// except one-time notes, which went with them. Messages from other
@@ -134,7 +134,7 @@ impl ContinueOptions {
     }
 
     /// Continues the run in `workspace` instead of its working directory,
-    /// such as a chat that becomes an agent working on a folder: its tools
+    /// such as a chat that becomes an agent working on a folder. Its tools
     /// work there, its path checks allow it, and skills load from it, as
     /// [`RunOptions::workspace`] sets for a new run (resolved the same way,
     /// against the workflow's workspace, and it must exist). A run that

@@ -147,7 +147,8 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             Some((f, v)) => (f, Some(v.to_owned())),
             None => (a.as_str(), None),
         };
-        let unknown = || -> Error { format!("unknown option {a}; options: {options}").into() };
+        let unknown =
+            || -> Error { format!("unknown option {a}. Available options are {options}").into() };
         let accepted = match flag {
             "--respect-ignore"
             | "--exclude"
@@ -327,7 +328,7 @@ fn stop_with_owner(pid: u32, stop: &Arc<StopSignal>) {
         stop.stop(reason);
         std::thread::sleep(OWNER_GRACE);
         eprintln!(
-            "arko_index: the current request is still running after {} s: leaving it; the next run continues from what was saved",
+            "arko_index: leaving the current request running after {} s. The next run continues from what was saved",
             OWNER_GRACE.as_secs()
         );
         std::process::exit(0);
@@ -335,7 +336,7 @@ fn stop_with_owner(pid: u32, stop: &Arc<StopSignal>) {
 }
 fn rules_changed_note() {
     eprintln!(
-        "arko_index: the file selection rules differ from the previous run's (or the state predates recorded rules); the first delta applies the new rules"
+        "arko_index: the file selection rules differ from the previous run's (or the state predates recorded rules). The first delta applies the new rules"
     );
 }
 
@@ -354,7 +355,7 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         return Ok(None);
     }
     if f.embed.is_some() && f.embed_config.is_some() {
-        return Err("--embed and --embed-config both choose the model: give one".into());
+        return Err("--embed and --embed-config both choose the model. Give one".into());
     }
     let saved = DenseConfig::load(state)?;
     let mut config = if let Some(path) = &f.embed_config {
@@ -391,7 +392,7 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
             || f.vector_index.is_some()
             || f.max_embed_tokens.is_some()
         {
-            return Err("this index has no saved embedding model: choose one with --embed".into());
+            return Err("this index has no saved embedding model. Choose one with --embed".into());
         }
         return Ok(None);
     };
@@ -413,7 +414,7 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
 /// The stderr lines of an embedding run.
 fn print_embed_stats(s: &EmbedStats) {
     eprintln!(
-        "arko_index: embeddings: {}; {} chunks, {} distinct texts: {} from the cache, {} embedded now in {} requests, {} tokens",
+        "arko_index: embeddings {}, {} chunks, {} distinct texts ({} from the cache, {} embedded now in {} requests, {} tokens)",
         s.embedder.display(),
         s.docs,
         s.texts,
@@ -429,12 +430,12 @@ fn print_embed_stats(s: &EmbedStats) {
     }
     if s.stopped {
         eprintln!(
-            "arko_index: stopped; `embed STATE_DIR` (or the next index2) continues, with the texts embedded so far from the cache"
+            "arko_index: stopped. `embed STATE_DIR` (or the next index2) continues, with the texts embedded so far from the cache"
         );
     }
     if s.cap_reached {
         eprintln!(
-            "arko_index: stopped at the token cap ({}): {} texts ({} counted tokens) not embedded; their chunks are found by lexical search only. Run `embed STATE_DIR` with a higher --max-embed-tokens (or none) to finish; embedded texts come from the cache",
+            "arko_index: stopped at the token cap ({}). {} texts ({} counted tokens) were not embedded. Their chunks are found by lexical search only. Run `embed STATE_DIR` with a higher --max-embed-tokens (or none) to finish. Embedded texts come from the cache",
             s.max_tokens.unwrap_or(0),
             s.not_embedded - s.too_long,
             s.not_embedded_tokens
@@ -447,7 +448,7 @@ fn print_embed_stats(s: &EmbedStats) {
         );
     }
     eprintln!(
-        "arko_index: {} of {} chunks have vectors; the cache holds {} vectors for this model",
+        "arko_index: {} of {} chunks have vectors. The cache holds {} vectors for this model",
         s.embedded_docs, s.docs, s.cache_records
     );
     eprintln!(
@@ -462,7 +463,7 @@ fn print_embed_stats(s: &EmbedStats) {
 /// `status`.
 fn progress_line(p: &EmbedProgress) -> String {
     format!(
-        "embedded {}/{} texts, {} tokens, {} requests; {} of {} chunks have vectors",
+        "embedded {}/{} texts, {} tokens, {} requests. {} of {} chunks have vectors",
         p.texts, p.total, p.tokens, p.requests, p.embedded_docs, p.docs
     )
 }
@@ -491,7 +492,7 @@ fn coverage_note(state: EmbedState, status: &IndexStatus) -> String {
 /// the owner process `owner` (0: none).
 fn embed_now(state: &Path, max_tokens: Option<Option<u64>>, owner: u32) -> Result<(), Error> {
     let info = arko_index::index2::dense_info(state)?
-        .ok_or("this index has no embeddings: build it with them (index2 --embed MODEL)")?;
+        .ok_or("this index has no embeddings. Build it with them (index2 --embed MODEL)")?;
     let embedder = support::embedder_for(&info.embedder)?;
     let cap = match max_tokens {
         Some(cap) => cap,
@@ -556,7 +557,7 @@ fn print_status(status: &IndexStatus) -> Result<(), Error> {
         ),
         Some(info) => {
             eprintln!(
-                "arko_index: {}: {} chunks; dense ({}): {} of {} chunks have vectors{}",
+                "arko_index: {} has {} chunks, dense ({}), {} of {} chunks have vectors{}",
                 status.generation,
                 status.docs,
                 info.embedder.display(),
@@ -645,7 +646,7 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
             }
             writeln!(
                 out,
-                "{:>2}. {}  [{} {:.4}; {}]",
+                "{:>2}. {}  [{} {:.4}, {}]",
                 i + 1,
                 hit.header,
                 results.mode.as_str(),
@@ -671,7 +672,7 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
         if !info.complete() {
             let status = arko_index::index2::status(state)?;
             eprintln!(
-                "arko_index: dense: {} of {} chunks embedded ({}); the others are found by lexical search only",
+                "arko_index: {} of {} chunks embedded ({}). The others are found by lexical search only",
                 info.embedded,
                 info.docs,
                 coverage_note(info.state, &status)
@@ -737,7 +738,7 @@ impl Keeper<'_> {
         let s = arko_index::index2::build(self.root, index, self.options, &settings)?;
         match &s.dense {
             Some(d) => eprintln!(
-                "arko_index: index rebuilt: {} chunks; dense: {} have vectors, {} distinct texts to embed",
+                "arko_index: index rebuilt with {} chunks, {} have vectors, {} distinct texts to embed",
                 s.docs,
                 d.embedded_docs,
                 d.texts - d.cached
@@ -962,7 +963,7 @@ fn run() -> Result<(), Error> {
                 .map(|c| {
                     support::embedder_for(&c.embedder).map_err(|e| {
                         format!(
-                            "{e} (this index embeds with {}; --no-embed builds it lexically and forgets the model)",
+                            "{e} (this index embeds with {}, and --no-embed builds it lexically and forgets the model)",
                             c.embedder.display()
                         )
                     })
@@ -989,7 +990,9 @@ fn run() -> Result<(), Error> {
                     DenseBuild::from_config(embedder.as_ref(), config).with_embed_later(true),
                 );
             } else if flags.wait_embeddings {
-                return Err("--wait-embeddings: this index has no embedding model (choose one with --embed)".into());
+                return Err(
+                    "--wait-embeddings needs an embedding model. Choose one with --embed".into(),
+                );
             }
             let s = arko_index::index2::build(Path::new(&args[1]), state, &options, &settings)?;
             eprintln!(
@@ -999,7 +1002,7 @@ fn run() -> Result<(), Error> {
             report(walk, &s.report)?;
             if let Some(d) = &s.dense {
                 eprintln!(
-                    "arko_index: lexical search is ready; dense: {} of {} chunks have vectors, {} of {} distinct texts to embed ({} in the cache)",
+                    "arko_index: lexical search is ready. {} of {} chunks have vectors, {} of {} distinct texts to embed ({} in the cache)",
                     d.embedded_docs,
                     d.docs,
                     d.texts - d.cached,
@@ -1014,7 +1017,7 @@ fn run() -> Result<(), Error> {
                     let owner = owner.unwrap_or_else(|| process::default_owner().unwrap_or(0));
                     let pid = embed_in_background(state, owner)?;
                     eprintln!(
-                        "arko_index: embedding in the background (process {pid}{}); `status {}` shows the progress, {} the run's output",
+                        "arko_index: embedding in the background (process {pid}{}). `status {}` shows the progress, {} the run's output",
                         if owner == 0 {
                             String::new()
                         } else {
@@ -1125,7 +1128,7 @@ fn run() -> Result<(), Error> {
             watcher.flush()?;
         }
         #[cfg(not(target_os = "linux"))]
-        Some("watch2") => return Err("watch2 needs Linux (inotify); use watch".into()),
+        Some("watch2") => return Err("watch2 needs Linux (inotify). Use watch".into()),
         #[cfg(not(unix))]
         Some("bench-scan") => return Err("bench-scan needs a Unix system".into()),
         Some("--help") | Some("-h") => eprintln!("{usage}"),
