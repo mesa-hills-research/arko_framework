@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Independent protocol audit of JSONL chunk output (no dependency on candidate code).
-Usage: python3 tools/audit_coverage.py CORPUS OUTPUT.jsonl [max_bytes]
-The supplied benchmark projection contains only included UTF-8 files; ignored or binary
+"""Check JSONL chunk coverage against source files using the Python standard library.
+
+Run with `python3 tools/audit_coverage.py CORPUS OUTPUT.jsonl [max_bytes]`.
+The supplied benchmark projection contains only included UTF-8 files. Ignored or binary
 files are reported separately rather than silently hidden by this audit.
-Chunk format 3: a line with a `file` key records a file's metadata region (Markdown
-front matter), which starts at byte 0; the file's chunks cover the bytes after it.
-Files of the original languages' extensions must carry that language; every other file
-one language for all its chunks.
+In chunk format 3, a line with a `file` key records a file's metadata region (Markdown
+front matter), which starts at byte 0. The file's chunks cover the bytes after it.
+Files with a recognized language extension must carry that language. Every other file
+must use one language for all its chunks.
 """
 import bisect, collections, json, pathlib, sys
 root = pathlib.Path(sys.argv[1]); output = pathlib.Path(sys.argv[2]); limit = int(sys.argv[3]) if len(sys.argv)>3 else 4096
