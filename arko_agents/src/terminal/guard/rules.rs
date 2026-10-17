@@ -1,4 +1,4 @@
-//! Command rules: which programs, with which arguments, the guard allows or
+//! Command rules specify which programs, with which arguments, the guard allows or
 //! refuses. They are matched against each command the guard finds in a
 //! line, never against the raw text.
 
@@ -20,12 +20,12 @@ pub enum RuleAction {
     Deny,
 }
 
-/// A rule of the [`CommandGuard`](super::CommandGuard): a pattern of words
+/// A rule of the [`CommandGuard`](super::CommandGuard), with a pattern of words
 /// for the commands it allows or refuses.
 ///
 /// The pattern's first word is the program, compared with the base name of
 /// the command's program (`/usr/bin/git` is `git`, case and `.exe` are
-/// ignored). The other words match the command's arguments in order: `*`
+/// ignored). The other words match the command's arguments in order. `*`
 /// alone matches any number of words, none included. `*` inside a word
 /// matches any text in that word (`--output*`). Any other word matches
 /// itself exactly, after the shell's quoting is removed. An argument only
@@ -47,9 +47,9 @@ pub enum RuleAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRule {
     pub action: RuleAction,
-    /// Whitespace-separated words: the program, then its arguments.
+    /// Whitespace-separated words naming the program, then its arguments.
     pub pattern: String,
-    /// Only for commands run in this directory or below it: after `cd`, and
+    /// Only for commands run in this directory or below it, after `cd`, and
     /// for git `-C`. Relative paths are relative to the job's working
     /// directory. A command whose directory isn't known (it changes to a
     /// directory only known when it runs, or git is given `--git-dir` or
@@ -58,7 +58,7 @@ pub struct CommandRule {
     /// never within it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within: Option<PathBuf>,
-    /// Why, for the model: the refusal's message says it instead of a
+    /// The reason shown to the model. The refusal's message says it instead of a
     /// generic explanation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
