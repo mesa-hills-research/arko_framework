@@ -835,7 +835,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual; a host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
-| `ModelRequestStarted { model, subagent, sizes, bytes_per_token }` | A model request is going out: just before each request (each attempt, a retry and a refusal fallback's included), or for a Claude Code model when its response starts. `sizes` is its `arko_ai::RequestSizes` (`None` for a Claude Code subagent's request, named by `subagent`), and `bytes_per_token` the ratio calibrated from the conversation's earlier requests (`calibrated_bytes_per_token`; `DEFAULT_BYTES_PER_TOKEN`, 3, before one was answered), which turns the sizes into tokens. A host times a prompt cache's lifetime from the latest one. |
+| `ModelRequestStarted { model, subagent, sizes, bytes_per_token }` | A model request is going out: just before each request (each attempt, a retry and a refusal fallback's included), or for a Claude Code model when its response starts. `sizes` is its `arko_ai::RequestSizes` (`None` for a Claude Code subagent's request, named by `subagent`), and `bytes_per_token` the ratio calibrated from the conversation's earlier requests (`calibrated_bytes_per_token`, `DEFAULT_BYTES_PER_TOKEN`, 3, before one was answered), which turns the sizes into tokens. A host times a prompt cache's lifetime from the latest one. |
 | `StreamedOutputDiscarded { text_bytes, reasoning_bytes }` | The response the latest `ModelRequestStarted` (of the conversation's own requests) began failed after streaming part of it: a host drops the `AssistantResponseChunk` and `ReasoningChunk` text it showed since then (`text_bytes` and `reasoning_bytes` of it). It comes before the failure's `ErrorEncountered` and `RetryScheduled`, and a retry streams anew after its own `ModelRequestStarted`. A response that streams to its end is followed by its `UsageReported` instead. |
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. A Claude Code subagent's calls carry `ModelCallUsage::subagent`. |
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
@@ -933,17 +933,17 @@ usage stay. That is how a chat becomes an agent and back. The new tools and syst
 are a new prefix, so the next request writes the prompt cache afresh. The task records it
 (`Task::reconfigured`). A Claude Code task's session resumes with the new flags, and with
 `--system-prompt-snapshot off` from then on (`Task::claude_code_prompt_changed`), since
-Claude Code otherwise sends the prompt it recorded at the session's first request; a
+Claude Code otherwise sends the prompt it recorded at the session's first request. A
 handover's fresh session records the new one.
 
 **Cutting back and branching.** `Task::user_turns()` lists the messages of the current
 conversation the host sent (`UserTurn { index, kind, text, images }`, `kind` one of
-`Prompt`, `Message` and `ContextUpdate`; the runtime's own messages and tool results are
+`Prompt`, `Message` and `ContextUpdate`. The runtime's own messages and tool results are
 not among them, and `text` leaves out the environment details and reminder the runtime
 added). `Task::cut_back(index)` cuts the conversation back to just before one of them, to
 edit it or send it again: the later messages go, with what waited with them (calls and
 results, context taken, a refusal or handover under way), the usage stays, and the task is
-`Completed`, ready for a follow-up; cut back to `0` it is `Pending` and runs from its prompt
+`Completed`, ready for a follow-up. Cut back to `0` it is `Pending` and runs from its prompt
 again. `Task::branch(index)` is a copy cut back the same way (or whole, at the
 conversation's length) as a new task with its own ID and no usage, and the original stays.
 A Claude Code task records, for each message, its last entry in the session's transcript
@@ -1268,7 +1268,7 @@ and keeps the task, its events, commands, approvals and handovers as for any age
 Nothing else changes for a host: `AgentRuntime::run_task` picks the Claude Code runtime
 from the model's provider. The reply and the model's thinking stream as Claude Code streams
 them (`AssistantResponseChunk` and `ReasoningChunk` from its partial messages, a few tokens at
-a time; a subagent's stay its own), and Claude Code's retries of a failed request are
+a time, while a subagent's stay its own), and Claude Code's retries of a failed request are
 reported as the runtime reports its own: `ErrorEncountered` needing no decision, then
 `RetryScheduled` with the attempt, Claude Code's delay and whether it waits out a rate limit.
 
