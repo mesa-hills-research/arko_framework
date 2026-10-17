@@ -12,7 +12,7 @@ use crate::tool::ToolConfig;
 /// The size of a request by section: bytes of text, which a bytes-per-token
 /// ratio turns into tokens, and images, counted with their estimated
 /// tokens. The text sections add up to the request's text as this crate
-/// sends it, before each provider's own framing; reasoning a provider
+/// sends it, before each provider's own framing. Reasoning a provider
 /// replays and what a provider adds of its own are not counted.
 ///
 /// Built with [`of`](Self::of) for a whole request, or kept up to date
@@ -84,7 +84,7 @@ impl RequestSizes {
     }
 
     /// [`of_messages`](Self::of_messages) without the images' tokens
-    /// (`image_tokens` stays 0; `images` counts them): for what needs only
+    /// (`image_tokens` stays 0, `images` counts them): for what needs only
     /// the text, without reading each image's header.
     pub fn text_of_messages(
         conversation: &Conversation,

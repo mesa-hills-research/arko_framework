@@ -24,7 +24,7 @@ pub const TOOL_HISTORY_NOTE: &str = "[Earlier tool results, recorded when tools 
 
 impl Conversation {
     /// This conversation as a request without tools sends it: unchanged
-    /// (borrowed) when it holds no tool call or result; otherwise a copy
+    /// (borrowed) when it holds no tool call or result, otherwise a copy
     /// with its tool calls and results written as text (see
     /// [`into_tool_history_as_text`](Self::into_tool_history_as_text)).
     pub fn tool_history_as_text(&self) -> Cow<'_, Conversation> {

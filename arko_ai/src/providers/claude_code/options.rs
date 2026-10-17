@@ -211,12 +211,12 @@ pub struct ClaudeOptions {
     pub fallback_model: Option<String>,
     pub effort: Option<Effort>,
     pub system_prompt: SystemPrompt,
-    /// `--system-prompt-snapshot on|off`; `None` leaves the CLI's default
+    /// `--system-prompt-snapshot on|off`. `None` leaves the CLI's default
     /// (on). Claude Code records a conversation's system prompt at its first
     /// request and sends that record on every later request and resume, even
     /// when a later launch passes another prompt, until the conversation is
     /// compacted. `Some(false)` sends the prompt this launch passes instead,
-    /// for a resumed conversation whose prompt changed; each later launch
+    /// for a resumed conversation whose prompt changed. Each later launch
     /// needs it too, since off records nothing.
     pub system_prompt_snapshot: Option<bool>,
     pub built_in_tools: BuiltInTools,

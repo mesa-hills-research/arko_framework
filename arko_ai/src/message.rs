@@ -51,7 +51,7 @@ impl Content {
 }
 
 /// An image in a message. Serialized as `{"Url": ..}` or `{"Base64":
-/// {"data": .., "mime_type": ..}}`; inside
+/// {"data": .., "mime_type": ..}}`. Inside
 /// [`with_image_store`](crate::image_store::with_image_store), a base64
 /// image is saved in the store and written as a reference instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,7 +391,7 @@ mod tests {
         assert!(!Message::new_user("hi").has_images());
     }
 
-    /// The size is read from each format's header; a JPEG's after the
+    /// The size is read from each format's header, a JPEG's after the
     /// segments before its frame header, also far into the data.
     #[test]
     fn image_dimensions_come_from_the_header() {

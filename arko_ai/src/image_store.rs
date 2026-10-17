@@ -21,7 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::message::Image;
 
 /// Where images are saved while a value is serialized, and read from while
-/// it is deserialized; see [`with_image_store`].
+/// it is deserialized. See [`with_image_store`].
 pub trait ImageStore: Send + Sync {
     /// Saves the image (base64 `data`, of `mime_type`) and returns the
     /// reference written in its place. Saving the same image again returns
@@ -205,8 +205,9 @@ mod tests {
         }
     }
 
-    /// Without a store an image is written with its data, as always; inside
-    /// one, as a reference, which reads back through the store only.
+    /// Without a store an image is written with its data, as always. Inside
+    /// one, it is written as a reference, which reads back through the store
+    /// only.
     #[test]
     fn a_store_holds_the_data_and_the_json_a_reference() {
         let image = Image::new_base64("cGl4ZWxz", "image/png");

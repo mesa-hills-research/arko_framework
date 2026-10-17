@@ -188,8 +188,8 @@ fn tool_history_as_text_sends_no_call_or_result_items() {
     }
 }
 
-/// Only the copy is written as text; a conversation without tool calls is
-/// used as it is.
+/// Only the copy is written as text, and a conversation without tool calls
+/// is used as it is.
 #[test]
 fn tool_history_as_text_leaves_the_conversation_as_it_is() {
     let model = Model::get(Provider::OpenAI, "gpt-6-astra").unwrap();
