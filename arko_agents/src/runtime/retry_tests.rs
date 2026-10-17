@@ -1457,3 +1457,75 @@ async fn a_note_retry_goes_ahead_when_the_elapsed_budget_is_spent() {
     assert_eq!(started.elapsed(), Duration::ZERO);
     assert_eq!(retries_scheduled(&mut events), [(1, 0, 0)]);
 }
+
+/// A response that fails after streaming part of it is retried: the host is
+/// told to drop what it streamed (as much as it was sent of it) before the
+/// error and the retry are reported, nothing of it comes after, and the
+/// retry streams anew.
+#[tokio::test]
+async fn a_response_that_fails_while_it_streams_is_discarded() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.initial_delay_ms = 10;
+    retry.max_delay_ms = 10;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(futures::stream::iter([
+        Ok(ai::StreamEvent::ReasoningChunk("Thinking".into())),
+        Ok(ai::StreamEvent::TextChunk("Half an ".into())),
+        Err(ai::Error::StreamTruncated("the connection dropped".into())),
+    ])
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let mut order = Vec::new();
+    let (mut text, mut reasoning) = (0, 0);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::ModelRequestStarted { .. } => order.push("request".to_string()),
+            AgentEvent::AssistantResponseChunk(chunk) => {
+                text += chunk.len();
+                order.push("chunk".to_string());
+            }
+            AgentEvent::ReasoningChunk(chunk) => {
+                reasoning += chunk.len();
+                order.push("chunk".to_string());
+            }
+            AgentEvent::StreamedOutputDiscarded {
+                text_bytes,
+                reasoning_bytes,
+            } => {
+                assert_eq!((text_bytes, reasoning_bytes), (text, reasoning));
+                order.push("discard".to_string());
+            }
+            AgentEvent::ErrorEncountered { .. } => order.push("error".to_string()),
+            AgentEvent::RetryScheduled { .. } => order.push("retry".to_string()),
+            _ => {}
+        }
+    }
+    let discard = order.iter().position(|kind| kind == "discard").unwrap();
+    assert!(order[..discard].contains(&"chunk".to_string()), "{order:?}");
+    assert_eq!(order[0], "request");
+    assert_eq!(
+        order[discard + 1..discard + 4],
+        ["error", "retry", "request"]
+    );
+    assert!(
+        !order[discard..discard + 4].contains(&"chunk".to_string()),
+        "{order:?}"
+    );
+}

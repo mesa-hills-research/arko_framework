@@ -17,6 +17,11 @@ the next turn's index). Steps:
                                          Claude Code does
   {"retry": {"attempt": 1, ...}}         an api_retry system message with
                                          these fields
+  {"sleep": 0.3}                         waits this many seconds
+  {"stream_fail": "..."}                 a response that fails while it
+                                         streams: its message_start and this
+                                         text as a content_block_delta, and
+                                         no message
   {"exit_unrecorded": 3}                 as a turn's first step: the CLI
                                          exits before it saves the message
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
@@ -71,6 +76,7 @@ event: argv, tools, user messages (each with the conversation before it, as
 "history"), hook and permission answers, tool results.
 """
 import json
+import time
 import os
 import sys
 import uuid
@@ -384,6 +390,17 @@ def turn(text, message_uuid=None):
         if "retry" in step:
             send(dict({"type": "system", "subtype": "api_retry", "session_id": SESSION},
                       **step["retry"]))
+            continue
+        if "sleep" in step:
+            time.sleep(step["sleep"])
+            continue
+        if "stream_fail" in step:
+            state["message"] += 1
+            stream_event({"type": "message_start", "message": {
+                "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
+                "usage": usage(step, 1)}})
+            stream_event({"type": "content_block_delta", "index": 0,
+                          "delta": {"type": "text_delta", "text": step["stream_fail"]}})
             continue
         if "refused" in step:
             # Claude Code keeps no content from a refused response.

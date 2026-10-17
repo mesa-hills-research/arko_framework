@@ -14,10 +14,25 @@ use uuid::Uuid;
 pub enum AgentEvent {
     /// The task state has changed.
     TaskStateChanged(TaskState),
-    /// A chunk of the assistant's response text.
+    /// A chunk of the assistant's response text. The chunks after a
+    /// `ModelRequestStarted` of the conversation's own requests (`subagent`
+    /// `None`) belong to that request's response, which ends with its
+    /// `UsageReported`. When it fails after streaming, a
+    /// `StreamedOutputDiscarded` follows its last chunk.
     AssistantResponseChunk(String),
-    /// A chunk of the assistant's reasoning (for models that support it).
+    /// A chunk of the assistant's reasoning (for models that support it),
+    /// belonging to a response as `AssistantResponseChunk` does.
     ReasoningChunk(String),
+    /// The response the latest `ModelRequestStarted` began failed after
+    /// streaming part of it: the `AssistantResponseChunk` and
+    /// `ReasoningChunk` events since then belong to no response, and a host
+    /// that showed them drops them (`text_bytes` and `reasoning_bytes` say
+    /// how much of each). A retry streams its response anew, after its own
+    /// `ModelRequestStarted`. The task keeps nothing of the failed one.
+    StreamedOutputDiscarded {
+        text_bytes: usize,
+        reasoning_bytes: usize,
+    },
 
     /// A tool call has been initiated.
     ToolCallInitiated {

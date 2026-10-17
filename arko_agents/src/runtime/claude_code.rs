@@ -710,6 +710,9 @@ pub(super) struct ClaudeCodeRun {
     streamed_text: HashSet<String>,
     /// When Claude Code started retrying the current request, while it does.
     retrying_since: Option<std::time::Instant>,
+    /// The bytes of text and thinking the response streaming now has sent
+    /// the host, until it finishes (its final `message_delta`).
+    streamed_bytes: (usize, usize),
     /// What the session will have received once Claude Code has the input
     /// sent after a cut back or a branch (see `record_sent`).
     synced_on_send: Option<usize>,
@@ -811,6 +814,7 @@ impl ClaudeCodeRun {
             streaming: None,
             streamed_text: HashSet::new(),
             retrying_since: None,
+            streamed_bytes: (0, 0),
             synced_on_send: None,
             host: None,
             snapshots: TaskSnapshots::default(),
@@ -1855,6 +1859,8 @@ impl ClaudeCodeRun {
         &mut self,
         (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
+        self.retrying_since = None;
+        self.streamed_bytes = (0, 0);
         // A compaction due as the session starts (asked for while the task
         // waited, or the conversation's last turn ended over the threshold)
         // comes first, and the task's input follows Claude Code's summary.
@@ -2893,6 +2899,7 @@ impl ClaudeCodeRun {
                         // A response: any retry before it is over.
                         self.streaming = message["id"].as_str().map(str::to_string);
                         self.retrying_since = None;
+                        self.streamed_bytes = (0, 0);
                     }
                     self.request_started(message, &parent_tool_use_id).await?;
                     if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
@@ -2909,6 +2916,10 @@ impl ClaudeCodeRun {
                     }
                 }
                 Some("message_delta") => {
+                    if parent_tool_use_id.is_none() {
+                        // The response finished: what it streamed stands.
+                        self.streamed_bytes = (0, 0);
+                    }
                     // The request's final usage.
                     if let (Some(pending), Some(Value::Object(usage))) = (
                         self.pending_usage.get_mut(&parent_tool_use_id),
@@ -2949,6 +2960,15 @@ impl ClaudeCodeRun {
                     }) {
                         if let Some(id) = &self.streaming {
                             self.streamed_text.insert(id.clone());
+                        }
+                        match &chunk {
+                            AgentEvent::AssistantResponseChunk(text) => {
+                                self.streamed_bytes.0 += text.len();
+                            }
+                            AgentEvent::ReasoningChunk(thinking) => {
+                                self.streamed_bytes.1 += thinking.len();
+                            }
+                            _ => {}
                         }
                         self.emit(chunk).await?;
                     }
@@ -3003,6 +3023,15 @@ impl ClaudeCodeRun {
     /// reported as the runtime reports its own retries, an error that needs
     /// no decision and the retry with its delay.
     async fn retry_scheduled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
+        // A response that failed while it streamed: the host drops it.
+        let (text_bytes, reasoning_bytes) = std::mem::take(&mut self.streamed_bytes);
+        if text_bytes > 0 || reasoning_bytes > 0 {
+            self.emit(AgentEvent::StreamedOutputDiscarded {
+                text_bytes,
+                reasoning_bytes,
+            })
+            .await?;
+        }
         let field = |name: &str| raw.get(name).and_then(Value::as_u64);
         let attempt = field("attempt").unwrap_or(1);
         let error = raw.get("error").and_then(Value::as_str);
@@ -3709,6 +3738,8 @@ impl ClaudeCodeRun {
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
+        // A retry series ends with its turn, also one that failed.
+        self.retrying_since = None;
         let api_error = self.api_error.take();
         let ending = self.stopping.is_some() || self.task.current_state.is_terminal();
         if ending

@@ -170,6 +170,7 @@ impl AgentLoop {
         let mut turn_ended = false;
         let mut final_generation_response: Option<ai::GenerationResponse> = None;
         let mut streamed_text = String::new();
+        let mut streamed_reasoning = 0;
         let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
         let mut streamed_refusal: Option<ai::Refusal> = None;
 
@@ -200,6 +201,7 @@ impl AgentLoop {
                             }
                         }
                         Ok(Some(ai::StreamEvent::ReasoningChunk(reasoning))) => {
+                            streamed_reasoning += reasoning.len();
                             self.reasoning_buffer.push_str(&reasoning);
                             self.emit_throttled_reasoning().await?;
                         }
@@ -253,6 +255,7 @@ impl AgentLoop {
                         // generation-blocked codes): its partial text is
                         // not kept.
                         Err(ai::Error::Refusal(refusal)) => {
+                            self.discard_streamed(&streamed_text, streamed_reasoning).await?;
                             self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
                             self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
                             turn_ended = true;
@@ -263,6 +266,7 @@ impl AgentLoop {
                         // the retried request on an assistant turn (a
                         // prefill, which Claude 4.6 and later reject).
                         Err(e) => {
+                            self.discard_streamed(&streamed_text, streamed_reasoning).await?;
                             self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
                             self.handle_llm_error(e, None).await?;
                             turn_ended = true;
@@ -283,6 +287,33 @@ impl AgentLoop {
             parser_events: raw_events_for_turn,
             announced: native_stream_call_ids,
         }))
+    }
+
+    /// The response failed after streaming `text` and `reasoning` bytes of
+    /// reasoning: what is still buffered isn't sent, and the host is told to
+    /// drop what was ([`AgentEvent::StreamedOutputDiscarded`]).
+    async fn discard_streamed(
+        &mut self,
+        text: &str,
+        reasoning: usize,
+    ) -> Result<(), ArkoAgentsError> {
+        // Output-based text goes to the parser, not to the host, as it comes.
+        let text_bytes = if self.is_native_mode() {
+            text.len() - self.text_buffer.len()
+        } else {
+            0
+        };
+        let reasoning_bytes = reasoning - self.reasoning_buffer.len();
+        self.text_buffer.clear();
+        self.reasoning_buffer.clear();
+        if text_bytes > 0 || reasoning_bytes > 0 {
+            self.emit_event(AgentEvent::StreamedOutputDiscarded {
+                text_bytes,
+                reasoning_bytes,
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     /// A command that arrived while a response streamed. `CancelTask`,

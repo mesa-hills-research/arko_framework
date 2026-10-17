@@ -766,6 +766,91 @@ async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
     )));
 }
 
+/// A response that fails while it streams is retried by Claude Code: the
+/// host is told to drop what it streamed before the retry is reported, and
+/// the retry streams anew. Only the full reply is kept.
+#[tokio::test]
+async fn a_response_that_fails_while_it_streams_is_discarded() {
+    let fake = Fake::new(json!([[
+        {"stream_fail": "The ans"},
+        {"retry": {"attempt": 1, "max_retries": 10, "retry_delay_ms": 500,
+                   "error_status": 529, "error": "overloaded"}},
+        {"text": "The answer is four.", "stream": true},
+    ]]));
+    let task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "The answer is four.")
+    );
+    let order: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted { .. } => Some("request".to_string()),
+            AgentEvent::AssistantResponseChunk(chunk) => Some(format!("chunk {chunk}")),
+            AgentEvent::StreamedOutputDiscarded {
+                text_bytes,
+                reasoning_bytes,
+            } => Some(format!("discard {text_bytes} {reasoning_bytes}")),
+            AgentEvent::RetryScheduled { .. } => Some("retry".to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "request",
+            "chunk The ans",
+            "discard 7 0",
+            "retry",
+            "request",
+            "chunk The answer ",
+            "chunk is four.",
+        ]
+    );
+}
+
+/// A retry series that ends in a failure ends with its turn: the next
+/// series counts its time from its own first retry.
+#[tokio::test]
+async fn a_failed_retry_series_doesn_t_count_into_the_next() {
+    let retry = |attempt: u32| {
+        json!({"retry": {"attempt": attempt, "max_retries": 10, "retry_delay_ms": 10,
+                         "error_status": 529, "error": "overloaded"}})
+    };
+    let fake = Fake::new(json!([
+        [retry(1), {"sleep": 0.4}, {"fail": "API Error: 529 overloaded"}],
+        [retry(1), {"text": "Done."}],
+    ]));
+    let task = Task::new(chat_config(&fake), "Go.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.commands
+        .send(UserCommand::ApproveErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let (_, events) = run.finish().await;
+    let elapsed: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled { elapsed_ms, .. } => Some(*elapsed_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(elapsed.len(), 1, "{elapsed:?}");
+    assert!(elapsed[0] < 300, "{elapsed:?}");
+}
+
 /// A cache refresh pings a fork of the session that isn't saved: the ping
 /// reads the conversation (and its cache), its usage comes back, and the
 /// session's own conversation never sees it.
