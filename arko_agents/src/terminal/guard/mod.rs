@@ -76,7 +76,7 @@ pub struct CommandGuard {
     ///
     /// A command is refused when a [`Deny`](RuleAction::Deny) rule matches
     /// it, or when its program has [`Allow`](RuleAction::Allow) rules and
-    /// none matches it; otherwise only the path checks apply. While there
+    /// none matches it. Otherwise only the path checks apply. While there
     /// are rules, a command whose program, or nested command text, is only
     /// known when it runs is refused too, since the rules can't check it.
     pub rules: Vec<CommandRule>,
@@ -88,8 +88,8 @@ pub struct CommandGuard {
 #[error("{message}")]
 pub struct CommandRefusal {
     pub message: String,
-    /// The path the command would have affected, as the guard resolved it;
-    /// for a refusal by the [`rules`](CommandGuard::rules), the command.
+    /// The path the command would have affected, as the guard resolved it.
+    /// For a refusal by the [`rules`](CommandGuard::rules), the command.
     pub target: String,
     /// The path is protected: only `dangerously_allow_all_commands` allows it.
     pub protected: bool,
@@ -261,7 +261,7 @@ impl Host {
     }
 
     /// Where a resolved target is. A value only known when the command runs
-    /// at the start of the path can be anywhere; when it may be empty, the
+    /// at the start of the path can be anywhere. When it may be empty, the
     /// rest of the path is also checked from the root.
     fn locate(&self, text: &str, cwd: Option<&AbsPath>) -> Vec<Located> {
         if text.is_empty() {
@@ -1335,7 +1335,7 @@ impl Analysis<'_> {
         }
     }
 
-    /// `$name = value`; true when `words` is an assignment.
+    /// `$name = value`. True when `words` is an assignment.
     fn assign_powershell(&self, scope: &mut Scope, words: &[Word]) -> bool {
         const OPERATORS: [&str; 5] = ["+=", "-=", "*=", "/=", "="];
         let Some(first) = words.first() else {
@@ -1469,7 +1469,7 @@ impl Analysis<'_> {
         self.run(dialect, text, &mut child, depth + 1);
     }
 
-    /// Joins `words` into command text; `None` when part of it is unknown.
+    /// Joins `words` into command text. `None` when part of it is unknown.
     fn join(&self, dialect: ShellDialect, scope: &Scope, words: &[Word]) -> Option<String> {
         let mut parts = Vec::new();
         for word in words {
@@ -1486,7 +1486,7 @@ impl Analysis<'_> {
         Some(parts.join(" "))
     }
 
-    /// Checks command `text` a program runs through a POSIX shell; `what`
+    /// Checks command `text` a program runs through a POSIX shell. `what`
     /// names it when the text is only known when it runs.
     fn shell_text(&mut self, text: Option<&Word>, what: &str, scope: &Scope, depth: usize) {
         let Some(word) = text else {

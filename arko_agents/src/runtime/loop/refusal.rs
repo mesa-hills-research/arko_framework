@@ -6,7 +6,7 @@ use super::*;
 /// Whether OpenAI encrypted reasoning produced by `from` is replayed to `to`.
 /// Codex replays history unchanged when it switches between models of one
 /// compaction family and compacts it otherwise (codex-rs
-/// `maybe_run_previous_model_inline_compact`; its bundled catalog,
+/// `maybe_run_previous_model_inline_compact`, its bundled catalog,
 /// models-manager/models.json, gives every GPT-5.6 and GPT-6 model the same
 /// `comp_hash`). arko can't compact, so for other pairs the reasoning items
 /// are dropped and the reply's messages and calls replayed without them.
@@ -21,7 +21,7 @@ pub(super) fn openai_reasoning_replays(from: &ai::Model, to: &ai::Model) -> bool
 }
 
 /// Drops an assistant message's OpenAI reasoning (for a model that can't read
-/// it; see [`openai_reasoning_replays`]). The response's other items then
+/// it, see [`openai_reasoning_replays`]). The response's other items then
 /// lose their ids too: the Responses API rejects an item with an id (such as
 /// `fc_…`) sent without the reasoning item that preceded it ("provided
 /// without its required 'reasoning' item"), while ids are optional on input.
@@ -64,7 +64,7 @@ impl AgentLoop {
     /// Reports a refusal and stops recovery: the same input is expected to be
     /// refused again, so it is never retried unchanged. With the opt-in
     /// [`AgentConfig::refusal_fallback`], a refusal from the configured model
-    /// instead sends the same input to the fallback model once; a failure
+    /// instead sends the same input to the fallback model once. A failure
     /// of that request is recovered from by its own error, the fallback
     /// staying pending, and only the fallback's own refusal makes the
     /// refusal stand (see [`recover`](Self::recover)).
@@ -73,7 +73,7 @@ impl AgentLoop {
     /// history so the model can see what it declined, with the refusal
     /// explanation as its text when the turn has none (not when the fallback
     /// answers instead). Its tool calls are not run, so they are not kept
-    /// either (a call without a result would invalidate the history; OpenAI
+    /// either (a call without a result would invalidate the history, OpenAI
     /// output items stored with the turn replay only the calls it still
     /// holds), and a turn with no text at all is not kept. In output-based
     /// tool mode the turn's text holds tool-call markup that was never run:

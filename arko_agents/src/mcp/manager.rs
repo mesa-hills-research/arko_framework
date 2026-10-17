@@ -26,7 +26,7 @@ const STDERR_DRAIN: Duration = Duration::from_millis(250);
 struct McpServerHandle {
     name: String,
     service: RunningService<RoleClient, ()>,
-    /// Sent to stop the server process gracefully; dropped, it is killed.
+    /// Sent to stop the server process gracefully. Dropped, it is killed.
     stop: Option<oneshot::Sender<()>>,
     watcher: Option<JoinHandle<Option<ServerExit>>>,
 }
@@ -63,7 +63,7 @@ struct ServerExit {
 /// with the server's name, and when the process exits on its own, logs one
 /// warning with its exit status and last stderr lines (and returns them).
 /// `stop` stops the process: sent, it gets [`SHUTDOWN_GRACE`] to exit before
-/// it is killed; dropped, it is killed at once. A stopped process's exit is
+/// it is killed. Dropped, it is killed at once. A stopped process's exit is
 /// logged at info level only.
 fn watch_server(
     name: String,
@@ -159,10 +159,10 @@ fn watch_server(
 /// Each server's stderr goes to the log at info level, a line at a time,
 /// tagged with the server's name. A server that exits while the manager
 /// still uses it is reported once, with a warning giving its exit status
-/// and last stderr lines; its tools then fail with "Transport closed".
+/// and last stderr lines. Its tools then fail with "Transport closed".
 ///
 /// [`shutdown`](Self::shutdown) closes each connection and gives the server
-/// three seconds to exit before killing it; dropping the manager kills the
+/// three seconds to exit before killing it. Dropping the manager kills the
 /// servers at once.
 pub struct McpManager {
     servers: Vec<McpServerHandle>,

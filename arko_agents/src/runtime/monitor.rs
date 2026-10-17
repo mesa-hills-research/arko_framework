@@ -1,4 +1,4 @@
-//! Prompt-cache efficiency of a conversation; see
+//! Prompt-cache efficiency of a conversation. See
 //! [`CacheMonitorConfig`](crate::agent_config::CacheMonitorConfig).
 
 use crate::agent_config::CacheMonitorConfig;

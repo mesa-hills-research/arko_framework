@@ -33,7 +33,7 @@
 //! request, and records the coverage in `STATE_DIR/embed-progress.json` after each
 //! commit of the store. A run stops when a newer generation is published.
 //! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
-//! to a sorted run file; runs cover increasing doc ranges and are merged by term.
+//! to a sorted run file. Runs cover increasing doc ranges and are merged by term.
 //! Texts to embed are spooled to disk.
 use crate::{
     bench_v1::{Chunk, Error, Options},
@@ -333,7 +333,7 @@ fn file_docs(
 
 struct RunReader {
     r: BufReader<File>,
-    /// (first doc, last doc, df, postings bytes) of the current term; the term
+    /// (first doc, last doc, df, postings bytes) of the current term. The term
     /// itself lives in the merge heap.
     head: Option<(u32, u32, u32, Vec<u8>)>,
 }
@@ -1298,7 +1298,7 @@ const UPSERT_BATCH: usize = 1024;
 
 /// Removes every vector store directory but `keep`. Each is first renamed to a name no
 /// settings produce (`vectors-removed-...`), so a removal that stops halfway never
-/// leaves part of a store under a name a build would open; the next build removes it.
+/// leaves part of a store under a name a build would open. The next build removes it.
 fn remove_other_stores(state_dir: &Path, keep: Option<&str>) -> Result<(), Error> {
     let mut names = Vec::new();
     for e in std::fs::read_dir(state_dir)? {

@@ -82,10 +82,10 @@ pub struct MemoryTier {
     pub readers: AccessScope,
     pub writers: AccessScope,
     pub write_mode: WriteMode,
-    /// The write history, oldest first; see [`MemoryWrite`].
+    /// The write history, oldest first. See [`MemoryWrite`].
     #[serde(default)]
     pub entries: Vec<MemoryWrite>,
-    /// The most bytes the content may hold; `None` (the default) is no
+    /// The most bytes the content may hold. `None` (the default) is no
     /// limit.
     #[serde(default)]
     pub max_bytes: Option<usize>,
@@ -188,7 +188,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Creates a new memory store from the given tiers. Each write's text is
-    /// stored once (see [`MemoryWrite`]); tiers saved before are converted.
+    /// stored once (see [`MemoryWrite`]). Tiers saved before are converted.
     pub fn new(tiers: Vec<MemoryTier>) -> Self {
         let map = tiers
             .into_iter()
@@ -361,7 +361,7 @@ impl MemoryStore {
     }
 
     /// `(tier_name, can_read, can_write)` for each tier the agent can read
-    /// or write, sorted by name; tiers it can't access are left out.
+    /// or write, sorted by name. Tiers it can't access are left out.
     pub fn list_accessible(&self, agent_name: &str) -> Vec<(String, bool, bool)> {
         let mut accessible = self
             .tiers
@@ -451,7 +451,7 @@ impl MemoryConfig {
     }
 
     /// Adds a tier readable by all and writable only by `writers`, with a
-    /// byte limit (opt-in; tiers have none by default).
+    /// byte limit (opt-in, tiers have none by default).
     pub fn broadcast_tier_with_limit(
         self,
         name: impl Into<String>,
@@ -469,7 +469,7 @@ impl MemoryConfig {
         })
     }
 
-    /// Adds a global tier with a byte limit (opt-in; tiers have none by
+    /// Adds a global tier with a byte limit (opt-in, tiers have none by
     /// default).
     pub fn global_tier_with_limit(self, name: impl Into<String>, max_bytes: usize) -> Self {
         self.tier(MemoryTier {
@@ -518,7 +518,7 @@ impl MemoryConfig {
 
     /// The store of a resumed run: the configured tiers, each with the
     /// content and history the checkpoint saved under its name (or under a
-    /// name `renames` maps to it); access, limit and write mode come from
+    /// name `renames` maps to it). Access, limit and write mode come from
     /// this configuration. A configured tier the checkpoint lacks starts as
     /// configured. A checkpoint tier matching no configured tier is an error
     /// unless `dropped` names it (it is then discarded).
@@ -770,7 +770,7 @@ mod tests {
     }
 
     /// A checkpoint tier matching no configured tier stops the resume,
-    /// unless it is dropped or renamed to a configured tier; two tiers
+    /// unless it is dropped or renamed to a configured tier. Two tiers
     /// can't restore one.
     #[test]
     fn a_checkpoint_tier_without_a_configured_tier_is_refused_unless_mapped_or_dropped() {

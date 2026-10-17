@@ -23,7 +23,7 @@ const COST_SCALE: f64 = 1_000_000.0;
 /// The stored limit that stands for "no limit".
 const NO_LIMIT: u64 = u64::MAX;
 
-/// A limit in dollars, scaled; `None` is [`NO_LIMIT`].
+/// A limit in dollars, scaled. `None` is [`NO_LIMIT`].
 fn scaled_limit(limit: Option<f64>) -> u64 {
     match limit {
         Some(limit) => ((limit.max(0.0) * COST_SCALE) as u64).min(NO_LIMIT - 1),
@@ -44,8 +44,8 @@ pub enum BudgetExceededPolicy {
     /// (tool calls it is running finish first). A run inside another
     /// agent's tool call waits until the budget is raised
     /// ([`Workflow::set_budget`](crate::Workflow::set_budget),
-    /// [`Workflow::set_agent_budget`](crate::Workflow::set_agent_budget));
-    /// a run the host started returns
+    /// [`Workflow::set_agent_budget`](crate::Workflow::set_agent_budget)).
+    /// A run the host started returns
     /// [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused), to
     /// be continued with [`Workflow::resume_agent`](crate::Workflow::resume_agent)
     /// once the budget is raised, or waits too with
@@ -55,7 +55,7 @@ pub enum BudgetExceededPolicy {
     #[default]
     Pause,
     /// Each agent over the budget is cancelled (its run is recorded
-    /// `Cancelled`; [`Workflow::reopen_agent`](crate::Workflow::reopen_agent)
+    /// `Cancelled`, [`Workflow::reopen_agent`](crate::Workflow::reopen_agent)
     /// continues it), and later runs are refused while the budget stays
     /// exceeded.
     Cancel,
@@ -162,7 +162,7 @@ pub struct BudgetManager {
     spent: AtomicU64,
     /// Each agent's running totals ([`totals_by_agent`](Self::totals_by_agent)).
     agent_totals: Mutex<BTreeMap<String, CostTotals>>,
-    /// The limit, scaled ([`NO_LIMIT`]: none); it can change while agents
+    /// The limit, scaled ([`NO_LIMIT`]: none). It can change while agents
     /// run ([`set_limit`](Self::set_limit)).
     limit: AtomicU64,
     warning: Option<u64>,
@@ -201,7 +201,7 @@ impl BudgetManager {
     }
 
     /// Sets what happens when the budget is exceeded (see
-    /// [`BudgetExceededPolicy`]); with `wait_for_raise`, runs the host
+    /// [`BudgetExceededPolicy`]). With `wait_for_raise`, runs the host
     /// started wait for a raise under `Pause` too.
     pub fn with_exceeded_policy(
         mut self,
@@ -291,7 +291,7 @@ impl BudgetManager {
         result
     }
 
-    /// Sets `agent_name`'s own limit, in dollars; it applies from the
+    /// Sets `agent_name`'s own limit, in dollars. It applies from the
     /// agent's next model request. Raising it releases the agent's runs
     /// held on it.
     pub fn set_agent_limit(&self, agent_name: impl Into<String>, limit: f64) {
@@ -370,8 +370,8 @@ impl BudgetManager {
     }
 
     /// Takes a plan usage report (from any agent: plan usage is
-    /// account-wide), counted with the windows of the plan it names;
-    /// returns the windows it took over their plan budget limits, each once
+    /// account-wide), counted with the windows of the plan it names.
+    /// Returns the windows it took over their plan budget limits, each once
     /// per crossing.
     pub fn record_plan_usage(&self, usage: &arko_ai::PlanUsage) -> Vec<PlanBudgetCrossing> {
         let now = Utc::now().timestamp().max(0) as u64;

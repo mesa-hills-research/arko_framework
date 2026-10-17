@@ -101,7 +101,7 @@ pub trait ToolImageSink: Send + Sync {
     );
 }
 
-/// Structured output is opt-in; existing string-returning tools need no changes.
+/// Structured output is opt-in. Existing string-returning tools need no changes.
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
     pub text: String,
@@ -265,7 +265,7 @@ impl ImageRoom {
 ///
 /// A host that builds one itself (to call a tool outside a runtime, or in a
 /// test) uses [`TaskContext::new`], which leaves the call fields unset and
-/// the [stop signal](Self::stop) one that never fires; the fields stay
+/// the [stop signal](Self::stop) one that never fires. The fields stay
 /// public to set afterwards. The struct is `#[non_exhaustive]`, so fields
 /// can be added without breaking callers: outside this crate it can't be
 /// built with a struct literal.
@@ -279,7 +279,7 @@ pub struct TaskContext<'a> {
     /// The runtime's id of the call being executed, as its events and the
     /// execution middleware see it (`None` outside a call, such as for a
     /// result interceptor run by a host). A call recovered after its host
-    /// stopped keeps its id; see [`Tool::recovery_mode`].
+    /// stopped keeps its id. See [`Tool::recovery_mode`].
     pub tool_call_id: Option<uuid::Uuid>,
     /// The call is being run again because the task stopped while it ran
     /// (its host crashed, say): its tool declared
@@ -290,7 +290,7 @@ pub struct TaskContext<'a> {
     /// Fires when the task is being stopped while the call runs: the
     /// runtime received `CancelTask` or `SuspendTask`, or the host fired the
     /// signal it gave the runtime (a workflow's graceful stop). A long call
-    /// can watch it to save its work and return early; see
+    /// can watch it to save its work and return early. See
     /// [`StopSignal`](crate::stop::StopSignal) and
     /// [`StopAwareCommand`](crate::stop::StopAwareCommand) for a child
     /// process. An [interruptible](Tool::interruptible) call is dropped as
@@ -328,7 +328,7 @@ impl<'a> TaskContext<'a> {
 }
 
 /// How a tool call that was running when its task stopped (its host
-/// crashed, say) is settled when the task runs again; see
+/// crashed, say) is settled when the task runs again. See
 /// [`Tool::recovery_mode`] and
 /// [`Task::running_tool_calls`](crate::task::Task::running_tool_calls).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -378,7 +378,7 @@ pub trait Tool: Debug + Send + Sync {
     /// its result says it was stopped. Tools that wind their own work down
     /// when the task stops return `false`, as a workflow's
     /// `run_workflow_agent` does (it stops the agent it runs within the
-    /// workflow's grace period); the stop then takes effect once the call
+    /// workflow's grace period). The stop then takes effect once the call
     /// returns.
     fn interruptible(&self) -> bool {
         true

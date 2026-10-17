@@ -175,7 +175,7 @@ impl Cache {
         self.index.contains_key(hash)
     }
 
-    /// Reads the vector of `hash` into `out`; false when it is not cached.
+    /// Reads the vector of `hash` into `out`. False when it is not cached.
     pub(crate) fn get(&self, hash: &[u8; 32], out: &mut Vec<f32>) -> Result<bool, Error> {
         let Some(&rec) = self.index.get(hash) else {
             return Ok(false);

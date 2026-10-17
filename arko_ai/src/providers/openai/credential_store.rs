@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// clones of one client nor clients sharing the lock refresh concurrently.
 /// The calls run to completion even when the caller of the refresh is
 /// dropped (though not through a runtime shutdown). Implementations may
-/// block briefly (a small file read or write); they must never log or return
+/// block briefly (a small file read or write). They must never log or return
 /// tokens or account ids in error messages.
 pub trait ChatGptOAuthStore: Send + Sync {
     /// Called before a refresh with the credentials the client holds (and is
@@ -51,7 +51,7 @@ pub trait ChatGptOAuthStore: Send + Sync {
     /// Called right after a refresh with the rotated credentials and the
     /// refresh response's `id_token`, if any. The previous refresh token no
     /// longer works, so these must be stored now. An error is returned to the
-    /// caller of the refresh; the client keeps (and uses) the new
+    /// caller of the refresh. The client keeps (and uses) the new
     /// credentials either way.
     fn save_refreshed(
         &self,

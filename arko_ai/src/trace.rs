@@ -29,7 +29,7 @@
 //! previous request, and the serialized `input` itself only for the 32 most
 //! recently traced conversations, so memory stays bounded in long-running
 //! processes. For an older conversation's next
-//! request, `common_input_bytes` is `null`; the other metrics stay exact.
+//! request, `common_input_bytes` is `null`. The other metrics stay exact.
 //!
 //! Credentials are redacted, and `x-codex-turn-state` routing tokens are
 //! written as their SHA-256 (`sha256:<hex>`, the hash the summary line
@@ -101,7 +101,7 @@ struct Inner {
 struct Conversations {
     states: HashMap<String, ConversationState>,
     /// Conversations whose previous request keeps its serialized `input`,
-    /// least recently traced first; at most [`RETAINED_INPUTS`].
+    /// least recently traced first. At most [`RETAINED_INPUTS`].
     retained: VecDeque<String>,
 }
 
@@ -140,7 +140,7 @@ struct PreviousRequest {
     /// Hash of each serialized `input` item, for `common_items`.
     item_hashes: Vec<u128>,
     input_bytes: usize,
-    /// The serialized `input`, for `common_input_bytes`; dropped once the
+    /// The serialized `input`, for `common_input_bytes`. Dropped once the
     /// conversation is not among the [`RETAINED_INPUTS`] most recent.
     input_json: Option<Arc<str>>,
     instructions_hash: Option<String>,
@@ -316,7 +316,7 @@ impl RequestTrace {
     }
 }
 
-/// One traced model call. Created by [`RequestTrace::begin`]; completed by
+/// One traced model call. Created by [`RequestTrace::begin`]. Completed by
 /// [`TraceCall::finish`] or [`TraceCall::fail`]. A call dropped before either
 /// is recorded as abandoned (for example, a stream the consumer stopped
 /// reading).
@@ -348,8 +348,8 @@ pub(crate) struct TraceCall {
 }
 
 impl TraceCall {
-    /// Records the exact request about to be sent. Called for every attempt;
-    /// a retried request overwrites the file and increments `attempts`.
+    /// Records the exact request about to be sent. Called for every attempt.
+    /// A retried request overwrites the file and increments `attempts`.
     pub(crate) fn record_request(&mut self, request: &reqwest::Request) {
         self.attempts += 1;
         self.url = Some(request.url().to_string());
@@ -384,7 +384,7 @@ impl TraceCall {
     }
 
     /// Records one streamed event. `response.created` supplies the served
-    /// model; `response.output_item.done` items are kept so they can be
+    /// model. `response.output_item.done` items are kept so they can be
     /// compared with the terminal response's `output`.
     pub(crate) fn on_event(&mut self, event_type: &str, value: &Value) {
         if self.first_event_ms.is_none() {
@@ -575,7 +575,7 @@ impl Drop for TraceCall {
 /// Compares the current request with the previous one of the same
 /// conversation. `previous_is_prefix` is true when every previous `input`
 /// item appears unchanged, in order, at the start of the current `input`.
-/// Items are compared by hash; `common_input_bytes` is `null` when the
+/// Items are compared by hash. `common_input_bytes` is `null` when the
 /// previous request's serialized input is no longer retained.
 fn prefix_metrics(
     previous: Option<&PreviousRequest>,
@@ -677,7 +677,7 @@ fn response_id_prefix(id: &str) -> Option<String> {
 /// `.`, `-` and `_` become `_` and ASCII letters are lowercased, so the name
 /// holds no path separators or drive prefixes. A key this leaves unchanged
 /// is its own name, unless it ends like a hashed name (`-` and 16 lowercase
-/// hex digits); any other key gets `-<hash of the key>` appended, so keys
+/// hex digits). Any other key gets `-<hash of the key>` appended, so keys
 /// that differ only in replaced characters or in case (`team/a`, `team:a`,
 /// `Team_a`) keep apart, also on case-insensitive filesystems, and no key
 /// can take another's hashed name. A name that would still be unsafe
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     /// Only the most recently used conversations keep their serialized
-    /// input; the others keep item hashes, so every metric but
+    /// input. The others keep item hashes, so every metric but
     /// `common_input_bytes` stays exact for them.
     #[test]
     fn retained_input_is_bounded() {

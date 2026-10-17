@@ -20,7 +20,7 @@ pub struct RunOptions {
     /// [`current_working_directory`](arko_agents::Task::current_working_directory)),
     /// and where its skills load from. Saved with the task, so a continued,
     /// resumed or recovered run keeps it. A relative path is resolved against
-    /// the workflow's workspace; the directory must exist.
+    /// the workflow's workspace. The directory must exist.
     pub workspace: Option<PathBuf>,
     /// Images that go with the prompt, after its text in the run's first
     /// message (the task's
@@ -38,7 +38,7 @@ impl RunOptions {
         Self::default()
     }
 
-    /// Runs the agent in `workspace`; see [`RunOptions::workspace`].
+    /// Runs the agent in `workspace`. See [`RunOptions::workspace`].
     pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
         self.workspace = Some(workspace.into());
         self

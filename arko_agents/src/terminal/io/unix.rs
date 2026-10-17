@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 pub(super) type Child = tokio::process::Child;
 
-/// Nonblocking descriptor; dropping an async read never leaves a blocking worker.
+/// Nonblocking descriptor. Dropping an async read never leaves a blocking worker.
 struct Descriptor(AsyncFd<OwnedFd>);
 impl Descriptor {
     fn new(fd: OwnedFd) -> io::Result<Self> {

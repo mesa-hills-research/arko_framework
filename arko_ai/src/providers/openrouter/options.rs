@@ -80,7 +80,7 @@ impl OpenRouterOptions {
         self
     }
 
-    /// These options over `defaults`: fields set here win; `provider` and
+    /// These options over `defaults`: fields set here win. `provider` and
     /// `auto_router` merge field by field.
     pub fn merged_over(&self, defaults: &OpenRouterOptions) -> OpenRouterOptions {
         OpenRouterOptions {
@@ -127,7 +127,7 @@ pub enum OpenRouterServiceTier {
 /// tool-calling quality on every request with tools. It overrides sticky
 /// routing, so an agent loop can land on a different provider on each turn
 /// and miss its prompt cache. Sorting providers by price turns it off.
-/// https://openrouter.ai/docs/guides/routing/auto-exacto
+/// <https://openrouter.ai/docs/guides/routing/auto-exacto>
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoExactoPolicy {
@@ -150,13 +150,13 @@ pub enum AutoExactoPolicy {
 /// (`require_parameters: false`), data collection allowed, no per-request ZDR
 /// (account settings still apply), no sort (tool requests get Auto Exacto).
 /// Provider slugs are lowercase (`anthropic`, `openai`, `google-vertex`,
-/// `amazon-bedrock`, `azure`, ...); `GET /api/v1/providers` lists them.
-/// https://openrouter.ai/docs/guides/routing/provider-selection
+/// `amazon-bedrock`, `azure`, ...). `GET /api/v1/providers` lists them.
+/// <https://openrouter.ai/docs/guides/routing/provider-selection>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderPreferences {
     /// Providers to try first, in order. Disables sticky routing (and so
-    /// prompt-cache affinity); prefer [`only`](Self::only) to restrict.
+    /// prompt-cache affinity). Prefer [`only`](Self::only) to restrict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
     /// Providers allowed for this request.
@@ -370,7 +370,7 @@ pub enum SortBy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortPartition {
-    /// Sort endpoints within each model; fallback models stay fallbacks
+    /// Sort endpoints within each model. Fallback models stay fallbacks
     /// (OpenRouter's default).
     Model,
     /// Sort all endpoints of all models together.
@@ -470,22 +470,22 @@ pub enum AutoRouterCostTier {
 /// Settings for the Auto Router (`openrouter/auto`, `openrouter/auto-beta`),
 /// ignored for every other model so they can be set once on the client.
 /// The plugin id is chosen from the slug (`auto-router` or
-/// `auto-beta-router`; the other id would be silently ignored).
-/// https://openrouter.ai/docs/guides/routing/routers/auto-router
+/// `auto-beta-router`, the other id would be silently ignored).
+/// <https://openrouter.ai/docs/guides/routing/routers/auto-router>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoRouterOptions {
     /// Model patterns the router may choose from (`anthropic/*`, `openai/gpt-5*`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
-    /// Model patterns the router must not choose; wins over `allowed_models`.
+    /// Model patterns the router must not choose. Wins over `allowed_models`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded_models: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_tier: Option<AutoRouterCostTier>,
     /// Provider preferences applied, over the request's own, only when the
     /// model is an Auto Router slug. How far the router's own task
-    /// classifier honours ZDR is not documented; for a hard guarantee use an
+    /// classifier honours ZDR is not documented. For a hard guarantee use an
     /// API key with a ZDR guardrail on OpenRouter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderPreferences>,
@@ -497,7 +497,7 @@ impl AutoRouterOptions {
     }
 
     /// Auto Router requests limited to Zero Data Retention endpoints with data
-    /// collection denied; other models are unaffected.
+    /// collection denied. Other models are unaffected.
     pub fn zdr() -> Self {
         Self {
             provider: Some(
@@ -580,7 +580,7 @@ impl AutoRouterOptions {
 /// App attribution headers for OpenRouter's rankings and analytics. Never
 /// sent unless configured with
 /// [`OpenRouterClient::with_app_attribution`](super::OpenRouterClient::with_app_attribution).
-/// https://openrouter.ai/docs/app-attribution
+/// <https://openrouter.ai/docs/app-attribution>
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppAttribution {
@@ -593,7 +593,7 @@ pub struct AppAttribution {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub categories: Vec<String>,
     /// Create the app hidden from public rankings
-    /// (`X-OpenRouter-App-Visibility: hidden`); applies only when the app is
+    /// (`X-OpenRouter-App-Visibility: hidden`). Applies only when the app is
     /// first created.
     pub hidden: bool,
 }

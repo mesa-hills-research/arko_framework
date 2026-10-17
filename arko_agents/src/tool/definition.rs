@@ -80,9 +80,9 @@ pub struct ToolDefinition {
     /// Whether calls to this tool may run at the same time as other
     /// parallel-safe calls of the same response (native mode), and be
     /// batched in one output-based response. Set it only for tools whose
-    /// calls don't affect each other, such as reads; calls that write, or
+    /// calls don't affect each other, such as reads. Calls that write, or
     /// whose order matters, run one at a time in the order the model made
-    /// them. An agent's configuration can override it per tool; see
+    /// them. An agent's configuration can override it per tool. See
     /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig). The former
     /// `supports_batched_calls` of saved definitions (which let calls share a
     /// response, run one after another) is ignored: they load as not

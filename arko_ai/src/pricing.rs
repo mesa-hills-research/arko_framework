@@ -21,7 +21,7 @@ pub enum ServiceTier {
     Standard,
     /// Lower-priority, discounted processing (OpenAI `flex`, Gemini `flex`).
     Flex,
-    /// Premium low-latency processing: OpenAI Fast mode (formerly Priority;
+    /// Premium low-latency processing: OpenAI Fast mode (formerly Priority,
     /// requested or echoed as `priority` or `fast`) and Anthropic fast mode
     /// (`speed: "fast"`).
     Fast,
@@ -37,7 +37,7 @@ pub enum ServiceTier {
 
 impl ServiceTier {
     /// Normalizes an OpenAI Responses `service_tier` value.
-    /// https://developers.openai.com/api/reference/resources/responses/methods/create
+    /// <https://developers.openai.com/api/reference/resources/responses/methods/create>
     pub fn from_openai(value: &str) -> Self {
         match value {
             "default" | "auto" => Self::Standard,
@@ -50,7 +50,7 @@ impl ServiceTier {
 
     /// Normalizes Anthropic `usage.service_tier` / `usage.speed`. Fast mode is
     /// a speed option, reported separately from the service tier.
-    /// https://platform.claude.com/docs/en/build-with-claude/fast-mode
+    /// <https://platform.claude.com/docs/en/build-with-claude/fast-mode>
     pub fn from_anthropic(service_tier: Option<&str>, speed: Option<&str>) -> Option<Self> {
         if speed == Some("fast") {
             return Some(Self::Fast);
@@ -181,7 +181,7 @@ impl ModelPricing {
             .any(|pricing| &pricing.tier == tier)
     }
 
-    /// Multiplier for a reported residency region; other regions (such as
+    /// Multiplier for a reported residency region. Other regions (such as
     /// the default `global`) use standard rates.
     pub fn residency_multiplier(&self, region: Option<&str>) -> f64 {
         let Some(region) = region else {

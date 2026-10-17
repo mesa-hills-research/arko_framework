@@ -26,7 +26,7 @@ pub struct SourceSpan {
     pub end_line: usize,
 }
 /// The version of the chunk JSON format (the `chunk` command's lines, deltas, index
-/// documents). Format 1 had the ten fields up to `token_estimate`; format 2 adds
+/// documents). Format 1 had the ten fields up to `token_estimate`. Format 2 adds
 /// `scope`, serialized only when it is not empty. Boundaries and IDs are the same in
 /// both formats. Format 3 adds file entries ([`FileMetadata`]) to the `chunk`
 /// command's output: a Markdown file's metadata region (front matter, MDX
@@ -77,7 +77,7 @@ pub struct FileMetadata {
     /// The file's path, as in its chunks.
     pub file: String,
     pub metadata_range: SourceSpan,
-    /// The front matter block as written, delimiter lines included; empty when the
+    /// The front matter block as written, delimiter lines included. Empty when the
     /// region holds only MDX import/export lines.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub front_matter: String,
@@ -107,7 +107,7 @@ pub use crate::files::{FileRules, Report, SkipReason, Skipped};
 pub use crate::watch::Watcher;
 
 /// A file's chunks. A Markdown file's metadata region (see [`FileMetadata`]) is left
-/// out; [`chunk_str_with_metadata`] also returns it.
+/// out. [`chunk_str_with_metadata`] also returns it.
 pub fn chunk_str(path: &Path, text: &str, options: &Options) -> Result<Vec<Chunk>, Error> {
     Ok(crate::syntax::chunk(path, text, options)?.chunks)
 }
@@ -136,11 +136,11 @@ pub fn chunk_file_with_metadata(path: &Path, options: &Options) -> Result<FileCh
 }
 /// Chunks every file the default [`FileRules`] select (see `docs/arko_index-reference.md`,
 /// "File selection").
-/// Files that cannot be indexed are skipped; [`chunk_dir_with`] also returns the report.
+/// Files that cannot be indexed are skipped. [`chunk_dir_with`] also returns the report.
 pub fn chunk_dir(root: &Path, options: &Options) -> Result<Vec<Chunk>, Error> {
     Ok(chunk_dir_with(root, options, &FileRules::default())?.0)
 }
-/// [`chunk_dir`] with explicit file selection rules; also returns what was skipped.
+/// [`chunk_dir`] with explicit file selection rules. Also returns what was skipped.
 pub fn chunk_dir_with(
     root: &Path,
     options: &Options,
@@ -167,7 +167,7 @@ where
 {
     chunk_dir_each_with(root, options, &FileRules::default(), threads, sink).map(|_| ())
 }
-/// [`chunk_dir_each`] with explicit file selection rules; returns the report.
+/// [`chunk_dir_each`] with explicit file selection rules. Returns the report.
 pub fn chunk_dir_each_with<S>(
     root: &Path,
     options: &Options,
@@ -198,7 +198,7 @@ where
 {
     chunk_dir_map_with(root, options, &FileRules::default(), threads, map, sink).map(|_| ())
 }
-/// [`chunk_dir_map`] with explicit file selection rules; returns the report.
+/// [`chunk_dir_map`] with explicit file selection rules. Returns the report.
 pub fn chunk_dir_map_with<R, M, S>(
     root: &Path,
     options: &Options,

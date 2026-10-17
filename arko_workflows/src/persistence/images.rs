@@ -27,9 +27,8 @@ const CACHE_BYTES: usize = 256 << 20;
 /// them.
 ///
 /// Wrap code that reads a run directory's task files or checkpoints
-/// yourself in [`ImageFiles::with`]. [`WorkflowState::agent_results_in`]
-/// (crate::persistence::state::WorkflowState::agent_results_in) does so
-/// already.
+/// yourself in [`ImageFiles::with`]. [`WorkflowState::agent_results_in`](crate::persistence::state::WorkflowState::agent_results_in)
+/// does so already.
 pub struct ImageFiles {
     dir: PathBuf,
     cache: Mutex<Cache>,

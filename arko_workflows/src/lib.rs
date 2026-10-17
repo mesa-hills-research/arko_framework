@@ -1,35 +1,36 @@
-/// # arko_workflows
-///
-/// Multi-agent workflow orchestration built on `arko_agents`.
-///
-/// `arko_workflows` enables composing multiple LLM agent runs into cohesive
-/// workflows with shared memory, inter-agent messaging, budget management,
-/// lifecycle hooks, context freshness tracking, and persistence.
-///
-/// ## Quick Start
-///
-/// ```rust,no_run
-/// use arko_workflows::prelude::*;
-/// use arko_ai::LLMClient;
-/// use arko_agents::AgentConfig;
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), WorkflowError> {
-/// let client = Arc::new(LLMClient::new().with_anthropic_api_key("sk-..."));
-///
-/// let workflow = Workflow::builder()
-///     .name("my-workflow")
-///     .workspace("./project")
-///     .llm_client(client)
-///     .agent("coder", AgentConfig::load_from_path("configs/coder.json".as_ref()).unwrap())
-///     .budget(5.0)
-///     .build()?;
-///
-/// let result = workflow.run_agent("coder", "Implement the auth module").await?;
-/// println!("Cost: ${:.6}", result.total_cost());
-/// # Ok(())
-/// # }
-/// ```
+//! Multi-agent workflows built on `arko_agents` and `arko_ai`.
+//!
+//! A workflow is ordinary Rust code. [`Workflow`] runs the agents and gives them shared
+//! memory, messaging, budgets, lifecycle hooks, context-freshness tracking, completion
+//! verification, durable steps and persistence, and your code decides which agents run
+//! and in what order.
+//!
+//! ```rust,no_run
+//! use arko_workflows::prelude::*;
+//! use arko_ai::LLMClient;
+//! use arko_agents::AgentConfig;
+//! use std::sync::Arc;
+//!
+//! # async fn example() -> Result<(), WorkflowError> {
+//! let client = Arc::new(LLMClient::new().with_anthropic_api_key("sk-..."));
+//!
+//! let workflow = Workflow::builder()
+//!     .name("my-workflow")
+//!     .workspace("./project")
+//!     .llm_client(client)
+//!     .agent("coder", AgentConfig::load_from_path("configs/coder.json".as_ref()).unwrap())
+//!     .budget(5.0)
+//!     .build()?;
+//!
+//! let result = workflow.run_agent("coder", "Implement the auth module").await?;
+//! println!("Cost: ${:.6}", result.total_cost());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The crate's README introduces it, and `docs/arko_workflows-guide.md` and
+//! `arko_workflows/INDEX.md` in the repository cover it in depth.
+
 pub mod budget;
 pub mod context;
 mod digest;

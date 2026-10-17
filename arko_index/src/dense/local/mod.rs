@@ -14,7 +14,7 @@
 //! special tokens, and its vector is their mean weighted by the text tokens each holds,
 //! at unit length. On the CPU the texts run packed together without padding, the linear
 //! layers in int8 by default ([`Precision`]), spread over a dedicated thread pool
-//! ([`LocalEmbedder::with_threads`]; by default [`threads`](crate::threads)). With the
+//! ([`LocalEmbedder::with_threads`], by default [`threads`](crate::threads)). With the
 //! features `local-embed-gpu` (wgpu: Vulkan, Metal, DirectX 12) and `local-embed-cuda`
 //! the same models run on a GPU ([`Device`]), in `f32`, `f16` or `bf16`, in padded
 //! batches of texts of similar length. Both devices split and combine long texts the
@@ -294,7 +294,7 @@ impl std::str::FromStr for Device {
     }
 }
 
-/// The models the local embedder runs; the first is [`DEFAULT_MODEL`].
+/// The models the local embedder runs. The first is [`DEFAULT_MODEL`].
 pub const MODELS: &[LocalModel] = &[CODE_RANK_EMBED, JINA_CODE_V2];
 
 /// The model `--embed local` picks when none is named.
@@ -691,7 +691,7 @@ impl LocalEmbedder {
         Ok(vectors)
     }
 
-    /// One forward pass over `batch` on the CPU; each sequence's unit vector.
+    /// One forward pass over `batch` on the CPU. Each sequence's unit vector.
     fn run(&self, encoder: &Encoder, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>, Error> {
         let lens: Vec<usize> = batch.iter().map(|ids| ids.len()).collect();
         let ids = batch.concat();

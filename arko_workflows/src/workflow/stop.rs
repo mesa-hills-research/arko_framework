@@ -76,7 +76,7 @@ pub struct WrapUp {
     pub message: Option<String>,
 }
 
-/// A request to stop the run; see [`Workflow::stop`](crate::Workflow::stop).
+/// A request to stop the run. See [`Workflow::stop`](crate::Workflow::stop).
 ///
 /// ```
 /// use arko_workflows::workflow::stop::StopRequest;
@@ -92,8 +92,8 @@ pub struct StopRequest {
     /// with the stop and on the results it ends.
     pub reason: String,
     /// `None` (the default): the run is cancelled at once, as
-    /// [`cancel`](crate::Workflow::cancel) does. `Some`: a wrap-up first;
-    /// see [`wrap_up`](Self::wrap_up).
+    /// [`cancel`](crate::Workflow::cancel) does. `Some`: a wrap-up first.
+    /// See [`wrap_up`](Self::wrap_up).
     pub wrap_up: Option<WrapUp>,
 }
 
@@ -131,7 +131,7 @@ impl StopRequest {
     /// agent's tools see their stop signal at once, and each agent is told
     /// at its next turn boundary to save its progress and call
     /// `complete_task` ([`wrap_up_notice`]). The wrap-up ends when no agent
-    /// runs any more, or after `within`; then the run is cancelled as
+    /// runs any more, or after `within`. Then the run is cancelled as
     /// without a wrap-up.
     pub fn wrap_up(mut self, within: Duration) -> Self {
         // A message set before is kept.
@@ -141,7 +141,7 @@ impl StopRequest {
     }
 
     /// The wrap-up notice agents get, replacing [`wrap_up_notice`]'s. Call
-    /// it after [`wrap_up`](Self::wrap_up); without a wrap-up it changes
+    /// it after [`wrap_up`](Self::wrap_up). Without a wrap-up it changes
     /// nothing.
     pub fn wrap_up_message(mut self, message: impl Into<String>) -> Self {
         if let Some(wrap_up) = &mut self.wrap_up {
@@ -183,7 +183,7 @@ impl std::fmt::Display for RunStopIntent {
     }
 }
 
-/// The stop that ended an agent run; see [`AgentResult::stopped_by`].
+/// The stop that ended an agent run. See [`AgentResult::stopped_by`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopRecord {
     pub kind: StopKind,
@@ -305,7 +305,7 @@ pub enum Restart {
     Continue,
 }
 
-/// A run to relaunch after resuming a stopped workflow; see
+/// A run to relaunch after resuming a stopped workflow. See
 /// [`Workflow::stopped_runs`](crate::Workflow::stopped_runs).
 #[derive(Debug, Clone)]
 pub struct StoppedRun {
@@ -350,9 +350,9 @@ pub(crate) fn continued_message(result: &AgentResult, note: &str) -> String {
 /// Stops the run when the process gets Ctrl-C or `SIGTERM`.
 ///
 /// The first signal stops the run with `request`. The second ends a
-/// wrap-up in progress at once (the run is cancelled; its agents still get
+/// wrap-up in progress at once (the run is cancelled, its agents still get
 /// the grace period). A third kills the children of running
-/// [`StopAwareCommand`](arko_agents::StopAwareCommand)s (on Unix;
+/// [`StopAwareCommand`](arko_agents::StopAwareCommand)s (on Unix,
 /// [`kill_stop_aware_commands`](arko_agents::kill_stop_aware_commands))
 /// and exits the process at once with status `128 + the signal's number`
 /// (130 for Ctrl-C), as an unhandled signal would end it. Handles Ctrl-C (`SIGINT`) and `SIGTERM` on Unix, and
@@ -404,7 +404,7 @@ pub fn stop_on_signals(
     }))
 }
 
-/// The signals [`stop_on_signals`] handles; yields each one's number.
+/// The signals [`stop_on_signals`] handles. Yields each one's number.
 struct Signals {
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
@@ -439,7 +439,7 @@ impl Signals {
         }
     }
 
-    /// The next signal's number; `None` once no more can arrive.
+    /// The next signal's number. `None` once no more can arrive.
     async fn next(&mut self) -> Option<i32> {
         #[cfg(unix)]
         {

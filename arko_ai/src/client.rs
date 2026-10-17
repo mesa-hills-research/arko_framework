@@ -60,7 +60,7 @@ impl LLMClient {
     ///
     /// - OpenAI: ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
     ///   `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`)
-    ///   when both are set; otherwise `OPENAI_API_KEY`. Setting only some of
+    ///   when both are set. Otherwise `OPENAI_API_KEY`. Setting only some of
     ///   the `OPENAI_OAUTH_*` variables is an error
     ///   ([`Error::AuthenticationFailed`]) rather than a silent switch to
     ///   API-key billing.
@@ -82,7 +82,7 @@ impl LLMClient {
     /// and [`with_codex_auth_file`](Self::with_codex_auth_file). Without a
     /// refresh token the access token is used until the server rejects it.
     ///
-    /// The library reads no environment variables unless this is called; the
+    /// The library reads no environment variables unless this is called. The
     /// Codex `auth.json` is read only when `OPENAI_OAUTH_REFRESH_TOKEN` is set.
     pub fn from_env() -> Result<Self, Error> {
         Self::from_env_with(|name| std::env::var(name).ok())
@@ -210,8 +210,8 @@ impl LLMClient {
         self
     }
 
-    /// Writes every model request and response to `trace` for debugging;
-    /// see [`RequestTrace`]. Applies to providers configured before or after
+    /// Writes every model request and response to `trace` for debugging.
+    /// See [`RequestTrace`]. Applies to providers configured before or after
     /// this call. Currently implemented for the OpenAI provider only: the
     /// first request to another provider logs a warning (once per provider)
     /// that it is not traced.
@@ -229,7 +229,7 @@ impl LLMClient {
     /// Models can reason for a long time without sending anything: GPT Pro
     /// models can think for over an hour, and a stream may carry no event
     /// until the reasoning ends. A timeout shorter than that cuts healthy
-    /// responses off; they then fail with [`Error::StreamTruncated`], which
+    /// responses off. They then fail with [`Error::StreamTruncated`], which
     /// is transient, so a caller that retries (such as the arko_agents
     /// runtime) sends them again, paying for the work again. If you set one,
     /// make it generous, well above the longest silent stretch the models you
@@ -261,7 +261,7 @@ impl LLMClient {
     }
 
     /// Applies the stream idle timeout set on this `LLMClient`, if any, to a
-    /// provider client; otherwise the client keeps its own.
+    /// provider client. Otherwise the client keeps its own.
     fn idle<T>(&self, client: T, apply: impl FnOnce(T, Option<std::time::Duration>) -> T) -> T {
         match self.stream_idle_timeout {
             Some(timeout) => apply(client, Some(timeout)),
@@ -269,7 +269,7 @@ impl LLMClient {
         }
     }
 
-    /// Installs a hook that can adjust each OpenAI request; see
+    /// Installs a hook that can adjust each OpenAI request. See
     /// [`OpenAIRequestHook`](providers::openai::OpenAIRequestHook).
     pub fn with_openai_request_hook(
         mut self,
@@ -389,7 +389,7 @@ impl LLMClient {
     /// token endpoint to an explicit
     /// [`refresh_openai_oauth_token`](Self::refresh_openai_oauth_token) call
     /// wait for the advertised reset when available and otherwise use
-    /// bounded exponential backoff, for up to 8 retries; see
+    /// bounded exponential backoff, for up to 8 retries. See
     /// [`OpenAIClient::with_oauth_rate_limit_retries`](providers::openai::OpenAIClient::with_oauth_rate_limit_retries).
     /// The refreshes requests make on their own, including those of the
     /// arko_agents runtime, never wait: their 429 goes to the agent's own
@@ -501,7 +501,7 @@ impl LLMClient {
     /// runtime shutting down cancels it, and tokens it had not stored yet are
     /// lost (the previous refresh token no longer works). A host that must
     /// not lose them stops starting refreshes (finishes or cancels its agent
-    /// runs) and then awaits this before shutting the runtime down; clients
+    /// runs) and then awaits this before shutting the runtime down. Clients
     /// built separately (even from one Codex `auth.json`) are awaited one by
     /// one.
     pub async fn openai_chatgpt_oauth_credentials(
@@ -515,7 +515,7 @@ impl LLMClient {
 
     /// How long the provider keeps the prompt cache of this client's requests
     /// for `model` with `config` after their last use, for a conversation
-    /// with caching enabled (the default); see
+    /// with caching enabled (the default). See
     /// [`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime).
     /// For OpenAI models it depends on the client's OpenAI auth: API key or
     /// ChatGPT OAuth.
@@ -529,8 +529,8 @@ impl LLMClient {
         crate::prompt_cache::prompt_cache_lifetime(model, config, chatgpt_oauth)
     }
 
-    /// The most input tokens this client's requests to `model` may carry;
-    /// see [`effective_max_input_tokens`](crate::input_limit::effective_max_input_tokens).
+    /// The most input tokens this client's requests to `model` may carry.
+    /// See [`effective_max_input_tokens`](crate::input_limit::effective_max_input_tokens).
     /// For OpenAI models it depends on the client's OpenAI auth: API key or
     /// ChatGPT OAuth.
     pub async fn max_input_tokens(&self, model: &Model) -> Option<usize> {
@@ -540,7 +540,7 @@ impl LLMClient {
     }
 
     /// Replaces the ChatGPT OAuth credentials only if the client still holds
-    /// `expected`; returns whether it did.
+    /// `expected`. Returns whether it did.
     pub(crate) async fn replace_openai_chatgpt_credentials(
         &self,
         expected: &providers::openai::ChatGptOAuthCredentials,
@@ -686,8 +686,8 @@ impl LLMClient {
     ///
     /// The OAuth methods ([`refresh_openai_oauth_token_if_expiring`](Self::refresh_openai_oauth_token_if_expiring),
     /// [`openai_chatgpt_oauth_credentials`](Self::openai_chatgpt_oauth_credentials)
-    /// and the others) act on the account the next request would go to;
-    /// each account refreshes its own credentials before it is used, and
+    /// and the others) act on the account the next request would go to.
+    /// Each account refreshes its own credentials before it is used, and
     /// with a Codex `auth.json` keeps its file in step.
     pub fn with_chatgpt_accounts(mut self, accounts: providers::openai::ChatGptAccounts) -> Self {
         self.openai_client = None;
@@ -696,7 +696,7 @@ impl LLMClient {
     }
 
     /// Configures the OpenAI provider with the Codex `auth.json` files of
-    /// several ChatGPT accounts, labelled, first preferred; see
+    /// several ChatGPT accounts, labelled, first preferred. See
     /// [`with_chatgpt_accounts`](Self::with_chatgpt_accounts) and
     /// [`ChatGptAccounts::from_codex_auth_files`](providers::openai::ChatGptAccounts::from_codex_auth_files).
     pub fn with_codex_auth_files<'a>(
@@ -859,7 +859,7 @@ impl LLMClient {
         }
     }
 
-    /// Request tracing covers the OpenAI provider only; says so, once per
+    /// Request tracing covers the OpenAI provider only. Says so, once per
     /// provider, when a traced client sends to another.
     fn note_untraced(&self, provider: &Provider) {
         if self.request_trace.is_some() && *provider != Provider::OpenAI {
@@ -907,7 +907,7 @@ impl LLMClient {
 
 /// The Codex `auth.json` (located through `lookup`, as
 /// [`CodexAuthFile::default_path`] locates it) when it holds `refresh_token`
-/// for `account_id`. Tokens are compared by SHA-256 fingerprint; a missing or
+/// for `account_id`. Tokens are compared by SHA-256 fingerprint. A missing or
 /// unreadable file is no match. Nothing about the tokens is logged.
 ///
 /// [`CodexAuthFile::default_path`]: crate::codex_auth::CodexAuthFile::default_path
@@ -1146,7 +1146,7 @@ mod tests {
         assert!(openai(&found).has_credential_store());
     }
 
-    /// Only OpenAI requests are traced; a traced request to another provider
+    /// Only OpenAI requests are traced. A traced request to another provider
     /// says so once per provider.
     #[tokio::test]
     async fn traced_requests_to_other_providers_warn_that_they_are_not_traced() {

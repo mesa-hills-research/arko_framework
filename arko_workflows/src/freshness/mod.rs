@@ -326,7 +326,7 @@ impl ResourceTracker {
     /// (`read_file`, `write_file`, `edit_file`, `apply_diff`, `list_files`)
     /// open, resolved against `working_directory` with arko_agents'
     /// [`resolve_path`](arko_agents::utils::resolve_path), which the
-    /// runtime's workspace check also uses; `None` for a path that can't be
+    /// runtime's workspace check also uses. `None` for a path that can't be
     /// resolved, which no tool opens.
     pub fn resource_for_tool_in(
         &self,
@@ -428,7 +428,7 @@ impl ResourceTracker {
     /// Record a successful mutation and return the readers whose observed
     /// context has just become stale and who are to be told: not actors
     /// whose task has finished (their reads are kept for a continuation,
-    /// which is told what changed; see [`resume_actor`](Self::resume_actor)).
+    /// which is told what changed, see [`resume_actor`](Self::resume_actor)).
     pub fn record_write(&self, actor: &ActorId, resource: ResourceId) -> Vec<ActorId> {
         let finished = self.finished.read();
         let mut state = self.state.write();
@@ -488,7 +488,7 @@ impl ResourceTracker {
     /// Records that `actor`'s task stopped. A task that can be `continued`
     /// (completed, waiting for input, or paused) keeps its reads, so a
     /// continuation still sees what changed, but no longer gets freshness
-    /// notices or fires conflict hooks; the reads of any other task are
+    /// notices or fires conflict hooks. The reads of any other task are
     /// forgotten.
     pub fn finish_actor(&self, actor: &ActorId, continued: bool) {
         if continued {
@@ -588,7 +588,7 @@ mod tests {
     use super::*;
 
     /// Fields omitted in JSON take the `Default` values (both were
-    /// required); given ones replace them whole.
+    /// required). Given ones replace them whole.
     #[test]
     fn omitted_freshness_fields_take_the_defaults() {
         let defaults = ContextFreshnessConfig::default();

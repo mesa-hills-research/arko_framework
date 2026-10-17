@@ -1,7 +1,7 @@
 //! The OpenRouter model catalog (`GET /api/v1/models`, or
 //! `/api/v1/models/user` for the models an API key may use) parsed into
 //! [`Model`]s. Fetched only on request and cached in memory by the client.
-//! https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties
+//! <https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties>
 
 use super::request::without_preset;
 use crate::{
@@ -37,7 +37,7 @@ pub struct OpenRouterModelInfo {
     /// Request parameters the model accepts (`tools`, `reasoning`,
     /// `temperature`, ...). Empty when the catalog lists none (routers).
     pub supported_parameters: Vec<String>,
-    /// Reasoning controls; `None` for non-reasoning models and routers.
+    /// Reasoning controls. `None` for non-reasoning models and routers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<OpenRouterReasoningInfo>,
     /// Whether prices are published (routers report `-1`).
@@ -61,14 +61,14 @@ impl OpenRouterModelInfo {
 }
 
 /// A model's reasoning controls from the catalog `reasoning` object.
-/// https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#discovering-per-model-reasoning-options
+/// <https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#discovering-per-model-reasoning-options>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenRouterReasoningInfo {
     /// Whether effort selection is exposed at all (`supported_efforts`
     /// present in the catalog).
     pub effort_selectable: bool,
-    /// Accepted efforts, highest first; `None` with `effort_selectable` means
+    /// Accepted efforts, highest first. `None` with `effort_selectable` means
     /// every effort is accepted. Kept as strings so new levels don't break
     /// parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,7 +106,7 @@ pub struct OpenRouterCatalog {
 
 impl OpenRouterCatalog {
     /// Parses a models-list response body (`{"data": [...]}`). Entries that
-    /// can't be read are skipped; unknown fields are ignored.
+    /// can't be read are skipped. Unknown fields are ignored.
     pub fn from_json(body: &str) -> Result<Self, Error> {
         Self::parse(body, CatalogSource::Supplied)
     }
@@ -167,7 +167,7 @@ impl OpenRouterCatalog {
     /// The model with this slug or canonical slug. A variant suffix
     /// (`:floor`, `:nitro`, `:thinking`, ...) not listed on its own resolves
     /// to the base model, and a combined `model@preset/slug` reference to its
-    /// model; the returned model keeps the requested slug.
+    /// model. The returned model keeps the requested slug.
     pub fn get(&self, slug: &str) -> Option<Model> {
         let mut model = self.models[self.position(slug)?].clone();
         model.id = slug.to_string();

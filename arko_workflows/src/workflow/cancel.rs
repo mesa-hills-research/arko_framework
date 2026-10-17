@@ -6,7 +6,7 @@
 //! running agent is told to stop, and every run call in progress or made
 //! later returns the stop's error: [`WorkflowError::Cancelled`] or
 //! [`WorkflowError::AbortedByHook`]. A graceful stop with a wrap-up first
-//! lets running agents finish; see [`stop`](crate::workflow::stop).
+//! lets running agents finish. See [`stop`](crate::workflow::stop).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +22,7 @@ use crate::error::WorkflowError;
 use crate::workflow::stop::{RunStopIntent, StopKind, StopRecord, StopRequest};
 
 /// How long a stopped run waits for each running agent to stop before it
-/// aborts the agent; see [`WorkflowBuilder::cancel_grace_period`](crate::WorkflowBuilder::cancel_grace_period).
+/// aborts the agent. See [`WorkflowBuilder::cancel_grace_period`](crate::WorkflowBuilder::cancel_grace_period).
 pub const DEFAULT_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
 /// Why a workflow run was stopped.
@@ -35,7 +35,7 @@ pub enum CancelCause {
     /// The run was stopped with a [`StopRequest`]
     /// ([`Workflow::stop`](crate::Workflow::stop)), after its wrap-up if it
     /// had one. In a [`Cancellation`] it is saved in a form older versions
-    /// read as [`Requested`](Self::Requested); see [`Cancellation`].
+    /// read as [`Requested`](Self::Requested). See [`Cancellation`].
     Stopped { kind: StopKind, reason: String },
 }
 
@@ -76,7 +76,7 @@ impl CancelCause {
 ///
 /// A [`CancelCause::Stopped`] cause is saved as `"cause": "Requested"` with
 /// its kind and reason in a `stop` field beside it, so that versions from
-/// before graceful stops read it as a plain cancellation; this version reads
+/// before graceful stops read it as a plain cancellation. This version reads
 /// it back as `Stopped`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "CancellationRepr", into = "CancellationRepr")]
@@ -148,7 +148,7 @@ struct RunStop {
     id: uuid::Uuid,
     /// What its result records (`intent` set).
     record: StopRecord,
-    /// What the run is told; `None` for a stop without a wrap-up.
+    /// What the run is told. `None` for a stop without a wrap-up.
     notice: Option<String>,
     /// The run was given the notice: its completion reports progress.
     told: bool,
@@ -183,7 +183,7 @@ pub(crate) enum RunStopBegun {
     /// stopped, or the run is being stopped already and the request has a
     /// wrap-up too.
     Unchanged,
-    /// The run is told to wrap up; the caller times it (stop `id`).
+    /// The run is told to wrap up. The caller times it (stop `id`).
     WrapUp(uuid::Uuid),
     /// The run is being cancelled.
     Cancelled,
@@ -206,7 +206,7 @@ pub(crate) struct RunControl {
     /// ([`TaskContext::stop`](arko_agents::TaskContext::stop)) when the run
     /// starts stopping: at a wrap-up's start, or at the stop.
     tools_stop: arko_agents::StopSource,
-    /// A graceful stop in its wrap-up; taken when the run stops. Locked
+    /// A graceful stop in its wrap-up. Taken when the run stops. Locked
     /// before `state` is changed.
     wrap_up: parking_lot::Mutex<Option<WrapUpState>>,
     /// The stop the host asked for, once one began: a stop request's (from
@@ -323,7 +323,7 @@ impl RunControl {
         let _ = receiver.wait_for(Option::is_some).await;
     }
 
-    /// Registers a started agent's command channel; an agent started after
+    /// Registers a started agent's command channel. An agent started after
     /// the stop is sent `CancelTask` at once.
     pub fn register(&self, task_id: uuid::Uuid, sender: &mpsc::Sender<UserCommand>) {
         {
@@ -359,7 +359,7 @@ impl RunControl {
     }
 
     /// Records agent run `task_id` as running from its launch (`review`: a
-    /// completion verifier's review; `parent`: the run inside whose tool
+    /// completion verifier's review, `parent`: the run inside whose tool
     /// call it runs), and returns the stop signal its tools see, and the
     /// launch's number for [`unregister`](Self::unregister). The signal
     /// fires when the workflow starts stopping (at once if it has), and when
@@ -420,9 +420,9 @@ impl RunControl {
 
     /// Begins a stop of agent run `task_id` alone, recorded as `record`:
     /// with a wrap-up (`notice`), the run's tools see their stop signal and
-    /// the run is told at its next turn boundary; without one, it is
+    /// the run is told at its next turn boundary. Without one, it is
     /// cancelled at once. A request without a wrap-up during the run's
-    /// wrap-up cancels it at once (the first stop's record stands); one with
+    /// wrap-up cancels it at once (the first stop's record stands). One with
     /// a wrap-up changes nothing.
     pub fn begin_run_stop(
         &self,
@@ -466,7 +466,7 @@ impl RunControl {
     /// Cancels agent run `task_id` for its own stop (stop `id`, when given:
     /// a wrap-up's timer cancels only the stop it was started for), unless
     /// it is being cancelled already. Its driver winds it down within the
-    /// grace period; a run driven through `into_parts` is sent `CancelTask`.
+    /// grace period. A run driven through `into_parts` is sent `CancelTask`.
     /// Returns whether this call cancelled it.
     ///
     /// The runs inside its tool calls that are being stopped alone (with it)
@@ -515,7 +515,7 @@ impl RunControl {
     }
 
     /// Set, with the reason, once agent run `task_id`'s own stop cancels
-    /// it; `None` for a run that isn't running.
+    /// it. `None` for a run that isn't running.
     pub fn run_cancel(&self, task_id: uuid::Uuid) -> Option<watch::Receiver<Option<String>>> {
         self.runs
             .lock()
@@ -659,8 +659,8 @@ impl RunControl {
 
     /// The stop that ended agent run `task_id` with `status`, if a stop the
     /// host asked for did: the run's own stop, when it has one and the run
-    /// was cancelled, interrupted, or completed after a wrap-up notice;
-    /// otherwise the workflow's, for a run cancelled once the run is
+    /// was cancelled, interrupted, or completed after a wrap-up notice.
+    /// Otherwise the workflow's, for a run cancelled once the run is
     /// stopped (by a stop request or a cancellation), or a run that
     /// completed after it was given the wrap-up notice.
     pub fn stopped_by(
@@ -719,13 +719,13 @@ impl RunControl {
 
 /// Cancels or stops a workflow run from any task or thread.
 ///
-/// Obtained from [`Workflow::cancel_handle`](crate::Workflow::cancel_handle);
-/// clones cancel the same run. [`cancel`](Self::cancel) tells every running
+/// Obtained from [`Workflow::cancel_handle`](crate::Workflow::cancel_handle).
+/// Clones cancel the same run. [`cancel`](Self::cancel) tells every running
 /// agent of the run to stop (`CancelTask`) and makes run calls in progress,
 /// and every later one, return [`WorkflowError::Cancelled`]. Each call in
 /// progress returns once its agents have stopped, or have been aborted after
 /// the run's grace period. [`stop`](Self::stop) does the same for a
-/// [`StopRequest`], after its wrap-up if it has one; see
+/// [`StopRequest`], after its wrap-up if it has one. See
 /// [`stop_on_signals`](crate::workflow::stop::stop_on_signals) for Ctrl-C
 /// and `SIGTERM`.
 #[derive(Clone)]
@@ -760,7 +760,7 @@ impl WorkflowCancelHandle {
         true
     }
 
-    /// Stops the run gracefully; see [`Workflow::stop`](crate::Workflow::stop).
+    /// Stops the run gracefully. See [`Workflow::stop`](crate::Workflow::stop).
     pub fn stop(&self, request: StopRequest) -> bool {
         let StopRequest {
             kind,
@@ -827,7 +827,7 @@ impl WorkflowCancelHandle {
     }
 
     /// Stops agent run `agent_run_id` alone, with the runs inside its tool
-    /// calls; see [`Workflow::stop_run`](crate::Workflow::stop_run).
+    /// calls. See [`Workflow::stop_run`](crate::Workflow::stop_run).
     pub fn stop_run(
         &self,
         agent_run_id: uuid::Uuid,
@@ -840,7 +840,7 @@ impl WorkflowCancelHandle {
         self.stop_one(&context, agent_run_id, &request, intent)
     }
 
-    /// Stops every running run of `agent_name` alone; see
+    /// Stops every running run of `agent_name` alone. See
     /// [`Workflow::stop_agent`](crate::Workflow::stop_agent).
     pub fn stop_agent(
         &self,
@@ -979,7 +979,7 @@ impl WorkflowCancelHandle {
     }
 
     /// Whether the run is stopped, by cancellation, a stop or a hook's abort
-    /// (`false` during a graceful stop's wrap-up; see [`is_stopping`](Self::is_stopping)).
+    /// (`false` during a graceful stop's wrap-up, see [`is_stopping`](Self::is_stopping)).
     pub fn is_cancelled(&self) -> bool {
         self.control.is_stopped()
     }

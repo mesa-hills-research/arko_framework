@@ -19,10 +19,10 @@
 //!
 //! Reports, failures, stops and messages go through a mailbox kept per run.
 //! An item reaches its recipient in the first way that applies:
-//! - a `wait_for_agents` call that waits for it returns it, whole;
+//! - a `wait_for_agents` call that waits for it returns it, whole.
 //! - while the recipient runs, at its next turn boundary, in its
 //!   `# Workflow context update` (a long item as an excerpt, with the file
-//!   that holds all of it);
+//!   that holds all of it).
 //! - otherwise it waits in the mailbox. A subagent that had finished is
 //!   continued with it. For a run the host drives, the workflow sends
 //!   [`SubagentEventKind::NewsWaiting`]: the host continues the run (with
@@ -75,18 +75,18 @@ pub const DEFAULT_MAX_PEER_MESSAGES: u32 = 20;
 /// (`wait_for_agents` returns it whole).
 pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 
-/// About this many bytes of mail go into one context update; the rest come
+/// About this many bytes of mail go into one context update. The rest come
 /// at the next turn boundary. The first item always goes.
 pub const UPDATE_MAX_MAIL_BYTES: usize = 48 * 1024;
 
-/// How background subagents work in a workflow; see the [module](self).
+/// How background subagents work in a workflow. See the [module](self).
 ///
 /// Who may start which agent is
 /// [`WorkflowServicesConfig`](crate::services::WorkflowServicesConfig)'s
 /// callers and targets.
 #[derive(Clone)]
 pub struct SubagentsConfig {
-    /// At most this many subagents run at once, workflow-wide; a start (or a
+    /// At most this many subagents run at once, workflow-wide. A start (or a
     /// restart) over it waits in a queue, first come first served. `None`:
     /// any number. Default [`DEFAULT_MAX_RUNNING`].
     pub max_running: Option<NonZeroUsize>,
@@ -122,7 +122,7 @@ pub struct SubagentsConfig {
     /// Adjusts a subagent's configuration as it starts.
     pub hook: Option<Arc<dyn SubagentHook>>,
     /// Context for each run's first message, such as the project's
-    /// instructions; see [`StartContext`].
+    /// instructions. See [`StartContext`].
     pub start_context: Option<StartContext>,
     /// The host's own `start_agent` parameters, whose values the
     /// [hook](Self::hook) receives.
@@ -179,7 +179,7 @@ impl std::fmt::Debug for SubagentsConfig {
 }
 
 impl SubagentsConfig {
-    /// At most `max` subagents run at once (at least 1); see
+    /// At most `max` subagents run at once (at least 1). See
     /// [`max_running`](Self::max_running).
     pub fn max_running(mut self, max: usize) -> Self {
         self.max_running = NonZeroUsize::new(max.max(1));
@@ -240,14 +240,14 @@ impl SubagentsConfig {
         self
     }
 
-    /// Adjusts each subagent's configuration as it starts; see
+    /// Adjusts each subagent's configuration as it starts. See
     /// [`SubagentHook`].
     pub fn hook(mut self, hook: Arc<dyn SubagentHook>) -> Self {
         self.hook = Some(hook);
         self
     }
 
-    /// Gives each run context in its first message; see [`StartContext`].
+    /// Gives each run context in its first message. See [`StartContext`].
     pub fn start_context(mut self, context: StartContext) -> Self {
         self.start_context = Some(context);
         self
@@ -534,7 +534,7 @@ impl MailItem {
     }
 
     /// The item as a context update shows it: whole, or for a long body an
-    /// excerpt with the file holding all of it; every line after the first
+    /// excerpt with the file holding all of it. Every line after the first
     /// indented.
     pub(crate) fn excerpt(&self) -> String {
         let body = self.body.trim();

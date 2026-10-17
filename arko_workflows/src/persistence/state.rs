@@ -33,7 +33,7 @@ pub struct WorkflowState {
     #[serde(default)]
     pub freshness_snapshot: Option<FreshnessSnapshot>,
     /// Finalized agent results with their tasks, as checkpoints before
-    /// [`agent_runs`](Self::agent_runs) held them; empty in newer ones.
+    /// [`agent_runs`](Self::agent_runs) held them. Empty in newer ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_results: Vec<AgentResult>,
     /// Finalized agent results, each referring to the version of its task
@@ -91,7 +91,7 @@ pub struct WorkflowState {
 /// The budget limits a checkpoint records.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BudgetLimits {
-    /// The workflow's limit in dollars; `None`: no limit.
+    /// The workflow's limit in dollars. `None`: no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<f64>,
     /// The agents' own limits in dollars, by agent name.
@@ -165,7 +165,7 @@ impl WorkflowState {
     /// whose tasks are in the task files of `run_dir`, the directory
     /// holding the checkpoint. A run whose latest state the checkpoint
     /// lacks ([`missing_task_states`](Self::missing_task_states)) is
-    /// restored as last saved, and one never saved isn't; each is logged
+    /// restored as last saved, and one never saved isn't. Each is logged
     /// as a warning.
     pub fn agent_results_in(
         &self,
@@ -365,7 +365,7 @@ mod tests {
 
     /// A checkpoint from before the task journal (its run records without
     /// `usage_charged`, its tasks without `parent` or running calls) still
-    /// loads; a record of a run that was running loads interrupted, without
+    /// loads. A record of a run that was running loads interrupted, without
     /// a warning, whatever state its task was saved in.
     #[test]
     fn records_from_before_the_task_journal_still_load() {
@@ -442,7 +442,7 @@ mod tests {
     }
 
     /// An agent cancelled before cancellation had its own task state was
-    /// saved as failed with the runtime's cancellation reason; it loads as
+    /// saved as failed with the runtime's cancellation reason. It loads as
     /// cancelled.
     #[test]
     fn a_checkpointed_legacy_cancellation_loads_as_cancelled() {

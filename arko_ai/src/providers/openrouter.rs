@@ -5,9 +5,9 @@
 //! Library-neutral by default: no attribution or metadata headers are sent
 //! (see [`AppAttribution`] to opt in), no model fallbacks, no network call
 //! beyond the requests you make. Models are dynamic slugs
-//! ([`Model::openrouter`]); the catalog ([`OpenRouterClient::fetch_models`])
+//! ([`Model::openrouter`]). The catalog ([`OpenRouterClient::fetch_models`])
 //! adds limits, prices and request validation.
-//! https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion
+//! <https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion>
 
 mod catalog;
 mod options;
@@ -48,7 +48,7 @@ use std::{
     time::Duration,
 };
 
-/// Default API base URL; chat requests go to `{base}/chat/completions`.
+/// Default API base URL. Chat requests go to `{base}/chat/completions`.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// A client for OpenRouter. Clones share the loaded catalog.
@@ -104,7 +104,7 @@ impl OpenRouterClient {
         self
     }
 
-    /// Options applied to every request; per-request
+    /// Options applied to every request. Per-request
     /// [`GenerationConfig::openrouter`] options override them field by field.
     pub fn with_default_options(mut self, options: OpenRouterOptions) -> Self {
         self.default_options = options;
@@ -182,7 +182,7 @@ impl OpenRouterClient {
     }
 
     /// The catalog model for `slug` when a catalog is loaded (failing for
-    /// slugs it doesn't list; presets such as `@preset/name` are never
+    /// slugs it doesn't list, presets such as `@preset/name` are never
     /// listed and pass, and `model@preset/name` resolves to its model), else
     /// [`Model::openrouter`].
     pub fn resolve_model(&self, slug: &str) -> Result<Model, Error> {
@@ -234,11 +234,11 @@ impl OpenRouterClient {
 ///
 /// - `error.metadata.error_type` `refusal` (the provider refused as an error,
 ///   for example a GPT-6 `bio_policy` block) becomes [`Error::Refusal`] with
-///   [`RefusalSource::SafetyClassifier`]; `content_policy_violation` and
+///   [`RefusalSource::SafetyClassifier`]. `content_policy_violation` and
 ///   moderation flags (`metadata.reasons` / `flagged_input` on a 403) become
 ///   [`RefusalSource::ContentFilter`]. Never retryable.
 /// - A 402 is retryable only for the in-flight budget
-///   (`limit_source: openrouter_in_flight_budget`) with a delay; exhausted
+///   (`limit_source: openrouter_in_flight_budget`) with a delay. Exhausted
 ///   credits or key limits are permanent.
 /// - "No available model provider meets your routing requirements" or "No
 ///   allowed providers" (503 or 404) is a permanent configuration error

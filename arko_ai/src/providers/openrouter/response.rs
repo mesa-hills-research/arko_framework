@@ -1,7 +1,7 @@
 //! Response and stream parsing: text, refusals, tool calls, verbatim
 //! `reasoning_details`, stop reasons, usage and cost.
 //!
-//! Unknown fields and enum values are ignored; OpenRouter adds them without
+//! Unknown fields and enum values are ignored. OpenRouter adds them without
 //! notice.
 
 use super::openrouter_error;
@@ -53,7 +53,7 @@ impl ResponseContext {
     /// Responses name the model by its dated permaslug, whose name can differ
     /// from the requested slug's (`anthropic/claude-4.5-sonnet-20250929` for
     /// `anthropic/claude-sonnet-4.5`). With the catalog's canonical slug the
-    /// comparison is exact; without it only changes arko can recognize count:
+    /// comparison is exact. Without it only changes arko can recognize count:
     /// routers, `~` aliases and presets, configured fallbacks, or another
     /// vendor. Variant suffixes and trailing dates are ignored.
     fn served_model_changed(&self, served: &str) -> bool {
@@ -243,8 +243,8 @@ impl ToolCallAssembler {
 /// Merges streamed `reasoning_details` chunks into whole items. Chunks with
 /// the same `index` and `type` are one item: `text`, `summary` and `data`
 /// are concatenated and any other non-null field (signature, id, format)
-/// is taken. OpenRouter documents only that chunks "concatenate in order";
-/// this rule is to be confirmed against non-streaming output.
+/// is taken. OpenRouter documents only that chunks "concatenate in order".
+/// This rule is to be confirmed against non-streaming output.
 const REDACTED: &str = "[REDACTED]";
 
 #[derive(Debug, Default)]
@@ -455,7 +455,7 @@ pub(crate) fn parse_response(
 /// Parses a Chat Completions SSE byte stream. Comment lines (`:
 /// OPENROUTER PROCESSING` keep-alives) are skipped by the SSE parser. `End`
 /// is emitted once a finish reason was seen and the stream reached `[DONE]`
-/// or delivered its usage chunk; a stream that ends earlier yields
+/// or delivered its usage chunk, a stream that ends earlier yields
 /// [`Error::StreamTruncated`]. Error chunks (HTTP 200 already sent) become
 /// errors, refusals among them [`Error::Refusal`].
 pub(crate) fn stream_events<S, B, E>(
@@ -554,7 +554,7 @@ where
 /// |---|---|
 /// | `stop` | `EndTurn` (`ToolUse` with tool calls, `StopSequence` for a native `stop_sequence`) |
 /// | `tool_calls` | `ToolUse` |
-/// | `length` | `MaxTokens`; the first tool call with unfinished (invalid JSON) arguments is dropped with every call after it |
+/// | `length` | `MaxTokens`. The first tool call with unfinished (invalid JSON) arguments is dropped with every call after it |
 /// | `content_filter` | `Refusal`: `SafetyClassifier` for a native `refusal`, `Model` when `message.refusal` is set, else `ContentFilter` |
 /// | other | `Other(raw)` |
 ///
@@ -564,7 +564,7 @@ where
 /// arguments are complete (interleaved streams can finish a later call
 /// first): removing only the unfinished call would shift the later calls
 /// away from the positions their `ToolCallStart` events announced. The calls
-/// kept are a prefix, so each keeps its position; a dropped call may have
+/// kept are a prefix, so each keeps its position. A dropped call may have
 /// been announced by a `ToolCallStart` without appearing in the response.
 fn stop_and_refusal(
     message: &mut Message,
@@ -660,7 +660,7 @@ impl ReportedUsage {
     }
 
     /// `UsageInfo` for this usage. The reported `cost` is what was charged
-    /// (`BillingKind::ProviderReported`); with BYOK it is OpenRouter's fee and
+    /// (`BillingKind::ProviderReported`). With BYOK it is OpenRouter's fee and
     /// the provider's own charge is `upstream_cost`, both billed. Only when
     /// no cost is reported is the call estimated from the model's prices.
     pub(crate) fn usage_info(

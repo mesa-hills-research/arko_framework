@@ -7,12 +7,12 @@
 //!
 //! - an agent's initial prompt lists its permitted recipients with their
 //!   statuses from a registry snapshot, and the run records the snapshot's
-//!   version as seen;
+//!   version as seen.
 //! - at each safe turn boundary a running agent is told about every
 //!   permitted recipient that started after the version it has seen, and
 //!   then has seen the current version (start notices are derived from the
 //!   registry, not queued when an agent starts, so no ordering of starts
-//!   loses or repeats one);
+//!   loses or repeats one).
 //! - `list_recipients` reports current statuses.
 //!
 //! A watch channel publishes the version, so `wait_for_message` wakes when
@@ -62,10 +62,10 @@ pub enum AgentStatus {
     NotStarted,
     /// A run of the agent is running.
     Running,
-    /// Every running run of the agent is waiting; the reason is one of
+    /// Every running run of the agent is waiting. The reason is one of
     /// theirs.
     Waiting(WaitReason),
-    /// No run is running; the latest ended with this outcome.
+    /// No run is running. The latest ended with this outcome.
     Finished(AgentRunStatus),
 }
 
@@ -133,7 +133,7 @@ pub struct AgentRecord {
     pub last_finish: u64,
 }
 
-/// A change in an agent's activity a run is told about; see
+/// A change in an agent's activity a run is told about. See
 /// [`AgentRegistry::changes_since_seen`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActivityChange {
@@ -188,7 +188,7 @@ struct RegistryState {
 
 /// A recovery's claim on the interrupted run it recovers (see
 /// [`AgentRegistry::claim_recovery`]). Held until the recovery has recorded
-/// the run's outcome; dropping it wakes the recoveries waiting for it.
+/// the run's outcome. Dropping it wakes the recoveries waiting for it.
 pub(crate) struct RecoveryClaim(#[allow(dead_code)] watch::Sender<()>);
 
 /// The status registry of one workflow run.
@@ -256,7 +256,7 @@ impl AgentRegistry {
         }
     }
 
-    /// Publishes `state`'s version; called with the state lock held, so
+    /// Publishes `state`'s version. Called with the state lock held, so
     /// versions are published in order.
     fn publish(&self, state: &RegistryState) {
         let version = state.saved.version;
@@ -340,7 +340,7 @@ impl AgentRegistry {
     }
 
     /// Marks run `task_id` of `agent` running, as [`start`](Self::start)
-    /// does, unless it is running already; returns whether it was marked.
+    /// does, unless it is running already. Returns whether it was marked.
     pub fn start_unless_running(&self, task_id: Uuid, agent: &str) -> bool {
         let mut guard = self.state.lock();
         if guard.runs.contains_key(&task_id) {
@@ -392,7 +392,7 @@ impl AgentRegistry {
 
     /// Removes a run marked running whose start then failed. When no other
     /// run of its agent is running and this run made the agent's latest
-    /// start, the agent's previous record is restored; otherwise the record
+    /// start, the agent's previous record is restored. Otherwise the record
     /// keeps the outcome of the agent's runs that did run.
     pub fn abandon(&self, task_id: Uuid) {
         let mut guard = self.state.lock();
@@ -411,8 +411,8 @@ impl AgentRegistry {
         self.publish(state);
     }
 
-    /// Records that a run ended with `outcome`, the agent's latest outcome;
-    /// the agent is finished once no other run of it is running. What a run
+    /// Records that a run ended with `outcome`, the agent's latest outcome.
+    /// The agent is finished once no other run of it is running. What a run
     /// that can't be continued has seen is forgotten.
     pub fn finish(&self, task_id: Uuid, outcome: AgentRunStatus) {
         let mut guard = self.state.lock();
@@ -571,7 +571,7 @@ impl AgentRegistry {
             .collect()
     }
 
-    /// The statuses of `agents` now; `paused` reports running agents as
+    /// The statuses of `agents` now. `paused` reports running agents as
     /// waiting for the paused workflow.
     pub fn statuses(&self, agents: &[String], paused: bool) -> Vec<(String, AgentStatus)> {
         let state = self.state.lock();
@@ -600,7 +600,7 @@ impl AgentRegistry {
     }
 
     /// The recipients (of `recipients`) that started after the version run
-    /// `task_id` has seen and are still running, in order; the run has then
+    /// `task_id` has seen and are still running, in order. The run has then
     /// seen the current version. A run without a seen version (a task from
     /// an older checkpoint) is told about every running recipient.
     #[cfg(test)]
@@ -895,7 +895,7 @@ mod tests {
     }
 
     /// A run in `wait_for_message` is waiting until the tool says otherwise,
-    /// whatever events the driver observes meanwhile; a pause still reports
+    /// whatever events the driver observes meanwhile. A pause still reports
     /// paused. Each change is a new, published version.
     #[test]
     fn a_run_awaiting_a_message_waits_until_the_tool_ends_the_wait() {
@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     /// A run is told once when a recipient finishes after its roster, only
-    /// when the recipient's last running run ends; a recipient that started
+    /// when the recipient's last running run ends. A recipient that started
     /// and finished since is reported finished, and a finish before the
     /// roster is not reported.
     #[test]

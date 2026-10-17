@@ -47,7 +47,7 @@ pub struct ToolCall {
     pub id: Option<String>,
     pub name: String,
     /// Parsed arguments. `Value::Null` when the provider returned text that
-    /// is not valid JSON; see [`invalid_arguments`](Self::invalid_arguments).
+    /// is not valid JSON. See [`invalid_arguments`](Self::invalid_arguments).
     pub arguments: serde_json::Value,
     /// Opaque Gemini signature for this function call.
     ///
@@ -72,7 +72,7 @@ pub struct ToolCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     /// The raw argument text when it was not valid JSON. Such a call must
-    /// not be executed; report the problem to the model instead. The text is
+    /// not be executed. Report the problem to the model instead. The text is
     /// replayed verbatim to providers that accept argument strings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid_arguments: Option<String>,
@@ -80,7 +80,7 @@ pub struct ToolCall {
 
 impl ToolCall {
     /// Builds a call from provider argument text. Empty text means no
-    /// arguments; text that isn't valid JSON is kept in `invalid_arguments`.
+    /// arguments. Text that isn't valid JSON is kept in `invalid_arguments`.
     pub(crate) fn from_argument_text(id: Option<String>, name: String, text: &str) -> Self {
         let (arguments, invalid_arguments) = if text.trim().is_empty() {
             (serde_json::Value::Object(Default::default()), None)
@@ -102,7 +102,7 @@ impl ToolCall {
 
     /// Arguments for providers that require a JSON object when the call is
     /// sent back as history (Anthropic `tool_use.input`, Gemini
-    /// `function_call.arguments`). Invalid arguments become `{}`; the
+    /// `function_call.arguments`). Invalid arguments become `{}`. The
     /// accompanying tool result tells the model what went wrong.
     pub(crate) fn replay_arguments(&self) -> serde_json::Value {
         if self.invalid_arguments.is_some() {
@@ -130,13 +130,13 @@ pub struct ToolResult {
     pub name: String,
     pub output: String,
     /// When `true`, indicates that the tool execution failed. Anthropic
-    /// and Google Gemini surface this to the model via `is_error`; for
+    /// and Google Gemini surface this to the model via `is_error`. For
     /// OpenAI the error details in `output` convey the failure.
     pub is_error: bool,
     /// Images the tool returned with its output (a screenshot, a rendered
     /// chart). Where the model accepts images inside a tool result
     /// ([`Model::accepts_tool_result_images`]) they are sent inside this
-    /// result, after the output text; otherwise they follow all of the
+    /// result, after the output text. Otherwise they follow all of the
     /// turn's results, each after the text
     /// `"Image from tool {name}, call {call_id}: {label}"`. Results without
     /// images are sent exactly as before this field existed, and results
@@ -200,7 +200,7 @@ impl ToolResult {
         }
     }
 
-    /// Attaches images the tool returned; see [`images`](Self::images).
+    /// Attaches images the tool returned. See [`images`](Self::images).
     pub fn with_images(mut self, images: Vec<ToolResultImage>) -> Self {
         self.images = images;
         self
@@ -248,7 +248,7 @@ pub struct ToolConfig {
     ///   per turn.
     ///
     /// Supported by OpenAI and Anthropic. Google Gemini does **not**
-    /// support disabling parallel tool calls; setting this to
+    /// support disabling parallel tool calls. Setting this to
     /// `Some(false)` for a Gemini model will return
     /// [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature).
     #[serde(skip_serializing_if = "Option::is_none")]

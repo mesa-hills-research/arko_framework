@@ -24,7 +24,7 @@ pub struct SharedContext {
     pub durable_store: Option<Arc<crate::durable::DurableStore>>,
     pub memory: MemoryStore,
     pub messages: MessageBus,
-    /// Who may message whom with `send_message`; `None` disables it.
+    /// Who may message whom with `send_message`. `None` disables it.
     pub messaging: Option<crate::messaging::MessagingPolicy>,
     /// How long `wait_for_message` waits, for the workflow and per agent.
     pub(crate) wait_timeouts: crate::messaging::wait::WaitTimeouts,
@@ -99,7 +99,7 @@ pub struct SharedContext {
 /// How `run_agents_parallel` runs its agents.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ParallelSettings {
-    /// At most this many at once; `None`: all at once.
+    /// At most this many at once. `None`: all at once.
     pub max_agents: Option<usize>,
     /// The first failure stops the others.
     pub fail_fast: bool,
@@ -108,14 +108,14 @@ pub(crate) struct ParallelSettings {
 impl SharedContext {
     /// The agents `agent_name` may message with `send_message`: registered
     /// agents other than itself that the messaging policy permits. Empty when
-    /// messaging is disabled; the agent is then not offered the tool.
+    /// messaging is disabled. The agent is then not offered the tool.
     pub fn message_recipients(&self, agent_name: &str) -> Vec<String> {
         self.messaging.as_ref().map_or_else(Vec::new, |policy| {
             policy.recipients_of(agent_name, &self.messages.roster())
         })
     }
 
-    /// Whether messages to a finished agent are kept for its next run; see
+    /// Whether messages to a finished agent are kept for its next run. See
     /// [`MessagingPolicy::keep_for_finished`](crate::messaging::MessagingPolicy::keep_for_finished).
     pub fn keeps_messages_for_finished(&self) -> bool {
         self.messaging
@@ -125,7 +125,7 @@ impl SharedContext {
 
     /// The agents that may message `agent_name` with `send_message`:
     /// registered agents other than itself whose messaging policy permits it.
-    /// Empty when messaging is disabled; the agent is then not offered
+    /// Empty when messaging is disabled. The agent is then not offered
     /// `wait_for_message`.
     pub fn message_senders(&self, agent_name: &str) -> Vec<String> {
         self.messaging.as_ref().map_or_else(Vec::new, |policy| {

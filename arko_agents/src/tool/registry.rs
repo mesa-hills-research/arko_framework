@@ -90,7 +90,7 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
-    /// A registry with only the tools of this one that `names` lists; names
+    /// A registry with only the tools of this one that `names` lists. Names
     /// not registered here are skipped. The runtime runs a task with the
     /// tools its configuration offers
     /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names)).

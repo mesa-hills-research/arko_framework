@@ -112,7 +112,7 @@ impl ToolServer {
         format!("mcp__{}__{}", self.name, tool)
     }
 
-    /// Answers one JSON-RPC message; `None` for a notification.
+    /// Answers one JSON-RPC message. `None` for a notification.
     pub(super) async fn handle(&self, message: &Value) -> Option<Value> {
         let id = message.get("id").cloned()?;
         let method = message

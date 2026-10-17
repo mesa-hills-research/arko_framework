@@ -367,7 +367,7 @@ mod request_tests {
         conversation
     }
 
-    /// Settings for another provider change nothing in the request; before,
+    /// Settings for another provider change nothing in the request. Before,
     /// the direct providers ignored them silently (and OpenAI rejected
     /// another provider's reasoning on non-reasoning models).
     #[test]

@@ -37,7 +37,7 @@ impl std::fmt::Debug for TokenCounter {
 }
 
 /// Loads one reusable, untruncated tokenizer per repository/revision. Failed downloads
-/// remain retryable; concurrent loads of the same revision share one initialization.
+/// remain retryable. Concurrent loads of the same revision share one initialization.
 /// Call from a blocking worker when the tokenizer is not already cached.
 pub(crate) fn load_tokenizer(
     id: &str,
@@ -89,9 +89,9 @@ pub(crate) fn load_tokenizer(
 
 /// Why a tokenizer failed to load. Tokenizers come from the Hugging Face Hub
 /// on first use and are then read from its cache with no network request, so
-/// a failed download says what to do without network access to the Hub; a
+/// a failed download says what to do without network access to the Hub. A
 /// Hub that answers 404 has no such repository or revision (a pinned
-/// revision the repository doesn't have), which is said plainly; other
+/// revision the repository doesn't have), which is said plainly. Other
 /// failures (an invalid id, a damaged cached file) are reported as they are.
 fn load_error(id: &str, revision: &str, error: impl std::fmt::Display) -> Error {
     let error = error.to_string();
@@ -121,8 +121,8 @@ fn is_download_failure(error: &str) -> bool {
         .any(|prefix| error.starts_with(prefix))
 }
 
-/// The Hugging Face cache lives in `HF_HOME`, else in the home directory;
-/// with neither, the Hub client can't place it (it would panic).
+/// The Hugging Face cache lives in `HF_HOME`, else in the home directory.
+/// With neither, the Hub client can't place it (it would panic).
 fn cache_location_error(
     hf_home: Option<&std::ffi::OsStr>,
     home: Option<&std::path::Path>,
@@ -220,7 +220,7 @@ mod tests {
     }
 
     /// A failed download says where tokenizers come from and what to set
-    /// without network access; other failures are reported plainly.
+    /// without network access. Other failures are reported plainly.
     #[test]
     fn only_download_failures_get_network_advice() {
         let download = load_error(

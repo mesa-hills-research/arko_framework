@@ -26,7 +26,7 @@ fn parsed_plain_text(events: &[RawParserEvent]) -> String {
 
 /// A model's turn, streamed to its end, for the turn phase.
 pub(super) struct StreamedTurn {
-    /// The final response, which the conversation holds; `None` for a
+    /// The final response, which the conversation holds. `None` for a
     /// stream that ended without one, its partial text kept.
     pub(super) response: Option<ai::GenerationResponse>,
     /// The output-based parser's events (none in native mode).
@@ -319,7 +319,7 @@ impl AgentLoop {
     /// A command that arrived while a response streamed. `CancelTask`,
     /// `SuspendTask` or a closed channel stops the stream: the partial
     /// text is kept, the calls it announced are rejected, and `true` says
-    /// the pass ends. Context and handover requests are taken; other
+    /// the pass ends. Context and handover requests are taken. Other
     /// commands are ignored.
     async fn on_stream_command(
         &mut self,

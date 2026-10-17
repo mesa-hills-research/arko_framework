@@ -91,7 +91,7 @@ pub fn resolve_path(path: &str, working_directory: &Path) -> std::io::Result<Pat
 /// is inside it (`./sub/file`, or `.` for the directory itself), else as it
 /// is. The relative form holds no `..` and starts with `.`, so a program run
 /// in the working directory opens the same file and can't read the path as
-/// an option; on Windows it also avoids handing programs a verbatim `\\?\`
+/// an option. On Windows it also avoids handing programs a verbatim `\\?\`
 /// path, which many of them mishandle.
 pub(crate) fn relative_to_working_directory(resolved: &Path, working_directory: &Path) -> PathBuf {
     let Ok(root) = absolute(working_directory).map(|root| normalize_path(&root)) else {

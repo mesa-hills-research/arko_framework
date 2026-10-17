@@ -66,10 +66,10 @@ type StreamingRefusals = BTreeMap<(String, u64), String>;
 
 const CHATGPT_OAUTH_DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CHATGPT_OAUTH_DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-/// Default Responses API base URLs; requests go to `{base}/responses`.
+/// Default Responses API base URLs. Requests go to `{base}/responses`.
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-/// ChatGPT backend sticky-routing token; see [`Conversation::openai_turn_state`].
+/// ChatGPT backend sticky-routing token. See [`Conversation::openai_turn_state`].
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 /// The ChatGPT backend's routing hint, `model=<model>` plus `;tier=<tier>`
 /// when a tier is sent, which Codex sends on every Codex-backend request
@@ -317,7 +317,7 @@ const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
 /// Timing of the opt-in OAuth refresh rate-limit loop.
 #[derive(Debug, Clone, Copy)]
 struct OAuthRefreshRetry {
-    /// 30 s doubling to a 15-minute cap; a server hint is a minimum.
+    /// 30 s doubling to a 15-minute cap. A server hint is a minimum.
     backoff: BackoffPolicy,
     /// The longest server hint one wait honors (the backoff's own cap), far
     /// below [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT):
@@ -365,7 +365,7 @@ fn is_rate_limited_refresh(error: &Error) -> bool {
 /// indefinitely.
 const OAUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Exchanges a ChatGPT OAuth refresh token for new tokens, once; an HTTP
+/// Exchanges a ChatGPT OAuth refresh token for new tokens, once. An HTTP
 /// failure (including a 429) is returned to the caller with its retry
 /// metadata. `client_id` and `token_url` default to the Codex CLI's. The
 /// request times out after 60 seconds (a transient [`Error::HttpError`]).
@@ -503,14 +503,14 @@ pub struct OpenAIClient {
     /// [`OAUTH_REFRESH_TIMEOUT`]. Tests shorten it, and turn it off under a
     /// paused clock (which jumps ahead while test I/O is under way).
     oauth_refresh_timeout: Option<Duration>,
-    /// Timing of the opt-in rate-limit retries of a refresh; tests shorten it.
+    /// Timing of the opt-in rate-limit retries of a refresh. Tests shorten it.
     oauth_refresh_retry: OAuthRefreshRetry,
     /// The organization refused reasoning summaries (it isn't verified for
     /// them): requests ask for none from then on. Shared by clones.
     summaries_refused: Arc<AtomicBool>,
 }
 
-/// What a refresh replaces; checked once the credential lock is held.
+/// What a refresh replaces. Checked once the credential lock is held.
 #[derive(Clone)]
 enum RefreshTarget {
     /// The credentials held when [`auth_epoch`](OpenAIClient::auth_epoch) had
@@ -683,13 +683,13 @@ impl OpenAIClient {
         self
     }
 
-    /// Writes every request and response to `trace`; see [`RequestTrace`].
+    /// Writes every request and response to `trace`. See [`RequestTrace`].
     pub fn with_request_trace(mut self, trace: Option<RequestTrace>) -> Self {
         self.trace = trace;
         self
     }
 
-    /// Installs a hook that can adjust each request; see [`OpenAIRequestHook`].
+    /// Installs a hook that can adjust each request. See [`OpenAIRequestHook`].
     pub fn with_request_hook(mut self, hook: Option<Arc<dyn OpenAIRequestHook>>) -> Self {
         self.request_hook = hook;
         self
@@ -715,7 +715,7 @@ impl OpenAIClient {
         self.install_auth(&mut slot, auth);
     }
 
-    /// Replaces the credentials; `slot` is the locked `auth`.
+    /// Replaces the credentials. `slot` is the locked `auth`.
     fn install_auth(&self, slot: &mut OpenAIAuth, auth: OpenAIAuth) {
         *slot = auth;
         self.auth_epoch.fetch_add(1, Ordering::SeqCst);
@@ -807,7 +807,7 @@ impl OpenAIClient {
     ///
     /// Returns `Ok(Some(_))` when this call installed new credentials:
     /// refreshed ones, or ones another program stored (adopted without a
-    /// refresh when they don't expire within `margin`; refreshed otherwise).
+    /// refresh when they don't expire within `margin`, refreshed otherwise).
     /// Returns `Ok(None)` when the credentials held don't expire within
     /// `margin` (including ones another caller installed while this call
     /// waited), and for API-key clients.
@@ -893,7 +893,7 @@ impl OpenAIClient {
     /// Refresh attempts for `target`. When `retry_rate_limits` is on, an
     /// HTTP 429 is waited out (up to [`OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES`]
     /// times) with no lock held, so the wait can be cancelled and other
-    /// callers go on; each attempt takes the locks again and checks `target`
+    /// callers go on. Each attempt takes the locks again and checks `target`
     /// again, since another caller may have refreshed meanwhile.
     async fn refresh(
         &self,
@@ -927,7 +927,7 @@ impl OpenAIClient {
     /// read to installing and storing new tokens, nothing can be lost to the
     /// caller being dropped (a refresh token rotates when the request
     /// succeeds, whether or not anyone reads the response). Dropping the
-    /// caller while it waits for the locks cancels the attempt; a runtime
+    /// caller while it waits for the locks cancels the attempt. A runtime
     /// shutting down cancels the task too.
     ///
     /// The store's lock comes first so that a client waiting for another
@@ -1119,7 +1119,7 @@ impl OpenAIClient {
     }
 
     /// Replaces the ChatGPT OAuth credentials only if the client still holds
-    /// `expected`; returns whether it did.
+    /// `expected`. Returns whether it did.
     pub(crate) async fn replace_chatgpt_credentials(
         &self,
         expected: &ChatGptOAuthCredentials,
@@ -1528,7 +1528,7 @@ impl ProviderClient for OpenAIClient {
 
 impl OpenAIClient {
     /// Parses a Responses API SSE byte stream. `End` is emitted only for a
-    /// `response.completed` or `response.incomplete` event; a stream that
+    /// `response.completed` or `response.incomplete` event. A stream that
     /// ends earlier yields [`Error::StreamTruncated`].
     #[cfg(test)]
     fn stream_events<S, B, E>(
@@ -1880,7 +1880,7 @@ impl OpenAIClient {
 
     /// The response's output items, in output order. Items streamed as
     /// `response.output_item.done` come first, as Codex builds its output
-    /// only from those; items only `response.completed.output` holds are
+    /// only from those. Items only `response.completed.output` holds are
     /// merged in at their output index. A non-streaming response has only
     /// the latter.
     fn assemble_output(streamed: &[(Option<u64>, Value)], completed: &[Value]) -> Vec<Value> {
@@ -1941,7 +1941,7 @@ impl OpenAIClient {
     }
 
     /// Normalizes a finished response. Refusal parts are the model declining
-    /// in its own words; `incomplete` responses carry their reason in
+    /// in its own words. `incomplete` responses carry their reason in
     /// `incomplete_details`.
     /// https://developers.openai.com/api/docs/guides/structured-outputs#refusals
     /// https://platform.openai.com/docs/api-reference/responses/object
@@ -2619,7 +2619,7 @@ impl OpenAIClient {
     /// [`ReasoningArtifact::OpenAIOutputItems`]). A `function_call` item is
     /// replayed only if the message still holds that call, so every
     /// replayed call gets an output (an application that drops a call, such
-    /// as an agent keeping a refused turn, drops its item too); calls the
+    /// as an agent keeping a refused turn, drops its item too). Calls the
     /// message holds without an item follow in the reconstructed shape.
     fn replay_output_items(input: &mut Vec<OpenAIInputEntry>, message: &Message, items: &[Value]) {
         let held: HashSet<&str> = message
@@ -2911,7 +2911,7 @@ impl OpenAIClient {
     /// items that aren't replayed: reasoning without `encrypted_content`
     /// (it can't be replayed with `store: false`), unfinished function
     /// calls, and item types arko doesn't request. Like Codex, `status` is
-    /// dropped; everything else is kept as sent.
+    /// dropped. Everything else is kept as sent.
     fn replay_item(item: &Value) -> Option<Value> {
         let replayable = match item.get("type").and_then(Value::as_str)? {
             "message" => true,
@@ -2938,7 +2938,7 @@ impl OpenAIClient {
     /// `input_tokens` already includes cached and written tokens and
     /// `output_tokens` includes reasoning tokens. On the API, the response's
     /// `service_tier` is the tier actually used (for example `default` when a
-    /// Fast request was downgraded); over ChatGPT OAuth the requested tier
+    /// Fast request was downgraded). Over ChatGPT OAuth the requested tier
     /// replaces it (see [`chatgpt_oauth_requested_tier`](Self::chatgpt_oauth_requested_tier)).
     /// https://developers.openai.com/api/docs/guides/prompt-caching
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
@@ -3158,7 +3158,7 @@ struct OpenAIResponse {
     incomplete_details: Option<Value>,
     #[serde(default)]
     model: String,
-    /// Output items as sent; see [`OpenAIClient::assemble_output`].
+    /// Output items as sent. See [`OpenAIClient::assemble_output`].
     #[serde(default)]
     output: Vec<Value>,
     usage: OpenAIUsage,

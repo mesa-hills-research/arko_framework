@@ -251,11 +251,11 @@ impl Workflow {
     /// connection failure) is listed too. Runs being recovered are not.
     ///
     /// Two kinds are listed:
-    /// - top-level runs (`task.parent` is `None`), which the host started;
+    /// - top-level runs (`task.parent` is `None`), which the host started.
     /// - orphaned runs (`task.parent` is set): runs started inside another
     ///   run's tool call (a delegated agent) that the run which started
     ///   them can no longer resume, because it ended, or it stopped with
-    ///   that call answered (the call failed; its result named the run).
+    ///   that call answered (the call failed, its result named the run).
     ///   Only the host recovers them, unless an agent resumes one first
     ///   (`run_workflow_agent` with `resume_run`).
     ///
@@ -263,7 +263,7 @@ impl Workflow {
     /// listed: recovering the parent recovers it (or supersedes it, for a
     /// completion verifier's review or a call that can't resume). Neither
     /// is a run the host retired ([`stop_run`](Self::stop_run) with
-    /// [`RunStopIntent::Retire`]) that the process ended in its wrap-up;
+    /// [`RunStopIntent::Retire`]) that the process ended in its wrap-up.
     /// `recover_agent` still takes it.
     pub fn interrupted_runs(&self) -> Vec<AgentResult> {
         let interrupted = self
@@ -295,8 +295,8 @@ impl Workflow {
     /// was saved, with its run identity and without a new message. Tool
     /// calls it was running are settled by their tools'
     /// [`recovery_mode`](arko_agents::Tool::recovery_mode): by default the
-    /// agent is told the call may have run and to check its effects;
-    /// read-only built-in tools run again; `run_workflow_agent` recovers the
+    /// agent is told the call may have run and to check its effects.
+    /// Read-only built-in tools run again. `run_workflow_agent` recovers the
     /// agent run it started (or returns its result if it had finished), and
     /// a `complete_task` call is reviewed again by its completion verifiers.
     /// A wait it was saved in (a tool approval, an error-recovery pause, a
@@ -424,7 +424,7 @@ impl Workflow {
     /// continued with [`continue_agent`](Self::continue_agent) or
     /// [`resume_agent`](Self::resume_agent), while the others run on. If an
     /// agent fails, the first failure is returned (and `OnWorkflowFailed`
-    /// fires once); the other results stay available through
+    /// fires once). The other results stay available through
     /// [`result`](Self::result).
     pub async fn run_agents_parallel(
         &self,
@@ -552,7 +552,7 @@ impl Workflow {
     }
 
     /// The number of the newest note agent run `agent_run_id` has been
-    /// given; see [`NotesHandle::given`](crate::notes::NotesHandle::given).
+    /// given. See [`NotesHandle::given`](crate::notes::NotesHandle::given).
     pub fn notes_given(&self, agent_run_id: uuid::Uuid) -> u64 {
         self.context.notes.given(agent_run_id)
     }
@@ -575,14 +575,14 @@ impl Workflow {
         WorkflowCancelHandle::new(&self.context)
     }
 
-    /// Cancels the run; see [`WorkflowCancelHandle::cancel`]. Returns
+    /// Cancels the run. See [`WorkflowCancelHandle::cancel`]. Returns
     /// `false` when the run was already stopped.
     pub fn cancel(&self) -> bool {
         self.cancel_handle().cancel()
     }
 
     /// Stops the run for `request`'s [kind](crate::workflow::stop::StopKind)
-    /// and reason; see the [`stop`](crate::workflow::stop) module.
+    /// and reason. See the [`stop`] module.
     ///
     /// Without a wrap-up (the default), the run is cancelled at once, as
     /// [`cancel`](Self::cancel) does, with
@@ -591,11 +591,11 @@ impl Workflow {
     /// With a [wrap-up](StopRequest::wrap_up), first:
     /// - no new agent run starts: run calls return `Cancelled` (only a
     ///   completion verifier's review may start, of a completion an agent
-    ///   made before it was told);
+    ///   made before it was told).
     /// - the tools of running agents see their stop signal at once
     ///   ([`TaskContext::stop`](arko_agents::TaskContext::stop)): a
     ///   [`StopAwareCommand`](arko_agents::StopAwareCommand) creates its
-    ///   stop file, and `wait_for_message` returns;
+    ///   stop file, and `wait_for_message` returns.
     /// - each running agent (other than a completion verifier's review) is
     ///   told at its next turn boundary to save its progress and call
     ///   `complete_task`
@@ -605,20 +605,20 @@ impl Workflow {
     ///   is continued after a restart).
     ///
     /// The wrap-up ends when no agent of the run is running any more, or
-    /// after its time; then the run is cancelled with the stop's cause, its
+    /// after its time. Then the run is cancelled with the stop's cause, its
     /// agents get the [grace period](WorkflowBuilder::cancel_grace_period),
     /// and the checkpoint records the stop. Run calls of agents that
-    /// completed during the wrap-up return their results; once the run is
+    /// completed during the wrap-up return their results. Once the run is
     /// stopped, calls return `Cancelled`. Results the stop ended are marked
     /// ([`AgentResult::stopped_by`]).
     ///
     /// Returns `false`, changing nothing, when the run is stopped already,
     /// or when it is wrapping up and `request` has a wrap-up too. A request
-    /// without a wrap-up during a wrap-up ends the wrap-up at once; the
+    /// without a wrap-up during a wrap-up ends the wrap-up at once. The
     /// first stop's cause stands. `OnWorkflowCancelled` fires when the run
     /// is stopped, with `stop_kind` and `reason` metadata. Timing a wrap-up
     /// needs a Tokio runtime (the current one, or the one the handle was
-    /// made in); without one, the run is stopped at once.
+    /// made in). Without one, the run is stopped at once.
     pub fn stop(&self, request: StopRequest) -> bool {
         self.cancel_handle().stop(request)
     }
@@ -660,7 +660,7 @@ impl Workflow {
     /// completion verifier's review (stop the run under review instead),
     /// the workflow is stopped, or the run is being stopped alone already
     /// and `request` has a wrap-up too. A request without a wrap-up during
-    /// the run's wrap-up cancels it at once; the first stop's record stands.
+    /// the run's wrap-up cancels it at once. The first stop's record stands.
     /// With persistence and the task journal, the stop is saved with the
     /// live checkpoint at once, so a resume keeps the host's intent for a
     /// run the process ended in its wrap-up.
@@ -699,9 +699,9 @@ impl Workflow {
     /// with [`RunStopIntent::Relaunch`]), in the order they were recorded,
     /// each with how [`restart`](Self::restart) relaunches it:
     /// - runs a stop cancelled ([`AgentResult::stopped_by`] set, status
-    ///   `Cancelled`): [`Restart::Reopen`];
+    ///   `Cancelled`): [`Restart::Reopen`].
     /// - runs that completed in a stop's wrap-up (`stopped_by` set, status
-    ///   `Completed`), started by the host: [`Restart::Continue`];
+    ///   `Completed`), started by the host: [`Restart::Continue`].
     /// - the [`interrupted_runs`](Self::interrupted_runs) (the process
     ///   ended while they ran, before or during a stop):
     ///   [`Restart::Recover`].
@@ -783,7 +783,7 @@ impl Workflow {
 
     /// Relaunches a run [`stopped_runs`](Self::stopped_runs) listed, as its
     /// [`Restart`] says: [`recover_agent`](Self::recover_agent) (without a
-    /// message; `note` is not used),
+    /// message, `note` is not used),
     /// [`reopen_agent`](Self::reopen_agent) with `note` after its reopened
     /// notice, or [`continue_agent`](Self::continue_agent) with a message
     /// saying the workflow (or, for a run stopped alone, the run) was
@@ -857,7 +857,7 @@ impl Workflow {
     }
 
     /// The status of a registered agent in this run, as `list_recipients`
-    /// reports it; `None` for an unknown name.
+    /// reports it. `None` for an unknown name.
     pub fn agent_status(&self, agent_name: &str) -> Option<AgentStatus> {
         self.context
             .agent_configs
@@ -989,7 +989,7 @@ impl Workflow {
     }
 
     /// The points of each of `plan`'s windows the run has used so far, as
-    /// [`plan_usage_spent`](Self::plan_usage_spent) counts them; `None` for
+    /// [`plan_usage_spent`](Self::plan_usage_spent) counts them. `None` for
     /// a window no report of the plan has shown yet.
     pub fn plan_usage_spent_of(
         &self,
@@ -1163,11 +1163,11 @@ impl Workflow {
     /// the workflow runs, without changing their configuration (so a resume
     /// still accepts their saved tasks). A running agent of the audience gets
     /// it at its next safe turn boundary, in its `# Workflow context
-    /// update`; a standing note (the default) is also in the initial prompt
+    /// update`. A standing note (the default) is also in the initial prompt
     /// of every later run of the audience, and in the fresh conversation
     /// after a handover. See [`notes`](crate::notes).
     ///
-    /// The text is trimmed; an empty one, one over
+    /// The text is trimmed. An empty one, one over
     /// [`MAX_NOTE_BYTES`](crate::notes::MAX_NOTE_BYTES), or one no agent
     /// receives returns `BuilderInvalid`, and an audience naming an
     /// unregistered agent returns `AgentNotFound`. The note is logged once
@@ -1299,7 +1299,7 @@ impl Workflow {
 
     /// Open a ballot. Its eligible voters must be among the workflow's
     /// voters ([`WorkflowBuilder::enable_voting`]), the agents offered
-    /// `cast_vote`; with none named, every workflow voter is eligible.
+    /// `cast_vote`. With none named, every workflow voter is eligible.
     pub fn begin_ballot(&self, mut config: BallotConfig) -> Result<uuid::Uuid, WorkflowError> {
         let ballots = self.context.ballots.as_ref().ok_or_else(|| {
             WorkflowError::BuilderInvalid("structured voting is not enabled".to_string())
@@ -1718,12 +1718,12 @@ impl WorkflowBuilder {
     /// Exceeding any plan's window's limit is handled as exceeding the
     /// dollar budget is (see [`budget_exceeded_policy`](Self::budget_exceeded_policy)):
     /// by default agents are held until it is raised
-    /// ([`Workflow::set_plan_budget`]); `OnBudgetExceeded` fires once per
+    /// ([`Workflow::set_plan_budget`]). `OnBudgetExceeded` fires once per
     /// crossing, with `plan` (`chatgpt` or `claude_code`), `plan_window`
     /// (`five_hour` or `seven_day`), `plan_points_used` and
     /// `plan_points_limit` in its metadata. Checkpoints record the limits
     /// and the counting, so a resumed run counts from where the run
-    /// started; on resume, each limit combines with the recorded one as
+    /// started. On resume, each limit combines with the recorded one as
     /// dollar limits do (see [`resume_from`](Self::resume_from)).
     pub fn plan_budget(mut self, budget: crate::budget::PlanBudget) -> Self {
         self.plan_budget = budget;
@@ -1733,7 +1733,7 @@ impl WorkflowBuilder {
     /// What happens when the workflow's budget, or an agent's, is exceeded:
     /// [`BudgetExceededPolicy::Pause`](crate::budget::BudgetExceededPolicy::Pause)
     /// (the default) holds each agent over it before its next model
-    /// request until the budget is raised;
+    /// request until the budget is raised.
     /// [`BudgetExceededPolicy::Cancel`](crate::budget::BudgetExceededPolicy::Cancel)
     /// cancels it.
     pub fn budget_exceeded_policy(mut self, policy: crate::budget::BudgetExceededPolicy) -> Self {
@@ -1841,7 +1841,7 @@ impl WorkflowBuilder {
     /// checkpoint's workflow-run identity.
     ///
     /// Agent runs that were running when the checkpoint was written come
-    /// back `Interrupted`, with their tasks; see
+    /// back `Interrupted`, with their tasks. See
     /// [`Workflow::interrupted_runs`] and [`Workflow::recover_agent`]. The
     /// usage they reported that the checkpoint's cost ledger lacks is
     /// charged now.
@@ -1852,7 +1852,7 @@ impl WorkflowBuilder {
     /// workflow's limit and each agent's, the limit set on this builder
     /// applies unless the recorded one is higher, which then applies. A
     /// limit not set on the builder is none, as in a new run, whatever the
-    /// checkpoint recorded; a checkpoint written before limits were
+    /// checkpoint recorded. A checkpoint written before limits were
     /// recorded leaves the builder's. So resuming with a higher budget
     /// raises it, and resuming with the budget the run was built with keeps
     /// a raise made while it was live (a lowering is not kept). Each limit
@@ -1959,7 +1959,7 @@ impl WorkflowBuilder {
     /// distillers. The policy applies to each: an interceptor that fails is
     /// retried up to the policy's attempts, without running those before it
     /// again, and then skipped, so the next one (and the agent) gets the
-    /// output of the last one that succeeded; a failure never undoes an
+    /// output of the last one that succeeded. A failure never undoes an
     /// earlier interceptor's work, such as a redaction. Under `InformAgent`
     /// and `RetryThenInformAgent` the result ends with a note that an
     /// interceptor failed. `load_skill` results are intercepted only when
@@ -2049,7 +2049,7 @@ impl WorkflowBuilder {
     /// prompt cached: 4 minutes 30 seconds, 27 minutes over ChatGPT OAuth, or
     /// 54 minutes with Anthropic's 1-hour TTL. An agent waits longer by
     /// calling the tool again. A
-    /// `Duration` sets a fixed limit, more than zero and at most 24 hours; one
+    /// `Duration` sets a fixed limit, more than zero and at most 24 hours. One
     /// past the cache lifetime can cost a cache miss on the next turn.
     pub fn wait_for_message_timeout(mut self, timeout: impl Into<WaitForMessageTimeout>) -> Self {
         self.wait_timeouts.workflow = timeout.into();
@@ -2080,7 +2080,7 @@ impl WorkflowBuilder {
     /// for approval and paths outside the workspace under
     /// `PathSafetyPolicy::RequireApproval`, so the workflow runs without
     /// human input (the first such call of each agent is logged as a
-    /// warning). `RespectAgentConfig` pauses the agent for the caller;
+    /// warning). `RespectAgentConfig` pauses the agent for the caller.
     /// `Handler` decides each call in-process.
     pub fn approval_policy(mut self, policy: crate::policy::ApprovalPolicy) -> Self {
         self.approval_policy = policy;
@@ -2091,7 +2091,7 @@ impl WorkflowBuilder {
     /// [`ErrorRecoveryPolicy::Automatic`](crate::policy::ErrorRecoveryPolicy::Automatic),
     /// recovers without an attempt limit** from errors that may pass
     /// (outages, rate limits, plan usage limits, which it waits out) and
-    /// fails the run clearly on errors that won't; `Limited { max }` caps
+    /// fails the run clearly on errors that won't. `Limited { max }` caps
     /// the automatic recoveries, and `ReturnToCaller` pauses the agent for
     /// the caller at every error-recovery pause.
     pub fn error_recovery_policy(mut self, policy: crate::policy::ErrorRecoveryPolicy) -> Self {
@@ -2099,8 +2099,8 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Runs at most `max` agents of a `run_agents_parallel` call at once;
-    /// the others start as places free up, in input order. Default: no cap,
+    /// Runs at most `max` agents of a `run_agents_parallel` call at once.
+    /// The others start as places free up, in input order. Default: no cap,
     /// every agent starts at once. `build` rejects zero. Workflow services
     /// have their own limit (`WorkflowServicesConfig::max_active_calls`).
     pub fn max_parallel_agents(mut self, max: usize) -> Self {
@@ -2127,7 +2127,7 @@ impl WorkflowBuilder {
     }
 
     /// Enable structured ballots, with `voters` (registration names) offered
-    /// the `cast_vote` tool; other agents are not. A ballot's eligible
+    /// the `cast_vote` tool. Other agents are not. A ballot's eligible
     /// voters must be among them.
     pub fn enable_voting<I, S>(mut self, voters: I) -> Self
     where
@@ -2140,7 +2140,7 @@ impl WorkflowBuilder {
 
     /// How long a stopped run waits for each running agent to stop before
     /// aborting it (default [`DEFAULT_CANCEL_GRACE_PERIOD`], 30 seconds). An
-    /// agent stops at its next step; one running a long tool call stops once
+    /// agent stops at its next step. One running a long tool call stops once
     /// the call returns.
     pub fn cancel_grace_period(mut self, grace_period: std::time::Duration) -> Self {
         self.cancel_grace_period = grace_period;
@@ -2810,7 +2810,7 @@ impl Default for WorkflowBuilder {
 }
 
 /// A limit on resume: the builder's (`configured`) unless the checkpoint
-/// recorded a higher one; none when the builder sets none.
+/// recorded a higher one. None when the builder sets none.
 fn resumed_limit(configured: Option<f64>, recorded: Option<f64>) -> Option<f64> {
     match (configured, recorded) {
         (Some(configured), Some(recorded)) => Some(configured.max(recorded)),

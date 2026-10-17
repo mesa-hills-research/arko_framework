@@ -62,7 +62,7 @@ pub fn folder(run_dir: &Path) -> PathBuf {
 }
 
 /// A line of the notes file: a [`Note`]'s fields, with the identity and time
-/// [`post_note`] gives it. A line written by hand may leave both out; the
+/// [`post_note`] gives it. A line written by hand may leave both out. The
 /// workflow then gives the note an identity when it reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlNote {
@@ -70,7 +70,7 @@ pub struct ControlNote {
     /// already is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
-    /// When it was written; the posted note's time.
+    /// When it was written. The posted note's time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
     #[serde(flatten)]
@@ -122,7 +122,7 @@ pub fn post_note(run_dir: &Path, note: &Note) -> io::Result<ControlNote> {
 }
 
 /// Every note in the notes file of run directory `run_dir`, oldest first,
-/// read under the control folder's lock; lines that aren't notes are
+/// read under the control folder's lock. Lines that aren't notes are
 /// skipped. Empty when there is no notes file. For status tools: which of
 /// them the workflow has posted is in its checkpoint
 /// ([`NotesSnapshot::notes`](super::NotesSnapshot::notes), by `id`).
@@ -198,7 +198,7 @@ pub(crate) struct Batch {
     pub end: u64,
 }
 
-/// The notes written to `folder`'s notes file after byte `offset`; `None`
+/// The notes written to `folder`'s notes file after byte `offset`. `None`
 /// when there are none, or a writer holds the lock (they are read next
 /// time). A file shorter than `offset` was replaced: it is read from the
 /// start, and the notes it repeats are skipped by their `id`.
@@ -222,7 +222,7 @@ struct Lines {
 }
 
 /// The complete lines written to `folder`'s file `name` after byte
-/// `offset`; `None` when there are none, or a writer holds the lock (they
+/// `offset`. `None` when there are none, or a writer holds the lock (they
 /// are read next time). A file shorter than `offset` was replaced: it is
 /// read from the start. An unfinished last line (one a writer crashed in)
 /// is read once a later write ends it.
@@ -275,7 +275,7 @@ fn read_lines_from(folder: &Path, name: &str, offset: u64) -> io::Result<Option<
 /// [`Workflow::stop_agent`](crate::Workflow::stop_agent)), written by
 /// another process while the workflow runs. It names one run (`run`) or
 /// every running run of an agent (`agent`). In JSON only `run` or `agent`
-/// is required; the others default.
+/// is required. The others default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlStop {
     /// The request's identity, given by [`request_stop`].
@@ -295,7 +295,7 @@ pub struct ControlStop {
     pub kind: StopKind,
     #[serde(default)]
     pub reason: String,
-    /// The wrap-up's length in seconds; none: the runs are cancelled at
+    /// The wrap-up's length in seconds. None: the runs are cancelled at
     /// once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_up_secs: Option<u64>,
@@ -413,7 +413,7 @@ pub fn request_stop(run_dir: &Path, stop: &ControlStop) -> io::Result<ControlSto
 }
 
 /// Every request in the stops file of run directory `run_dir`, oldest
-/// first, read under the control folder's lock; lines that aren't requests
+/// first, read under the control folder's lock. Lines that aren't requests
 /// are skipped. Empty when there is no stops file.
 pub fn read_stops(run_dir: &Path) -> io::Result<Vec<ControlStop>> {
     let folder = folder(run_dir);
@@ -456,7 +456,7 @@ impl StopReader {
     }
 
     /// Starts the task that reads the stops file every
-    /// [`STOPS_POLL_INTERVAL`] (once, from the first agent run's start; it
+    /// [`STOPS_POLL_INTERVAL`] (once, from the first agent run's start, it
     /// needs a Tokio runtime). The task ends once the workflow is stopped or
     /// dropped.
     pub(crate) fn start(&self, context: &Arc<SharedContext>) {

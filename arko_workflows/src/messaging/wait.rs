@@ -3,8 +3,8 @@
 //! polling.
 //!
 //! The wait returns on the first of: an agent message for the run that its
-//! conversation doesn't hold yet; a start or finish of an agent it may
-//! message or that may message it; its time limit; the workflow stopping or
+//! conversation doesn't hold yet. A start or finish of an agent it may
+//! message or that may message it. Its time limit. The workflow stopping or
 //! stopping this run. The result names the senders but carries no message:
 //! the message arrives, once, through the usual context update at the next
 //! turn boundary, and the wait returns only once the message is in the run's
@@ -56,7 +56,7 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 ///
 /// Every wait ends with a model request, and a request within the
 /// provider's prompt-cache lifetime finds the prompt cached (a cache hit
-/// restarts the lifetime) and pays only for cheap cached reads; a request
+/// restarts the lifetime) and pays only for cheap cached reads. A request
 /// after it re-reads the whole prompt at full price. So waits are kept short,
 /// and a long wait is several of them: the agent calls `wait_for_message`
 /// again, keeping the cache warm. `Auto` keeps each wait inside the agent's
@@ -139,7 +139,7 @@ impl WaitTimeouts {
     }
 }
 
-/// Waits for a message from another agent; offered to every agent that
+/// Waits for a message from another agent. Offered to every agent that
 /// another agent may message. Its definition names no agent and no time, so
 /// it never changes during a task.
 pub struct WaitForMessageTool {
@@ -176,7 +176,7 @@ impl WaitForMessageTool {
 
     /// How long run `task_id` may wait: the agent's limit. An automatic
     /// limit counts from the run's last model request, when the cache was
-    /// last used, so the time the model took to answer is included; at least
+    /// last used, so the time the model took to answer is included. At least
     /// a second is left.
     pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
         let limit = self.limit().await;
@@ -209,7 +209,7 @@ impl WaitForMessageTool {
     }
 }
 
-/// Marks a run as waiting for a message while it lives; dropping it (the wait
+/// Marks a run as waiting for a message while it lives. Dropping it (the wait
 /// returned, or its task was aborted) marks the run running again.
 struct AwaitingMessage<'a> {
     registry: &'a AgentRegistry,

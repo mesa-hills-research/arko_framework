@@ -191,13 +191,13 @@ pub struct SearchRequest {
     pub mode: Mode,
     /// Results returned (default 10).
     pub limit: usize,
-    /// Hybrid: chunks taken from each side before fusing (default 50; at least
+    /// Hybrid: chunks taken from each side before fusing (default 50, at least
     /// `limit` are taken).
     pub candidates: usize,
     pub fusion: Fusion,
     pub filter: Filter,
     /// Dense and hybrid: the query's embedding, when the caller already has it (from
-    /// [`embed_query`] with the index's model); no embedder is needed then, and the
+    /// [`embed_query`] with the index's model). No embedder is needed then, and the
     /// search reports 0 query tokens.
     pub query_vector: Option<Vec<f32>>,
 }
@@ -249,7 +249,7 @@ pub struct SearchHit {
     pub header: String,
     /// BM25 (lexical), cosine similarity (dense) or the fused score (hybrid).
     pub score: f64,
-    /// 1-based rank in the lexical and dense lists (hybrid; the one list otherwise).
+    /// 1-based rank in the lexical and dense lists (hybrid, the one list otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lexical_rank: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

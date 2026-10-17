@@ -420,7 +420,7 @@ fn plan_budget_error(ctx: &SharedContext) -> Option<WorkflowError> {
 /// exceeded ([`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)):
 /// once the budget is raised, it continues. A run inside another agent's
 /// tool call (`nested`) waits for the raise, and so does one the host
-/// started under `WorkflowBuilder::wait_for_budget_raise`; any other is
+/// started under `WorkflowBuilder::wait_for_budget_raise`. Any other is
 /// paused for its caller ([`WorkflowError::AgentPaused`]). A stop of the
 /// run ends the wait. Not an automatic recovery: `ErrorRecoveryPolicy`
 /// doesn't count it.
@@ -520,7 +520,7 @@ fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolC
 }
 
 /// The warning for the first call of `agent_name` its configuration marks
-/// for approval that `ApproveAll` approves; `None` for its later ones.
+/// for approval that `ApproveAll` approves. `None` for its later ones.
 pub(super) fn auto_approval_warning(
     ctx: &SharedContext,
     agent_name: &str,
@@ -596,7 +596,7 @@ async fn decide_tool_calls(
 }
 
 /// A nested run's calls under `RespectAgentConfig`: `complete_task` is
-/// approved; any other call is left undecided (`None`), since no one can
+/// approved. Any other call is left undecided (`None`), since no one can
 /// be asked.
 fn approve_nested_completions(
     calls: &[PendingToolCallInfo],
@@ -732,7 +732,7 @@ async fn send_tool_decisions(
 
 /// Answers `error`, reported at an error-recovery pause, under the
 /// workflow's error recovery policy and the pause's cause: continues (after
-/// a wait), fails the task, or pauses the agent for its caller; a `nested`
+/// a wait), fails the task, or pauses the agent for its caller. A `nested`
 /// run (inside another agent's tool call) can't pause, so it fails instead.
 async fn answer_recovery_pause(
     agent_name: &str,
@@ -840,8 +840,8 @@ async fn answer_recovery_pause(
 /// budget. Tool hooks and freshness policy are enforced by execution
 /// middleware, so auto-approved and batched calls follow the same path.
 ///
-/// Returns when the agent ends; with [`WorkflowError::UserInputRequired`] or
-/// [`WorkflowError::AgentPaused`] once it is suspended for its caller; or
+/// Returns when the agent ends. With [`WorkflowError::UserInputRequired`] or
+/// [`WorkflowError::AgentPaused`] once it is suspended for its caller. Or
 /// with another error when the workflow must stop it (including the stop's
 /// error once the run is cancelled or aborted), and the caller then stops
 /// the agent.
@@ -895,7 +895,7 @@ pub(crate) async fn drive_event_loop(
     }
 }
 
-/// Resolves with the reason once `stop` is set; never when there is none,
+/// Resolves with the reason once `stop` is set. Never when there is none,
 /// or when what could set it is gone (the run drives on, where it was).
 async fn stop_set(stop: Option<tokio::sync::watch::Receiver<Option<String>>>) -> String {
     if let Some(mut stop) = stop
@@ -1174,7 +1174,7 @@ async fn drive_events(
 }
 
 /// Answers an agent's questions with the workflow's user input handler, or
-/// suspends the agent for its caller (`UserInputRequired`); a nested run
+/// suspends the agent for its caller (`UserInputRequired`). A nested run
 /// without a handler is stopped instead.
 async fn answer_questions(
     drive: &Drive<'_>,
@@ -1239,7 +1239,7 @@ async fn answer_questions(
 /// it when the agent reached it: a recovered agent waits for the command
 /// without announcing the wait again. The tool approvals it awaits are
 /// decided under the approval policy, an error-recovery pause under the
-/// error recovery policy, and its questions by the user input handler; each
+/// error recovery policy, and its questions by the user input handler. Each
 /// may suspend the agent for its caller, as it would have. (A Claude Code
 /// agent doesn't keep a saved approval wait, and approved calls that ran
 /// are recovered by the runtime.)
@@ -1832,7 +1832,7 @@ impl Drop for AbortOnDrop {
 }
 
 /// When a stopped agent at `depth` is aborted. Every driver of a stopped run
-/// counts from the moment the run stopped; one nested inside another agent's
+/// counts from the moment the run stopped. One nested inside another agent's
 /// tool call gets half its parent's time, so it winds down, and is recorded,
 /// before its parent can be aborted.
 fn stop_deadline(ctx: &SharedContext, depth: u32) -> tokio::time::Instant {
@@ -1911,7 +1911,7 @@ async fn wind_down(
 /// Drives a started agent run to its result: runs the event loop, stops the
 /// agent when the workflow must (aborting it after the run's grace period),
 /// records the final task, and maps it to the call's outcome. Once the run
-/// is stopped the outcome is the stop's error; the agent's result is
+/// is stopped the outcome is the stop's error. The agent's result is
 /// recorded either way.
 ///
 /// Boxed: an agent run's driver is large, and its callers (including a
@@ -2395,13 +2395,13 @@ pub(crate) async fn save_stop_checkpoint(
 }
 
 /// Records `result` in the run's results, replacing an earlier result of
-/// its task (without persistence; see [`PersistenceManager::record_result`]).
+/// its task (without persistence, see [`PersistenceManager::record_result`]).
 pub(crate) fn record_result(ctx: &SharedContext, result: AgentResult) {
     crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
 }
 
 /// Records an agent run that stopped: its result (replacing an earlier one
-/// of the same task), the messages it holds (acknowledged when it completed;
+/// of the same task), the messages it holds (acknowledged when it completed,
 /// `prompt_ids` are the messages its prompt presented), its lifecycle hook,
 /// and, with persistence, its task and a checkpoint.
 pub(crate) async fn finalize_agent_task(
@@ -3003,7 +3003,7 @@ impl WorkflowEngine {
     }
 
     /// Starts the agent runtime on `task` and registers the running agent
-    /// with the message bus and the run's cancellation; `review` for a
+    /// with the message bus and the run's cancellation. `review` for a
     /// completion verifier's review (see [`StartOptions::review`]).
     #[allow(clippy::too_many_arguments)]
     fn launch(
@@ -3474,7 +3474,7 @@ impl WorkflowEngine {
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
-    /// tool call `parent` (`None` for a run the host continues); `review`
+    /// tool call `parent` (`None` for a run the host continues). `review`
     /// for a completion verifier's review (see [`StartOptions::review`]).
     async fn continue_at(
         &self,
@@ -3702,7 +3702,7 @@ impl WorkflowEngine {
     }
 
     /// Continue paused agent run `previous` at `depth` (see
-    /// [`StartedRun::depth`]); with `parent`, inside that tool call (its
+    /// [`StartedRun::depth`]). With `parent`, inside that tool call (its
     /// parent link points there), else keeping its link.
     async fn resume_at(
         &self,
@@ -4300,7 +4300,7 @@ struct WorkflowExecutionMiddleware {
     context: Arc<SharedContext>,
     llm_client: Arc<LLMClient>,
     persistence: Option<Arc<PersistenceManager>>,
-    /// The depth of this agent's run; its verifiers run one deeper.
+    /// The depth of this agent's run. Its verifiers run one deeper.
     depth: u32,
 }
 
@@ -4327,7 +4327,7 @@ impl WorkflowExecutionMiddleware {
     /// Answers a review that failed (the verifier's run failed, or its
     /// verdict stayed unusable): within the verifier's `max_review_retries`,
     /// the completion is rejected so the agent calls `complete_task` again
-    /// and a new review runs; after that, the completion is neither accepted
+    /// and a new review runs. After that, the completion is neither accepted
     /// nor rejected: the task is paused for its caller (continuable with
     /// `continue_agent`) and the run call returns `VerifierFailed`. The
     /// count starts again after the pause.
@@ -4380,7 +4380,7 @@ impl WorkflowExecutionMiddleware {
     }
 
     /// Reviews a completion (`complete_task` call `tool_call_id` with
-    /// `summary`) with each verifier that applies; its reviews run inside
+    /// `summary`) with each verifier that applies. Its reviews run inside
     /// the call.
     async fn verify_completion(
         &self,
@@ -5259,7 +5259,7 @@ mod tests {
         std::fs::remove_dir(&workspace).unwrap();
     }
 
-    /// A distiller's target is the agent's registration name; its display
+    /// A distiller's target is the agent's registration name. Its display
     /// name (`AgentConfig::name`, which the runtime reports) doesn't match.
     #[tokio::test]
     async fn distillers_target_registration_names_not_display_names() {
@@ -5334,7 +5334,7 @@ mod tests {
     }
 
     /// Under a retrying failure policy, a refused or truncated summary is not
-    /// requested (and billed) again; an empty one is. The chain retries the
+    /// requested (and billed) again. An empty one is. The chain retries the
     /// distiller alone, not the interceptor before it, and keeps the tool
     /// output once the retries run out.
     #[tokio::test]
@@ -5410,7 +5410,7 @@ mod tests {
     }
 
     /// A reader whose task finished is not notified of a write (no notice,
-    /// no conflict hook); continuing it sends one message listing what
+    /// no conflict hook). Continuing it sends one message listing what
     /// changed since it read it, advising a reread before editing.
     #[tokio::test]
     async fn a_continued_reader_learns_what_changed_since_it_read() {
@@ -5475,7 +5475,7 @@ mod tests {
         assert_eq!(server.requests(), 3);
     }
 
-    /// Counts its calls; replaces the result with `replacement`, if any.
+    /// Counts its calls. Replaces the result with `replacement`, if any.
     #[derive(Debug, Default)]
     struct Counting {
         calls: std::sync::atomic::AtomicUsize,
@@ -5505,7 +5505,7 @@ mod tests {
         }
     }
 
-    /// Always fails; counts its calls.
+    /// Always fails. Counts its calls.
     #[derive(Debug, Default)]
     struct Failing(std::sync::atomic::AtomicUsize);
 

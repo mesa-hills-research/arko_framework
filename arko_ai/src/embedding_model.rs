@@ -10,7 +10,7 @@ pub struct EmbeddingModelDetails {
     pub api_id: String,
     pub max_input_tokens_per_item: usize,
     /// Maximum total tokens allowed in a single batch, when the provider
-    /// publishes one. `None` means no known local limit; the provider may
+    /// publishes one. `None` means no known local limit. The provider may
     /// still enforce a limit.
     pub max_batch_total_tokens: Option<usize>,
     /// Maximum number of items allowed in a single batch, when the provider
@@ -79,10 +79,10 @@ impl EmbeddingModelDetails {
     /// Embeddings optimized for code retrieval.
     ///
     /// Voyage does not currently publish an aggregate request-token limit
-    /// for this model. Per-input and item-count limits are checked locally;
-    /// aggregate token limits are left to the provider. Voyage answered
-    /// (2026-10-04) that it allows 320,000 tokens per request ("The max
-    /// allowed tokens per submitted batch is 320000"); it stays unset until
+    /// for this model. Per-input and item-count limits are checked locally.
+    /// Aggregate token limits are left to the provider. Voyage answered
+    /// that it allows 320,000 tokens per request ("The max
+    /// allowed tokens per submitted batch is 320000"). It stays unset until
     /// published.
     pub fn voyage_code_4() -> Self {
         Self {

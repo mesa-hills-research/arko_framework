@@ -1,4 +1,4 @@
-//! Refused inputs and how the host changes them; see [`Task::resolve_refusal`].
+//! Refused inputs and how the host changes them. See [`Task::resolve_refusal`].
 
 use super::Task;
 use crate::error::ArkoAgentsError;
@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 /// The input a refused turn answered: every user message after the last
 /// assistant turn, in order. Besides the host's own input (the task prompt,
 /// a user response, a context update, tool results) the runtime adds some
-/// (a file-tree update, an error or recovery note, a request to continue);
-/// those are marked [`runtime`](RefusedMessage::runtime) and can't be
+/// (a file-tree update, an error or recovery note, a request to continue).
+/// Those are marked [`runtime`](RefusedMessage::runtime) and can't be
 /// changed. Reported with `AgentEvent::RefusedInput` and kept in
 /// [`Task::refused_input`] until the refusal is resolved, recovery is
 /// approved, or a later turn completes.
@@ -60,7 +60,7 @@ pub struct RefusedToolResult {
     pub tool_name: String,
 }
 
-/// A change to a refused input; see [`Task::resolve_refusal`] and
+/// A change to a refused input. See [`Task::resolve_refusal`] and
 /// `UserCommand::ResolveRefusal`. Changes name messages by their
 /// [`RefusedMessage::message_index`] and never apply to runtime messages.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,7 +68,7 @@ pub enum RefusalResolution {
     /// Replace the text of a message. Sections the runtime appended to it
     /// (`# Initial Environment Information`, `# Current Environment
     /// Information (updated this turn)`, `# Reminder`) are kept after the new
-    /// text; images and tool results are kept. In a message holding tool
+    /// text. Images and tool results are kept. In a message holding tool
     /// results this is the text beside them (such as a native `ask_user`
     /// answer), not an image description. The text must not be empty.
     /// Rephrasing the task prompt applies the prompt's `output_based_only`
@@ -84,8 +84,8 @@ pub enum RefusalResolution {
     /// before tool images sent beside the results.
     RemoveImages { message_index: usize },
     /// Replace the output text of tool results by provider call id, keeping
-    /// each call paired with its result. Images inside the results stay;
-    /// remove them with `RemoveImages`.
+    /// each call paired with its result. Images inside the results stay.
+    /// Remove them with `RemoveImages`.
     RedactToolResults {
         call_ids: Vec<String>,
         replacement: String,
@@ -226,9 +226,9 @@ impl Task {
     /// Changes the input of the latest refused turn ([`Task::refused_input`])
     /// and removes the refused turn, so that the task can continue with a
     /// request the provider has not refused. All changes are checked before
-    /// any is applied; the refused input must still be the conversation's
+    /// any is applied. The refused input must still be the conversation's
     /// last input (followed only by the refused turn, if it was kept). Used
-    /// by the runtime for `UserCommand::ResolveRefusal`; call it directly on
+    /// by the runtime for `UserCommand::ResolveRefusal`. Call it directly on
     /// a task that was returned interrupted, before running it again.
     pub fn resolve_refusal(
         &mut self,
@@ -486,7 +486,7 @@ mod tests {
 
     /// A prompt with runtime sections, a turn calling a tool, and its
     /// result with an ask_user-style answer and a screenshot, then a runtime
-    /// note; the last two are the refused input.
+    /// note. The last two are the refused input.
     fn refused_task() -> Task {
         let mut task = task();
         task.conversation.add_user_message(
@@ -553,7 +553,7 @@ mod tests {
     }
 
     /// Beside native tool results the runtime's sections can be the whole
-    /// text; rephrasing puts the new text before them.
+    /// text. Rephrasing puts the new text before them.
     #[test]
     fn rephrasing_beside_results_keeps_sections_that_are_the_whole_text() {
         let mut task = task();
@@ -610,7 +610,7 @@ mod tests {
         assert!(task.refused_input.is_none());
     }
 
-    /// Images inside tool results count as the message's images;
+    /// Images inside tool results count as the message's images.
     /// `RemoveImages` removes them (keeping each result's text), and
     /// redaction replaces only the text.
     #[test]

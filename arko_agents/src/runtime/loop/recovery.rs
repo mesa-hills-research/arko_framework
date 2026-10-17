@@ -35,7 +35,7 @@ pub(super) struct RecoveryState {
 
 /// How recovery from a failed model request waits.
 enum RecoveryWait {
-    /// Bounded by the error policy's attempts and the elapsed budget; a
+    /// Bounded by the error policy's attempts and the elapsed budget. A
     /// message about the error is added before the retry.
     Ordinary,
     /// Opt-in indefinite capacity recovery (`capacity_retry`).
@@ -219,7 +219,7 @@ impl AgentLoop {
     }
 
     /// Stops the ordinary elapsed-recovery clock (and its deadline) while an
-    /// indefinite wait lasts; see [`resume_ordinary_recovery_clock`](Self::resume_ordinary_recovery_clock).
+    /// indefinite wait lasts. See [`resume_ordinary_recovery_clock`](Self::resume_ordinary_recovery_clock).
     pub(super) fn pause_ordinary_recovery_clock(&mut self) {
         if let Some(started) = self.recovery.recovery_started.take() {
             self.recovery.paused_recovery_elapsed = Some(
@@ -380,7 +380,7 @@ impl AgentLoop {
     /// failed request, but with `note` added to the conversation before the
     /// next request, so the model can do better. It isn't an outage: the
     /// request is made again at once, without backoff, and the elapsed
-    /// recovery budget neither starts nor applies; the attempt limit bounds
+    /// recovery budget neither starts nor applies. The attempt limit bounds
     /// it.
     pub(super) async fn handle_model_output_failure(
         &mut self,
@@ -393,7 +393,7 @@ impl AgentLoop {
     /// The attempt a failed request is in its recovery, and when that
     /// recovery started. A wait that doesn't count against ordinary
     /// recovery (capacity, rate limits) stops its elapsed clock and counts
-    /// on its own; otherwise the clock resumes (not for a response the
+    /// on its own. Otherwise the clock resumes (not for a response the
     /// runtime can't use, which isn't an outage).
     fn recovery_attempt(
         &mut self,
@@ -610,7 +610,7 @@ impl AgentLoop {
         self.wait_before_retry(retry_at, tool_call_id).await
     }
 
-    /// Waits until `retry_at` before a retry, handling commands; the task is
+    /// Waits until `retry_at` before a retry, handling commands. The task is
     /// then in progress again. An ordinary recovery deadline that passes
     /// first ends recovery: the elapsed budget limits the waits between
     /// attempts and the decision to make another, never a request in flight.

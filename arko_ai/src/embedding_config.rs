@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     /// The token is never written when a config is serialized (it was, in
-    /// plain text); a loaded config has none until it is set again, and a
+    /// plain text). A loaded config has none until it is set again, and a
     /// config an earlier version saved with one still loads it.
     #[test]
     fn the_hugging_face_token_is_never_serialized() {

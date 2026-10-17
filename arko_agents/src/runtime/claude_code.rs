@@ -1,4 +1,4 @@
-//! The runtime of agents whose model runs in Claude Code; see
+//! The runtime of agents whose model runs in Claude Code. See
 //! [`crate::claude_code`].
 //!
 //! Claude Code runs the agent loop in a session of the installed CLI. This
@@ -114,7 +114,7 @@ fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolO
 /// conversation.
 const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal: a Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
 
-/// Heads the note on the calls that were open when the task stopped; see
+/// Heads the note on the calls that were open when the task stopped. See
 /// [`ClaudeCodeRun::recover_open_calls`].
 const RESTARTED_NOTE: &str = "The task stopped while tool calls were open (arko's host or Claude Code stopped). As arko recorded them, and whatever Claude Code reports of them (it may call them interrupted):";
 
@@ -581,7 +581,7 @@ struct Entry {
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
     Stop,
-    /// The task waits for a command; the session is closed meanwhile.
+    /// The task waits for a command. The session is closed meanwhile.
     Wait,
     /// A handover (the next session starts a fresh conversation), or a
     /// step left out (it resumes the session at an earlier message).
@@ -618,7 +618,7 @@ pub(super) struct ClaudeCodeRun {
 
     calls: HashMap<String, Call>,
     /// Each thread's (the main conversation's, or a subagent's) latest
-    /// request's usage, recorded once the request is complete; see
+    /// request's usage, recorded once the request is complete. See
     /// [`observe_usage`](Self::observe_usage).
     pending_usage: HashMap<Option<String>, PendingUsage>,
     /// Requests whose usage the stream events report.
@@ -646,14 +646,14 @@ pub(super) struct ClaudeCodeRun {
     slowed: VecDeque<(tokio::time::Instant, oneshot::Sender<Value>, Value)>,
     cache_warned: bool,
     cache_pause_episode: bool,
-    /// The cache monitor asked for a pause; the turn is interrupted.
+    /// The cache monitor asked for a pause. The turn is interrupted.
     cache_interrupt: bool,
     /// A refusal Claude Code reported standing in this turn (no retry ran).
     refused: Option<ai::Refusal>,
     /// The `stop_details` of the last response the API refused. Claude
-    /// Code's refusal message can leave the explanation out; these have it.
+    /// Code's refusal message can leave the explanation out. These have it.
     refusal_details: Option<Value>,
-    /// The refusal fallback model answers this turn; the configured model
+    /// The refusal fallback model answers this turn. The configured model
     /// takes over again when it ends.
     fallback_turn: bool,
     /// The input of the current conversation's latest and first requests
@@ -697,7 +697,7 @@ pub(super) struct ClaudeCodeRun {
     /// The message before the model's latest response: the end of the
     /// conversation as the last request Claude Code answered had it, and
     /// whether tool results followed that response. A turn over the model's
-    /// input limit hands over from it; see
+    /// input limit hands over from it. See
     /// [`hand_over_without_the_step`](Self::hand_over_without_the_step).
     answered: Option<Entry>,
     step_results: bool,
@@ -723,14 +723,14 @@ pub(super) struct ClaudeCodeRun {
     host: Option<Arc<ToolHost>>,
     /// Receives the task at its safe points.
     pub(super) snapshots: TaskSnapshots,
-    /// The host's stop signal for the task's arko tool calls; see
+    /// The host's stop signal for the task's arko tool calls. See
     /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
     pub(super) host_stop: crate::stop::StopSignal,
     /// Receives the images the task's calls return. See
     /// [`AgentRuntime::with_tool_image_sink`](super::AgentRuntime::with_tool_image_sink).
     pub(super) image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     /// Fired when the host stops the session, so that a running arko tool
-    /// call winds down; see [`TaskContext::stop`](crate::tool::TaskContext::stop).
+    /// call winds down. See [`TaskContext::stop`](crate::tool::TaskContext::stop).
     calls_stop: crate::stop::StopSource,
 }
 
@@ -850,7 +850,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Reports the task to the snapshot sink, if there is one; with
+    /// Reports the task to the snapshot sink, if there is one. With
     /// `durable`, returns once the sink has saved it.
     async fn report(&mut self, durable: bool) {
         self.snapshots.report(&self.task, durable).await;
@@ -998,7 +998,7 @@ impl ClaudeCodeRun {
     }
 
     /// Adds a user message to the conversation, with the environment details
-    /// and reminder of every user message; it is sent with the next input.
+    /// and reminder of every user message. It is sent with the next input.
     fn add_user_message(&mut self, text: &str) -> Result<(), ArkoAgentsError> {
         let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
         let number = self.task.user_message_count + 1;
@@ -1015,11 +1015,11 @@ impl ClaudeCodeRun {
     /// running them again, and its transcript can lack calls arko already
     /// ran. The task's record of them is what counts: the resumed session's
     /// input tells the model each call's outcome. A call whose result arko
-    /// had is reported completed, with its result; an arko call whose tool
+    /// had is reported completed, with its result. An arko call whose tool
     /// is [`Rerun`](ToolRecovery::Rerun) or [`Resume`](ToolRecovery::Resume)
     /// runs again now (with
     /// [`TaskContext::recovering`](crate::tool::TaskContext::recovering)
-    /// set), and its result is reported; any other call's outcome is
+    /// set), and its result is reported. Any other call's outcome is
     /// unknown.
     async fn recover_open_calls(&mut self) -> Result<(), ArkoAgentsError> {
         if self.task.claude_code_session.is_none() || self.task.current_state.is_terminal() {
@@ -2384,7 +2384,7 @@ impl ClaudeCodeRun {
     }
 
     /// An approved (or auto-approved) call: a built-in passes the
-    /// middleware's `before`; an arko call is admitted for its MCP call,
+    /// middleware's `before`. An arko call is admitted for its MCP call,
     /// where the middleware runs.
     async fn admit(
         &mut self,
@@ -4604,7 +4604,7 @@ impl ClaudeCodeRun {
 /// Claude Code's `rate_limit_info` as plan usage of
 /// [`SubscriptionPlan::ClaudeCode`](ai::SubscriptionPlan::ClaudeCode): the
 /// five-hour window is the primary one and the seven-day window the
-/// secondary, as in its `unifiedWindows`; an event without them reports its
+/// secondary, as in its `unifiedWindows`. An event without them reports its
 /// one window.
 fn plan_usage_of(info: &Value) -> ai::PlanUsage {
     let window = |value: &Value, minutes: u64| {

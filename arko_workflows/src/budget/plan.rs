@@ -29,7 +29,7 @@ const RESET_TOLERANCE_SECS: u64 = 60;
 ///
 /// Each plan ([`SubscriptionPlan`]) has its own windows, counted
 /// separately. `five_hour` and `seven_day` limit each plan's window of that
-/// length; a plan's own limit (`chatgpt`, `claude_code`) replaces them for
+/// length. A plan's own limit (`chatgpt`, `claude_code`) replaces them for
 /// that plan's window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanBudget {
@@ -91,7 +91,7 @@ impl PlanBudget {
         self.own(Some(plan), window).or(self.limit(window))
     }
 
-    /// The limit that applies to the tracking of `plan`'s `window`; tracking
+    /// The limit that applies to the tracking of `plan`'s `window`. Tracking
     /// without a plan (`None`) has the general limits.
     fn applies(&self, plan: Option<SubscriptionPlan>, window: PlanWindow) -> Option<f64> {
         match plan {
@@ -140,7 +140,7 @@ impl PlanBudget {
         Self::slots().any(|(plan, window)| self.own(plan, window).is_some())
     }
 
-    /// Checks that every limit is finite and non-negative; the error names
+    /// Checks that every limit is finite and non-negative. The error names
     /// the first that isn't.
     pub(crate) fn validate(&self) -> Result<(), String> {
         for (plan, window) in Self::slots() {
@@ -159,7 +159,7 @@ impl PlanBudget {
 }
 
 /// One plan's own limits in a [`PlanBudget`], in points of each of its
-/// windows; `None`: the budget's limit for that window applies.
+/// windows. `None`: the budget's limit for that window applies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanLimits {
     /// Points of the plan's five-hour window.
@@ -237,7 +237,7 @@ impl PlanWindow {
     }
 
     /// The window a reported window is: by its length when reported (300
-    /// minutes: five-hour; 10080: seven-day; another length is neither),
+    /// minutes: five-hour, 10080: seven-day, another length is neither),
     /// otherwise by position (primary: five-hour, secondary: seven-day).
     fn of(window: &PlanUsageWindow, primary: bool) -> Option<Self> {
         match window.window_minutes {
@@ -254,7 +254,7 @@ impl PlanWindow {
 /// [`Workflow::plan_usage_spent`](crate::Workflow::plan_usage_spent) (the
 /// most any plan has used) and
 /// [`Workflow::plan_usage_spent_of`](crate::Workflow::plan_usage_spent_of)
-/// (one plan's) report them; `None` for a window no report has shown yet.
+/// (one plan's) report them. `None` for a window no report has shown yet.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanUsageSpent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -415,7 +415,7 @@ pub struct PlanBudgetState {
 /// A window whose limit a report took the run over.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanBudgetCrossing {
-    /// The plan whose window it is; `None` for tracking without a plan
+    /// The plan whose window it is. `None` for tracking without a plan
     /// (see [`PlanBudgetState::usage`]).
     pub plan: Option<SubscriptionPlan>,
     pub window: PlanWindow,
@@ -444,7 +444,7 @@ impl PlanBudgetCrossing {
 #[derive(Debug, Default)]
 pub(crate) struct PlanBudgetTracker {
     pub(crate) limits: PlanBudget,
-    /// Each plan's tracking; `None`: tracking without a plan (see
+    /// Each plan's tracking. `None`: tracking without a plan (see
     /// [`PlanBudgetState::usage`]).
     usage: BTreeMap<Option<SubscriptionPlan>, PlanUsageTracking>,
     /// Windows reported over their limit since last within it.
@@ -475,7 +475,7 @@ impl PlanBudgetTracker {
             .collect()
     }
 
-    /// Takes a report, counted with its plan's windows; returns the windows
+    /// Takes a report, counted with its plan's windows. Returns the windows
     /// it took over their limits (each once per crossing). The first plan to
     /// report takes over the tracking without a plan, if it has none of its
     /// own.
@@ -509,7 +509,7 @@ impl PlanBudgetTracker {
         self.reported.retain(|window| over.contains(window));
     }
 
-    /// Sets the limits; a window now within its limit reports its next
+    /// Sets the limits. A window now within its limit reports its next
     /// crossing again.
     pub(crate) fn set_limits(&mut self, limits: PlanBudget) {
         self.limits = limits;
@@ -553,7 +553,7 @@ impl PlanBudgetTracker {
     }
 
     /// Restores the tracking a checkpoint recorded (`unnamed`: without a
-    /// plan); windows already over their limits count as reported.
+    /// plan). Windows already over their limits count as reported.
     pub(crate) fn restore(
         &mut self,
         unnamed: PlanUsageTracking,
@@ -887,7 +887,7 @@ mod tests {
 
     /// A checkpoint from before plans were counted apart: its tracking and
     /// limits load, the counting goes on, and the first plan to report
-    /// takes the tracking over; another plan counts from its own first
+    /// takes the tracking over. Another plan counts from its own first
     /// report.
     #[test]
     fn an_earlier_checkpoints_tracking_is_taken_over_by_the_first_plan_to_report() {

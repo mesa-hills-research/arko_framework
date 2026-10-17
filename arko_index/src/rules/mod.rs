@@ -22,7 +22,7 @@ pub(crate) use tables::table;
 /// How a scope label is made from a node.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Label {
-    /// `keyword name` (`fn f`, `class C`); nothing when the node has no name.
+    /// `keyword name` (`fn f`, `class C`). Nothing when the node has no name.
     Keyword(&'static str),
     /// The prefix and the name with nothing between (`directive @auth`), or the prefix
     /// alone when the node has no name (GraphQL's `schema`).
@@ -82,7 +82,7 @@ pub(crate) struct Table {
     /// The grammar key (`languages::grammar`).
     #[allow(dead_code)]
     pub(crate) key: &'static str,
-    /// tags.scm definitions `(kind, category)`; the category is the default label
+    /// tags.scm definitions `(kind, category)`. The category is the default label
     /// keyword.
     pub(crate) tags: &'static [(&'static str, &'static str)],
     /// tags.scm kinds that are not definitions here.
@@ -143,7 +143,7 @@ pub(crate) struct Table {
     /// `(kind, path)`: kinds that continue the scope chain inside a split definition
     /// (match arms, conditionals, loops, closures, inner functions). The label is the
     /// node's text up to the node at the path, as `Label::Header` cleans it
-    /// (`if let Some(guard) = overflow_guard`, `ToolCall { .. } =>`); an empty path
+    /// (`if let Some(guard) = overflow_guard`, `ToolCall { .. } =>`). An empty path
     /// takes the first line.
     #[allow(dead_code)]
     pub(crate) breadcrumbs: &'static [(&'static str, &'static str)],
@@ -369,9 +369,9 @@ impl Table {
 }
 
 /// The node at `path` below `n`. Segments are separated by `/`:
-/// - `field`: the child in that field;
-/// - `#kind` or `#a|b`: the first named child of one of those kinds;
-/// - `*`: the first named child;
+/// - `field`: the child in that field.
+/// - `#kind` or `#a|b`: the first named child of one of those kinds.
+/// - `*`: the first named child.
 /// - `~field`: the nearest node in that field among the named descendants, breadth
 ///   first, at most four levels down.
 pub(crate) fn resolve<'t>(n: Node<'t>, path: &str) -> Option<Node<'t>> {

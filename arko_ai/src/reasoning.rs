@@ -171,11 +171,11 @@ pub enum ReasoningContext {
 /// The OpenRouter Chat Completions `reasoning` object. Serializes to the wire
 /// form with unset fields omitted, so the model's defaults apply (catalog
 /// `reasoning.default_enabled` / `default_effort`).
-/// https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+/// <https://openrouter.ai/docs/guides/best-practices/reasoning-tokens>
 ///
-/// `effort` and `max_tokens` are mutually exclusive; requests setting both
+/// `effort` and `max_tokens` are mutually exclusive. Requests setting both
 /// are rejected before sending. `exclude: true` hides reasoning from the
-/// response (it is still generated and billed); whether it also withholds the
+/// response (it is still generated and billed). Whether it also withholds the
 /// `reasoning_details` needed to continue tool calls is undocumented, so avoid
 /// it in tool loops.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -183,7 +183,7 @@ pub enum ReasoningContext {
 pub struct OpenRouterReasoning {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
-    /// Reasoning token budget (Anthropic-style); at least 1024 on Claude.
+    /// Reasoning token budget (Anthropic-style). At least 1024 on Claude.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -224,7 +224,7 @@ impl OpenRouterReasoning {
         }
     }
 
-    /// Reasoning off (`enabled: false`); rejected by models whose reasoning is
+    /// Reasoning off (`enabled: false`). Rejected by models whose reasoning is
     /// mandatory.
     pub fn disabled() -> Self {
         Self {
@@ -289,7 +289,7 @@ pub enum ReasoningConfig {
         include_summaries: bool,
     },
     /// OpenRouter's unified `reasoning` object. The only reasoning
-    /// configuration OpenRouter models accept; convert another provider's
+    /// configuration OpenRouter models accept. Convert another provider's
     /// configuration explicitly with [`ReasoningConfig::to_openrouter`].
     OpenRouter(OpenRouterReasoning),
 }
@@ -474,7 +474,7 @@ pub enum ReasoningArtifact {
     /// Every reasoning item of one OpenAI response, in output order. All of
     /// them are replayed, ahead of the turn's function calls.
     ///
-    /// Written by earlier versions; responses now keep
+    /// Written by earlier versions. Responses now keep
     /// [`OpenAIOutputItems`](Self::OpenAIOutputItems). Conversations saved
     /// with this form still replay as before: the reasoning items, then the
     /// message's function calls, then its text.
@@ -503,7 +503,7 @@ pub enum ReasoningArtifact {
     /// OpenRouter `reasoning_details` items, kept verbatim and in order. They
     /// are sent back unmodified on the assistant turn: they carry the
     /// signatures and encrypted reasoning that Claude, Gemini and OpenAI models
-    /// need to continue after tool calls. Items are opaque JSON; encrypted
+    /// need to continue after tool calls. Items are opaque JSON. Encrypted
     /// items (`reasoning.encrypted`) hold no readable text.
     OpenRouter { details: Vec<serde_json::Value> },
 }

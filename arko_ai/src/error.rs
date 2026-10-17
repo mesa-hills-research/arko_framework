@@ -13,7 +13,7 @@ use thiserror::Error;
 ///
 /// A provider's error is classified from its codes first (its error code
 /// or type, then its HTTP status), then from the documented phrases of its
-/// message; anything else is [`Unknown`](Self::Unknown), which callers
+/// message. Anything else is [`Unknown`](Self::Unknown), which callers
 /// treat as before kinds existed. Temporary failures (rate limits,
 /// capacity, server and network errors) are `Unknown`: their
 /// [`RetryClass`] says what they are.
@@ -24,7 +24,7 @@ pub enum ErrorKind {
     /// The credential is missing, invalid, expired or revoked: an HTTP 401,
     /// an API key the provider rejects, a ChatGPT sign-in whose refresh
     /// failed, a Claude Code CLI that isn't signed in. A new credential (or
-    /// sign-in) is needed; every request that uses it fails until then.
+    /// sign-in) is needed. Every request that uses it fails until then.
     Authentication,
     /// The credential works but may not use this model, feature or region
     /// (an HTTP 403).
@@ -148,15 +148,15 @@ const GENERIC_INVALID_REQUEST_CODES: &[&str] = &[
 /// decide. Sources:
 /// - OpenAI Responses (and the ChatGPT backend, codex-rs
 ///   `sse/responses.rs`): "Your input exceeds the context window of this
-///   model."; Chat Completions and OpenRouter: "This model's maximum
+///   model.". Chat Completions and OpenRouter: "This model's maximum
 ///   context length is N tokens", "This endpoint's maximum context length
-///   is N tokens"; OpenAI per-value limits: "string too long. Expected a
+///   is N tokens". OpenAI per-value limits: "string too long. Expected a
 ///   string with maximum length N".
 /// - Anthropic (https://platform.claude.com/docs/en/api/errors): "prompt is
 ///   too long: N tokens > M maximum"; "input length and max_tokens exceed
 ///   context limit".
 /// - Gemini: "The input token count (N) exceeds the maximum number of
-///   tokens allowed (M)."; an invalid key: "API key not valid", reason
+///   tokens allowed (M).". An invalid key: "API key not valid", reason
 ///   `API_KEY_INVALID`.
 const KIND_PHRASES: &[(&str, ErrorKind)] = &[
     ("context_length_exceeded", ErrorKind::ContextOverflow),
@@ -188,7 +188,7 @@ fn status_kind(status: u16) -> Option<ErrorKind> {
 }
 
 /// The kind of a provider error with `status`, `code` and `message` (the
-/// label and the error body); see [`ErrorKind`].
+/// label and the error body). See [`ErrorKind`].
 fn provider_error_kind(status: Option<u16>, code: Option<&str>, message: &str) -> ErrorKind {
     if let Some(kind) = code.and_then(|code| {
         KIND_CODES
@@ -251,7 +251,7 @@ impl ErrorKind {
 
     /// The kind of a failed Claude Code CLI turn, from what the CLI reports:
     /// the assistant message's `error` field (`authentication_failed`,
-    /// `billing_error`, `invalid_request`, ...; the Claude Agent SDK's
+    /// `billing_error`, `invalid_request`, ..., the Claude Agent SDK's
     /// `SDKAssistantMessageError`), the result's `api_error_status` (the
     /// HTTP status of the failed API request) and `terminal_reason`
     /// (`prompt_too_long`, ...), and the result text, whose Anthropic error
@@ -294,14 +294,14 @@ impl ErrorKind {
 /// How a failed request may be recovered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryClass {
-    /// Retrying the same request cannot succeed; a request, credential or
+    /// Retrying the same request cannot succeed. A request, credential or
     /// configuration change is required.
     Permanent,
     /// A temporary failure (rate limit, timeout, transient server error) that
     /// a bounded retry may recover.
     Transient,
     /// An explicit provider capacity signal (overloaded / unavailable). Also
-    /// retryable; callers may choose a longer wait.
+    /// retryable. Callers may choose a longer wait.
     Capacity,
     /// A plan usage limit (ChatGPT `usage_limit_reached`): requests fail
     /// until the limit resets, typically hours or days later
@@ -423,7 +423,7 @@ const CAPACITY_CODES: &[&str] = &[
 /// HTTP statuses of documented string codes, used to classify errors that
 /// arrive without one: a stream error event or failed interaction reported
 /// after the HTTP 200. Sources: Gemini Interactions API
-/// (https://ai.google.dev/gemini-api/docs/api-errors; unlisted codes fall back
+/// (https://ai.google.dev/gemini-api/docs/api-errors, unlisted codes fall back
 /// to the snake_case HTTP status name, e.g. `gateway_timeout`), Anthropic
 /// (https://platform.claude.com/docs/en/api/errors) and Google RPC names.
 const CODE_STATUSES: &[(&str, u16)] = &[
@@ -512,7 +512,7 @@ const CODE_STATUSES: &[(&str, u16)] = &[
 ];
 
 /// Plan usage limits (the ChatGPT backend's HTTP 429 `usage_limit_reached`,
-/// with the reset time in `resets_at`; codex-rs `api_bridge.rs`).
+/// with the reset time in `resets_at`, codex-rs `api_bridge.rs`).
 const USAGE_LIMIT_CODES: &[&str] = &["usage_limit_reached"];
 
 /// Short request-rate limits besides HTTP 429 itself: OpenAI/Codex
@@ -699,14 +699,14 @@ impl Error {
         self.retry_class() == RetryClass::Capacity
     }
 
-    /// A plan usage limit; see [`RetryClass::UsageLimit`].
+    /// A plan usage limit. See [`RetryClass::UsageLimit`].
     pub fn is_usage_limit(&self) -> bool {
         self.retry_class() == RetryClass::UsageLimit
     }
 
     /// A short request-rate limit: a retryable HTTP 429 (or a 429 code on an
     /// error reported after the response started), or `rate_limit_exceeded`
-    /// / `slow_down`. Such errors are [`RetryClass::Transient`]; this
+    /// / `slow_down`. Such errors are [`RetryClass::Transient`]. This
     /// refines that class. Quota walls (`insufficient_quota`, ...) are
     /// permanent and plan usage limits are [`RetryClass::UsageLimit`], so
     /// neither is a rate limit. [`retry_after`](Self::retry_after) holds the
@@ -739,7 +739,7 @@ impl Error {
         }
     }
 
-    /// What kind of failure this is; see [`ErrorKind`]. A provider error is
+    /// What kind of failure this is. See [`ErrorKind`]. A provider error is
     /// classified from its code, then its HTTP status, then documented
     /// phrases of its message. arko's own errors: a rejected or missing
     /// credential is [`ErrorKind::Authentication`], a local request check
@@ -851,7 +851,7 @@ impl Error {
 }
 
 /// Delay requested by response headers: `Retry-After` (seconds or an HTTP
-/// date) on any status; on a 429 without it, OpenAI-style
+/// date) on any status. On a 429 without it, OpenAI-style
 /// `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` durations such
 /// as `1m2.5s`.
 ///
@@ -877,7 +877,7 @@ pub(crate) fn retry_after_from_headers(
 }
 
 /// A delay hint from a response, capped so callers can add it to the current
-/// time; see [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
+/// time. See [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
 fn cap_server_hint(delay: Duration) -> Duration {
     delay.min(crate::retry::MAX_SERVER_DELAY_HINT)
 }

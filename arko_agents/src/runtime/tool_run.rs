@@ -70,7 +70,7 @@ pub(super) struct ToolRun {
     pub tool_name: String,
     pub tool: Arc<dyn Tool>,
     pub params: HashMap<String, Value>,
-    /// The host-side time limit; `None` runs without one.
+    /// The host-side time limit. `None` runs without one.
     pub timeout: Option<Duration>,
     /// Output the host gave with the approval instead of running the tool.
     pub custom_output: Option<String>,
@@ -87,7 +87,7 @@ pub(super) struct ToolRun {
     /// The host's message given with the call's approval, recorded with it
     /// while it runs.
     pub message_to_agent: Option<String>,
-    /// The call runs again after its task stopped while it ran; see
+    /// The call runs again after its task stopped while it ran. See
     /// [`TaskContext::recovering`].
     pub recovering: bool,
 }
@@ -111,9 +111,9 @@ impl ToolRun {
 
 /// How a call ended.
 pub(super) enum RunOutcome {
-    /// The middleware rejected the call; it did not run.
+    /// The middleware rejected the call. It did not run.
     Rejected(String),
-    /// The middleware hook itself failed before the tool ran; the task must
+    /// The middleware hook itself failed before the tool ran. The task must
     /// pause so the host can decide whether to continue.
     MiddlewareErrorBefore { reason: String },
     /// The middleware hook itself failed after the tool returned. The output
@@ -126,10 +126,10 @@ pub(super) enum RunOutcome {
         is_error: bool,
     },
     /// The middleware failed (or, with `cancel`, cancelled) the task at the
-    /// call; it did not run.
+    /// call. It did not run.
     Stop { reason: String, cancel: bool },
     /// The middleware paused the task at the call, answering it with
-    /// `message`; it did not run.
+    /// `message`. It did not run.
     Pause { message: String, reason: String },
     /// The tool returned, or the host supplied its output. `effective` is
     /// the text after interception.
@@ -314,7 +314,7 @@ fn middleware_error_reason(phase: &str, tool_name: &str, error: &ToolError) -> S
     format!("Tool execution middleware {phase} hook failed for '{tool_name}': {error}")
 }
 
-/// Applies `interception` to a result; returns the text for the
+/// Applies `interception` to a result. Returns the text for the
 /// conversation and whether it differs from the raw result. A failed
 /// interceptor is retried under its policy, and then the raw result is used.
 async fn intercept(

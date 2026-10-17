@@ -18,7 +18,7 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 /// Makes a rename into `dir` durable: fsyncs the directory on Unix. Windows cannot
-/// open a directory with `File::open`; there this does nothing.
+/// open a directory with `File::open`. There this does nothing.
 pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -70,7 +70,7 @@ pub struct FileRules {
     /// excludes file and ignore files above the root are never read.
     pub respect_ignore: bool,
     /// Gitignore-syntax patterns relative to the root (`vendor/`, `*.min.js`,
-    /// `/docs/generated/`, `!keep.md`). A matching file is not indexed; a matching
+    /// `/docs/generated/`, `!keep.md`). A matching file is not indexed. A matching
     /// directory is not entered.
     pub exclude: Vec<String>,
     /// Gitignore-syntax patterns relative to the root. When non-empty, only files
@@ -93,7 +93,7 @@ pub enum SkipReason {
     NameNotUtf8,
     /// Reading the file or listing the directory failed (`detail` has the error).
     Unreadable,
-    /// A symbolic link; links are never followed.
+    /// A symbolic link. Links are never followed.
     Symlink,
     /// Not a regular file, directory or symlink (FIFO, socket, device).
     Special,
@@ -105,11 +105,11 @@ pub enum SkipReason {
     CachedirTag,
     /// The tool's own index or watch state directory.
     StateDir,
-    /// Matched by a `.gitignore` (only with `respect_ignore`; listed in `ignored`).
+    /// Matched by a `.gitignore` (only with `respect_ignore`, listed in `ignored`).
     Gitignore,
-    /// Matched by a `.ignore` file (only with `respect_ignore`; listed in `ignored`).
+    /// Matched by a `.ignore` file (only with `respect_ignore`, listed in `ignored`).
     IgnoreFile,
-    /// Matched by `.git/info/exclude` (only with `respect_ignore`; listed in `ignored`).
+    /// Matched by `.git/info/exclude` (only with `respect_ignore`, listed in `ignored`).
     GitInfoExclude,
 }
 impl SkipReason {
@@ -157,7 +157,7 @@ pub struct Skipped {
 
 /// What a walk indexed and what it did not. Everything not indexed for a reason other
 /// than the user's own rules is listed in `skipped`. Entries removed by ignore files are
-/// counted per source and listed in `ignored` (at most [`IGNORED_LIST_CAP`]); entries
+/// counted per source and listed in `ignored` (at most `IGNORED_LIST_CAP`, 1,000). Entries
 /// removed by `exclude`/`include` are counted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -182,7 +182,7 @@ pub struct Report {
     /// Files and directories removed by `.git/info/exclude`.
     pub ignored_by_git_info_exclude: u64,
     /// The entries removed by ignore files, sorted by path: the first
-    /// [`IGNORED_LIST_CAP`]; the three counts above are complete.
+    /// `IGNORED_LIST_CAP`. The three counts above are complete.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<Skipped>,
     /// Problems that did not skip anything, such as an invalid line in an ignore file.
@@ -196,7 +196,7 @@ impl Report {
             ..Self::default()
         }
     }
-    /// Sorts `skipped` and recomputes `counts`; sorts and caps `ignored`.
+    /// Sorts `skipped` and recomputes `counts`. Sorts and caps `ignored`.
     pub(crate) fn finish(&mut self) {
         self.ignored.sort();
         self.ignored.truncate(IGNORED_LIST_CAP);
@@ -334,7 +334,7 @@ pub(crate) struct FileData {
     pub hash: String,
 }
 
-/// A walked regular file: its relative path as slash-joined raw bytes (the sort key;
+/// A walked regular file: its relative path as slash-joined raw bytes (the sort key,
 /// for UTF-8 names it orders exactly like a `BTreeMap<String, _>`) and its absolute
 /// path. Nothing is read yet. The walker only lists files with UTF-8 names.
 pub(crate) struct Listed {
@@ -393,11 +393,11 @@ struct Tally {
 }
 
 /// The ignore files of one directory, and its parent's (with `respect_ignore`).
-/// The `ignore` crate's own handling is not used, because it hides what it removes;
-/// this follows its precedence (ignore-0.4.33 dir.rs `matched_ignore`, with
+/// The `ignore` crate's own handling is not used, because it hides what it removes.
+/// This follows its precedence (ignore-0.4.33 dir.rs `matched_ignore`, with
 /// `require_git(false)` and no parents): over the directories from the entry's parent
 /// up to the root, the nearest `.ignore` match wins, then the nearest `.gitignore`
-/// match, then the nearest `.git/info/exclude` match; a `!` whitelist ends the search.
+/// match, then the nearest `.git/info/exclude` match. A `!` whitelist ends the search.
 struct DirIgnore {
     ignore: Option<Gitignore>,
     gitignore: Option<Gitignore>,
@@ -729,14 +729,14 @@ pub(crate) fn list_files(
 pub(crate) enum Read {
     /// UTF-8 text without NUL bytes: the relative path and the contents.
     Text(String, FileData),
-    /// Not indexable; the report entry says why.
+    /// Not indexable. The report entry says why.
     Skip(Skipped),
     /// Vanished since it was listed.
     Gone,
 }
 
 /// Reads one listed file: NUL-containing files are binary, other invalid UTF-8 is
-/// `not-utf8`, read errors are `unreadable`; a vanished file is `Gone`.
+/// `not-utf8`, read errors are `unreadable`. A vanished file is `Gone`.
 pub(crate) fn read_listed(item: &Listed, with_hash: bool) -> Read {
     let bytes = match std::fs::read(&item.path) {
         Ok(b) => b,

@@ -6,7 +6,7 @@
 //! arko_index makes no network calls itself: an [`Embedder`] is supplied by the
 //! caller. The crate ships [`HashEmbedder`] (offline, deterministic, not semantic: for
 //! tests and examples) and, with the `local-embed` feature, `local::LocalEmbedder`,
-//! which runs a code-embedding model on the CPU; the `arko_index_cli` example adapts
+//! which runs a code-embedding model on the CPU. The `arko_index_cli` example adapts
 //! arko_ai's Voyage client too.
 //! An index is built with embeddings by [`index2::build`](crate::index2::build) with
 //! [`BuildOptions::dense`](crate::index2::BuildOptions::dense) set, and searched by
@@ -196,7 +196,7 @@ pub struct EmbedLimits {
     /// within `max_input_tokens` goes in a request of its own.
     pub max_request_tokens: u64,
     /// Tokens per text. A longer text is not embedded (counted in
-    /// [`EmbedStats::too_long`]); its chunk stays searchable lexically.
+    /// [`EmbedStats::too_long`]). Its chunk stays searchable lexically.
     pub max_input_tokens: u64,
 }
 impl EmbedLimits {
@@ -214,12 +214,12 @@ impl EmbedLimits {
 pub struct Embedding {
     /// One vector per input text, in input order.
     pub vectors: Vec<Vec<f32>>,
-    /// Tokens the provider billed for the request (0 when it does not say; the
+    /// Tokens the provider billed for the request (0 when it does not say, the
     /// counted tokens are then used for accounting).
     pub tokens: u64,
 }
 
-/// A text embedding model. Implementations make the requests; arko_index batches
+/// A text embedding model. Implementations make the requests. arko_index batches
 /// texts within [`limits`](Self::limits), stops at the caller's token cap, caches
 /// the vectors and stores them. Calls come from one thread at a time.
 ///
@@ -261,7 +261,7 @@ pub fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<(Vec<f32>, u6
 
 /// An offline, deterministic embedder for tests and examples: feature hashing of the
 /// lexical search terms (words and identifier parts), with a sign per term. Texts
-/// that share terms get similar vectors; it knows nothing of meaning. Descriptor:
+/// that share terms get similar vectors. It knows nothing of meaning. Descriptor:
 /// provider `hash`, model `hash-v1`. One token per term, at least one per text.
 #[derive(Clone, Debug)]
 pub struct HashEmbedder {
@@ -311,7 +311,7 @@ impl Embedder for HashEmbedder {
 /// The embedding settings saved with an index (`STATE_DIR/dense.json`): which model
 /// embeds it and how. Written by a build with embeddings, so later builds (after a
 /// watcher reported changes, for example) can use the same model without being told
-/// again; see [`DenseConfig::load`]. Removing it makes later builds lexical only, in
+/// again. See [`DenseConfig::load`]. Removing it makes later builds lexical only, in
 /// callers that follow it (the CLI does).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -406,7 +406,7 @@ impl DenseConfig {
         bytes.push(b'\n');
         atomic_write(state_dir, Self::FILE, &bytes)
     }
-    /// Removes the saved config; returns whether there was one. The embedding cache
+    /// Removes the saved config. Returns whether there was one. The embedding cache
     /// stays (`STATE_DIR/embed-cache/`).
     pub fn remove(state_dir: &Path) -> Result<bool, Error> {
         match std::fs::remove_file(state_dir.join(Self::FILE)) {

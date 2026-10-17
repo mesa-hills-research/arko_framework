@@ -47,10 +47,10 @@ pub struct WorkflowDependency {
     pub executable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
-    /// Only on this OS (`std::env::consts::OS`, any case); any when unset.
+    /// Only on this OS (`std::env::consts::OS`, any case). Any when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
-    /// Only on this architecture (`std::env::consts::ARCH`, any case); any
+    /// Only on this architecture (`std::env::consts::ARCH`, any case). Any
     /// when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
@@ -136,7 +136,7 @@ impl WorkflowMetadata {
     /// and `arch` match `std::env::consts::{OS, ARCH}`, or are unset) whose
     /// `executable` isn't found, required and optional alike. A dependency
     /// without an `executable` is never reported. Nothing is printed or
-    /// installed; the workflow decides what to do, for example stop before
+    /// installed. The workflow decides what to do, for example stop before
     /// any model call when a required one is missing and warn about the
     /// optional ones.
     pub fn missing_dependencies(&self) -> Vec<&WorkflowDependency> {

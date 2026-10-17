@@ -120,21 +120,21 @@ pub struct AgentLoop {
     /// The request in flight (or last made) went to the fallback model
     /// ([`Task::fallback_for`]).
     current_request_is_fallback: bool,
-    /// The cache monitor's warning and pause; see [`CacheMonitorState`].
+    /// The cache monitor's warning and pause. See [`CacheMonitorState`].
     cache_monitor: CacheMonitorState,
     stop_requested: bool,
-    /// A batch of tool calls is running; see [`begin_tool_batch`](Self::begin_tool_batch).
+    /// A batch of tool calls is running. See [`begin_tool_batch`](Self::begin_tool_batch).
     deferring_tool_errors: bool,
     /// The task failed on a tool error under `ToolErrorPolicy::FailTask`
-    /// (not on a middleware's decision); see
+    /// (not on a middleware's decision). See
     /// [`not_run_after_stop`](Self::not_run_after_stop).
     failed_on_tool_error: bool,
-    /// `SuspendTask` stopped running tool calls; the loop reports the
+    /// `SuspendTask` stopped running tool calls. The loop reports the
     /// task's state as it stops.
     suspended_tools: bool,
     /// The index of the message that carried this turn's environment
-    /// details and reminder, when the loop added it since the last request;
-    /// see [`add_taken_context`](Self::add_taken_context).
+    /// details and reminder, when the loop added it since the last request.
+    /// See [`add_taken_context`](Self::add_taken_context).
     details_sent_with: Option<usize>,
     /// The state the last `TaskStateChanged` reported, so a state reported
     /// by one path isn't reported again by another.
@@ -148,7 +148,7 @@ pub struct AgentLoop {
     /// The model of every request made, in order.
     #[cfg(test)]
     requested_models: Arc<std::sync::Mutex<Vec<String>>>,
-    /// The test's trace of the loop's events and snapshots; see
+    /// The test's trace of the loop's events and snapshots. See
     /// [`loop_trace`].
     #[cfg(test)]
     trace: loop_trace::LoopTrace,
@@ -160,7 +160,7 @@ pub struct AgentLoop {
     /// Asked for context at each safe turn boundary.
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     /// The identifiers of the turn context source's content queued and not
-    /// yet added; see [`add_taken_context`](Self::add_taken_context).
+    /// yet added. See [`add_taken_context`](Self::add_taken_context).
     pub(super) context_ids: Vec<String>,
     /// `ContextInjected` events for context updates added and not yet
     /// emitted (the update is added where no event can be sent).
@@ -173,29 +173,29 @@ pub struct AgentLoop {
     /// out: the next report request says so
     /// ([`hand_over_without_the_step`](Self::hand_over_without_the_step)).
     pub(super) step_left_out: bool,
-    /// Receives the task at its safe points; see [`report_task`](Self::report_task).
+    /// Receives the task at its safe points. See [`report_task`](Self::report_task).
     pub(super) snapshots: crate::snapshot::TaskSnapshots,
-    /// The host's stop signal for the task's calls; see
+    /// The host's stop signal for the task's calls. See
     /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
     pub(super) host_stop: crate::stop::StopSignal,
     /// Receives the images the task's calls return. See
     /// [`AgentRuntime::with_tool_image_sink`](super::AgentRuntime::with_tool_image_sink).
     pub(super) image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     /// Fired when `CancelTask` or `SuspendTask` arrives while calls run, so
-    /// that a call the runtime waits for winds down; see
+    /// that a call the runtime waits for winds down. See
     /// [`TaskContext::stop`](crate::tool::TaskContext::stop).
     calls_stop: crate::stop::StopSource,
     /// The plan-usage SlowDown's delay was checked against the prompt-cache
     /// lifetime (once per run).
     slow_down_cache_checked: bool,
-    /// A threshold handover was skipped and logged; see
+    /// A threshold handover was skipped and logged. See
     /// `start_handover_if_due`.
     handover_skip_warned: bool,
     tool_context_cursor: usize,
     file_tree_baseline: Option<crate::file_tree::FileTreeSnapshot>,
     file_tree_error: Option<String>,
     /// Bytes per token of this task's requests, calibrated from their
-    /// reported usage; see [`result_budget`].
+    /// reported usage. See [`result_budget`].
     bytes_per_token: f64,
     /// The request in flight, or last sent.
     sent_request: Option<RequestMark>,

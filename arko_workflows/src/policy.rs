@@ -51,7 +51,7 @@ pub enum ApprovalPolicy {
     RespectAgentConfig,
     /// Honor the agent's configuration, with this handler deciding each
     /// call it marks for approval as it is asked (the handler may wait on a
-    /// person; a stopped run doesn't wait for it). A
+    /// person, a stopped run doesn't wait for it). A
     /// [`ToolApprovalOutcome::Pause`] pauses the agent as under
     /// `RespectAgentConfig`.
     Handler(Arc<dyn ToolApprovalHandler>),
@@ -67,7 +67,7 @@ impl fmt::Debug for ApprovalPolicy {
     }
 }
 
-/// Decides tool calls an agent's configuration marks for approval; see
+/// Decides tool calls an agent's configuration marks for approval. See
 /// [`ApprovalPolicy::Handler`].
 #[async_trait]
 pub trait ToolApprovalHandler: Send + Sync {
@@ -94,7 +94,7 @@ pub struct ToolApprovalRequest {
 pub enum ToolApprovalOutcome {
     /// Run the call.
     Approve,
-    /// Don't run it; the agent is told, with the reason when given.
+    /// Don't run it. The agent is told, with the reason when given.
     Reject { reason: Option<String> },
     /// Pause the agent and return the decision to the run's caller
     /// ([`AgentPause::ToolApproval`]).
@@ -109,7 +109,7 @@ pub enum ToolApprovalOutcome {
 /// rate limit after the provider's delay) until its attempts or elapsed
 /// budget run out, and a request in flight is never cut off. Only then does
 /// the agent pause, with an
-/// [`ErrorRecoveryCause`](arko_agents::ErrorRecoveryCause), and this policy
+/// [`ErrorRecoveryCause`], and this policy
 /// decides. The driver never sends a request itself, so nothing is retried
 /// twice.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -122,18 +122,18 @@ pub enum ErrorRecoveryPolicy {
     ///   the provider asked for), the failed request is sent again
     ///   unchanged, starting a new round of the agent's retries.
     /// - A plan usage limit: the driver waits until it resets (plus 5
-    ///   seconds; when the limit is reported again right after, at least the
+    ///   seconds, when the limit is reported again right after, at least the
     ///   growing wait above), or, when the provider didn't say when, for the
     ///   growing wait, and sends the request again unchanged.
     ///
     /// Each wait gets up to 30 seconds (at most a quarter of it) added at
     /// random, so agents sharing a plan don't all resend at once.
     /// - Tool errors (under the agent's opt-in
-    ///   `ToolErrorPolicy::PauseAndAwaitApproval`): the agent continues;
-    ///   the calls' results report the errors.
+    ///   `ToolErrorPolicy::PauseAndAwaitApproval`): the agent continues.
+    ///   The calls' results report the errors.
     /// - A refusal: the agent's refusal settings apply first (the opt-in
-    ///   `refusal_fallback` model has already been tried when configured);
-    ///   a refusal that stands fails the run with a clear reason, since the
+    ///   `refusal_fallback` model has already been tried when configured).
+    ///   A refusal that stands fails the run with a clear reason, since the
     ///   same input would be refused again. A fallback request that fails
     ///   for another reason (a dropped connection, a server error) pauses
     ///   with that failure's cause and is recovered from as such.
@@ -154,13 +154,13 @@ pub enum ErrorRecoveryPolicy {
     #[default]
     Automatic,
     /// As `Automatic`, for at most `max` automatic recoveries in each call
-    /// that drives the agent (a run, continuation or resume); the next
+    /// that drives the agent (a run, continuation or resume). The next
     /// pause fails the run with a clear reason. `max: 0` recovers nothing
     /// automatically.
     Limited { max: u32 },
     /// Every error-recovery pause pauses the agent and returns
     /// [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused) with
-    /// [`AgentPause::ErrorRecovery`]; continue with
+    /// [`AgentPause::ErrorRecovery`]. Continue with
     /// [`Workflow::resume_agent`](crate::Workflow::resume_agent).
     ReturnToCaller,
 }
@@ -169,15 +169,15 @@ pub enum ErrorRecoveryPolicy {
 /// [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused). Its
 /// task (in the recorded [`AgentResult`](crate::AgentResult), with status
 /// [`AgentRunStatus::Paused`](crate::AgentRunStatus::Paused)) keeps the
-/// state; continue it with
+/// state. Continue it with
 /// [`Workflow::resume_agent`](crate::Workflow::resume_agent).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPause {
-    /// Tool calls await approval; decide them with
+    /// Tool calls await approval. Decide them with
     /// [`AgentResume::ToolApprovals`].
     ToolApproval { calls: Vec<PendingToolCallInfo> },
-    /// The agent awaits error-recovery approval; continue with
+    /// The agent awaits error-recovery approval. Continue with
     /// [`AgentResume::ContinueAfterError`], fail with
     /// [`AgentResume::FailAfterError`], or, for a refusal, change the input
     /// with [`AgentResume::ResolveRefusal`].
@@ -293,24 +293,24 @@ pub(crate) fn cause_name(cause: &ErrorRecoveryCause) -> &'static str {
 /// paused agent.
 #[derive(Debug, Clone)]
 pub enum AgentResume {
-    /// Decide the calls of an [`AgentPause::ToolApproval`]; a call without
+    /// Decide the calls of an [`AgentPause::ToolApproval`]. A call without
     /// a decision is rejected.
     ToolApprovals(HashMap<Uuid, ToolApprovalDecision>),
     /// Continue after an [`AgentPause::ErrorRecovery`]: without a note the
-    /// failed request is sent again unchanged; a note is added for the
+    /// failed request is sent again unchanged. A note is added for the
     /// model first.
     ContinueAfterError { note: Option<String> },
     /// Fail the task, with `reason` when given.
     FailAfterError { reason: Option<String> },
     /// Change the refused input of a refusal pause (cause
     /// [`ErrorRecoveryCause::Refusal`], or `Unknown` for a pause saved before
-    /// causes were recorded) and continue; see
+    /// causes were recorded) and continue. See
     /// `arko_agents::Task::resolve_refusal`. Refused at once for another
     /// pause, without a change, or for a Claude Code agent (Claude Code
     /// keeps its own conversation). When the runtime can't apply the
     /// changes, the host gets its error under the error recovery policy, as
     /// another error at that pause: under `ReturnToCaller` (or for an
-    /// `Unknown` pause) the run call returns the agent paused again; under
+    /// `Unknown` pause) the run call returns the agent paused again. Under
     /// `Automatic` or `Limited` a refusal's run fails with that error.
     ResolveRefusal(Vec<RefusalResolution>),
 }
@@ -326,7 +326,7 @@ pub(crate) enum RecoveryAction {
     ReturnToCaller,
 }
 
-/// The waits of automatic recovery; tests shorten them.
+/// The waits of automatic recovery. Tests shorten them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RecoveryWaits {
     /// The first wait after retries ran out.
@@ -521,7 +521,7 @@ mod tests {
     }
 
     /// Each cause under each policy: `Automatic` recovers from what may
-    /// pass, without a limit; `Limited` the same, up to its count;
+    /// pass, without a limit. `Limited` the same, up to its count.
     /// `ReturnToCaller` returns every pause.
     #[test]
     fn each_cause_gets_its_action_under_each_policy() {

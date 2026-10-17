@@ -1,5 +1,5 @@
 //! Live snapshots of a running task, so that a host can save it while it
-//! runs and continue it after a crash; see [`TaskSnapshotSink`].
+//! runs and continue it after a crash. See [`TaskSnapshotSink`].
 
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -18,14 +18,14 @@ use crate::task::Task;
 ///
 /// The runtime reports the task:
 /// - after the model's turn is added to the conversation, before its tool
-///   calls run;
+///   calls run.
 /// - before a group of tool calls starts, with the calls recorded as
 ///   running: the write-ahead point, reported `durable` (unless every
 ///   call in the group is one recovery simply runs again:
 ///   [`ToolRecovery::Rerun`](crate::tool::ToolRecovery::Rerun) without the
 ///   host's own output, or, for a Claude Code agent, a
-///   [read-only built-in](crate::claude_code::READ_ONLY_BUILT_IN_TOOLS));
-/// - after each group of calls' results are recorded;
+///   [read-only built-in](crate::claude_code::READ_ONLY_BUILT_IN_TOOLS)).
+/// - after each group of calls' results are recorded.
 /// - at every turn boundary (which covers pauses and waits for a
 ///   command), after a handover, and when the run ends.
 ///

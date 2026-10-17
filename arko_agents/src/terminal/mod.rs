@@ -60,15 +60,15 @@ pub struct TerminalConfig {
     /// PTY jobs get [`QUIET_TERMINAL_ENVIRONMENT`] on top of the host's
     /// environment (default `true`), so programs that see a terminal print
     /// plain text: no colours, no pagers, UTF-8 output. Full-screen programs
-    /// (editors, `top`, `less`) refuse to run or degrade under `TERM=dumb`;
-    /// set `false` to give PTY jobs the host's environment unchanged. Pipe
+    /// (editors, `top`, `less`) refuse to run or degrade under `TERM=dumb`.
+    /// Set `false` to give PTY jobs the host's environment unchanged. Pipe
     /// jobs always get it unchanged.
     pub quiet_terminal_environment: bool,
     /// Refuses commands that would delete, move, overwrite, or reformat a
     /// protected path (the filesystem root, a drive root, the home directory
     /// or its parents, top-level and system directories, mounted volumes,
     /// devices) or a path outside the job's working directory. On by
-    /// default; see [`CommandGuard`] for the opt-ins.
+    /// default. See [`CommandGuard`] for the opt-ins.
     pub command_guard: CommandGuard,
 }
 
@@ -203,7 +203,7 @@ impl JobState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputSource {
-    /// An application declared a request; this is not OS-level wait detection.
+    /// An application declared a request. This is not OS-level wait detection.
     Program { request_id: String },
     /// A configured rule matched output. It is always an inference.
     PromptRule { rule: String },
@@ -241,7 +241,7 @@ pub struct OutputWindow {
     /// True when the requested beginning is no longer in the output buffer.
     pub gap: bool,
     /// UTF-8 display of this byte range, replacing invalid/incomplete
-    /// sequences. On Windows, PTY output is shown without escape sequences;
+    /// sequences. On Windows, PTY output is shown without escape sequences.
     /// `start`, `end` and the log still count the raw bytes.
     pub text: String,
     /// Exact bytes when the display range contains invalid/incomplete UTF-8.
@@ -260,7 +260,7 @@ pub struct TerminalSnapshot {
     pub output: OutputWindow,
     pub log_path: PathBuf,
     pub log_truncated: bool,
-    /// Both modes retain combined arrival-order output; PTY mode adds terminal semantics.
+    /// Both modes retain combined arrival-order output. PTY mode adds terminal semantics.
     pub terminal: bool,
 }
 
@@ -383,9 +383,9 @@ struct RuntimeBinding {
     pending: Arc<Mutex<HashSet<Uuid>>>,
 }
 
-/// Share one manager across tools. It owns jobs; dropping it cancels running jobs.
+/// Share one manager across tools. It owns jobs. Dropping it cancels running jobs.
 /// Its directory is exclusive. On process restart, previous running jobs become
-/// interrupted records; their PIDs are never trusted, reattached, or rerun.
+/// interrupted records. Their PIDs are never trusted, reattached, or rerun.
 pub struct TerminalManager {
     config: TerminalConfig,
     detector: Arc<Detector>,
@@ -854,7 +854,7 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Wait for a revision change, input request, or completion; never more than 30s.
+    /// Wait for a revision change, input request, or completion. Never more than 30s.
     /// The wait deadline does not terminate the process.
     pub async fn wait(
         &self,

@@ -83,7 +83,7 @@ pub struct VectorHit {
 
 /// A searchable set of vectors. Implementation: [`CaprockStore`].
 ///
-/// `upsert` and `delete` change what the store's own searches see at once; `persist`
+/// `upsert` and `delete` change what the store's own searches see at once. `persist`
 /// makes every change since the last `persist` durable at once, and visible to stores
 /// opened afterwards. How a store is created and opened (its directory, model and
 /// settings) is specific to each implementation.
@@ -98,7 +98,7 @@ pub trait VectorStore: Send + Sync {
     /// Stores each record's vector under its id, replacing the vector stored under it.
     /// A batch is applied in order, all or nothing.
     fn upsert(&mut self, records: &[VectorRecord<'_>]) -> Result<(), Error>;
-    /// Removes the vectors stored under `ids`; returns how many there were.
+    /// Removes the vectors stored under `ids`. Returns how many there were.
     fn delete(&mut self, ids: &[VectorId]) -> Result<usize, Error>;
     /// Every stored id, ascending.
     fn ids(&self) -> Result<Vec<VectorId>, Error>;
@@ -226,7 +226,7 @@ impl StoreConfig {
 /// tombstones. [`persist`](VectorStore::persist) merges segments by its policy and
 /// commits a new generation atomically: a crash keeps the last persisted state.
 ///
-/// One handle writes a directory at a time (an exclusive lock); any number of
+/// One handle writes a directory at a time (an exclusive lock). Any number of
 /// read-only handles ([`CaprockStore::open`]) search its last persisted state meanwhile.
 pub struct CaprockStore {
     handle: Handle,
@@ -259,7 +259,7 @@ fn parse_key(key: &str) -> Result<VectorId, Error> {
 }
 
 impl CaprockStore {
-    /// Creates an empty store in `dir` (created if missing; it must not already hold a
+    /// Creates an empty store in `dir` (created if missing, it must not already hold a
     /// store).
     pub fn create(dir: &Path, config: &StoreConfig) -> Result<Self, Error> {
         Self::create_with(dir, config, store_options())
@@ -305,7 +305,7 @@ impl CaprockStore {
     }
 
     /// Merges segments into as few as memory allows, with no deletions left (and
-    /// graphs, with [`VectorIndex::Graph`]); for after a bulk load. Durable at the next
+    /// graphs, with [`VectorIndex::Graph`]). For after a bulk load. Durable at the next
     /// [`persist`](VectorStore::persist).
     pub fn compact(&mut self) -> Result<(), Error> {
         self.writer()?.compact()?;

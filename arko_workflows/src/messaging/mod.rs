@@ -36,7 +36,7 @@ pub enum MessageAttachment {
 ///
 /// Set with [`WorkflowBuilder::messaging`](crate::WorkflowBuilder::messaging).
 /// An agent the policy doesn't name may message every other registered agent
-/// (the default for every agent); [`can_message`](Self::can_message)
+/// (the default for every agent). [`can_message`](Self::can_message)
 /// restricts an agent to named recipients, or to none. An agent is offered
 /// `send_message` only when it has at least one permitted recipient, so a
 /// single-agent workflow has none.
@@ -44,7 +44,7 @@ pub enum MessageAttachment {
 /// ```rust
 /// use arko_workflows::messaging::MessagingPolicy;
 ///
-/// // Workers report to the lead only; the lead may message everyone.
+/// // Workers report to the lead only, and the lead may message everyone.
 /// let policy = MessagingPolicy::all()
 ///     .can_message("worker_a", ["lead"])
 ///     .can_message("worker_b", ["lead"]);
@@ -52,7 +52,7 @@ pub enum MessageAttachment {
 #[derive(Debug, Clone, Default)]
 pub struct MessagingPolicy {
     /// For each agent listed, the only agents it may message (none when the
-    /// set is empty); an agent without an entry may message every other
+    /// set is empty). An agent without an entry may message every other
     /// agent.
     pub recipients: HashMap<String, HashSet<String>>,
     /// Opt-in: `send_message` to a finished agent queues the message for
@@ -69,7 +69,7 @@ impl MessagingPolicy {
         Self::default()
     }
 
-    /// `agent` may message only `recipients`; an empty list means no one.
+    /// `agent` may message only `recipients`. An empty list means no one.
     /// Replaces an earlier setting for `agent`.
     pub fn can_message<I, S>(mut self, agent: impl Into<String>, recipients: I) -> Self
     where
@@ -84,7 +84,7 @@ impl MessagingPolicy {
     }
 
     /// Messages to a finished agent are kept for its next run instead of
-    /// being refused; its finish notice says so. Suits workflows that
+    /// being refused. Its finish notice says so. Suits workflows that
     /// continue or run agents again: a lead that finished before a worker
     /// replied gets the reply when it is continued.
     pub fn keep_messages_for_finished(mut self) -> Self {
@@ -97,7 +97,7 @@ impl MessagingPolicy {
         self.can_message(agent, std::iter::empty::<String>())
     }
 
-    /// Whether `sender` may message `recipient`; never itself.
+    /// Whether `sender` may message `recipient`. Never itself.
     pub fn permits(&self, sender: &str, recipient: &str) -> bool {
         sender != recipient
             && self
@@ -106,8 +106,8 @@ impl MessagingPolicy {
                 .is_none_or(|allowed| allowed.contains(recipient))
     }
 
-    /// The agents of `roster` that `sender` may message, in roster order;
-    /// never the sender itself.
+    /// The agents of `roster` that `sender` may message, in roster order.
+    /// Never the sender itself.
     pub fn recipients_of(&self, sender: &str, roster: &[String]) -> Vec<String> {
         roster
             .iter()
@@ -154,7 +154,7 @@ pub struct AgentMessage {
     /// The agent runs (task IDs) that stopped holding this message: in
     /// their conversation (in a prompt, or added as a context update) or
     /// taken to be added when they run again. It is not presented to them
-    /// again when they are continued or resumed; other runs of the agent
+    /// again when they are continued or resumed. Other runs of the agent
     /// still get it until one that completed with it in its conversation
     /// acknowledges it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -168,7 +168,7 @@ pub struct AgentMessage {
 }
 
 impl AgentMessage {
-    /// Whether run `task_id` holds this message; see
+    /// Whether run `task_id` holds this message. See
     /// [`held_by`](Self::held_by).
     pub fn is_held_by(&self, task_id: Uuid) -> bool {
         self.held_by.contains(&task_id)
@@ -182,7 +182,7 @@ impl AgentMessage {
 }
 
 /// Per-agent message queue. Active recipients receive asynchronous context
-/// injections; later invocations receive pending messages in their prompt.
+/// injections. Later invocations receive pending messages in their prompt.
 /// Messages remain snapshot-backed until the workflow acknowledges completion.
 pub struct MessageBus {
     state: Arc<Mutex<BusState>>,
@@ -217,7 +217,7 @@ struct ActiveRecipient {
     pump: Option<AbortHandle>,
 }
 
-/// The agent messages a run hasn't seen yet; see
+/// The agent messages a run hasn't seen yet. See
 /// [`MessageBus::unseen_messages`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UnseenMessages {
@@ -621,7 +621,7 @@ impl MessageBus {
     /// True means retained for a known active task, not yet consumed. The
     /// queue is persisted by workflow checkpoints, just like inter-agent
     /// messages. A notice is for its run only: it is dropped when that run
-    /// stops ([`settle_run`](Self::settle_run)).
+    /// stops (`settle_run`).
     pub async fn inject_task(&self, task_id: Uuid, content: String) -> bool {
         let mut state = self.state.lock();
         let agent_name = state
@@ -664,7 +664,7 @@ impl MessageBus {
     /// Retain a message for checkpoint persistence and schedule active delivery
     /// without waiting for the recipient's command channel. It leaves the
     /// queue once a run of the recipient completes with it in its
-    /// conversation ([`settle_run`](Self::settle_run)); until then it is
+    /// conversation (`settle_run`). Until then it is
     /// presented to every run of the recipient that doesn't hold it.
     pub async fn send(
         &self,
@@ -763,12 +763,12 @@ impl MessageBus {
     /// Records what run `task_id` of `agent_name` holds as it stops (see
     /// [`AgentMessage::held_by`]): the queued messages its conversation holds
     /// (presented in `prompt_ids` or an earlier prompt, or added as a
-    /// runtime context update; an echo in an assistant turn, a tool result,
+    /// runtime context update, an echo in an assistant turn, a tool result,
     /// or a suffix doesn't count) and those it took from its command channel
     /// but hadn't added yet (`taken`, its `pending_context_injections`).
     /// None of them is presented to the run again when it is continued or
     /// resumed. When the run `completed`, the messages in its conversation
-    /// are acknowledged and leave the queue; one it only took stays for the
+    /// are acknowledged and leave the queue. One it only took stays for the
     /// runs that haven't read it. The run's context notices are dropped
     /// whatever the outcome: they describe the run's own context.
     pub(crate) fn settle_run(
@@ -832,7 +832,7 @@ impl MessageBus {
     /// runtime context update) are marked as read by the run
     /// ([`AgentMessage::read_by`]) and held by it, so they are neither
     /// presented to it again nor left unacknowledged when it completes. Its
-    /// context notices in the conversation are dropped; those it hasn't
+    /// context notices in the conversation are dropped. Those it hasn't
     /// received yet stay.
     pub fn hand_over(
         &self,
@@ -931,7 +931,7 @@ mod tests {
 
     /// A run's unseen agent messages: sent after it started, not yet in its
     /// conversation. Messages in its prompt, delivered ones (still queued
-    /// until acknowledged) and context notices don't count; each arrival and
+    /// until acknowledged) and context notices don't count. Each arrival and
     /// forward is signalled.
     #[tokio::test]
     async fn a_run_tracks_the_agent_messages_its_conversation_lacks() {
@@ -1293,7 +1293,7 @@ mod tests {
     }
 
     /// A message queued after a run's prompt was built, before the run was
-    /// registered, is delivered to it live; one in its prompt is not
+    /// registered, is delivered to it live. One in its prompt is not
     /// delivered again.
     #[tokio::test]
     async fn a_run_receives_messages_sent_while_it_started() {
@@ -1602,7 +1602,7 @@ mod tests {
     /// A handover marks the messages the old conversation held as read by
     /// the run: they are not presented to it again, and they are
     /// acknowledged when it completes though the fresh conversation lacks
-    /// them. Its own notices in the old conversation go; unread messages
+    /// them. Its own notices in the old conversation go. Unread messages
     /// stay.
     #[tokio::test]
     async fn a_handover_keeps_what_the_old_conversation_read() {

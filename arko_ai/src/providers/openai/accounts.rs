@@ -1,6 +1,6 @@
 //! Failover between ChatGPT accounts: an ordered list of ChatGPT OAuth
 //! sign-ins (for example two Codex `auth.json` files) behind one OpenAI
-//! provider. Requests go to the first account that can serve them; one that
+//! provider. Requests go to the first account that can serve them. One that
 //! reaches its usage limit is set aside until it resets, or until a status
 //! check finds it usable again, and the request goes to the next account at
 //! once.
@@ -10,7 +10,7 @@
 //! - A used-up plan answers HTTP 429 with `error.type: "usage_limit_reached"`
 //!   and the reset time in `resets_at` (`codex-api/src/api_bridge.rs`), and
 //!   credit or spend walls with codes such as `credit_balance_exhausted` or
-//!   `usage_not_included`. Codex stops the turn on either; no retry helps.
+//!   `usage_not_included`. Codex stops the turn on either. No retry helps.
 //! - Credits need no opt-in: Codex sends no flag, and counts an account
 //!   whose credits are left (or unlimited) as usable when its plan's windows
 //!   are used up (`tui/src/chatwidget/backend_banners.rs`,
@@ -20,7 +20,7 @@
 //!   with the bearer token and `ChatGPT-Account-Id`
 //!   (`backend-client/src/client/rate_limit_resets.rs`,
 //!   `get_rate_limit_status`), reports `rate_limit.allowed`, the windows,
-//!   the credits, spend control and the reached-limit type; a manual usage
+//!   the credits, spend control and the reached-limit type. A manual usage
 //!   reset shows there at once.
 //! - The `x-codex-turn-state` routing token belongs to the account that
 //!   issued it: Codex drops it when the signed-in account changes
@@ -71,11 +71,11 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 const USAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most reasoning items and turn-state tokens whose account is
-/// remembered (about 40 MB); past it the record starts over.
+/// remembered (about 40 MB). Past it the record starts over.
 const MAX_ORIGINS: usize = 1 << 20;
 
 /// One ChatGPT OAuth account of a [`ChatGptAccounts`] list: a label (used in
-/// events, logs and [`ModelCallUsage::account`](crate::usage::ModelCallUsage::account);
+/// events, logs and [`ModelCallUsage::account`](crate::usage::ModelCallUsage::account),
 /// never a secret) and the client holding its credentials, which refreshes
 /// them on its own (with a Codex `auth.json`, kept in step with the file).
 #[derive(Clone)]
@@ -122,7 +122,7 @@ impl ChatGptAccount {
 
 /// Something that happened to the accounts of a [`ChatGptAccounts`] list,
 /// passed to its [observer](ChatGptAccounts::with_observer) and logged.
-/// `Display` writes a sentence fit for a notification; no event holds a
+/// `Display` writes a sentence fit for a notification. No event holds a
 /// secret.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -387,7 +387,7 @@ pub struct ChatGptAccountStatus {
     pub label: String,
     /// The last request went to this account.
     pub active: bool,
-    /// Set aside after the backend refused it; see
+    /// Set aside after the backend refused it. See
     /// [`ChatGptAccountEvent::Exhausted`].
     pub exhausted: bool,
     /// Set aside, but the next request tries it (with why it may be usable
@@ -400,7 +400,7 @@ pub struct ChatGptAccountStatus {
     pub error_code: Option<String>,
     /// The plan usage of the newest response it served (the usage headers
     /// of requests accepted earlier than the last report applied are left
-    /// out; see [`ChatGptAccountEvent::UsingCredits`]), with the last
+    /// out, see [`ChatGptAccountEvent::UsingCredits`]), with the last
     /// credits known when a response reported none, as Codex keeps them.
     pub plan_usage: Option<PlanUsage>,
     /// The last usage-endpoint report, and when it came.
@@ -423,7 +423,7 @@ impl ChatGptAccountStatus {
 /// What one report about an account says about its windows and credits:
 /// the usage headers of a response, or a usage check.
 struct Report {
-    /// Some window is used up; `None` when the report has no window.
+    /// Some window is used up. `None` when the report has no window.
     used_up: Option<bool>,
     credits: Option<PlanCredits>,
 }
@@ -463,7 +463,7 @@ struct Block {
     /// Set when the account may be usable again (its reset time passed, or
     /// a check allowed it or couldn't tell): the next request tries it. The
     /// account is taken back, with [`ChatGptAccountEvent::Usable`] for this
-    /// reason, once a request to it is accepted; a refusal sets it aside
+    /// reason, once a request to it is accepted. A refusal sets it aside
     /// again quietly. So a check that allows an account the backend still
     /// refuses (a limit the check doesn't show) notifies nobody.
     retry: Option<UsableReason>,
@@ -476,7 +476,7 @@ struct AccountState {
     usage: Option<ChatGptUsageStatus>,
     checked_at: Option<SystemTime>,
     /// The last credits reported. A response's headers don't always carry
-    /// them; Codex then keeps the previous ones
+    /// them. Codex then keeps the previous ones
     /// (`merge_rate_limit_fields` in codex-rs/core/src/state/session.rs).
     credits: Option<PlanCredits>,
     /// The backend is drawing on the credits: set by the first report of a
@@ -580,7 +580,7 @@ fn error_code(error: &Error) -> Option<String> {
 type Observer = Arc<dyn Fn(&ChatGptAccountEvent) + Send + Sync>;
 
 /// An ordered list of ChatGPT OAuth accounts for the OpenAI provider, first
-/// preferred; install it with
+/// preferred. Install it with
 /// [`LLMClient::with_chatgpt_accounts`](crate::LLMClient::with_chatgpt_accounts).
 ///
 /// - Each request goes to the first account not set aside. An account is
@@ -606,7 +606,7 @@ type Observer = Arc<dyn Fn(&ChatGptAccountEvent) + Send + Sync>;
 ///   account's reset). [`mark_usable`](Self::mark_usable) takes it back at
 ///   once.
 /// - A request replays only the encrypted reasoning, and the
-///   `x-codex-turn-state` token, of the account serving it; see the module
+///   `x-codex-turn-state` token, of the account serving it. See the module
 ///   documentation. Reasoning from before this process (a resumed
 ///   conversation) counts as the first account's.
 /// - [`ModelCallUsage::account`](crate::usage::ModelCallUsage::account)
@@ -701,7 +701,7 @@ impl ChatGptAccounts {
     }
 
     /// The accounts of Codex `auth.json` files, labelled, in order of
-    /// preference; see [`ChatGptAccount::from_codex_auth_file`].
+    /// preference. See [`ChatGptAccount::from_codex_auth_file`].
     pub fn from_codex_auth_files<'a>(
         files: impl IntoIterator<Item = (&'a str, &'a CodexAuthFile)>,
     ) -> Result<Self, Error> {
@@ -797,7 +797,7 @@ impl ChatGptAccounts {
     /// credits, on the usage endpoint now (for example once the operator has
     /// pressed a usage reset), and returns the accounts' states. The next
     /// request tries the first account a check allowed (or couldn't decide
-    /// on; see [`ChatGptAccountStatus::retry`]), which is taken back once the
+    /// on, see [`ChatGptAccountStatus::retry`]), which is taken back once the
     /// backend accepts it. Waits for a check under way.
     pub async fn check_now(&self) -> Vec<ChatGptAccountStatus> {
         let _checking = self.check_lock.lock().await;
@@ -1060,7 +1060,7 @@ impl ChatGptAccounts {
     }
 
     /// The error of a request no account can serve: a usage-limit error
-    /// retryable at the earliest known reset; without one, the last
+    /// retryable at the earliest known reset. Without one, the last
     /// account's own error when there is one.
     fn all_exhausted(&self, last_error: Option<Error>) -> Error {
         let now = self.now();
@@ -1331,7 +1331,7 @@ impl ChatGptAccounts {
 
     /// Passes `index`'s stream (accepted at `stamp`) on, labelling its
     /// response. A refusal before anything was streamed moves the request
-    /// to the next account; one after it fails the stream with a transient
+    /// to the next account. One after it fails the stream with a transient
     /// error when another account is usable (so the retry goes there), else
     /// with the refusal.
     fn watch(
@@ -1412,7 +1412,7 @@ enum WatchState {
         /// An event was passed on.
         delivered: bool,
     },
-    /// The request moved to another account; its stream is labelled there.
+    /// The request moved to another account. Its stream is labelled there.
     Moved(BoxStream<'static, Result<StreamEvent, Error>>),
     Done,
 }

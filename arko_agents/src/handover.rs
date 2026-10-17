@@ -10,7 +10,7 @@
 //! address the agent by name or task ID are unaffected.
 //!
 //! [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover) turns
-//! it on at a context size; a host can also ask for one at any time with
+//! it on at a context size. A host can also ask for one at any time with
 //! [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover),
 //! and change the size while the task runs with a [`HandoverThreshold`].
 //! A [`HandoverHook`] lets the host adjust the fresh conversation's first
@@ -52,7 +52,7 @@ use crate::error::ArkoAgentsError;
 use crate::task::Task;
 use crate::tool::{ToolDefinition, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
 
-/// The tool an agent gives its handover report with; see the
+/// The tool an agent gives its handover report with. See the
 /// [module docs](self) for when it is offered.
 pub const HANDOVER_REPORT_TOOL_NAME: &str = "handover_report";
 
@@ -110,7 +110,7 @@ pub const REPORT_HEADING: &str = "# Handover report";
 /// Said before the report in the fresh conversation's first message.
 pub const REPORT_INTRODUCTION: &str = "Your earlier conversation on this task was replaced with this one to keep your context small. Before it was replaced, you wrote the report below. Continue the task from it.";
 
-/// When an agent hands over; see the [module docs](self). At least one
+/// When an agent hands over. See the [module docs](self). At least one
 /// threshold must be set. In arko's own runtime it is checked before each
 /// model request against the estimated input of that request: the latest
 /// request's reported input, plus what the conversation gained since (the
@@ -372,7 +372,7 @@ pub fn report_tool_definition() -> ToolDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandoverRequest {
     pub requested_at: DateTime<Utc>,
-    /// The input size of the latest request when the handover started; 0
+    /// The input size of the latest request when the handover started. 0
     /// when a host asked for it before any request.
     pub input_tokens: usize,
     /// The report request is in the conversation. A host's request is noted
@@ -543,7 +543,7 @@ pub(crate) fn seed_images(task: &Task, chat: bool) -> Vec<arko_ai::Content> {
 /// [`AgentRuntime::with_handover_hook`](crate::runtime::AgentRuntime::with_handover_hook).
 pub trait HandoverHook: Send + Sync {
     /// `task` still holds the conversation being replaced. Returns the fresh
-    /// conversation's first message; the default restates the task's
+    /// conversation's first message. The default restates the task's
     /// initial prompt. A host that tracks what the conversation received
     /// (delivered messages, files read) updates its records here, before the
     /// conversation is gone.

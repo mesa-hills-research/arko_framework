@@ -22,7 +22,7 @@
 //! - A refresh request whose answer is lost (the connection drops or the
 //!   request times out after it was sent) may still have rotated the token,
 //!   but no new token arrived, so the old one is not recorded and the next
-//!   refresh sends it again; the server then refuses it (and it is recorded).
+//!   refresh sends it again. The server then refuses it (and it is recorded).
 //! - Clients that share neither their credentials nor a store's refresh lock
 //!   can send the same token at the same time: a token is known spent only
 //!   once a refresh with it has been answered.

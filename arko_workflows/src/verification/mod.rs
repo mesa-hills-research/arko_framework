@@ -44,8 +44,8 @@ pub struct CompletionVerifierConfig {
     /// `complete_task` again, which starts a new review. On the next failure
     /// the completion is neither accepted nor rejected: the task pauses and
     /// the run call returns
-    /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed);
-    /// continuing it starts the count again. Default 1.
+    /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed).
+    /// Continuing it starts the count again. Default 1.
     #[serde(default = "default_review_retries")]
     pub max_review_retries: u32,
 }
@@ -133,7 +133,7 @@ impl CompletionVerifierConfig {
     }
 
     /// Whether a fresh re-review is given the prior verdict and findings
-    /// (default `true`); `false` makes every review without
+    /// (default `true`). `false` makes every review without
     /// `reuse_conversation` an independent first review.
     pub fn include_prior_findings(mut self, enabled: bool) -> Self {
         self.include_prior_findings = enabled;
@@ -147,7 +147,7 @@ impl CompletionVerifierConfig {
     }
 
     /// How many failed reviews of one task are retried by asking the agent
-    /// to call `complete_task` again (default 1); see
+    /// to call `complete_task` again (default 1). See
     /// [`max_review_retries`](Self::max_review_retries).
     pub fn review_retries(mut self, retries: u32) -> Self {
         self.max_review_retries = retries;

@@ -34,7 +34,7 @@ pub(super) const REPORT_NOT_REQUESTED: &str = "This call was not run: no handove
 pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the call had no report. Call handover_report again with the full report in its `report` parameter.";
 
 /// The runtime's notes on a response it can't use, added to the
-/// conversation before it asks again; see
+/// conversation before it asks again. See
 /// [`AgentLoop::handle_model_output_failure`].
 pub(super) const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 /// [`NO_NATIVE_TOOL_CALL`] for an agent whose reply in text ends the task
@@ -57,7 +57,7 @@ pub(super) const UNDELIVERED_CALL: &str =
     "The model's final response did not include this call; it was not run.";
 pub(super) const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
 /// Why a call awaiting approval was not run, when its wait ended without a
-/// decision; see [`AgentLoop::settle_interrupted_wait`]. For a task saved
+/// decision. See [`AgentLoop::settle_interrupted_wait`]. For a task saved
 /// that way by an older version.
 pub(super) const UNDECIDED_CALL: &str =
     "The approval wait ended without a decision, so this call was not run.";
@@ -82,7 +82,7 @@ pub(super) const TASK_CANCELLED_CALL: &str = "The task was cancelled, so this ca
 /// Results of calls a `SuspendTask` command left unrun.
 pub(super) const TASK_SUSPENDED_CALL: &str = "The task was suspended before this call ran, so it was not run. Call it again if it is still needed.";
 /// Results of calls that were running when `CancelTask` or `SuspendTask`
-/// arrived; see [`AgentLoop::run_group`].
+/// arrived. See [`AgentLoop::run_group`].
 pub(super) const STOPPED_BY_CANCEL: &str = "The task was cancelled while this call was running, so the call was stopped before it finished.";
 pub(super) const STOPPED_BY_SUSPEND: &str = "The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.";
 

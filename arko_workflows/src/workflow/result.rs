@@ -21,12 +21,12 @@ pub enum AgentRunStatus {
     /// The task ended `TaskState::Cancelled`: stopped with the workflow run
     /// (cancelled, or aborted by a hook), or by the workflow (over budget).
     Cancelled,
-    /// Suspended at an `ask_user` question; `Workflow::continue_agent`
+    /// Suspended at an `ask_user` question. `Workflow::continue_agent`
     /// answers it.
     WaitingForInput,
     /// Suspended awaiting a tool approval or error-recovery decision the
     /// workflow's policies leave to the caller (see
-    /// [`AgentPause`](crate::policy::AgentPause));
+    /// [`AgentPause`](crate::policy::AgentPause)).
     /// `Workflow::resume_agent` continues it.
     Paused,
 }
@@ -110,7 +110,7 @@ pub struct AgentResult {
     pub summary: String,
     pub error: Option<String>,
     pub task: arko_agents::Task,
-    /// The stop that ended the run, if one did; see
+    /// The stop that ended the run, if one did. See
     /// [`stopped_by`](Self::stopped_by). `None` in results recorded by an
     /// older version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +146,7 @@ impl AgentResult {
     /// [`intent`](crate::workflow::stop::StopRecord::intent) says what the
     /// host means to do with it. A stopped run is blameless: its outcome
     /// says nothing about the agent's work, so don't count it as a failure
-    /// (or a success); [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
+    /// (or a success). [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
     /// lists it for a restart unless the host retired it. `None` for every
     /// other run, a run a hook's abort ended, and runs recorded by an older
     /// version.

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value; // For dynamic input field
 
-/// Default embeddings API base URL; requests go to `{base}/embeddings`.
+/// Default embeddings API base URL. Requests go to `{base}/embeddings`.
 const VOYAGE_BASE_URL: &str = "https://api.voyageai.com/v1";
 
 #[derive(Clone)]

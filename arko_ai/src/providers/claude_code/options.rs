@@ -140,7 +140,7 @@ impl HookEvent {
 
 /// A host function Claude Code calls at a hook event. `input` is the hook
 /// input Claude Code documents for the event (for `PreToolUse`:
-/// `tool_name`, `tool_input`, `session_id`, `cwd`, …); the returned JSON is
+/// `tool_name`, `tool_input`, `session_id`, `cwd`, …). The returned JSON is
 /// the hook output, for example [`Hook::deny_tool`].
 #[async_trait]
 pub trait HookCallback: Send + Sync {
@@ -151,7 +151,7 @@ pub trait HookCallback: Send + Sync {
 #[derive(Clone)]
 pub struct Hook {
     pub event: HookEvent,
-    /// A tool-name pattern (`"Bash"`, `"Edit|Write"`); `None` matches all.
+    /// A tool-name pattern (`"Bash"`, `"Edit|Write"`). `None` matches all.
     pub matcher: Option<String>,
     pub callback: Arc<dyn HookCallback>,
     pub timeout_seconds: Option<f64>,
@@ -231,7 +231,7 @@ pub struct ClaudeOptions {
     pub settings: Option<Value>,
     /// `--setting-sources`: which of the user's settings files (`user`,
     /// `project`, `local`), with their `CLAUDE.md`, hooks and skills, the
-    /// session loads. `None` leaves the CLI's default; `Some(vec![])` loads
+    /// session loads. `None` leaves the CLI's default. `Some(vec![])` loads
     /// none, so the session behaves the same on any machine.
     pub setting_sources: Option<Vec<String>>,
     pub add_directories: Vec<PathBuf>,

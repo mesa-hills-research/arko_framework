@@ -23,7 +23,7 @@ pub enum StopReason {
     MaxTokens,
     /// A caller-supplied stop sequence was generated.
     StopSequence,
-    /// The request or response was refused; see
+    /// The request or response was refused. See
     /// [`GenerationResponse::refusal`](crate::GenerationResponse::refusal).
     Refusal,
     /// The provider paused a long-running turn that the caller may continue
@@ -58,7 +58,7 @@ pub enum RefusalSource {
     /// [`Refusal::partial_output`].
     SafetyClassifier,
     /// The model declined in its own words (OpenAI structured `refusal`
-    /// content). The response is otherwise a normal assistant turn; the
+    /// content). The response is otherwise a normal assistant turn. The
     /// refusal text is in [`Refusal::explanation`], not in the message text.
     Model,
     /// A content filter around the model cut the output (OpenAI
@@ -86,7 +86,7 @@ pub struct Refusal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     /// Human-readable explanation suitable for display. Its wording is not
-    /// stable; don't parse it.
+    /// stable. Don't parse it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
     /// Text generated before the refusal. It is incomplete and was removed

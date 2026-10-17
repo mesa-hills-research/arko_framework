@@ -1,5 +1,5 @@
 //! Scaling prototype of the watcher (Linux only): inotify events and metadata
-//! reconciliation decide *which* files to look at; per-file records and an
+//! reconciliation decide *which* files to look at. Per-file records and an
 //! append-only journal make each commit proportional to the change, not the repo.
 //!
 //! Durability model (same guarantees as `watch.rs`, different storage):
@@ -8,18 +8,18 @@
 //!   undelivered/unacknowledged deltas, not the chunks.
 //! * `watch2.recs.N` (the record store) holds each file version's chunks, appended
 //!   and fdatasync'ed before the journal record that references them. Only the
-//!   file table stays in memory; a file's chunks are read back when it changes.
+//!   file table stays in memory. A file's chunks are read back when it changes.
 //!   On open the store is cut back to the end of its last referenced record (an
 //!   uncommitted tail is garbage). When dead versions dominate and no delta is
 //!   pending, the live records are copied to `watch2.recs.N+1` and a checkpoint
 //!   switches to it.
 //! * `watch2.wal` holds one JSON line per transaction, appended and fdatasync'ed
-//!   **before** the delta is delivered. Every record carries a log sequence number;
-//!   replay skips records already folded into the checkpoint and ignores a torn tail.
+//!   **before** the delta is delivered. Every record carries a log sequence number.
+//!   Replay skips records already folded into the checkpoint and ignores a torn tail.
 //!   A delta is stored as the (old, new) record versions of the files it covers and
 //!   rendered from the store when delivered: the same per-file diff as before.
 //! * Startup (and inotify queue overflow, and any directory-level event) runs a full
-//!   reconciliation: walk + lstat every file; a file is re-read and re-hashed only if
+//!   reconciliation: walk + lstat every file. A file is re-read and re-hashed only if
 //!   its (size, mtime, ctime, inode, device) differ from the record or the record is
 //!   "racy" (ctime within RACY_NS of when it was hashed, the racy-git rule), so
 //!   same-size, mtime-restoring edits are still found (they change ctime).
@@ -84,7 +84,7 @@ fn now_ns() -> i128 {
         .unwrap_or(0)
 }
 
-/// (offset, length) of one file version's records in the record store; length 0
+/// (offset, length) of one file version's records in the record store. Length 0
 /// means no chunks.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 struct Loc(u64, u64);
@@ -94,8 +94,8 @@ impl Loc {
     }
 }
 
-/// SHA-256 of a file's bytes, inline (no heap allocation per file), written as hex;
-/// all zeros (written "") means unknown and never matches.
+/// SHA-256 of a file's bytes, inline (no heap allocation per file), written as hex.
+/// All zeros (written "") means unknown and never matches.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 struct Hash32([u8; 32]);
 impl Serialize for Hash32 {
@@ -280,7 +280,7 @@ fn diff<'a>(old: &[EntryChunk<'a>], new: &[EntryChunk<'a>]) -> FileDiff<'a> {
     d
 }
 
-/// The record store: appends are buffered and written with `pwrite`; `sync` makes
+/// The record store: appends are buffered and written with `pwrite`. `sync` makes
 /// everything appended so far durable (before the journal record that refers to it).
 struct Store {
     file: File,
@@ -442,7 +442,7 @@ impl Inotify {
             trigger_only: HashMap::new(),
         })
     }
-    /// Adds (or refreshes) the watch of `rel`; `None` if it failed, as for walked
+    /// Adds (or refreshes) the watch of `rel`. `None` if it failed, as for walked
     /// directories (a vanished directory's parent event triggers a rescan).
     fn watch(&mut self, root: &Path, rel: &str) -> Option<i32> {
         let abs = if rel.is_empty() {
@@ -559,7 +559,7 @@ pub struct Watcher2 {
     live_bytes: u64,
     /// Compact when the store exceeds twice `live_bytes` plus this.
     store_slack: u64,
-    /// Set when a durable write failed midway; every later operation errors.
+    /// Set when a durable write failed midway. Every later operation errors.
     poisoned: Option<String>,
     /// Number of tracked paths per (device, inode), for hard-linked siblings.
     inodes: HashMap<(u64, u64), u32>,
@@ -631,7 +631,7 @@ fn release_memory() {
     }
 }
 
-/// One candidate's outcome: `None` if it vanished or is not text; otherwise its new
+/// One candidate's outcome: `None` if it vanished or is not text. Otherwise its new
 /// record, with the encoded chunks if its content hash changed.
 type Update = Option<(FileRec, Option<Vec<u8>>)>;
 
@@ -809,13 +809,13 @@ impl Watcher2 {
         Ok(w)
     }
 
-    /// What the latest reconciliation indexed and skipped; also kept in
+    /// What the latest reconciliation indexed and skipped. Also kept in
     /// `STATE_DIR/report.json`. Pattern counts are refreshed by full reconciliations.
     pub fn report(&self) -> &Report {
         &self.report
     }
     /// Whether this open found a state written with different file selection rules
-    /// (or by a version that did not record them); the open reconciled to the new rules.
+    /// (or by a version that did not record them). The open reconciled to the new rules.
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
     }
@@ -1309,7 +1309,7 @@ impl Watcher2 {
         Ok(())
     }
 
-    /// Waits up to `timeout` for the next undelivered delta; returns its index in
+    /// Waits up to `timeout` for the next undelivered delta. Returns its index in
     /// `snap.pending`.
     fn next_pending(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         self.write_report()?;
@@ -1373,7 +1373,7 @@ impl Watcher2 {
     }
 
     /// Writes the next delta as one JSON line (exactly `serde_json` of [`Delta`] plus a
-    /// newline) without holding its chunks in memory; returns its sequence.
+    /// newline) without holding its chunks in memory. Returns its sequence.
     pub fn next_change_to(
         &mut self,
         timeout: Duration,
@@ -1452,7 +1452,7 @@ mod tests {
             model.insert(c.id.clone(), c.clone());
         }
     }
-    /// Collects deltas until none arrives for `idle`; checks that the materialized
+    /// Collects deltas until none arrives for `idle`. Checks that the materialized
     /// delta re-serializes to the streamed line.
     fn drain(w: &mut Watcher2, model: &mut Map<String, Chunk>, idle: Duration) -> usize {
         let mut n = 0;

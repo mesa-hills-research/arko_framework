@@ -34,7 +34,7 @@ pub const SUBAGENT_TOOL_NAMES: &[&str] = &[
     LINK_AGENTS_TOOL_NAME,
 ];
 
-/// `start_agent`'s own parameters; a host parameter may not take one of
+/// `start_agent`'s own parameters. A host parameter may not take one of
 /// these names.
 pub(crate) const START_PARAMETERS: &[&str] = &["agent", "task", "workspace", "isolated", "peers"];
 
@@ -72,7 +72,7 @@ fn definition(
     }
 }
 
-/// A text parameter, trimmed; `None` when absent or empty.
+/// A text parameter, trimmed. `None` when absent or empty.
 fn text(params: &HashMap<String, Value>, name: &str) -> Option<String> {
     match params.get(name)? {
         Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
@@ -87,7 +87,7 @@ fn required(params: &HashMap<String, Value>, name: &str) -> Result<String, ToolE
     })
 }
 
-/// A true-or-false parameter, read leniently (`"true"` counts); absent is
+/// A true-or-false parameter, read leniently (`"true"` counts). Absent is
 /// false.
 fn flag(params: &HashMap<String, Value>, name: &str) -> Result<bool, ToolError> {
     match params.get(name) {

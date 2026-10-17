@@ -209,7 +209,7 @@ fn headings(text: &str) -> Vec<Heading> {
 
 /// The scope of each range of a Markdown file: the document's root, then the heading
 /// chain at the range (see [`markdown_chains`]). The root is `title` (the front
-/// matter's), with ` — description` when one is given; without a title, the first
+/// matter's), with ` — description` when one is given. Without a title, the first
 /// level-1 heading's text. The heading that gives the root, and a level-1 heading
 /// that repeats the title, are left out of the chains.
 pub(crate) fn markdown_scopes(

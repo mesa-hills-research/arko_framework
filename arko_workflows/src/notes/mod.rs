@@ -5,7 +5,7 @@
 //! [`NotesHandle`], from any task) posts a [`Note`]. A running agent gets it
 //! at its next safe turn boundary, in its `# Workflow context update` (at
 //! most [`PROMPT_MAX_NOTES`] and about [`PROMPT_MAX_BYTES`] of new notes per
-//! update, oldest first; the rest at the next boundaries). A standing note
+//! update, oldest first, the rest at the next boundaries). A standing note
 //! ([`NoteKind::Standing`], the default) is also shown in the initial prompt
 //! of every later run of its audience, newest first and capped, in the
 //! fresh conversation after a handover, and again after Claude Code compacts
@@ -15,8 +15,8 @@
 //!
 //! Each note is labelled with its source ([`NoteSource`]) and delivered in
 //! the user role as a refinement of the task: it doesn't change a role's
-//! rules. The audience ([`NoteAudience`]) names agents by registration name;
-//! completion verifiers' reviews, and the agents set with
+//! rules. The audience ([`NoteAudience`]) names agents by registration name.
+//! Completion verifiers' reviews, and the agents set with
 //! [`WorkflowBuilder::notes_by_name_only`](crate::WorkflowBuilder::notes_by_name_only),
 //! get a note only when it names them.
 //!
@@ -46,8 +46,8 @@ use arko_ai::image_store::ImageStore as _;
 pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 
 /// At most this many notes are shown in a prompt (the newest standing
-/// notes; older ones are left out) or in one context update (the oldest new
-/// notes; the rest come at the next turn boundary).
+/// notes, older ones are left out) or in one context update (the oldest new
+/// notes, the rest come at the next turn boundary).
 pub const PROMPT_MAX_NOTES: usize = 20;
 
 /// About this many bytes of notes are shown in a prompt or a context update,
@@ -88,7 +88,7 @@ pub enum NoteKind {
     Once,
 }
 
-/// Who wrote a note, as the agents are told. The host sets it; agents can't
+/// Who wrote a note, as the agents are told. The host sets it. Agents can't
 /// post notes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,7 +98,7 @@ pub enum NoteSource {
     Operator,
     /// The program running the workflow.
     Host,
-    /// An agent, such as an observer reviewing the run; its note is shown as
+    /// An agent, such as an observer reviewing the run. Its note is shown as
     /// that agent's, and it doesn't receive the note itself. The name need
     /// not be a registered agent's.
     Agent(String),
@@ -112,7 +112,7 @@ pub enum NoteSource {
 /// "source": "operator" | "host" | {"agent": "observer"}}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Note {
-    /// The note, trimmed when posted; at most [`MAX_NOTE_BYTES`].
+    /// The note, trimmed when posted. At most [`MAX_NOTE_BYTES`].
     pub text: String,
     #[serde(default)]
     pub audience: NoteAudience,
@@ -420,7 +420,7 @@ impl NoteBoard {
     }
 
     /// The number of the newest note run `task_id` has been given (in its
-    /// prompt or at a turn boundary); 0 when it has been given none.
+    /// prompt or at a turn boundary). 0 when it has been given none.
     pub(crate) fn given(&self, task_id: Uuid) -> u64 {
         self.state.lock().seen.get(&task_id).copied().unwrap_or(0)
     }
@@ -437,7 +437,7 @@ impl NoteBoard {
         })
     }
 
-    /// The one-time notes posted so far don't reach run `task_id`; see
+    /// The one-time notes posted so far don't reach run `task_id`. See
     /// [`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes).
     pub(crate) fn skip_one_time(&self, ctx: &SharedContext, task_id: Uuid) {
         self.poll(ctx);
@@ -447,7 +447,7 @@ impl NoteBoard {
         }
     }
 
-    /// The state a checkpoint saves; `None` while there is nothing to save.
+    /// The state a checkpoint saves. `None` while there is nothing to save.
     pub(crate) fn snapshot(&self) -> Option<NotesSnapshot> {
         let state = self.state.lock();
         (*state != NotesSnapshot::default()).then(|| state.clone())
@@ -478,7 +478,7 @@ impl NoteBoard {
 
     /// The notes section of the initial prompt of run `task_id` of `agent`
     /// (`review` for a completion verifier's review): the standing notes it
-    /// receives, newest first and capped; empty when there are none. The
+    /// receives, newest first and capped. Empty when there are none. The
     /// run has then been given every note so far.
     pub(crate) fn initial_section(
         &self,
@@ -511,7 +511,7 @@ impl NoteBoard {
     /// newest first and capped, as an initial prompt shows them. The notes
     /// it hasn't been given (such as one posted while it wrote its report)
     /// come in the context update before its first request, so none is lost
-    /// to the cap or given twice; the one-time notes it had been given
+    /// to the cap or given twice. The one-time notes it had been given
     /// aren't repeated (its report covers them).
     pub(crate) fn handover_section(&self, agent: &str, task_id: Uuid, review: bool) -> String {
         let state = self.state.lock();
@@ -644,7 +644,7 @@ impl NoteBoard {
         }
     }
 
-    /// Whether a run of `agent` receives `note`; `review` for a completion
+    /// Whether a run of `agent` receives `note`. `review` for a completion
     /// verifier's review.
     fn receives(&self, note: &Note, agent: &str, review: bool) -> bool {
         if matches!(&note.source, NoteSource::Agent(source) if source == agent) {
@@ -678,8 +678,8 @@ impl NoteBoard {
         )
     }
 
-    /// `note` with its text trimmed, and the agents that receive it, sorted;
-    /// an error for a note that can't be posted.
+    /// `note` with its text trimmed, and the agents that receive it, sorted.
+    /// An error for a note that can't be posted.
     fn check(
         &self,
         ctx: &SharedContext,
@@ -943,8 +943,8 @@ fn is_break_or_control(c: char) -> bool {
 }
 
 /// `text` trimmed, with every line break (CR LF, a lone CR, NEL, U+2028 and
-/// U+2029) made a LF, so every line of a note is indented when it is shown;
-/// or why it can't be a note.
+/// U+2029) made a LF, so every line of a note is indented when it is shown.
+/// Or why it can't be a note.
 pub(crate) fn checked_text(text: &str) -> Result<String, String> {
     let text = text
         .replace("\r\n", "\n")
@@ -1009,7 +1009,7 @@ fn item(posted: &PostedNote) -> String {
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
 /// most [`PROMPT_MAX_NOTES`], and no further note once it would pass
-/// [`PROMPT_MAX_BYTES`]; the first always (at least one, when there are
+/// [`PROMPT_MAX_BYTES`]. The first always (at least one, when there are
 /// any).
 fn fitting(notes: &[&PostedNote]) -> usize {
     let mut bytes = 0;
@@ -1030,7 +1030,7 @@ fn items(notes: &[&PostedNote]) -> String {
 }
 
 /// The notes section of a prompt: `notes` (newest first) as many as fit,
-/// with a line counting the older ones left out; empty without notes.
+/// with a line counting the older ones left out. Empty without notes.
 fn section(notes: &[&PostedNote]) -> String {
     if notes.is_empty() {
         return String::new();
@@ -1065,8 +1065,8 @@ fn update(notes: &[&PostedNote], more: usize) -> String {
 
 /// Posts notes to a running workflow from any task or thread.
 ///
-/// Obtained from [`Workflow::notes_handle`](crate::Workflow::notes_handle);
-/// clones post to the same run. It holds only a weak reference to the
+/// Obtained from [`Workflow::notes_handle`](crate::Workflow::notes_handle).
+/// Clones post to the same run. It holds only a weak reference to the
 /// workflow: once the workflow is dropped, `post` returns an error and
 /// `notes` returns none.
 #[derive(Clone)]
@@ -1081,7 +1081,7 @@ impl NotesHandle {
         }
     }
 
-    /// Posts `note`; see [`Workflow::post_note`](crate::Workflow::post_note).
+    /// Posts `note`. See [`Workflow::post_note`](crate::Workflow::post_note).
     pub fn post(&self, note: Note) -> Result<PostedNote, WorkflowError> {
         let context = self
             .context
@@ -1108,7 +1108,7 @@ impl NotesHandle {
 
     /// The number of the newest note agent run `agent_run_id` has been
     /// given, in its prompt or at a turn boundary (notes are given oldest
-    /// first, so it has been given every earlier note it receives); 0 when
+    /// first, so it has been given every earlier note it receives). 0 when
     /// it has been given none. A run gets its notes in the context update
     /// [`AgentEvent::ContextInjected`](arko_agents::AgentEvent::ContextInjected)
     /// reports, whose ids name them (`note:<number>`).
@@ -1118,7 +1118,7 @@ impl NotesHandle {
             .map_or(0, |context| context.notes.given(agent_run_id))
     }
 
-    /// Every note posted, oldest first; see
+    /// Every note posted, oldest first. See
     /// [`Workflow::notes`](crate::Workflow::notes).
     pub fn notes(&self) -> Vec<PostedNote> {
         self.context

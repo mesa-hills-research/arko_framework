@@ -40,7 +40,7 @@ pub enum WorkflowError {
     },
 
     /// The agent asked the user a question and no user input handler is
-    /// set: it is suspended, recorded with status `WaitingForInput`; answer
+    /// set: it is suspended, recorded with status `WaitingForInput`. Answer
     /// with `Workflow::continue_agent`. A pause, not a failure.
     #[error("Agent '{agent}' requires user input: {questions}")]
     UserInputRequired {
@@ -51,7 +51,7 @@ pub enum WorkflowError {
 
     /// The agent paused for a decision the workflow's approval or error
     /// recovery policy leaves to the caller: it is suspended, recorded with
-    /// status `Paused`; continue it with `Workflow::resume_agent`. A pause,
+    /// status `Paused`. Continue it with `Workflow::resume_agent`. A pause,
     /// not a failure.
     #[error("Agent '{agent}' paused, {pause}")]
     AgentPaused {
@@ -100,7 +100,7 @@ pub enum WorkflowError {
 
     /// Under `BudgetExceededPolicy::Cancel`, the plan budget is exceeded
     /// (`plan`: `ChatGPT` or `Claude Code`, `None` for tracking without a
-    /// plan; `window`: `five-hour` or `seven-day`; points of the window).
+    /// plan, `window`: `five-hour` or `seven-day`, points of the window).
     #[error(
         "Plan budget exceeded: {}{window} window used {used:.1} of {limit} points",
         plan.as_ref().map_or(String::new(), |plan| format!("{plan} "))
@@ -115,7 +115,7 @@ pub enum WorkflowError {
     #[error("Invalid cost amount {0}: costs must be finite and non-negative")]
     InvalidCost(f64),
 
-    /// A hook returned `HookResult::Abort`; the run is stopped.
+    /// A hook returned `HookResult::Abort`. The run is stopped.
     #[error("Workflow aborted by hook at {hook_point}: {reason}")]
     AbortedByHook { hook_point: String, reason: String },
 

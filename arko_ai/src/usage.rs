@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelCallUsage {
     pub call_id: String,
     pub provider: String,
-    /// The model that answered, as the provider names it; see the table
+    /// The model that answered, as the provider names it. See the table
     /// above.
     pub model: String,
     pub input_tokens: usize,
@@ -51,7 +51,7 @@ pub struct ModelCallUsage {
     /// Whether any model the provider reported for the call differs from
     /// the requested one (ignoring case and snapshot date suffixes), for
     /// example when the ChatGPT backend routes a request to a fallback model.
-    /// Set by the OpenAI provider; OpenRouter reports a change through
+    /// Set by the OpenAI provider. OpenRouter reports a change through
     /// `requested_model`. [`served_model_changed`](Self::served_model_changed)
     /// covers both.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -407,8 +407,8 @@ pub enum BillingKind {
     /// Charged per token at list prices: the billed cost is the estimate.
     #[default]
     Metered,
-    /// Covered by a subscription (ChatGPT OAuth): nothing is billed per call;
-    /// the estimate shows what the call would cost at API list prices.
+    /// Covered by a subscription (ChatGPT OAuth): nothing is billed per call.
+    /// The estimate shows what the call would cost at API list prices.
     Subscription,
     /// The provider reported the actual charge in [`UsageInfo::reported_cost`].
     ProviderReported,
@@ -429,7 +429,7 @@ pub enum BillingKind {
 /// - `output_tokens` includes reasoning/thinking tokens (`reasoning_tokens`).
 ///
 /// Costs are USD estimates at list prices, for the tier, residency and date
-/// that applied. `total_cost` is their sum; `billed_cost` is what the account
+/// that applied. `total_cost` is their sum. `billed_cost` is what the account
 /// is actually charged (see [`BillingKind`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageInfo {
@@ -472,14 +472,14 @@ pub struct UsageInfo {
     pub reported_cost: Option<f64>,
     /// With bring-your-own-key routing, what the upstream provider charged
     /// your own provider account (OpenRouter
-    /// `usage.cost_details.upstream_inference_cost`); `reported_cost` is then
+    /// `usage.cost_details.upstream_inference_cost`). `reported_cost` is then
     /// only OpenRouter's fee. Included in `billed_cost`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_cost: Option<f64>,
     #[serde(default)]
     pub billing: BillingKind,
     /// What the account was charged. Records saved before billing kinds
-    /// existed have none; see [`UsageInfo::billed`].
+    /// existed have none. See [`UsageInfo::billed`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billed_cost: Option<f64>,
 }
@@ -528,7 +528,7 @@ impl UsageInfo {
     ///   threshold. On Claude Sonnet 4 and 4.5, whose long context needed a
     ///   (now retired) beta, they apply only when `long_context` was requested.
     /// - The tier is the reported `service_tier`, else the requested OpenAI
-    ///   tier, else standard; unpriced tiers use standard rates.
+    ///   tier, else standard. Unpriced tiers use standard rates.
     /// - Tier and residency multipliers stack and apply to every token class.
     /// - Token classes without their own price are billed at the input rate.
     pub fn calculate_cost_at(
@@ -626,7 +626,7 @@ impl UsageInfo {
         self.update_billed_cost();
     }
 
-    /// Records a provider-reported charge; it takes precedence over the
+    /// Records a provider-reported charge. It takes precedence over the
     /// estimate for billing.
     pub fn with_reported_cost(mut self, cost: f64) -> Self {
         self.reported_cost = Some(cost);
@@ -684,7 +684,7 @@ fn add_counts(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 
 impl std::ops::AddAssign<&UsageInfo> for UsageInfo {
     /// Adds another call's usage. Tier, region and billing kind are kept when
-    /// both sides agree; otherwise the tier and region become unknown and the
+    /// both sides agree. Otherwise the tier and region become unknown and the
     /// billing kind becomes [`BillingKind::Mixed`].
     fn add_assign(&mut self, other: &UsageInfo) {
         let billed = self.billed() + other.billed();

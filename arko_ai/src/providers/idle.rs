@@ -1,6 +1,6 @@
 //! The opt-in stream idle timeout: the longest a streamed response may go
 //! without receiving any data. Off unless set, since models can reason for a
-//! long time without sending anything; see
+//! long time without sending anything. See
 //! [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout).
 
 use super::StreamEvent;
@@ -18,7 +18,7 @@ use std::{
 /// is cut off once no data has arrived for that long (any data counts,
 /// keep-alive comments and ping events included). The parser then reports
 /// the early end, usually as a response that ended before completing (or, if
-/// the cut split an event, as a malformed one); either way the error becomes
+/// the cut split an event, as a malformed one). Either way the error becomes
 /// [`Error::StreamTruncated`], which is transient, so the caller's usual
 /// retries apply, and its message names the timeout. The wait for the
 /// response's status and headers happens before this and is not covered.

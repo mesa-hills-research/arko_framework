@@ -1,5 +1,5 @@
 //! One embedding run's requests. While the tree is chunked, texts missing from the
-//! cache are spooled to a file in the new generation (so memory stays bounded); a run
+//! cache are spooled to a file in the new generation (so memory stays bounded). A run
 //! then embeds the ones it still needs in requests within the embedder's limits,
 //! stopping before a request would take the run over its token cap. Every request's
 //! vectors are appended to the cache at once and handed to the caller, which stores

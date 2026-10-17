@@ -23,7 +23,7 @@ pub enum ToolApprovalDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UserCommand {
     /// Queue application-provided context for the agent. The runtime appends it
-    /// as a user message at the next safe turn boundary; an in-flight model
+    /// as a user message at the next safe turn boundary. An in-flight model
     /// stream is never mutated.
     InjectContext { content: String },
 
@@ -75,7 +75,7 @@ pub enum UserCommand {
     /// without the user-approval note of
     /// [`ApproveErrorRecovery`](Self::ApproveErrorRecovery): with no `note`
     /// the failed request is sent again unchanged (with the tool results the
-    /// pause left waiting, which report their errors); with a `note`, it is
+    /// pause left waiting, which report their errors). With a `note`, it is
     /// added as the runtime's text before the next request. Like an
     /// approval, it starts a new recovery and clears a refused input.
     ContinueAfterError { note: Option<String> },
@@ -88,7 +88,7 @@ pub enum UserCommand {
     /// Change the input of a refused turn (reported with
     /// `AgentEvent::RefusedInput`) and continue: the refused turn is removed
     /// and the changed input is sent. Accepted while the refusal awaits
-    /// error-recovery approval; see [`crate::task::Task::resolve_refusal`].
+    /// error-recovery approval. See [`crate::task::Task::resolve_refusal`].
     /// The changes apply together, or none does: an invalid one is reported
     /// with `ErrorEncountered` and the task keeps waiting.
     ResolveRefusal {
@@ -99,7 +99,7 @@ pub enum UserCommand {
     /// agent writes a report, and its conversation is replaced with a fresh
     /// one that starts from the task prompt and the report. Works whether
     /// or not [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover)
-    /// is set; ignored while a handover is already under way. It doesn't
+    /// is set. Ignored while a handover is already under way. It doesn't
     /// end a wait: a task awaiting a command hands over after the wait. An
     /// agent that compacts in Claude Code
     /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))

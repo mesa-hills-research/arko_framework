@@ -86,8 +86,8 @@ pub(crate) struct ChatRequest {
 }
 
 /// The model of a combined `model@preset/slug` reference
-/// (`openai/gpt-6-luna@preset/email-copywriter` → `openai/gpt-6-luna`);
-/// other slugs, including a bare `@preset/slug`, are returned unchanged.
+/// (`openai/gpt-6-luna@preset/email-copywriter` → `openai/gpt-6-luna`).
+/// Other slugs, including a bare `@preset/slug`, are returned unchanged.
 /// https://openrouter.ai/docs/guides/features/presets
 pub(crate) fn without_preset(slug: &str) -> &str {
     match slug.split_once("@preset/") {
@@ -116,7 +116,7 @@ pub(crate) fn is_claude_family(slug: &str) -> bool {
 }
 
 /// The Auto Router plugin id for this slug. Each router slug reads only its
-/// own id; settings under the other id are silently ignored.
+/// own id. Settings under the other id are silently ignored.
 pub(crate) fn auto_router_plugin_id(slug: &str) -> Option<&'static str> {
     match base_slug(slug) {
         "openrouter/auto" => Some("auto-router"),
@@ -147,7 +147,7 @@ fn invalid(message: String) -> Error {
 
 /// Interleaved thinking on Claude: OpenRouter sends the beta that turns it
 /// on, but has no way to turn it off. (On other models the setting is
-/// dropped with the other Anthropic ones; see `without_foreign_settings`.)
+/// dropped with the other Anthropic ones, see `without_foreign_settings`.)
 fn check_interleaved_thinking(model: &Model, config: &GenerationConfig) -> Result<(), Error> {
     match config.interleaved_thinking {
         Some(false) if is_claude_family(&model.id) => Err(Error::UnsupportedFeature(format!(

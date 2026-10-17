@@ -3,7 +3,7 @@ use crate::{bench_v1::Error, files, files::FileRules, par};
 use std::{os::unix::fs::MetadataExt, path::Path, time::Instant};
 
 /// Prints one JSON line of timings for: the current full `read_dir` pass (read, UTF-8
-/// check, copy, SHA-256 of every file; what each watcher poll does), a walk that only
+/// check, copy, SHA-256 of every file, what each watcher poll does), a walk that only
 /// lists files, a metadata-only pass (lstat: size, mtime, ctime, inode), and the same
 /// read+hash and metadata passes with `threads` workers.
 pub fn bench_scan(root: &Path, threads: usize) -> Result<(), Error> {

@@ -4,7 +4,7 @@
 
 use super::*;
 
-/// What a decision on a wait leaves for after it; see
+/// What a decision on a wait leaves for after it. See
 /// [`AgentLoop::after_decision`].
 #[derive(Default)]
 pub(super) struct FollowUp {
@@ -96,8 +96,8 @@ impl AgentLoop {
     }
 
     /// The approved call runs: natively with the calls held for it, then
-    /// the turn's results go into the conversation once due;
-    /// output-based, its result is the next message.
+    /// the turn's results go into the conversation once due.
+    /// Output-based, its result is the next message.
     async fn approve_tool_use(
         &mut self,
         tool_call_id: Uuid,
@@ -171,7 +171,7 @@ impl AgentLoop {
     }
 
     /// The rejected call is answered with the reason: natively beside the
-    /// held calls, which run now; output-based, as the next message.
+    /// held calls, which run now. Output-based, as the next message.
     async fn reject_tool_use(
         &mut self,
         tool_call_id: Uuid,
@@ -216,7 +216,7 @@ impl AgentLoop {
 
     /// `SubmitBatchToolApprovals` for the batch awaiting approval: the
     /// rejections and the calls without a decision are answered, and the
-    /// approved calls run (natively with the held ones, in call order;
+    /// approved calls run (natively with the held ones, in call order,
     /// output-based one at a time until one changes the state). A
     /// decision for another batch is ignored, and any other command but
     /// `CancelTask` and `SuspendTask` reports the state again.
@@ -339,7 +339,7 @@ impl AgentLoop {
     }
 
     /// An output-based batch decided: in order, each call runs or is
-    /// answered as rejected; once a call changed the state (or the task was
+    /// answered as rejected. Once a call changed the state (or the task was
     /// suspended while it ran), the approved calls after it are answered as
     /// not run, as in native mode. The results are the next message.
     async fn decide_text_batch(
@@ -564,7 +564,7 @@ impl AgentLoop {
 
     /// `ContinueAfterError`: a pending refusal fallback's request is sent
     /// again (a note waits as context), waiting native results go out with
-    /// the note beside them, or the note is the next message; without one
+    /// the note beside them, or the note is the next message. Without one
     /// the failed request is sent again, or the waiting output-based
     /// results are the next message.
     async fn continue_after_error(
@@ -622,7 +622,7 @@ impl AgentLoop {
     }
 
     /// `ApproveErrorRecovery`: like continuing, but a model error is noted
-    /// for the model (with the host's message); a monitor's pause adds only
+    /// for the model (with the host's message). A monitor's pause adds only
     /// the host's message.
     async fn approve_error_recovery(
         &mut self,
