@@ -1,13 +1,13 @@
 //! How much input a model accepts on the auth path in use.
 use crate::model::{Model, Provider};
 
-/// The input limit, in tokens, of the ChatGPT OAuth (Codex) backend: the
-/// `context_window` its model catalog serves for GPT-5.x and GPT-6 models.
+/// The input limit, in tokens, of the ChatGPT OAuth (Codex) backend. Taken
+/// from the `context_window` its model catalog serves for GPT-5.x and GPT-6 models.
 /// OpenAI does not document it. The API accepts more (922,000 input tokens
 /// for GPT-5.6 and GPT-6).
 pub const CHATGPT_OAUTH_MAX_INPUT_TOKENS: usize = 272_000;
 
-/// The most input tokens `model` accepts on the given auth path:
+/// The most input tokens `model` accepts on the given auth path. Returns
 /// [`Model::max_input_tokens`], capped at [`CHATGPT_OAUTH_MAX_INPUT_TOKENS`]
 /// for OpenAI models when `openai_chatgpt_oauth` is set. `None` when the
 /// model's limit is unknown (`max_input_tokens` of 0, as for

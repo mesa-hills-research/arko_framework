@@ -1,27 +1,27 @@
 //! How long providers keep prompt-cache entries.
 //!
 //! A cache entry expires once it has gone unused for its lifetime. Every
-//! request that hits it restarts the clock. Anthropic: "the cache is
+//! request that hits it restarts the clock. Anthropic says "the cache is
 //! refreshed for no additional cost each time the cached content is used".
-//! OpenAI: "Reusing the prefix refreshes its lifetime without another
+//! OpenAI says "Reusing the prefix refreshes its lifetime without another
 //! cache-write charge." An agent that makes a request before the lifetime
 //! runs out therefore keeps its prompt cached however long it stays idle in
 //! between requests.
 //!
-//! Sources:
-//! - Anthropic: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
+//! The reported lifetimes follow these sources and defaults:
+//! - Anthropic documents caching at <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
 //!   (5 minutes by default, 1 hour with `ttl: "1h"`). OpenRouter passes
 //!   Claude models' `cache_control`, `ttl` included, through to Anthropic.
-//! - OpenAI: <https://developers.openai.com/api/docs/guides/prompt-caching>.
+//! - OpenAI documents caching at <https://developers.openai.com/api/docs/guides/prompt-caching>.
 //!   In-memory retention keeps entries "around 5 to 10 minutes of
 //!   inactivity" (the default before GPT-5.6 for organizations with Zero Data
 //!   Retention, others get extended retention, "around 30 minutes and ...
 //!   up to 24 hours"). GPT-5.6 and later take `prompt_cache_options.ttl`,
 //!   whose "only supported value, `30m`, is also the default". This module
 //!   reports API-key requests as a conservative 5 minutes on every model, on
-//!   purpose: a request after a longer idle time can miss the cache and pay
+//!   purpose. A request after a longer idle time can miss the cache and pay
 //!   for the whole prompt again (see [`OPENAI_PROMPT_CACHE_LIFETIME`]).
-//! - ChatGPT OAuth (the Codex backend): implicit caching only, with a
+//! - ChatGPT OAuth (the Codex backend) uses implicit caching only, with a
 //!   lifetime no request configures. This module reports 30 minutes
 //!   ([`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`]).
 //!
@@ -44,7 +44,7 @@ pub enum PromptCacheLifetime {
     /// The provider may cache the prompt, but documents no lifetime for this
     /// model or route (Gemini, and OpenRouter models other than Claude).
     Unknown,
-    /// The request is not cached: caching is turned off for it, or the model
+    /// The request is not cached because caching is turned off for it or the model
     /// doesn't support caching.
     Disabled,
 }
@@ -56,7 +56,7 @@ pub const ANTHROPIC_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60
 /// Anthropic's extended cache lifetime, [`AnthropicCacheTtl::OneHour`].
 pub const ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// The cache lifetime reported for OpenAI models with an API key: a
+/// The cache lifetime reported for OpenAI models with an API key, a
 /// conservative 5 minutes, the lower end of the documented in-memory
 /// retention. Longer lifetimes exist (30 minutes for GPT-5.6 and later on
 /// the API, extended retention for many organizations) but aren't
@@ -66,7 +66,7 @@ pub const ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_se
 pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// The cache lifetime reported for OpenAI models over ChatGPT OAuth (the
-/// Codex backend): 30 minutes. The backend caches implicitly, on every
+/// Codex backend), 30 minutes. The backend caches implicitly, on every
 /// model, with a lifetime no request configures. A live measurement over
 /// ChatGPT OAuth (GPT-6 Astra) found the cache still warm after 4- and
 /// 40-minute idle gaps.
@@ -89,25 +89,25 @@ impl AnthropicCacheTtl {
 /// through ChatGPT OAuth ([`LLMClient::prompt_cache_lifetime`] reads it from
 /// the client).
 ///
-/// - A model without cache support: `Disabled`.
-/// - Anthropic, and Claude models on OpenRouter: `Disabled` when
+/// - A model without cache support returns `Disabled`.
+/// - Anthropic and Claude models on OpenRouter return `Disabled` when
 ///   [`GenerationConfig::prompt_caching`] is off, since no `cache_control` is
 ///   sent. Otherwise [`GenerationConfig::anthropic_cache_ttl`]'s lifetime, 5
 ///   minutes by default.
-/// - OpenAI with an API key: [`OPENAI_PROMPT_CACHE_LIFETIME`], a
+/// - OpenAI with an API key returns [`OPENAI_PROMPT_CACHE_LIFETIME`], a
 ///   conservative 5 minutes, on every model. `Disabled` only for GPT-5.6
 ///   and later with caching off (explicit mode without breakpoints).
 ///   Earlier models cache automatically, so turning caching off doesn't
 ///   change them.
-/// - OpenAI over ChatGPT OAuth: [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`], 30
+/// - OpenAI over ChatGPT OAuth returns [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`], 30
 ///   minutes, on every model. The backend caches implicitly, so turning
 ///   caching off doesn't change it.
-/// - Claude Code: `anthropic_cache_ttl`'s lifetime when set (passed on as
-///   its `promptCacheTtl`). Otherwise `Unknown`, since Claude Code chooses:
+/// - Claude Code returns `anthropic_cache_ttl`'s lifetime when set (passed on
+///   as its `promptCacheTtl`). Otherwise `Unknown`, since Claude Code chooses
 ///   1 hour on a Claude subscription within its usage limits, 5 minutes on
 ///   an API key.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
-///   models: `Unknown`.
+///   models return `Unknown`.
 ///
 /// [`GenerationConfig::prompt_cache_lifetime_seconds`], when set, replaces a
 /// `Known` or `Unknown` lifetime (`Some(0)` reports `Disabled`). A request

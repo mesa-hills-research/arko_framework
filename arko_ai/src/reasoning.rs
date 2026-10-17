@@ -158,7 +158,7 @@ pub enum ReasoningSummary {
     Detailed,
 }
 
-/// OpenRouter `reasoning.context`: which replayed reasoning the model may use
+/// Which replayed reasoning the model may use, as OpenRouter `reasoning.context`
 /// (OpenAI GPT-5.6 and newer only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -306,19 +306,19 @@ impl ReasoningConfig {
     }
 
     /// The closest OpenRouter equivalent of this configuration. Nothing is
-    /// translated implicitly: OpenRouter models drop other variants (with a
+    /// translated implicitly. OpenRouter models drop other variants (with a
     /// warning), and this conversion fails where no equivalent exists.
     ///
-    /// - `OpenAI`: the effort, plus `summary: "auto"` when summaries were requested.
-    /// - `Anthropic`: the budget as `max_tokens`, or `enabled: false` for a zero
-    ///   budget. A budget combined with an effort fails: OpenRouter accepts
+    /// - `OpenAI` becomes the effort, plus `summary: "auto"` when summaries were requested.
+    /// - `Anthropic` becomes the budget as `max_tokens`, or `enabled: false` for a zero
+    ///   budget. A budget combined with an effort fails because OpenRouter accepts
     ///   one or the other.
-    /// - `AnthropicAdaptive`: the effort, or `enabled: true` without one.
-    /// - `Google`: `-1` (dynamic) becomes `enabled: true`, `0` `enabled: false`
+    /// - `AnthropicAdaptive` becomes the effort, or `enabled: true` without one.
+    /// - For `Google`, `-1` (dynamic) becomes `enabled: true`, `0` `enabled: false`
     ///   and a positive budget `max_tokens`.
-    /// - `Gemini`: the thinking level as an effort.
+    /// - `Gemini` becomes the thinking level as an effort.
     ///
-    /// `include_summaries: false` on the Google variants is not carried over:
+    /// `include_summaries: false` on the Google variants is not carried over.
     /// OpenRouter returns reasoning whenever the model produces it, and its
     /// only switch (`exclude`) may also withhold the signatures needed to
     /// continue tool calls.
@@ -476,13 +476,13 @@ pub enum ReasoningArtifact {
     ///
     /// Written by earlier versions. Responses now keep
     /// [`OpenAIOutputItems`](Self::OpenAIOutputItems). Conversations saved
-    /// with this form still replay as before: the reasoning items, then the
+    /// with this form still replay as before, with the reasoning items, then the
     /// message's function calls, then its text.
     OpenAIEncryptedReasoning { items: Vec<OpenAIReasoningItem> },
     /// The replayable output items of one OpenAI Responses call, in output
-    /// order and exactly as the provider returned them, minus `status`:
-    /// `reasoning` items that carry `encrypted_content`, `message` items
-    /// (with their `phase`, if any) and finished `function_call` items.
+    /// order and exactly as the provider returned them, minus `status`.
+    /// These include `reasoning` items that carry `encrypted_content`, `message`
+    /// items (with their `phase`, if any) and finished `function_call` items.
     ///
     /// Later requests replay them verbatim and in this order, for example
     /// `reasoning`, `message` (commentary), `function_call`, followed by the
@@ -501,7 +501,7 @@ pub enum ReasoningArtifact {
         fragments: Vec<GoogleReasoningFragment>,
     },
     /// OpenRouter `reasoning_details` items, kept verbatim and in order. They
-    /// are sent back unmodified on the assistant turn: they carry the
+    /// are sent back unmodified on the assistant turn because they carry the
     /// signatures and encrypted reasoning that Claude, Gemini and OpenAI models
     /// need to continue after tool calls. Items are opaque JSON. Encrypted
     /// items (`reasoning.encrypted`) hold no readable text.

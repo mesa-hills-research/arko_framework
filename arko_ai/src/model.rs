@@ -93,10 +93,11 @@ pub struct Model {
     pub openrouter: Option<crate::providers::openrouter::OpenRouterModelInfo>,
 }
 
-/// Model data comes from vendor docs:
-/// <https://developers.openai.com/api/docs/pricing> (+ per-model pages),
-/// <https://platform.claude.com/docs/en/about-claude/pricing> (+ model pages),
-/// <https://ai.google.dev/gemini-api/docs/pricing> (+ model pages).
+/// Model data comes from vendor pricing docs and per-model pages:
+/// - <https://developers.openai.com/api/docs/pricing>
+/// - <https://platform.claude.com/docs/en/about-claude/pricing>
+/// - <https://ai.google.dev/gemini-api/docs/pricing>
+///
 /// `max_input_tokens` is the vendor's published maximum input tokens where one is
 /// given (OpenAI lists it separately for some models), otherwise the context window.
 /// OpenAI publishes no separate maximum input for GPT-5.1, 5.2, 5.4, 5.4-pro, 5.5 and
@@ -105,7 +106,7 @@ pub struct Model {
 /// GPT-5.4/5.5 long-context rates apply "for the full session" per OpenAI's model
 /// pages. The docs don't define a session, so the rates are applied per request.
 ///
-/// Price variants, from the same pricing pages:
+/// Price variants come from the same pricing pages:
 /// - OpenAI `service_tiers` are the Flex and Fast tables as multipliers of the
 ///   Standard table. The tables round a few cached prices (for example gpt-5.4
 ///   Flex cached input $0.13 for 0.5 x $0.25). Fast mode on GPT-5.4/5.5 is
@@ -175,7 +176,7 @@ impl Model {
         }
     }
 
-    /// Standard API pricing and limits: cache reads are $0.10, half GPT-6
+    /// Standard API pricing and limits. Cache reads are $0.10, half GPT-6
     /// Sol's. Other rates match it. Long-context cache rates are taken as 2x,
     /// as on GPT-6 Sol.
     /// <https://developers.openai.com/api/docs/models/gpt-6.1-sol>
@@ -333,7 +334,7 @@ impl Model {
         }
     }
 
-    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol).
+    /// Shuts down December 11, 2026 (replaced by gpt-5.6-sol).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_gpt_5() -> Self {
         Self {
@@ -364,7 +365,7 @@ impl Model {
 
     /// Defaults to, and only supports, `reasoning.effort: high`. No cached-input
     /// discount. Responses and Batch only. Shuts down December 11, 2026
-    /// (replacement: gpt-5.6-sol with `reasoning.mode: "pro"`).
+    /// (replaced by gpt-5.6-sol with `reasoning.mode: "pro"`).
     /// <https://developers.openai.com/api/docs/models/gpt-5-pro>
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_gpt_5_pro() -> Self {
@@ -656,7 +657,7 @@ impl Model {
         }
     }
 
-    /// Shuts down December 11, 2026 (replacement: gpt-5.6-terra).
+    /// Shuts down December 11, 2026 (replaced by gpt-5.6-terra).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_gpt_5_mini() -> Self {
         Self {
@@ -685,7 +686,7 @@ impl Model {
         }
     }
 
-    /// Shuts down December 11, 2026 (replacement: gpt-5.6-luna).
+    /// Shuts down December 11, 2026 (replaced by gpt-5.6-luna).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_gpt_5_nano() -> Self {
         Self {
@@ -714,7 +715,7 @@ impl Model {
         }
     }
 
-    /// Shuts down October 23, 2026 (replacement: gpt-5.6-terra).
+    /// Shuts down October 23, 2026 (replaced by gpt-5.6-terra).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_o4_mini() -> Self {
         Self {
@@ -743,7 +744,7 @@ impl Model {
         }
     }
 
-    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol).
+    /// Shuts down December 11, 2026 (replaced by gpt-5.6-sol).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_o3() -> Self {
         Self {
@@ -772,7 +773,7 @@ impl Model {
         }
     }
 
-    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol with
+    /// Shuts down December 11, 2026 (replaced by gpt-5.6-sol with
     /// `reasoning.mode: "pro"`).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_o3_pro() -> Self {
@@ -855,7 +856,7 @@ impl Model {
         }
     }
 
-    /// Shuts down October 23, 2026 (replacement: gpt-5.6-luna).
+    /// Shuts down October 23, 2026 (replaced by gpt-5.6-luna).
     /// <https://developers.openai.com/api/docs/deprecations>
     pub fn openai_gpt_4_1_nano() -> Self {
         Self {
@@ -914,8 +915,8 @@ impl Model {
     }
 
     /// Claude Fable 5.1 for organizations verified through one of Anthropic's
-    /// verification programs, such as the Cyber Verification Program: the same
-    /// model, limits and prices, so every Fable 5.1 rule applies to it too
+    /// verification programs, such as the Cyber Verification Program. The
+    /// model, limits and prices are the same, so every Fable 5.1 rule applies too
     /// ([`Model::is_fable_or_mythos_5_1`]). Released 2026-09-01, retirement not
     /// sooner than 2027-09-01.
     /// <https://platform.claude.com/docs/en/models/mythos-5-1/overview>
@@ -1110,7 +1111,7 @@ impl Model {
     /// effort. Manual budgets, non-default sampling parameters and prefill are
     /// rejected. A forced tool choice is accepted, and the response then starts
     /// with the tool call, without thinking. No fast mode.
-    /// Prices depend on the prompt size: a prompt over 100,000 tokens (counting
+    /// Prices depend on the prompt size. A prompt over 100,000 tokens (counting
     /// cached and written input) pays 5x on every token class.
     /// <https://platform.claude.com/docs/en/models/haiku-5-5/overview>
     /// <https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide>
@@ -1144,7 +1145,7 @@ impl Model {
     }
 
     /// Retired on the Claude API February 19, 2026 (requests return an error).
-    /// Partner platforms set their own retirement dates. Max output is 64K: 128K
+    /// Partner platforms set their own retirement dates. Max output is 64K. 128K
     /// required the `output-128k-2025-02-19` beta header, which this client never
     /// sends.
     /// <https://platform.claude.com/docs/en/about-claude/model-deprecations>
@@ -1380,7 +1381,7 @@ impl Model {
     /// <https://platform.claude.com/docs/en/about-claude/model-deprecations>
     ///
     /// The 1M-context beta (`context-1m-2025-08-07`) was retired for Sonnet 4 and
-    /// 4.5 on 2026-04-30: the header has no effect and requests over 200K tokens
+    /// 4.5 on 2026-04-30. The header has no effect and requests over 200K tokens
     /// return an error. While it was available, input above 200K was priced at
     /// $6 input / $22.50 output, with caching multipliers on top ($0.60 reads, $7.50
     /// 5-minute and $12 1-hour writes). <https://platform.claude.com/docs/en/release-notes/overview>
@@ -1437,7 +1438,7 @@ impl Model {
 
     /// Retirement not sooner than September 29, 2026 (no deprecation notice published).
     /// The 1M-context beta (`context-1m-2025-08-07`) was retired for this model on
-    /// 2026-04-30: the header has no effect and requests over 200K tokens return an
+    /// 2026-04-30. The header has no effect and requests over 200K tokens return an
     /// error, so `long_context` is rejected locally. While it was available, input
     /// above 200K was priced at $6 input / $22.50 output, with caching multipliers
     /// on top ($0.60 reads, $7.50 5-minute and $12 1-hour writes).
@@ -1610,8 +1611,9 @@ impl Model {
     /// Shut down on the Gemini API June 1, 2026.
     /// <https://ai.google.dev/gemini-api/docs/models/gemini-2.0-flash>
     /// <https://ai.google.dev/gemini-api/docs/deprecations>
-    /// `supports_cache` is false: the Interactions API offers only implicit caching,
-    /// which starts with Gemini 2.5 (<https://ai.google.dev/gemini-api/docs/caching>).
+    /// `supports_cache` is false because the Interactions API offers only
+    /// implicit caching, which starts with Gemini 2.5
+    /// (<https://ai.google.dev/gemini-api/docs/caching>).
     pub fn google_gemini_2_0_flash() -> Self {
         Self {
             provider: Provider::Google,
@@ -1638,7 +1640,7 @@ impl Model {
         }
     }
 
-    /// Shut down on the Gemini API March 9, 2026 (replacement: gemini-3.1-pro-preview).
+    /// Shut down on the Gemini API March 9, 2026 (replaced by gemini-3.1-pro-preview).
     /// The changelog entry for that date also says the id "now points to"
     /// gemini-3.1-pro-preview. Both statements are recorded because the docs conflict.
     /// The current pricing page omits this model. Its cached-input prices ($0.20, or
@@ -1672,7 +1674,7 @@ impl Model {
         }
     }
 
-    /// Legacy model (replacement: gemini-3.6-flash). No shutdown date published.
+    /// Legacy model (replaced by gemini-3.6-flash). No shutdown date published.
     /// <https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview>
     /// <https://ai.google.dev/gemini-api/docs/deprecations>
     pub fn google_gemini_3_0_flash() -> Self {
@@ -1867,7 +1869,7 @@ impl Model {
     }
 
     /// Stable release (GA 2026-05-07) of the retired preview. Earliest shutdown
-    /// 2027-05-07 (replacement: gemini-3.5-flash-lite). Thinking levels minimal
+    /// 2027-05-07 (replaced by gemini-3.5-flash-lite). Thinking levels minimal
     /// (default) through high.
     /// <https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite>
     /// <https://ai.google.dev/gemini-api/docs/pricing>
@@ -1967,7 +1969,7 @@ impl Model {
     /// `openrouter/auto`, `~anthropic/claude-sonnet-latest`,
     /// `openai/gpt-6-luna:floor` or `@preset/name`.
     ///
-    /// No network call is made and nothing is known about the model: limits
+    /// No network call is made and nothing is known about the model. Limits
     /// are 0 (unknown), prices are 0 (costs come from OpenRouter's reported
     /// `usage.cost`), and image input and caching are assumed so requests pass
     /// through unchanged. For limits, prices and request validation, load the
@@ -2006,7 +2008,7 @@ impl Model {
     }
 
     /// `model` (a registered Anthropic model) run through the user's Claude
-    /// Code CLI: the same id, limits and list prices (for estimates, calls
+    /// Code CLI, with the same id, limits and list prices (for estimates, calls
     /// under a Claude subscription are billed nothing per call), with
     /// [`Provider::ClaudeCode`].
     pub fn claude_code(model: Model) -> Self {
@@ -2175,14 +2177,15 @@ impl Model {
     }
 
     /// Whether images can go inside a tool result for this model
-    /// ([`ToolResult::images`]): OpenAI (API key and ChatGPT OAuth) and
-    /// Anthropic models, and Gemini 3 and later, whose `function_result` takes
+    /// ([`ToolResult::images`]). Supported by OpenAI (API key and ChatGPT OAuth),
+    /// Anthropic, and Gemini 3 and later, whose `function_result` takes
     /// image content ("For Gemini 3 series models",
     /// <https://ai.google.dev/gemini-api/docs/function-calling#multimodal>).
     /// Gemini 2.x rejects images in function responses, and OpenRouter
-    /// doesn't document how each upstream receives them, so those models,
-    /// Gemini ids whose version can't be read, and models without image
-    /// input get `false`: their result images follow the turn's results.
+    /// doesn't document how each upstream receives them, so those models and
+    /// Gemini ids whose version can't be read get `false`. Their result images
+    /// follow the turn's results. Models without image input also get `false`,
+    /// but requests containing images are rejected.
     ///
     /// [`ToolResult::images`]: crate::tool::ToolResult::images
     pub fn accepts_tool_result_images(&self) -> bool {
@@ -2423,9 +2426,9 @@ impl Model {
         self.is_fable_or_mythos_5_1() || self.is_opus_5_5() || self.is_sonnet_5_5()
     }
 
-    /// Fast mode (`speed: "fast"`, research preview): Opus 5.5, Opus 5 and Opus 4.8
-    /// on the Claude API. Opus 4.7 rejects it. Opus 4.6 silently runs at standard
-    /// speed.
+    /// Whether fast mode (`speed: "fast"`, research preview) is supported.
+    /// Available for Opus 5.5, Opus 5 and Opus 4.8 on the Claude API.
+    /// Opus 4.7 rejects it. Opus 4.6 silently runs at standard speed.
     /// <https://platform.claude.com/docs/en/build-with-claude/fast-mode>
     pub fn supports_anthropic_fast_mode(&self) -> bool {
         self.is_opus_5_5() || self.is_opus_5() || self.is_opus_4_8()
