@@ -1,6 +1,6 @@
 //! Reading and safely updating a Codex CLI `auth.json` (ChatGPT OAuth).
 //!
-//! ChatGPT OAuth refresh tokens rotate: once a refresh succeeds, the previous
+//! ChatGPT OAuth refresh tokens rotate. Once a refresh succeeds, the previous
 //! refresh token stops working. When arko refreshes credentials loaded from the
 //! file Codex also uses, the new tokens must be written back, or Codex is left
 //! with a dead refresh token. And before refreshing, the file must be read
@@ -37,7 +37,7 @@ pub enum CodexAuthSync {
     Reloaded,
 }
 
-/// A Codex CLI `auth.json`. Both layouts are accepted: tokens nested under
+/// A Codex CLI `auth.json`. Accepts both tokens nested under
 /// `"tokens"` (what Codex writes) and top-level `access_token` /
 /// `refresh_token` / `account_id` fields.
 #[derive(Clone)]
@@ -145,7 +145,7 @@ impl CodexAuthFile {
     }
 
     /// An OpenAI client using the file's ChatGPT OAuth credentials and kept
-    /// in step with the file: every token refresh first re-reads the file
+    /// in step with the file. Every token refresh first re-reads the file
     /// (adopting tokens Codex refreshed, for the same account only), and
     /// rotated tokens are written back as soon as a refresh succeeds.
     /// Clients made from the same file in this process refresh one at a
@@ -172,8 +172,8 @@ impl CodexAuthFile {
     /// Fails without writing when the file changed since it was loaded or last
     /// written and now holds different credentials. Newer credentials written by
     /// another process are never overwritten. A change that leaves the
-    /// credentials as loaded (formatting or other fields) is not a rotation:
-    /// `credentials` are then written onto the file's current contents.
+    /// credentials as loaded (formatting or other fields) is not a rotation,
+    /// so `credentials` are then written onto the file's current contents.
     pub fn persist(
         &mut self,
         credentials: &ChatGptOAuthCredentials,
@@ -270,7 +270,7 @@ impl CodexAuthFile {
     /// creation). An existing file is never replaced.
     ///
     /// For when [`persist`](Self::persist) or [`sync`](Self::sync) fails
-    /// after a refresh: the previous refresh token no longer works, so the
+    /// after a refresh. The previous refresh token no longer works, so the
     /// rotated credentials must not be lost with the process. Move the
     /// recovery file over `auth.json` (or sign in again) before Codex next
     /// refreshes.
@@ -414,7 +414,7 @@ impl CodexAuthFile {
         Ok(Reconciled::Saved)
     }
 
-    /// Reconciles the file with `client`'s ChatGPT OAuth credentials: writes
+    /// Reconciles the file with `client`'s ChatGPT OAuth credentials. Writes
     /// credentials the client rotated, or loads newer credentials another
     /// process wrote into the client. Fails when both changed, since only one
     /// rotation can be valid, when the file holds a different account, and
@@ -471,8 +471,8 @@ impl CodexAuthFile {
     }
 }
 
-/// A [`CodexAuthFile`] as the [`ChatGptOAuthStore`] of an OpenAI client:
-/// before every refresh the file is read again, and tokens Codex refreshed
+/// A [`CodexAuthFile`] as the [`ChatGptOAuthStore`] of an OpenAI client.
+/// Before every refresh the file is read again, and tokens Codex refreshed
 /// are used instead of refreshing (for the same account only, a file now
 /// holding another account stops the refresh). Rotated tokens, with the
 /// refresh's `id_token`, are written back as soon as a refresh succeeds
@@ -483,8 +483,8 @@ impl CodexAuthFile {
 /// is spent once a refresh with it returned a new one, or the server refused
 /// it as reused, expired or revoked. It is then recorded (as a digest, in
 /// one record for the whole process), which the rows below and the client
-/// check before every refresh request. What the record can't know: a
-/// refresh whose answer was lost may have spent a token (the next refresh
+/// check before every refresh request. A refresh whose answer was lost may
+/// have spent a token without the record knowing (the next refresh
 /// sends it, the server refuses it, and then it is recorded), and a token
 /// spent by an earlier run of the process or by another one looks live. An
 /// old `auth.json` restored from a backup is then adopted like new
@@ -497,9 +497,9 @@ impl CodexAuthFile {
 /// new tokens. Every store of the file in this process then knows of this
 /// *unsaved rotation* (the latest one of each account). It is kept (also
 /// when no store of the file is left) until the file holds live credentials
-/// of its account: the rotation itself (saved by a store, or put in place
-/// from the recovery file), or others (the user signed in again). Only the
-/// client that made it holds its tokens: they are never handed to another
+/// of its account, either the rotation itself (saved by a store, or put in
+/// place from the recovery file), or others (the user signed in again). Only
+/// the client that made it holds its tokens. They are never handed to another
 /// client before they are in the file.
 ///
 /// Before a refresh of credentials `C`, the first row matching what the file
@@ -512,12 +512,12 @@ impl CodexAuthFile {
 /// | spent credentials, and a rotation is unsaved | The rotation is saved over them, and the row for the rotation applies. While it can't be saved, every refresh stops with an error naming its recovery file (so the client holding it doesn't rotate it again before it is saved). |
 /// | spent credentials, and no rotation is unsaved | `C` is saved over them and refreshed. If `C` is spent too (or has no refresh token), the refresh stops (sign in again). |
 /// | `C` | `C` is refreshed. |
-/// | other live credentials | They are adopted instead of refreshing: Codex refreshed, the user signed in again, or `C` was never in the file (credentials the host installed, say, they are not saved over live ones). |
+/// | other live credentials | They are adopted instead of refreshing. Codex refreshed, the user signed in again, or `C` was never in the file (credentials the host installed, say, they are not saved over live ones). |
 ///
 /// Every store of the same file (by canonical path) in this process shares
 /// one [`refresh_lock`](ChatGptOAuthStore::refresh_lock), so clients built
 /// separately from one `auth.json` (each [`CodexAuthFile::openai_client`]
-/// call makes its own store) refresh one at a time: the second finds the
+/// call makes its own store) refresh one at a time. The second finds the
 /// first one's tokens in the file instead of reusing the rotated refresh
 /// token. Each store keeps its own record of the file as last read.
 pub struct CodexAuthStore {

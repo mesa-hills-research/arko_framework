@@ -375,11 +375,11 @@ const OAUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 /// applications that don't install a process-wide rustls crypto provider,
 /// since this crate builds reqwest without one.
 ///
-/// The refresh token rotates: once this succeeds, the old one stops working,
-/// so store the returned tokens (see [`crate::CodexAuthFile`]). This process
-/// never sends it again: a later call (or any other refresh in the process)
-/// with a refresh token that a refresh here already exchanged for a new one,
-/// or that the server refused as reused, expired or revoked, fails with
+/// The refresh token rotates. Once this succeeds, the old one stops working,
+/// so store the returned tokens (see [`crate::CodexAuthFile`]). A later call
+/// (or any other refresh in the process) with a refresh token that a refresh
+/// here already exchanged for a new one, or that the server refused as
+/// reused, expired or revoked, fails with
 /// [`Error::AuthenticationFailed`] without a request (a second use would
 /// sign the user out). Refresh tokens are unique, so this holds whatever
 /// `token_url` either refresh used.
@@ -618,19 +618,19 @@ impl OpenAIClient {
 
     /// Configures whether an explicit
     /// [`refresh_oauth_token`](Self::refresh_oauth_token) call retries HTTP
-    /// 429 responses (off by default): up to 8 retries, waiting for the
-    /// advertised reset (at most 15 minutes per wait) when available and
-    /// otherwise backing off from 30 seconds to 15 minutes, before the 429
-    /// is returned. No lock is held while waiting: other callers keep using
-    /// and refreshing the credentials, and a retry finding them replaced
-    /// returns them instead of refreshing.
+    /// 429 responses (off by default). When enabled, it retries up to 8 times,
+    /// waiting for the advertised reset (at most 15 minutes per wait) when
+    /// available and otherwise backing off from 30 seconds to 15 minutes,
+    /// before the 429 is returned. No lock is held while waiting, so other
+    /// callers keep using and refreshing the credentials. A retry finding
+    /// them replaced returns them instead of refreshing.
     ///
-    /// It affects nothing else. The refreshes requests make on their own
+    /// The refreshes requests make on their own
     /// (after a request rejected as expired, and
     /// [`refresh_oauth_token_if_expiring`](Self::refresh_oauth_token_if_expiring),
     /// which the arko_agents runtime calls before each request) and
     /// [`refresh_oauth_token_once`](Self::refresh_oauth_token_once) never
-    /// wait: a 429 from them is returned as the request's error, which an
+    /// wait. A 429 from them is returned as the request's error, which an
     /// agent's own rate-limit recovery then handles. So turning this on for
     /// a client that only runs agents changes nothing.
     pub fn with_oauth_rate_limit_retries(mut self, enabled: bool) -> Self {
@@ -640,8 +640,8 @@ impl OpenAIClient {
 
     /// Keeps ChatGPT OAuth credentials in step with `store`, which other
     /// programs share (for a Codex `auth.json`, see
-    /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)):
-    /// every refresh first re-reads the store and adopts tokens another
+    /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)).
+    /// Every refresh first re-reads the store and adopts tokens another
     /// program already refreshed, and rotated tokens are stored as soon as a
     /// refresh succeeds. A request rejected with any other HTTP 401 re-reads
     /// the store too and is sent once more if it holds newer tokens. See
@@ -676,7 +676,7 @@ impl OpenAIClient {
     /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
     /// `None` (the default) waits as long as the connection stays open. See
     /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
-    /// before setting one: models can think for a long time without sending
+    /// before setting one. Models can think for a long time without sending
     /// anything, so a value must be generous.
     pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.stream_idle_timeout = timeout;
@@ -729,8 +729,8 @@ impl OpenAIClient {
     ///
     /// The snapshot includes any access or refresh token installed by the
     /// most recent successful refresh. A refresh in flight on this client or
-    /// a clone is waited for: it holds the credentials until its new tokens
-    /// are installed and stored (see [`refresh_oauth_token`](Self::refresh_oauth_token)
+    /// a clone is waited for because it holds the credentials until its new
+    /// tokens are installed and stored (see [`refresh_oauth_token`](Self::refresh_oauth_token)
     /// for awaiting this before a runtime shutdown). API-key clients return
     /// `None`.
     pub async fn chatgpt_oauth_credentials(&self) -> Option<ChatGptOAuthCredentials> {
@@ -752,7 +752,7 @@ impl OpenAIClient {
     }
 
     /// [`refresh_oauth_token`](Self::refresh_oauth_token) with a single
-    /// refresh request: an HTTP 429 is returned at once, whatever
+    /// refresh request. An HTTP 429 is returned at once, whatever
     /// [`with_oauth_rate_limit_retries`](Self::with_oauth_rate_limit_retries)
     /// says, so the caller owns retry timing and cancellation.
     pub async fn refresh_oauth_token_once(&self) -> Result<OAuthRefreshResult, Error> {
@@ -768,14 +768,14 @@ impl OpenAIClient {
     /// another refresh, so concurrent calls rotate once.
     ///
     /// Once the refresh request is sent, the refresh completes (installing
-    /// and storing the new tokens) even if this future is dropped: it runs in
+    /// and storing the new tokens) even if this future is dropped. It runs in
     /// a Tokio task of its own. A runtime shutting down still cancels that
     /// task, and rotated tokens it had not stored yet are then lost with the
     /// process (the previous refresh token no longer works). A host that
     /// must not lose them stops starting refreshes (for example, finishes or
     /// cancels its agent runs) and then awaits
     /// [`chatgpt_oauth_credentials`](Self::chatgpt_oauth_credentials)
-    /// before shutting the runtime down: a refresh in flight holds the
+    /// before shutting the runtime down. A refresh in flight holds the
     /// credential lock until the new tokens are installed and stored, so
     /// that call returns only after it. Clients that don't share the
     /// credentials (such as two built separately from one Codex `auth.json`)
@@ -788,7 +788,7 @@ impl OpenAIClient {
     /// No refresh (here or on any other path) sends a refresh token that a
     /// refresh in this process already exchanged for a new one, or that the
     /// server refused as reused, expired or revoked, nor adopts stored
-    /// credentials holding one: that fails with
+    /// credentials holding one. That fails with
     /// [`Error::AuthenticationFailed`] (a second use would sign the user
     /// out).
     pub async fn refresh_oauth_token(&self) -> Result<OAuthRefreshResult, Error> {
@@ -801,18 +801,18 @@ impl OpenAIClient {
     /// returned at once, as with [`refresh_oauth_token_once`](Self::refresh_oauth_token_once)).
     ///
     /// The decision is made under the credential lock, after the credential
-    /// store (if any) has been read: concurrent calls on one client, its
+    /// store (if any) has been read, so concurrent calls on one client, its
     /// clones, or clients sharing a store's
     /// [`refresh_lock`](ChatGptOAuthStore::refresh_lock) refresh once.
     ///
-    /// Returns `Ok(Some(_))` when this call installed new credentials:
-    /// refreshed ones, or ones another program stored (adopted without a
+    /// Returns `Ok(Some(_))` when this call installed new credentials, either
+    /// refreshed ones or ones another program stored (adopted without a
     /// refresh when they don't expire within `margin`, refreshed otherwise).
     /// Returns `Ok(None)` when the credentials held don't expire within
     /// `margin` (including ones another caller installed while this call
     /// waited), and for API-key clients.
     ///
-    /// Credentials without a refresh token can't be refreshed: they are used
+    /// Credentials without a refresh token can't be refreshed. They are used
     /// until the server rejects them, so this returns `Ok(None)` for them,
     /// even once their access token's expiry has passed. A request the
     /// server then rejects as expired fails with

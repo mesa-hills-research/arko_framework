@@ -8,7 +8,7 @@
 //! revoked (`refresh_token_reused`, `refresh_token_expired`,
 //! `refresh_token_invalidated`, which Codex treats as final too). This
 //! process then never sends such a token again, and never adopts or saves
-//! credentials holding one: the client checks this record immediately before
+//! credentials holding one. The client checks this record immediately before
 //! sending any refresh request and before adopting stored credentials, and
 //! [`CodexAuthStore`](crate::codex_auth::CodexAuthStore) checks it before
 //! offering or saving over the file's credentials.
@@ -17,18 +17,18 @@
 //! process. Only SHA-256 digests are kept, never the tokens, and nothing is
 //! removed (32 bytes per refresh).
 //!
-//! What this can't know:
+//! The record cannot cover these cases:
 //!
 //! - A refresh request whose answer is lost (the connection drops or the
 //!   request times out after it was sent) may still have rotated the token,
 //!   but no new token arrived, so the old one is not recorded and the next
 //!   refresh sends it again. The server then refuses it (and it is recorded).
 //! - Clients that share neither their credentials nor a store's refresh lock
-//!   can send the same token at the same time: a token is known spent only
+//!   can send the same token at the same time. A token is known spent only
 //!   once a refresh with it has been answered.
-//! - Tokens spent by another process, or by an earlier run of this one: an
-//!   old `auth.json` restored from a backup looks live until its refresh is
-//!   refused.
+//! - A token may have been spent by another process, or by an earlier run of
+//!   this one. An old `auth.json` restored from a backup looks live until its
+//!   refresh is refused.
 
 use super::ChatGptOAuthCredentials;
 use sha2::{Digest, Sha256};

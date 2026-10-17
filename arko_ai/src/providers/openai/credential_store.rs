@@ -5,7 +5,7 @@ use std::sync::Arc;
 /// Storage for ChatGPT OAuth credentials shared with other programs, such as
 /// the Codex CLI's `auth.json` ([`CodexAuthStore`](crate::codex_auth::CodexAuthStore)).
 ///
-/// ChatGPT refresh tokens rotate: once a refresh succeeds, the previous
+/// ChatGPT refresh tokens rotate. Once a refresh succeeds, the previous
 /// refresh token stops working, and the OAuth server treats a second use of
 /// it as a reused token (Codex then asks the user to sign in again). So a
 /// client with a store installed (see
@@ -17,17 +17,17 @@ use std::sync::Arc;
 ///    refresh request is made.
 /// 2. After a refresh, [`save_refreshed`](Self::save_refreshed) stores the
 ///    rotated tokens at once.
-/// 3. When the refresh request fails, the store is read again: if another
+/// 3. When the refresh request fails, the store is read again. If another
 ///    program rotated the tokens in the meantime, they are adopted.
 ///
 /// After any other HTTP 401 (not `token_expired`), the store is read as in
 /// step 1 without refreshing, as Codex's unauthorized recovery re-reads
-/// `auth.json`: newer tokens are adopted and the request is sent once more.
+/// `auth.json`. Newer tokens are adopted and the request is sent once more.
 ///
 /// Whatever the store returns, the client never sends a refresh token that
 /// a refresh in this process already exchanged for a new one (or that the
 /// server refused as reused, expired or revoked), and never adopts stored
-/// credentials holding one: that refresh fails with
+/// credentials holding one. That refresh fails with
 /// [`Error::AuthenticationFailed`].
 ///
 /// The client holds the store's [`refresh_lock`](Self::refresh_lock) when it
@@ -41,7 +41,7 @@ pub trait ChatGptOAuthStore: Send + Sync {
     /// Called before a refresh with the credentials the client holds (and is
     /// about to refresh). Returns newer credentials for the same account to
     /// use instead of refreshing, `None` to go ahead with the refresh, or an
-    /// error to stop it: a refresh must not proceed when the store cannot be
+    /// error to stop it. A refresh must not proceed when the store cannot be
     /// read, since the stored tokens may already have rotated.
     fn before_refresh(
         &self,
@@ -62,7 +62,7 @@ pub trait ChatGptOAuthStore: Send + Sync {
     /// A lock shared by every store of the same credentials in this process
     /// (for a Codex `auth.json`, every [`CodexAuthStore`](crate::codex_auth::CodexAuthStore)
     /// of the same file), held from [`before_refresh`](Self::before_refresh)
-    /// to [`save_refreshed`](Self::save_refreshed): clients with different
+    /// to [`save_refreshed`](Self::save_refreshed), so clients with different
     /// stores of the same credentials then never refresh concurrently. A
     /// client takes this lock first, then its own credential lock, so while
     /// it waits for another client's refresh its requests go on with the
