@@ -20,7 +20,11 @@ impl Descriptor {
     fn new(fd: OwnedFd) -> io::Result<Self> {
         let flags = OFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFL)?);
         fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
-        Ok(Self(AsyncFd::new(fd)?))
+        // AsyncFd owns this OwnedFd for its whole life, satisfying I/O safety until
+        // the minimum Tokio version supports register.
+        #[allow(deprecated)]
+        let descriptor = AsyncFd::new(fd)?;
+        Ok(Self(descriptor))
     }
 }
 impl AsyncRead for Descriptor {
