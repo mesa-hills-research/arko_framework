@@ -264,6 +264,7 @@ impl Task {
             None => {
                 // Nothing of the session stays: the next run starts one.
                 self.claude_code_session = None;
+                self.claude_code_directory = None;
                 self.claude_code_resume_at = None;
                 self.claude_code_fork_of = None;
                 self.claude_code_prompt_changed = false;
@@ -280,6 +281,7 @@ mod tests {
     use super::*;
     use crate::agent_config::{AgentConfig, AgentLLMConfig};
     use arko_ai::{Image, ToolCall, ToolResult};
+    use std::path::PathBuf;
 
     fn task() -> Task {
         let config = AgentConfig::builder(
@@ -492,5 +494,28 @@ mod tests {
         assert_eq!(again.claude_code_fork_of.as_deref(), Some("s1"));
 
         assert!(task.branch(0).is_err());
+    }
+
+    /// A task moves to another directory with its prompt written again. A
+    /// Claude Code session stays in the directory it started in, and gets
+    /// the new prompt. Moving back there needs no other directory.
+    #[test]
+    fn a_moved_task_keeps_its_claude_code_session_where_it_started() {
+        let mut plain = task();
+        plain.conversation.system_message = Some("prompt".into());
+        plain.move_to("/elsewhere".into());
+        assert_eq!(plain.current_working_directory, PathBuf::from("/elsewhere"));
+        assert!(plain.conversation.system_message.is_none());
+        assert_eq!(plain.claude_code_directory, None);
+
+        let mut session = task();
+        session.claude_code_session = Some("s1".into());
+        session.move_to("/elsewhere".into());
+        assert_eq!(session.claude_code_directory, Some(PathBuf::from("/w")));
+        assert!(session.claude_code_prompt_changed);
+        session.move_to("/third".into());
+        assert_eq!(session.claude_code_directory, Some(PathBuf::from("/w")));
+        session.move_to("/w".into());
+        assert_eq!(session.claude_code_directory, None);
     }
 }

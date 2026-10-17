@@ -481,7 +481,7 @@ def handle(message):
             for event, matchers in (request.get("hooks") or {}).items():
                 state["hooks"][event] = matchers[0]["hookCallbackIds"][0]
             reply(message["request_id"], {"commands": []})
-            log("argv", argv=ARGS, env={name: os.environ.get(name) for name in (
+            log("argv", argv=ARGS, cwd=os.getcwd(), env={name: os.environ.get(name) for name in (
                 "MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
                 "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "DISABLE_AUTOUPDATER")})
         elif subtype == "set_model":

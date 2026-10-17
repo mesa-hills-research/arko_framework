@@ -3492,19 +3492,10 @@ impl WorkflowEngine {
         }
         if let Some(workspace) = &input.workspace {
             let directory = super::options::run_workspace(&ctx.workspace, workspace)?;
-            if directory != task.current_working_directory {
-                if task.agent_config.runs_in_claude_code() && task.claude_code_session.is_some() {
-                    return Err(WorkflowError::BuilderInvalid(format!(
-                        "agent run {} runs in Claude Code, whose conversation stays in the directory its session started in ({}); continue it there, or start a new run in '{}'",
-                        task.id,
-                        task.current_working_directory.display(),
-                        directory.display()
-                    )));
-                }
-                task.current_working_directory = directory;
-                // The prompt may state the directory: it is written again.
-                task.conversation.system_message = None;
-            }
+            // Its tools work there, and its prompt (which may state the
+            // directory) is written again. A Claude Code session stays where
+            // it started, where Claude Code finds it.
+            task.move_to(directory);
         }
         if let Some(config) = input.config {
             // A configuration given now is checked as one given at a start

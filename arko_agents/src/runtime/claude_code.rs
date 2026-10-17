@@ -1663,7 +1663,14 @@ impl ClaudeCodeRun {
         cc::ClaudeOptions {
             cli_path: settings.cli_path.clone(),
             cli_prefix_args: settings.cli_args.clone(),
-            working_directory: Some(self.task.current_working_directory.clone()),
+            // Claude Code finds a session only from the directory it started
+            // in, so the CLI runs there after the task moved.
+            working_directory: Some(
+                self.task
+                    .claude_code_directory
+                    .clone()
+                    .unwrap_or_else(|| self.task.current_working_directory.clone()),
+            ),
             model: Some(config.llm_config.model.id.clone()),
             effort,
             system_prompt: if settings.replace_system_prompt {
@@ -1697,6 +1704,15 @@ impl ClaudeCodeRun {
                 hook(cc::HookEvent::PostToolUse),
             ],
             tool_servers: vec![Arc::new(server)],
+            // The task's own directory, where the CLI doesn't run after a
+            // move, is open to Claude Code's tools too.
+            add_directories: self
+                .task
+                .claude_code_directory
+                .is_some()
+                .then(|| self.task.current_working_directory.clone())
+                .into_iter()
+                .collect(),
             // Each request's final usage comes in its `message_delta`.
             include_partial_messages: true,
             ..cc::ClaudeOptions::default()
@@ -4520,6 +4536,7 @@ impl ClaudeCodeRun {
         // The next session is a new Claude Code conversation, which records
         // the current prompt.
         self.task.claude_code_session = None;
+        self.task.claude_code_directory = None;
         self.task.claude_code_synced = 0;
         self.task.claude_code_prompt_changed = false;
         self.task.claude_code_entries.clear();

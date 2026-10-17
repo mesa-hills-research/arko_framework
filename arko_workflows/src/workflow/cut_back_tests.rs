@@ -272,8 +272,7 @@ async fn a_cut_back_forgets_what_the_removed_messages_read() {
 }
 
 /// A run can go on in another directory: it works there from then
-/// on, and its prompt is written again. A Claude Code run with a session
-/// can't move (Claude Code finds a session only from its directory).
+/// on, and its prompt is written again.
 #[tokio::test]
 async fn a_run_goes_on_in_another_directory() {
     let workspace = Workspace::new();
@@ -298,19 +297,68 @@ async fn a_run_goes_on_in_another_directory() {
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("does not exist"), "{refused}");
+}
 
-    let mut in_claude_code = moved.clone();
-    in_claude_code.task.agent_config.llm_config.model =
-        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
-    in_claude_code.task.claude_code_session = Some("s1".into());
-    let refused = workflow
-        .continue_agent_with(&in_claude_code, "x", ContinueOptions::new().workspace("."))
+/// A Claude Code run moves too: its tools work in the new directory, while
+/// the CLI resumes its session in the directory the session started in,
+/// where Claude Code finds it, with the new directory open to it and the
+/// new prompt.
+#[tokio::test]
+async fn a_claude_code_run_moves_while_its_session_stays() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(serde_json::json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Hello."}}],
+        [
+            {"tool": "mcp__arko__read_file", "input": {"path": "only-here.txt"}},
+            {"tool": "mcp__arko__complete_task", "input": {"summary": "Read it."}},
+        ],
+    ]));
+    let workspace = Workspace::new();
+    let project = workspace.0.join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("only-here.txt"), "the project's own file").unwrap();
+    let mut agent = fake.agent();
+    agent.tool_config.available_tool_names = vec!["read_file".into()];
+    let workflow = Workflow::builder()
+        .name("cut-back-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("main", agent)
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let moved = workflow
+        .continue_agent_with(
+            &first,
+            "Now read the project's file.",
+            ContinueOptions::new().workspace("project"),
+        )
         .await
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(moved.summary, "Read it.");
+    let project = std::path::absolute(&project).unwrap();
+    assert_eq!(moved.task.current_working_directory, project);
+    assert!(moved.task.conversation.messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(content, arko_ai::Content::ToolResult(result)
+                if result.output.contains("the project's own file"))
+        })
+    }));
+    let launches = fake.logged("argv");
+    let canonical = |path: &str| std::fs::canonicalize(path).unwrap();
+    let original = std::fs::canonicalize(&workspace.0).unwrap();
+    assert_eq!(canonical(launches[0]["cwd"].as_str().unwrap()), original);
+    assert_eq!(canonical(launches[1]["cwd"].as_str().unwrap()), original);
+    let argv: Vec<String> = serde_json::from_value(launches[1]["argv"].clone()).unwrap();
+    let after = |flag: &str| {
+        argv.iter()
+            .position(|arg| arg == flag)
+            .map(|at| argv[at + 1].clone())
+    };
     assert!(
-        refused
-            .to_string()
-            .contains("stays in the directory its session started in"),
-        "{refused}"
+        argv.iter().any(|arg| arg.starts_with("--resume=")),
+        "{argv:?}"
     );
+    assert_eq!(after("--add-dir"), Some(project.display().to_string()));
+    assert_eq!(after("--system-prompt-snapshot").as_deref(), Some("off"));
 }

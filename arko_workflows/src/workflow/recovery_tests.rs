@@ -1418,17 +1418,17 @@ async fn the_live_checkpoint_is_rewritten_only_when_the_state_changes() {
 
 /// The scripted fake Claude Code CLI of arko_agents' tests, in a fresh
 /// directory, playing `script`.
-struct FakeClaude(std::path::PathBuf);
+pub(super) struct FakeClaude(pub(super) std::path::PathBuf);
 
 impl FakeClaude {
-    fn new(script: Value) -> Self {
+    pub(super) fn new(script: Value) -> Self {
         let dir = std::env::temp_dir().join(format!("arko-wf-fake-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("script.json"), script.to_string()).unwrap();
         Self(dir)
     }
 
-    fn agent(&self) -> arko_agents::AgentConfig {
+    pub(super) fn agent(&self) -> arko_agents::AgentConfig {
         let python = std::env::var("ARKO_TEST_PYTHON")
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1451,7 +1451,7 @@ impl FakeClaude {
     }
 
     /// The fake's log entries of kind `event`.
-    fn logged(&self, event: &str) -> Vec<Value> {
+    pub(super) fn logged(&self, event: &str) -> Vec<Value> {
         std::fs::read_to_string(self.0.join("log.jsonl"))
             .unwrap_or_default()
             .lines()

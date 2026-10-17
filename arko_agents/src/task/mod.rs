@@ -486,6 +486,15 @@ pub struct Task {
     /// handover starts a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_session: Option<String>,
+    /// The directory the Claude Code CLI runs in for the task's session,
+    /// when it differs from the task's working directory: the one the
+    /// session started in, which Claude Code finds it from. Set when the
+    /// task moves ([`Task::move_to`]). arko's tools and checks work in
+    /// [`current_working_directory`](Self::current_working_directory), and
+    /// the CLI is given that directory too. A new session starts in the
+    /// working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_directory: Option<PathBuf>,
     /// How many messages of the conversation the Claude Code session has
     /// received or produced. User messages after them (a follow-up added to
     /// a completed task, say) are sent when the task runs again.
@@ -718,6 +727,7 @@ impl Task {
             context_size_unknown: false,
             cache_window_start: 0,
             claude_code_session: None,
+            claude_code_directory: None,
             claude_code_synced: 0,
             claude_code_prompt_changed: false,
             claude_code_entries: BTreeMap::new(),
@@ -844,6 +854,28 @@ impl Task {
             self.claude_code_prompt_changed = true;
         }
         Ok(())
+    }
+
+    /// Moves the task to working directory `directory`: its tools work
+    /// there from its next run, and its system prompt (which may name the
+    /// directory) is written again. A Claude Code task with a session keeps
+    /// running the CLI in the session's directory, where Claude Code finds
+    /// the session ([`claude_code_directory`](Self::claude_code_directory)),
+    /// and the session gets the new prompt.
+    pub fn move_to(&mut self, directory: PathBuf) {
+        if directory == self.current_working_directory {
+            return;
+        }
+        if self.claude_code_session.is_some() {
+            self.claude_code_directory
+                .get_or_insert_with(|| self.current_working_directory.clone());
+            self.claude_code_prompt_changed = true;
+        }
+        if self.claude_code_directory.as_ref() == Some(&directory) {
+            self.claude_code_directory = None;
+        }
+        self.current_working_directory = directory;
+        self.conversation.system_message = None;
     }
 
     /// Prepares a task that was 'Completed' for resumption.
