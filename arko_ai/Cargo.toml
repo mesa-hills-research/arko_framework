@@ -21,7 +21,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 base64 = "0.22"
 # Shrinks images over a provider's limits; pure Rust codecs only.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 url = "2.4"
 log.workspace = true
 futures.workspace = true
