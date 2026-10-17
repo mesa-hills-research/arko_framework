@@ -16,10 +16,9 @@ use arko_index::{
 };
 use std::time::Duration;
 
-/// Voyage's total tokens per request, where arko_ai's model table has none:
-/// voyage-code-4 answered "The max allowed tokens per submitted batch is 320000"
-/// (2026-10-04, docs/voyage-api-notes.md). Other models without a figure get the
-/// smallest documented limit.
+/// Voyage's total tokens per request when arko_ai's model table has none.
+/// The voyage-code-4 API reports a limit of 320,000 tokens per batch.
+/// Other models without a figure use the smallest documented limit.
 fn request_token_limit(details: &EmbeddingModelDetails) -> u64 {
     match (details.max_batch_total_tokens, details.id.as_str()) {
         (Some(n), _) => n as u64,
