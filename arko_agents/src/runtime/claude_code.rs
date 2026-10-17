@@ -2928,10 +2928,11 @@ impl ClaudeCodeRun {
                 Some("message_start") => {
                     let message = &event["message"];
                     if parent_tool_use_id.is_none() {
-                        // A response: any retry before it is over.
+                        // A response: any retry before it is over, and a
+                        // response that streamed without finishing failed.
+                        self.discard_unfinished_stream().await?;
                         self.streaming = message["id"].as_str().map(str::to_string);
                         self.retrying_since = None;
-                        self.streamed_bytes = (0, 0);
                     }
                     self.request_started(message, &parent_tool_use_id).await?;
                     if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
@@ -3051,11 +3052,9 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Claude Code will retry a failed request (its `api_retry` message):
-    /// reported as the runtime reports its own retries, an error that needs
-    /// no decision and the retry with its delay.
-    async fn retry_scheduled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
-        // A response that failed while it streamed: the host drops it.
+    /// A response that streamed and didn't finish failed: the host is told
+    /// to drop what it streamed ([`AgentEvent::StreamedOutputDiscarded`]).
+    async fn discard_unfinished_stream(&mut self) -> Result<(), ArkoAgentsError> {
         let (text_bytes, reasoning_bytes) = std::mem::take(&mut self.streamed_bytes);
         if text_bytes > 0 || reasoning_bytes > 0 {
             self.emit(AgentEvent::StreamedOutputDiscarded {
@@ -3064,6 +3063,14 @@ impl ClaudeCodeRun {
             })
             .await?;
         }
+        Ok(())
+    }
+
+    /// Claude Code will retry a failed request (its `api_retry` message):
+    /// reported as the runtime reports its own retries, an error that needs
+    /// no decision and the retry with its delay.
+    async fn retry_scheduled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
+        self.discard_unfinished_stream().await?;
         let field = |name: &str| raw.get(name).and_then(Value::as_u64);
         let attempt = field("attempt").unwrap_or(1);
         let error = raw.get("error").and_then(Value::as_str);
@@ -3770,8 +3777,10 @@ impl ClaudeCodeRun {
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
-        // A retry series ends with its turn, also one that failed.
+        // A retry series ends with its turn, also one that failed, and so
+        // does a response that streamed without finishing.
         self.retrying_since = None;
+        self.discard_unfinished_stream().await?;
         let api_error = self.api_error.take();
         let ending = self.stopping.is_some() || self.task.current_state.is_terminal();
         if ending
@@ -4673,8 +4682,6 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-/// Images in a reported result, either MCP content or Claude's image
-/// source blocks. Arko tools retain their originals in `ToolHost` too.
 /// A file's size as `read_file` gives it: KB under a megabyte, else MB.
 fn file_size(bytes: usize) -> String {
     if bytes < 1024 * 1024 {
@@ -4684,6 +4691,8 @@ fn file_size(bytes: usize) -> String {
     }
 }
 
+/// Images in a reported result, either MCP content or Claude's image
+/// source blocks. Arko tools retain their originals in `ToolHost` too.
 fn result_images(content: &Value) -> Vec<crate::tool::ToolImage> {
     let blocks = match content {
         Value::Array(blocks) => blocks,

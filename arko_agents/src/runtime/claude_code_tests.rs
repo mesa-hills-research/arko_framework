@@ -999,6 +999,75 @@ async fn a_failed_retry_series_doesn_t_count_into_the_next() {
     assert!(elapsed[0] < 300, "{elapsed:?}");
 }
 
+/// A response that fails while it streams is discarded too when it ends
+/// the turn, or when Claude Code starts another response without reporting
+/// a retry: the host drops what it streamed before the turn's error, or
+/// before the next response's text.
+#[tokio::test]
+async fn a_response_that_fails_while_it_streams_is_discarded_however_it_ends() {
+    let order = |events: &[AgentEvent]| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ModelRequestStarted { .. } => Some("request".to_string()),
+                AgentEvent::AssistantResponseChunk(chunk) => Some(format!("chunk {chunk}")),
+                AgentEvent::StreamedOutputDiscarded { text_bytes, .. } => {
+                    Some(format!("discard {text_bytes}"))
+                }
+                AgentEvent::ErrorEncountered { .. } => Some("error".to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let fake = Fake::new(json!([[
+        {"stream_fail": "The ans"},
+        {"fail": "API Error: 529 overloaded"},
+    ]]));
+    let task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    run.finish().await;
+    let seen = order(&events);
+    let discard = seen.iter().position(|kind| kind == "discard 7").unwrap();
+    assert_eq!(seen[..discard], ["request", "chunk The ans"], "{seen:?}");
+
+    let fake = Fake::new(json!([[
+        {"stream_fail": "The ans"},
+        {"text": "The answer is four.", "stream": true},
+    ]]));
+    let task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    let (_, events) = start(task).finish().await;
+    assert_eq!(
+        order(&events),
+        [
+            "request",
+            "chunk The ans",
+            "discard 7",
+            "request",
+            "chunk The answer ",
+            "chunk is four.",
+        ]
+    );
+}
+
 /// A cache refresh pings a fork of the session that isn't saved: the ping
 /// reads the conversation (and its cache), its usage comes back, and the
 /// session's own conversation never sees it.
