@@ -60,8 +60,8 @@ fn workflow(server: &ResponsesServer, workspace: &Workspace) -> Workflow {
         .unwrap()
 }
 
-/// A run's images follow its prompt in its first message; a continuation's
-/// follow its prompt in the message that continues it.
+/// A run's images follow its prompt in its first message, and a
+/// continuation's follow its prompt in the message that continues it.
 #[tokio::test]
 async fn a_run_and_its_continuation_send_their_images_with_their_prompts() {
     let workspace = Workspace::new();

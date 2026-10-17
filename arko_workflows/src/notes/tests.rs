@@ -253,7 +253,7 @@ async fn a_one_time_note_s_images_reach_a_running_agent_after_its_text() {
 }
 
 /// Only a one-time note carries images, and only to agents whose models
-/// take them; a note without images still needs text.
+/// take them. A note without images still needs text.
 #[tokio::test]
 async fn notes_with_images_are_one_time_and_for_models_that_take_them() {
     let workspace = Workspace::new();
@@ -887,7 +887,7 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     assert_eq!(continued.status, AgentRunStatus::Completed);
     let body = server.bodies().last().unwrap().clone();
     assert_eq!(body.matches(data.as_str()).count(), 2, "{body}");
-    // The conversation holds them now; its saved versions name them.
+    // The conversation holds them now, and its saved versions name them.
     let held = continued
         .task
         .conversation

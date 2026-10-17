@@ -356,7 +356,7 @@ impl Workflow {
     /// checkpoint. Returns what was sent and its usage (its cache reads show
     /// what it kept). See
     /// [`AgentRuntime::refresh_prompt_cache`](arko_agents::AgentRuntime::refresh_prompt_cache)
-    /// for the routes it supports; others return
+    /// for the routes it supports. Others return
     /// `WorkflowError::Agent(ArkoAgentsError::LLM(Error::UnsupportedFeature))`.
     /// A running run (one waiting in a host handler counts as running) and a
     /// run started inside another run's tool call return `BuilderInvalid`,
@@ -378,8 +378,9 @@ impl Workflow {
     /// its own run ID, and a Claude Code agent its own session forked from
     /// the original's). The run keeps the configuration saved in `task`.
     /// It counts as given every note posted so far, as a run started now
-    /// does. `AgentNotFound` for an unregistered agent; `BuilderInvalid` for
-    /// a task that isn't `Completed` or whose ID the workflow has already.
+    /// does. Returns `AgentNotFound` for an unregistered agent, and
+    /// `BuilderInvalid` for a task that isn't `Completed` or whose ID the
+    /// workflow has already.
     pub fn import_agent_run(
         &self,
         agent_name: &str,
@@ -803,7 +804,7 @@ impl Workflow {
     /// A run that is recovered gets no message, so images for it are
     /// refused (`BuilderInvalid`): send them with the next message. Only a
     /// continued run takes [`ContinueOptions::reconfigure`] and
-    /// [`ContinueOptions::cut_back_to`]; `continue_agent_with` cuts back a
+    /// [`ContinueOptions::cut_back_to`], and `continue_agent_with` cuts back a
     /// stopped run of any status.
     pub async fn restart_with(
         &self,
@@ -1106,7 +1107,7 @@ impl Workflow {
     }
 
     /// Each agent's running cost totals (billed, at list prices, tokens and
-    /// calls), without copying the ledger; see
+    /// calls), without copying the ledger. See
     /// [`BudgetManager::totals_by_agent`](crate::budget::BudgetManager::totals_by_agent).
     pub fn cost_totals_by_agent(
         &self,

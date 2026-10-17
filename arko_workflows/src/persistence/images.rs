@@ -27,7 +27,7 @@ const CACHE_BYTES: usize = 256 << 20;
 /// them.
 ///
 /// Wrap code that reads a run directory's task files or checkpoints
-/// yourself in [`ImageFiles::with`]; [`WorkflowState::agent_results_in`]
+/// yourself in [`ImageFiles::with`]. [`WorkflowState::agent_results_in`]
 /// (crate::persistence::state::WorkflowState::agent_results_in) does so
 /// already.
 pub struct ImageFiles {
@@ -137,7 +137,7 @@ impl ImageFiles {
             used,
         });
         cache.bytes += data.len();
-        // The least recently used go first; one image larger than the whole
+        // The least recently used go first. One image larger than the whole
         // budget stays until the next.
         while cache.bytes > self.budget {
             let Some((key, index, len)) = cache
@@ -258,7 +258,7 @@ impl ImageStore for ImageFiles {
 const TEXT_EXTENSION: &str = ".b64";
 
 /// The file name of an image (`<SHA-256 of its bytes>.<type>`) and its
-/// bytes; `None` for data that isn't standard base64, saved as text.
+/// bytes, or `None` for data that isn't standard base64, saved as text.
 pub(crate) fn image_file(data: &str, mime_type: &str) -> (String, Option<Vec<u8>>) {
     match base64::engine::general_purpose::STANDARD.decode(data) {
         Ok(bytes) => {
@@ -308,7 +308,7 @@ fn valid_name(name: &str) -> bool {
         && extension.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// Flushes `directory`'s entries to disk (Unix; Windows can't open a
+/// Flushes `directory`'s entries to disk (on Unix, as Windows can't open a
 /// directory for that). A failure is ignored: the file is written either
 /// way, and only a crash of the machine could lose its name.
 fn sync_directory(directory: &Path) {
@@ -330,7 +330,7 @@ mod tests {
         dir
     }
 
-    /// An image is saved once, as its bytes, under its hash; the JSON
+    /// An image is saved once, as its bytes, under its hash. The JSON
     /// holds the name, and reads back through the files, also in a fresh
     /// process (an empty cache).
     #[test]

@@ -209,7 +209,7 @@ pub enum NoteImage {
     Url(String),
     /// An image the workflow keeps, by name: `<SHA-256 of its bytes>.<type>`.
     /// A persisted run keeps it in a file of that name in its directory's
-    /// `images` folder, written when the note is posted; a run that isn't
+    /// `images` folder, written when the note is posted. A run that isn't
     /// persisted keeps it in memory.
     Stored { name: String, mime_type: String },
 }
@@ -533,7 +533,7 @@ impl NoteBoard {
     /// verifier's review) receives that it hasn't been given, for its next
     /// turn boundary, oldest first, as many as fit ([`PROMPT_MAX_NOTES`],
     /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown and their
-    /// images, each labelled with its note; `None` when there are none. Only
+    /// images, each labelled with its note, or `None` when there are none. Only
     /// the notes shown count as given: the rest come at the next boundary.
     pub(crate) fn update_with_seqs(
         &self,
@@ -1127,7 +1127,7 @@ impl NotesHandle {
             .unwrap_or_default()
     }
 
-    /// A posted note's image; see
+    /// A posted note's image. See
     /// [`Workflow::note_image`](crate::Workflow::note_image).
     pub fn image(&self, image: &NoteImage) -> Result<arko_ai::Image, WorkflowError> {
         let context = self

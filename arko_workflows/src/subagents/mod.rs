@@ -515,8 +515,8 @@ pub struct MailItem {
     pub file: Option<PathBuf>,
     /// Not given to its recipient: it is from a subagent the recipient's
     /// conversation no longer started ([`SubagentRecord::detached`]). It
-    /// stays in the records for the host to show; `delivered_at` is when it
-    /// was set aside.
+    /// stays in the records for the host to show, and `delivered_at` is when
+    /// it was set aside.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub withheld: bool,
 }

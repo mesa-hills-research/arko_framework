@@ -1364,7 +1364,7 @@ pub(crate) struct StartOptions {
     pub images: Vec<arko_ai::Image>,
 }
 
-/// A message to an agent run: its text, and images after it; and the
+/// A message to an agent run: its text, images after it, and the
 /// configuration the run continues with, when the host changes it (see
 /// [`ContinueOptions::reconfigure`](super::ContinueOptions::reconfigure)).
 pub(crate) struct UserInput<'a> {
@@ -3577,7 +3577,7 @@ impl WorkflowEngine {
             false,
         );
         // Cut back: the standing notes the removed messages gave it are
-        // given again (one-time notes went with them; a cut to the first
+        // given again (one-time notes went with them, and a cut to the first
         // message gets its notes in its prompt). The subagents it started in
         // the removed messages are detached: their mail is withheld. The
         // mail of the others the removed messages held is given again.

@@ -44,7 +44,7 @@ impl RunOptions {
         self
     }
 
-    /// Sends `images` with the prompt; see [`RunOptions::images`].
+    /// Sends `images` with the prompt. See [`RunOptions::images`].
     pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
         self.images = images.into_iter().collect();
         self
@@ -84,7 +84,7 @@ impl ContinueOptions {
         Self::default()
     }
 
-    /// Sends `images` with the prompt; see [`ContinueOptions::images`].
+    /// Sends `images` with the prompt. See [`ContinueOptions::images`].
     pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
         self.images = images.into_iter().collect();
         self
@@ -95,7 +95,7 @@ impl ContinueOptions {
     /// (tools): the same conversation, with its prompt cache key and run ID,
     /// under `config`'s tools and a system message written from `config`.
     /// The workflow adds its tools to `config` as it does for a new run
-    /// (none to a chat). The model must stay the same; the new tools and
+    /// (none to a chat). The model must stay the same. The new tools and
     /// system message make the next request write the provider's prompt
     /// cache afresh. A Claude Code agent's session resumes with the new
     /// flags and prompt. The task keeps the configuration from then on, also
@@ -115,14 +115,14 @@ impl ContinueOptions {
     /// one of its task's [`user_turns`](arko_agents::Task::user_turns), and
     /// sends the prompt in its place: an edited message, or the same one
     /// again (regenerate). The messages from `index` on go, with what waited
-    /// with them (calls, results, a question, a pause); see
+    /// with them (calls, results, a question, a pause). See
     /// [`Task::cut_back`](arko_agents::Task::cut_back). Index `0` starts the
     /// conversation over from the prompt, as a new run's (with the
     /// workflow's notes and list of recipients), under the same run ID. A
     /// run that isn't running can be cut back whatever its status:
     /// completed, waiting for input, paused, cancelled, failed or
     /// interrupted. The notes the removed messages gave it are given again,
-    /// except one-time notes, which went with them; messages from other
+    /// except one-time notes, which went with them. Messages from other
     /// agents in them are not delivered again. A Claude Code agent's session
     /// resumes at the reply before the cut. Only
     /// [`Workflow::continue_agent_with`] takes it.

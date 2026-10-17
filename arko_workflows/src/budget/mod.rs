@@ -122,7 +122,7 @@ pub struct AddCostResult {
     pub exceeded_crossed: bool,
 }
 
-/// One agent's running cost totals; see [`BudgetManager::totals_by_agent`].
+/// One agent's running cost totals. See [`BudgetManager::totals_by_agent`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostTotals {
     /// What the account was billed, in dollars (calls a plan covered count
@@ -602,7 +602,7 @@ mod tests {
     }
 
     /// Each agent's totals add its calls up as they come: billed amounts, list
-    /// prices (a plan-covered call's estimate), tokens and calls; manual
+    /// prices (a plan-covered call's estimate), tokens and calls. Manual
     /// costs aren't an agent's. A resumed budget rebuilds them from its
     /// ledger.
     #[test]

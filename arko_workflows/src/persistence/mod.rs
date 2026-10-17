@@ -134,7 +134,7 @@ pub struct PersistenceManager {
     durable_store: Arc<crate::durable::DurableStore>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
     events: Arc<EventWriter>,
-    /// The run's images, saved once each; what it writes refers to them.
+    /// The run's images, saved once each. What it writes refers to them.
     images: Arc<images::ImageFiles>,
     /// The saved versions of the recorded results' tasks, by task ID:
     /// written by this manager, or loaded on resume. Changed only with the
