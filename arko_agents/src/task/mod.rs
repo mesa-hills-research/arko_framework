@@ -941,7 +941,7 @@ impl Task {
                                 None => true,
                             });
                         for line in lines {
-                            result.output.push_str("\n");
+                            result.output.push('\n');
                             result.output.push_str(&line);
                         }
                     }
