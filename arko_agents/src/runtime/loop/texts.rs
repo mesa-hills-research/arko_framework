@@ -55,16 +55,12 @@ pub(super) const FAILED_STREAM_CALL: &str =
 pub(super) const REFUSED_TURN_CALL: &str = "turn refused";
 pub(super) const UNDELIVERED_CALL: &str =
     "The model's final response did not include this call; it was not run.";
-pub(super) const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
+pub(super) use crate::task::{RESTARTED_CALL, UNREACHED_CALL};
 /// Why a call awaiting approval was not run, when its wait ended without a
 /// decision; see [`AgentLoop::settle_interrupted_wait`]. For a task saved
 /// that way by an older version.
 pub(super) const UNDECIDED_CALL: &str =
     "The approval wait ended without a decision, so this call was not run.";
-/// The result of a call that was running when the task stopped (its host
-/// crashed, say), settled as [`ToolRecovery::InDoubt`] when the task runs
-/// again.
-pub(super) const RESTARTED_CALL: &str = "The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.";
 /// Added to the output-based results of a turn the task stopped in the
 /// middle of, once they are settled when it runs again.
 pub(super) const RESTARTED_TURN: &str = "The task was restarted while this turn's tool calls ran (its host stopped). A call of the turn without a result here was not run; call it again if it is still needed.";

@@ -6,7 +6,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{Task, TaskState};
+use crate::agent_config::ToolCallingMode;
 use crate::error::ArkoAgentsError;
+
+/// The result of a call that was running when the task stopped (its host
+/// crashed, say), settled as `ToolRecovery::InDoubt` when the task runs
+/// again, or answered so in a branch of the task.
+pub(crate) const RESTARTED_CALL: &str = "The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.";
+
+/// The result of a call of a turn that ended before the call ran.
+pub(crate) const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
 
 /// What a message the host sent to a task was. See [`Task::user_turns`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,9 +110,9 @@ impl Task {
 
     /// Cuts the conversation back to just before message `index`, one of
     /// [`user_turns`](Self::user_turns), to send it again or a changed one
-    /// in its place. Everything from it on goes: the later messages, the
-    /// calls and results waiting with the task, context taken and not yet
-    /// added, a refusal or handover under way. The task's usage stays, and
+    /// in its place. Everything from it on goes, which is the later
+    /// messages, the calls and results waiting with the task, context taken
+    /// and not yet added, and a refusal or handover under way. The task's usage stays, and
     /// its context size is unknown until its next request. The task is then
     /// `Completed` (with the last reply kept as its summary), so a follow-up
     /// continues it
@@ -145,15 +154,17 @@ impl Task {
     /// the conversation's length. The original stays as it is. A Claude Code
     /// task's copy forks the session when it first runs
     /// ([`claude_code_fork_of`](Self::claude_code_fork_of)), so both
-    /// conversations go on apart.
+    /// conversations go on apart. A whole copy of a task stopped while its
+    /// last turn's calls ran answers each of them, so the copy's next
+    /// request pairs every call with a result, as providers require.
     ///
     /// At its first message (`0`), the copy has no conversation but keeps
     /// the rest, such as its [`handovers`](Self::handovers), whose latest
     /// report a host may start the branch's conversation from. It is
     /// `Completed` with an empty summary, for the host to import, and the
     /// host continues it cut back to its first message
-    /// (`ContinueOptions::cut_back_to(0)` in `arko_workflows`): it starts
-    /// over from the host's message as a new task does.
+    /// (`ContinueOptions::cut_back_to(0)` in `arko_workflows`), which
+    /// starts it over from the host's message as a new task starts.
     pub fn branch(&self, index: usize) -> Result<Task, ArkoAgentsError> {
         let mut branch = self.clone();
         branch.id = Uuid::new_v4();
@@ -165,7 +176,10 @@ impl Task {
         branch.plan_usage_threshold_reported = None;
         branch.monitor_pause = false;
         if index == self.conversation.messages.len() {
-            branch.cut_at(index)?;
+            // A task stopped while its last turn's calls ran: each call gets
+            // a result, as providers require of the next request.
+            branch.answer_open_calls();
+            branch.cut_at(branch.conversation.messages.len())?;
         } else {
             branch.cut_back(index)?;
         }
@@ -185,6 +199,50 @@ impl Task {
             branch.claude_code_session = Some(Uuid::new_v4().to_string());
         }
         Ok(branch)
+    }
+
+    /// Answers the native calls of the conversation's last turn that have
+    /// no result yet. A result the task holds for one goes in. A call that
+    /// was running reads as one a restarted task settles
+    /// ([`RESTARTED_CALL`]), and one that never ran as not run
+    /// ([`UNREACHED_CALL`]). A Claude Code task's session keeps its own
+    /// record of the turn.
+    fn answer_open_calls(&mut self) {
+        if self.agent_config.tool_config.tool_calling_mode != ToolCallingMode::Native
+            || self.agent_config.runs_in_claude_code()
+        {
+            return;
+        }
+        let Some(turn) =
+            self.conversation.messages.last().filter(|message| {
+                message.role == Role::Assistant && !message.tool_calls.is_empty()
+            })
+        else {
+            return;
+        };
+        let mut results = Vec::new();
+        for call in &turn.tool_calls {
+            let Some(id) = &call.id else {
+                continue;
+            };
+            let held = self
+                .pending_native_tool_results
+                .iter()
+                .find(|result| result.call_id.as_ref() == Some(id));
+            let running = self
+                .running_tool_calls
+                .iter()
+                .any(|running| running.call_id.as_ref() == Some(id));
+            results.push(match held {
+                Some(result) => result.clone(),
+                None if running => arko_ai::ToolResult::error_from_tool_call(call, RESTARTED_CALL),
+                None => arko_ai::ToolResult::error_from_tool_call(call, UNREACHED_CALL),
+            });
+        }
+        if !results.is_empty() {
+            self.pending_native_tool_results = results;
+            self.add_pending_tool_results(None);
+        }
     }
 
     fn cut_at(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
@@ -467,6 +525,57 @@ mod tests {
         let error = unknown.cut_back(5).unwrap_err().to_string();
         assert!(error.contains("transcript entry"), "{error}");
         assert_eq!(unknown.conversation.messages.len(), 8);
+    }
+
+    /// A whole branch of a task stopped while its last turn's calls ran
+    /// answers each of them: with the result the task holds, as a call a
+    /// restarted task settles, or as one that never ran.
+    #[test]
+    fn a_branch_answers_the_calls_its_last_turn_left_open() {
+        let mut task = task();
+        task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+        let call = |id: &str| -> ToolCall {
+            serde_json::from_value(serde_json::json!({"id": id, "name": "lookup", "arguments": {}}))
+                .unwrap()
+        };
+        task.conversation.add_user_message("Look it up.");
+        let mut turn = Message::new_assistant("Looking.");
+        turn.tool_calls = vec![call("held"), call("running"), call("unreached")];
+        task.conversation.messages.push(turn);
+        task.pending_native_tool_results
+            .push(ToolResult::from_tool_call(&call("held"), "found it"));
+        task.running_tool_calls.push(crate::task::RunningToolCall {
+            tool_call_id: Uuid::new_v4(),
+            call_id: Some("running".into()),
+            tool_name: "lookup".into(),
+            parameters: Default::default(),
+            custom_output: None,
+            message_to_agent: None,
+            built_in: false,
+            output: None,
+            output_images: Vec::new(),
+        });
+        task.set_state(TaskState::InProgress);
+        let branch = task.branch(2).unwrap();
+        assert_eq!(branch.conversation.messages.len(), 3);
+        let results: Vec<(String, String)> = branch.conversation.messages[2]
+            .content
+            .iter()
+            .filter_map(Content::as_tool_result)
+            .map(|result| (result.call_id.clone().unwrap(), result.output.clone()))
+            .collect();
+        assert_eq!(
+            results,
+            [
+                ("held".to_string(), "found it".to_string()),
+                ("running".to_string(), RESTARTED_CALL.to_string()),
+                ("unreached".to_string(), UNREACHED_CALL.to_string()),
+            ]
+        );
+        assert!(branch.pending_native_tool_results.is_empty());
+        assert!(branch.running_tool_calls.is_empty());
+        // The original is as it was.
+        assert_eq!(task.conversation.messages.len(), 2);
     }
 
     /// A branch is a new task with the conversation up to the message, no
