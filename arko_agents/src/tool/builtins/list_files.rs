@@ -26,7 +26,7 @@ impl Default for ListFilesTool {
 
 #[async_trait]
 impl Tool for ListFilesTool {
-    /// Listing has no side effects: a call running when its task stopped
+    /// Listing has no side effects. A call running when its task stopped
     /// lists again.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         crate::tool::ToolRecovery::Rerun

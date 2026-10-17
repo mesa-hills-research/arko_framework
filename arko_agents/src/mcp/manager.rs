@@ -286,7 +286,7 @@ impl McpManager {
         self.tools.iter().map(|t| t.definition().name).collect()
     }
 
-    /// Gracefully shuts down every MCP server connection: each server gets
+    /// Gracefully shuts down every MCP server connection. Each server gets
     /// three seconds to exit once its connection closes, and is then
     /// killed. Dropping the manager instead kills the servers at once.
     pub async fn shutdown(mut self) {

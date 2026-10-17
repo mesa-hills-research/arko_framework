@@ -15,7 +15,7 @@ pub const START_LINE_PARAM_NAME: &str = "start_line";
 pub const END_LINE_PARAM_NAME: &str = "end_line";
 
 /// The sentence `read_file`'s description gains when the agent is also
-/// offered a terminal: large files are better read in parts with it.
+/// offered a terminal, so large files can be read in parts with it.
 pub const TERMINAL_HINT: &str = "For a large or generated file (data, logs, minified code), look at the parts you need with the terminal instead: `wc -l`, `grep -n`, `head`, `sed -n '100,200p'`.";
 
 /// The sentence `read_file`'s description gains with line ranges on.
@@ -46,7 +46,7 @@ impl Default for ReadFileTool {
 /// [`LINE_RANGES_HINT`]. Any other definition is returned unchanged.
 ///
 /// Only the description and schema change, and they follow from the
-/// configuration: the same configuration shows the same definition. Tool
+/// configuration, so the same configuration shows the same definition. Tool
 /// definitions are not part of the configuration a workflow compares when
 /// it resumes, so a saved run resumes as before. (In output-based mode the
 /// definitions are written into the system prompt when a task starts, so a
@@ -132,7 +132,7 @@ fn line_number(params: &HashMap<String, Value>, name: &str) -> Result<Option<usi
 
 #[async_trait]
 impl Tool for ReadFileTool {
-    /// Reading has no side effects: a call running when its task stopped
+    /// Reading has no side effects. A call running when its task stopped
     /// reads again.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         crate::tool::ToolRecovery::Rerun
@@ -160,7 +160,7 @@ impl Tool for ReadFileTool {
         }
     }
 
-    /// The file's text: see [`execute_with_output`](Self::execute_with_output).
+    /// The file's text. See [`execute_with_output`](Self::execute_with_output).
     async fn execute(
         &self,
         context: &TaskContext<'_>,

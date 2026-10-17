@@ -11,14 +11,14 @@ pub enum ToolParameterType {
     #[serde(rename = "bool")]
     Bool,
     /// A whole number (`"integer"` in the JSON schema). A tool should also
-    /// take its value as text, as [`integer_argument`] reads it:
+    /// take its value as text, as [`integer_argument`] reads it, because
     /// output-based calls carry text, and conversations saved before a
     /// parameter had this type hold text.
     #[serde(rename = "integer")]
     Integer,
 }
 
-/// A whole-number argument: a JSON integer (or a float with no fraction),
+/// Reads a whole-number argument from a JSON integer (or a float with no fraction),
 /// or text holding one, surrounding whitespace ignored. `None` for anything
 /// else, such as `"ten"` or `1.5`.
 pub fn integer_argument(value: &Value) -> Option<i64> {
@@ -58,7 +58,7 @@ pub struct ToolParameterDefinition {
     pub param_type: ToolParameterType,
     pub required: bool,
     /// The value is a path the runtime checks against the workspace before
-    /// the call runs, as [`crate::utils::resolve_path`] resolves it: taken
+    /// the call runs, as [`crate::utils::resolve_path`] resolves it. It is taken
     /// literally, without `~` or `$VAR` expansion. A tool with such a
     /// parameter should open the path that function returns, so the check
     /// judges the path the tool opens.
@@ -85,7 +85,7 @@ pub struct ToolDefinition {
     /// them. An agent's configuration can override it per tool. See
     /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig). The former
     /// `supports_batched_calls` of saved definitions (which let calls share a
-    /// response, run one after another) is ignored: they load as not
+    /// response, run one after another) is ignored. They load as not
     /// parallel-safe.
     #[serde(default)]
     pub parallel_safe: bool,
@@ -122,7 +122,7 @@ impl ToolDefinition {
     }
 
     /// Gives text arguments their declared types. Output-based tool calls
-    /// carry every value as a string: a `bool` parameter's `"true"` or
+    /// carry every value as a string. A `bool` parameter's `"true"` or
     /// `"false"` (in any case, surrounding whitespace ignored) becomes a
     /// JSON boolean, and an `integer` parameter's whole number (`" 12"`) a
     /// JSON number. Other values are left as they are.

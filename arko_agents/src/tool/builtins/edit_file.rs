@@ -1,13 +1,13 @@
-//! `edit_file`: replaces one exact piece of text in a file, or every
+//! `edit_file` replaces one exact piece of text in a file, or every
 //! occurrence of it.
 //!
-//! The match is exact, on the file's whole content: no fuzzy matching and
+//! The match is exact, on the file's whole content, with no fuzzy matching and
 //! no whitespace tolerance. The one adjustment is for a file with CRLF line
 //! breaks, where the `\n` line breaks of `old_string` and `new_string` are
 //! written as `\r\n` before matching, since `read_file` shows the file's
 //! lines without them. Everything outside the match is kept byte for byte,
 //! a byte-order mark and the last line break included. A call applies in
-//! full or not at all: it reads the file, checks the match and writes the
+//! full or not at all. It reads the file, checks the match and writes the
 //! file once, and any error leaves the file as it was.
 
 use crate::tool::{

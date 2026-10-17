@@ -52,24 +52,24 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     ret
 }
 
-/// Resolves a tool's path parameter against a task's working directory: the
-/// path the built-in file tools (`read_file`, `write_file`, `edit_file`,
+/// Resolves a tool's path parameter against a task's working directory.
+/// Returns the path the built-in file tools (`read_file`, `write_file`, `edit_file`,
 /// `apply_diff`, `list_files`) open, and the path [`is_path_in_workspace`] checks.
 ///
 /// - Surrounding whitespace is trimmed.
-/// - The path is taken literally: `~` and `$VAR` are not expanded (`~/notes`
+/// - The path is taken literally, so `~` and `$VAR` are not expanded (`~/notes`
 ///   names a directory called `~` in the working directory).
 /// - A relative path is joined to the working directory, and the result is
 ///   made absolute with [`std::path::absolute`] against the process's
 ///   current directory, so a relative working directory (such as
 ///   `./project`) works.
-/// - On Windows, that is the resolution Win32 applies when a file is opened:
+/// - On Windows, that is the resolution Win32 applies when a file is opened.
 ///   `\` and `/` both separate components, `.` and `..` are resolved, a
 ///   drive-relative path (`C:dir`) uses that drive's current directory, and
 ///   trailing dots and spaces are dropped. A verbatim path (`\\?\C:\...`) is
 ///   kept as written. On Unix, `\` is an ordinary character.
 /// - `.` and `..` are then resolved lexically with [`normalize_path`].
-///   Symbolic links are not followed: on macOS, `/var` is a link to
+///   Symbolic links are not followed. On macOS, `/var` is a link to
 ///   `/private/var`, so a path written through one of them is not inside a
 ///   working directory written through the other.
 ///
@@ -116,7 +116,7 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 
 /// Whether `path` resolves (with [`resolve_path`]) inside `workspace`, the
 /// task's working directory, compared component by component. The check is
-/// lexical, like the resolution: a symbolic link inside the workspace that
+/// lexical, like the resolution, so a symbolic link inside the workspace that
 /// points outside it is not detected.
 ///
 /// On Windows, whose file systems usually ignore case, components are
@@ -125,7 +125,7 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 /// `\\?\UNC\server\share` and `\\server\share`). A directory with case
 /// sensitivity turned on is still compared without regard to case. On other
 /// platforms the comparison is exact, also on macOS file systems that
-/// ignore case: a path spelled in another case is judged outside.
+/// ignore case, so a path spelled in another case is judged outside.
 pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
     let root = normalize_path(&absolute(workspace)?);
     let resolved = resolve_path(path, workspace)?;
@@ -166,8 +166,8 @@ fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
 /// Generates a file tree string for the given root path.
 ///
 /// # Arguments
-/// * `root_path`: The root directory to generate the tree for.
-/// * `max_depth`: Optional maximum depth to traverse.
+/// * `root_path` is the root directory to generate the tree for.
+/// * `max_depth` sets the optional maximum depth to traverse.
 ///
 /// # Returns
 /// A string representation of the file tree.
@@ -180,7 +180,7 @@ pub fn get_file_tree(
 }
 
 /// Replaces the file at `path` with `bytes` in one step, creating its parent
-/// directory: the bytes go to a new temporary file in the same directory,
+/// directory. The bytes go to a new temporary file in the same directory,
 /// are flushed to disk through that file's own write handle, and the file is
 /// then renamed over `path`. A crash or a full disk during the save leaves
 /// the previous file whole. (Windows can flush only a handle opened for

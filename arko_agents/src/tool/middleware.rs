@@ -38,13 +38,13 @@ pub enum ToolExecutionDecision {
         reason: String,
     },
     /// Reject the call and stop the task as
-    /// [`Cancelled`](crate::task::TaskState::Cancelled): the caller is
+    /// [`Cancelled`](crate::task::TaskState::Cancelled). The caller is
     /// shutting the task down, for example because the run it belongs to was
     /// cancelled.
     CancelTask {
         reason: String,
     },
-    /// Don't run the call, and pause the task for its host's decision: the
+    /// Don't run the call, and pause the task for its host's decision. The
     /// call is answered with `message_to_agent` (and reported rejected), and
     /// once the other calls of its batch have run the task awaits
     /// error-recovery approval
@@ -54,7 +54,7 @@ pub enum ToolExecutionDecision {
     /// and `reason` as its error. `ContinueAfterError` goes on (the agent
     /// reads its note next), `RejectErrorRecovery` fails the task. For a
     /// decision the middleware can't make, such as a completion check that
-    /// could not be carried out: the call is neither run nor refused.
+    /// could not be carried out. The call is neither run nor refused.
     PauseTask {
         message_to_agent: String,
         reason: String,

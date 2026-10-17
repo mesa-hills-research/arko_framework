@@ -46,7 +46,7 @@ impl Debug for ToolImage {
     }
 }
 
-/// The largest image file `read_file` shows: 5 MiB. (The images a tool
+/// The largest image file `read_file` shows, equal to 5 MiB. (The images a tool
 /// returns are fitted to the model's limits when the runtime admits them,
 /// [`ToolOutput::admit_images`].)
 pub const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -63,7 +63,7 @@ impl ToolImage {
         }
     }
 
-    /// Its size in bytes once decoded: `None` for an image given by URL.
+    /// Its size in bytes once decoded, or `None` for an image given by URL.
     pub fn decoded_len(&self) -> Option<usize> {
         match &self.image {
             arko_ai::Image::Base64 { data, .. } => {
@@ -86,11 +86,11 @@ impl ToolImage {
 /// (`read_file`, MCP tools, a host's own), and for a Claude Code agent
 /// also Claude Code's built-in tools that return images (`Read`). A call
 /// whose result is recovered after its task stopped is not reported again.
-/// It runs on the call's task: keep it quick (hand the images to another
+/// It runs on the call's task, so keep it quick (hand the images to another
 /// thread to scale or store them).
 ///
-/// Events carry no image bytes: every subscriber of a workflow's event
-/// broadcast, and its event log, would get a copy.
+/// Events carry no image bytes because every subscriber of a workflow's
+/// event broadcast, and its event log, would get a copy.
 pub trait ToolImageSink: Send + Sync {
     fn tool_images(
         &self,
@@ -117,7 +117,7 @@ impl ToolOutput {
     }
 
     /// Fits the images to what `model` can be sent
-    /// ([`arko_ai::Model::sendable_image`]): one over the model's limits is
+    /// ([`arko_ai::Model::sendable_image`]). One over the model's limits is
     /// shrunk, and one the model can't be sent (every image for a model
     /// without image input, a URL where images go as data, GIF on Google,
     /// one that can't be read or shrunk enough) is left out, with a line
@@ -128,7 +128,7 @@ impl ToolOutput {
 
     /// [`admit_images`](Self::admit_images), admitting only the images
     /// `room` has room for (each one admitted takes its place and its bytes
-    /// from it): a request holds at most
+    /// from it). A request holds at most
     /// [`ImageLimits::max_images`](arko_ai::image_fit::ImageLimits::max_images)
     /// images and
     /// [`max_request_image_bytes`](arko_ai::image_fit::ImageLimits::max_request_image_bytes)
@@ -182,7 +182,7 @@ impl ToolOutput {
     }
 }
 
-/// What a conversation still takes of images in a request: how many more,
+/// How many more images a conversation can take in a request,
 /// and how many more bytes of base64 data (see
 /// [`ToolOutput::admit_images_within`]). Shared by the calls of a turn, so
 /// their images together stay within it.
@@ -267,7 +267,7 @@ impl ImageRoom {
 /// test) uses [`TaskContext::new`], which leaves the call fields unset and
 /// the [stop signal](Self::stop) one that never fires. The fields stay
 /// public to set afterwards. The struct is `#[non_exhaustive]`, so fields
-/// can be added without breaking callers: outside this crate it can't be
+/// can be added without breaking callers. Outside this crate it can't be
 /// built with a struct literal.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -282,12 +282,12 @@ pub struct TaskContext<'a> {
     /// stopped keeps its id. See [`Tool::recovery_mode`].
     pub tool_call_id: Option<uuid::Uuid>,
     /// The call is being run again because the task stopped while it ran
-    /// (its host crashed, say): its tool declared
+    /// (its host crashed, say). Its tool declared
     /// [`ToolRecovery::Rerun`] or [`ToolRecovery::Resume`]. A
     /// [`Resume`](ToolRecovery::Resume) tool finds the work the first run
     /// started, by [`tool_call_id`](Self::tool_call_id), and continues it.
     pub recovering: bool,
-    /// Fires when the task is being stopped while the call runs: the
+    /// Fires when the task is being stopped while the call runs because the
     /// runtime received `CancelTask` or `SuspendTask`, or the host fired the
     /// signal it gave the runtime (a workflow's graceful stop). A long call
     /// can watch it to save its work and return early. See
@@ -300,7 +300,7 @@ pub struct TaskContext<'a> {
 }
 
 impl<'a> TaskContext<'a> {
-    /// The context of a task outside a call: no call ID, not recovering, and
+    /// The context of a task outside a call, with no call ID, not recovering, and
     /// a stop signal that never fires. Set the public fields to change
     /// them, or [`with_stop`](Self::with_stop).
     pub fn new(
@@ -334,19 +334,19 @@ impl<'a> TaskContext<'a> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRecovery {
-    /// The call is not run again: its result tells the model the task
+    /// The call is not run again. Its result tells the model the task
     /// restarted while the call ran, that it may have run partly or fully,
     /// and to check its effects before calling it again. For a tool with
     /// effects outside the task (writing files, running commands).
     #[default]
     InDoubt,
-    /// The call runs again, as it was made: for a tool without side
-    /// effects, which returns the same result (reading a file, listing a
+    /// The call runs again with its original arguments. For a tool without
+    /// side effects, which returns a fresh result (reading a file, listing a
     /// directory, loading a skill).
     Rerun,
     /// The call runs again with
     /// [`TaskContext::recovering`] set and its original
-    /// [`TaskContext::tool_call_id`]: the tool reattaches to the work its
+    /// [`TaskContext::tool_call_id`]. The tool reattaches to the work its
     /// first run started (a workflow's `run_workflow_agent` recovers the
     /// agent run it started) and returns its result, or else runs the call.
     Resume,
@@ -374,8 +374,8 @@ pub trait Tool: Debug + Send + Sync {
     }
 
     /// Whether `CancelTask` and `SuspendTask` stop a running call of this
-    /// tool: the runtime drops the call (killing a command it started), and
-    /// its result says it was stopped. Tools that wind their own work down
+    /// tool. When true, the runtime drops the call (killing a command it
+    /// started), and its result says it was stopped. Tools that wind their own work down
     /// when the task stops return `false`, as a workflow's
     /// `run_workflow_agent` does (it stops the agent it runs within the
     /// workflow's grace period). The stop then takes effect once the call
@@ -386,7 +386,7 @@ pub trait Tool: Debug + Send + Sync {
 
     /// How a call of this tool that was running when its task stopped (its
     /// host crashed while the call ran) is settled when the task runs
-    /// again: by default [`ToolRecovery::InDoubt`], answered without
+    /// again. Defaults to [`ToolRecovery::InDoubt`], answered without
     /// running it again. Read-only tools return [`ToolRecovery::Rerun`].
     fn recovery_mode(&self) -> ToolRecovery {
         ToolRecovery::InDoubt
@@ -411,8 +411,8 @@ pub trait Tool: Debug + Send + Sync {
     /// Executes the tool with the given parameters and task context.
     ///
     /// # Arguments
-    /// * `context`: Contextual information about the current task, like CWD.
-    /// * `params`: A map of parameter names to their `serde_json::Value` representations.
+    /// * `context` gives information about the current task, like CWD.
+    /// * `params` maps parameter names to their `serde_json::Value` representations.
     ///
     /// # Returns
     /// A `Result` containing a `String` output of the tool on success, or a `ToolError` on failure.
