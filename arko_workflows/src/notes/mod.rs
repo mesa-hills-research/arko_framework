@@ -123,10 +123,12 @@ pub struct Note {
     /// Images that go with the note, after the text of the context update
     /// that gives it, each after a label naming the note. Only a one-time
     /// note ([`NoteKind::Once`]) may carry images, and only to agents whose
-    /// models take them ([`arko_ai::Model::image_refusal`]); with images, the
-    /// text may be empty. A Claude Code agent gets them with its next input,
-    /// not during a turn. Once the note is posted, the workflow keeps them
-    /// apart from the notes: [`PostedNote::images`] names them.
+    /// models can be sent them ([`arko_ai::Model::sendable_image`], which
+    /// shrinks one over a model's limits when it is given). With images,
+    /// the text may be empty. During a turn, a Claude Code agent gets the
+    /// note's text at once and its images with its next input. Once the
+    /// note is posted, the workflow keeps them apart from the notes:
+    /// [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
 }

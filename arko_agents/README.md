@@ -864,10 +864,10 @@ Besides answers to the waiting states, a running task accepts:
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
   read. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
-  `Task::pending_context_images` when it can't go yet. A Claude Code agent gets them with
-  its next input: an update with images that arrives during a turn can't go in a hook's
-  text, so it waits for the turn's end, and so does context taken after it, which keeps
-  the order.
+  `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
+  gets an update's text at once, in a hook (a hook's context is text), with a line saying
+  its images come with the next input, and the images go with that input, at the turn's
+  end, after `The images an earlier update said would follow.`
 - `HostDeciding`: while the task awaits a command, the host is deciding that wait itself
   (an approval handler, or a wait before it continues after a usage limit), so
   `user_command_timeout_seconds` doesn't end it; the next wait is timed again. Ignored

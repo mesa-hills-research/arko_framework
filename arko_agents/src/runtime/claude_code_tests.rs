@@ -1163,11 +1163,12 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
     }
 }
 
-/// Context with images that arrives during a turn can't go with a hook's
-/// text: it waits for the turn's end and goes with the next input, the
-/// image after its label.
+/// Context with images that arrives during a turn can't go whole with a
+/// hook's text: its text goes at once, saying the image follows, and the
+/// image waits for the turn's end and goes with the next input, after its
+/// label.
 #[tokio::test]
-async fn context_with_images_waits_for_the_next_input() {
+async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     let fake = Fake::new(json!([
         [{"tool": "Grep", "input": {"pattern": "todo"}}, {"text": "Looked."}],
         [complete("Seen")],
@@ -1186,10 +1187,12 @@ async fn context_with_images_waits_for_the_next_input() {
     let (task, events) = start_with(task, runtime).finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let posts = fake.logged("post");
+    let hooked = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", posts[0]));
     assert!(
-        posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null(),
-        "{}",
-        posts[0]
+        hooked.contains("# Workflow context update\n\nA new note: look at this.\n\n(The image of this update can't come during a turn: it comes with your next input.)"),
+        "{hooked}"
     );
     let sent: Value = serde_json::from_str(&user_texts(&fake)[1]).unwrap();
     let blocks = sent
@@ -1197,9 +1200,12 @@ async fn context_with_images_waits_for_the_next_input() {
         .expect("an input with an image is sent as blocks");
     let text = blocks[0]["text"].as_str().unwrap();
     assert!(
-        text.contains("# Workflow context update\n\nA new note: look at this."),
+        text.contains(
+            "# Workflow context update\n\nThe images an earlier update said would follow."
+        ),
         "{text}"
     );
+    assert!(!text.contains("look at this"), "{text}");
     assert_eq!(
         &blocks[1..],
         [
@@ -1208,10 +1214,15 @@ async fn context_with_images_waits_for_the_next_input() {
         ]
     );
     assert!(task.pending_context_images.is_empty());
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ContextInjected { ids, .. } if ids == &["note:3"]
-    )));
+    // The note counts as given with its text.
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected[0], ["note:3"]);
 }
 
 /// Context sent before the session starts goes with its first input.

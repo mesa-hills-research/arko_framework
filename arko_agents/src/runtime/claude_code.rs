@@ -1460,17 +1460,18 @@ impl ClaudeCodeRun {
     }
 
     /// The context waiting for the model (taken from the channel, and the
-    /// turn context source's), as one context update, with its images;
+    /// turn context source's), as one context update, with its images.
     /// `None` while a handover report is due, when it waits for the fresh
     /// conversation, and during a compaction, when it waits for the agent's
     /// next input. Where images can't go (`with_images` false: a hook's
-    /// context is text), context with images waits for the next input, and
-    /// the context taken after it waits with it, so it keeps its order.
+    /// context is text), the text goes now, saying that the update's images
+    /// come with the next input, and only the images wait.
     fn take_context(&mut self, with_images: bool) -> Option<(String, Vec<ContextImage>)> {
         if self.handover_due() || self.compaction.is_some() {
             return None;
         }
         let mut update_ids = Vec::new();
+        let mut arrived = 0;
         if let Some(update) = self
             .turn_context
             .as_ref()
@@ -1479,6 +1480,7 @@ impl ClaudeCodeRun {
             if !update.content.trim().is_empty() || !update.images.is_empty() {
                 update_ids = update.ids;
             }
+            arrived = update.images.len();
             self.queue_context(update.content);
             self.task.pending_context_images.extend(update.images);
         }
@@ -1487,11 +1489,13 @@ impl ClaudeCodeRun {
         {
             return None;
         }
-        if !with_images && !self.task.pending_context_images.is_empty() {
+        let hold_images = !with_images && !self.task.pending_context_images.is_empty();
+        if hold_images && self.task.pending_context_injections.is_empty() {
+            // Only images wait, said already: nothing goes until they can.
             self.held_context_ids.append(&mut update_ids);
             return None;
         }
-        let content = self.task.pending_context_injections.join("\n\n");
+        let mut content = self.task.pending_context_injections.join("\n\n");
         let mut ids = self
             .turn_context
             .as_ref()
@@ -1505,12 +1509,25 @@ impl ClaudeCodeRun {
             .unwrap_or_default();
         ids.append(&mut self.held_context_ids);
         ids.append(&mut update_ids);
+        self.task.pending_context_injections.clear();
+        let images = if hold_images {
+            if arrived > 0 {
+                content.push_str(&match arrived {
+                    1 => "\n\n(The image of this update can't come during a turn: it comes with your next input.)".to_string(),
+                    count => format!("\n\n(The {count} images of this update can't come during a turn: they come with your next input.)"),
+                });
+            }
+            Vec::new()
+        } else {
+            if content.is_empty() {
+                content = "The images an earlier update said would follow.".to_string();
+            }
+            std::mem::take(&mut self.task.pending_context_images)
+        };
         self.context_receipts.push(AgentEvent::ContextInjected {
             ids,
             bytes: content.len(),
         });
-        self.task.pending_context_injections.clear();
-        let images = std::mem::take(&mut self.task.pending_context_images);
         Some((format!("# Workflow context update\n\n{content}"), images))
     }
 
@@ -2641,7 +2658,7 @@ impl ClaudeCodeRun {
         if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
             texts.push(message);
         }
-        // A hook's context is text: images wait for the next input.
+        // A hook's context is text: its images wait for the next input.
         if let Some((context, _)) = self.take_context(false) {
             texts.push(context);
         }
