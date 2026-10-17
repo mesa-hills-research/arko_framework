@@ -1,6 +1,6 @@
 # DeepCoder example
 
-A sequential coding workflow built from `arko_workflows` primitives: an orchestrator
+A sequential coding workflow built from `arko_workflows` primitives. An orchestrator
 splits a specification into small coder tasks, every coder completion is checked
 by verifier agents, and a final verifier gates the end of the run.
 
@@ -15,7 +15,7 @@ orchestrator
   -> complete
 ```
 
-The orchestrator runs slices one at a time: each accepted slice becomes the
+The orchestrator runs slices one at a time. Each accepted slice becomes the
 verified base for the next, and small slices keep individual agent tasks
 manageable. The example uses no graph or parallel scheduler.
 
@@ -23,10 +23,10 @@ Each verification gate starts with a fresh, comprehensive review. When a gate
 requests a repair, the same verifier conversation continues with its previous
 verdict and a bounded summary of the tracked file and memory changes, so it can
 reuse unchanged evidence and run focused checks. The final gate runs
-automatically: workflow-service target restrictions allow the orchestrator to call
-only the coder and the researcher, never a verifier. Verifiers may batch
-read-only tool calls; a batch that contains a tool not marked batch-safe is
-rejected without running any of its calls.
+automatically, because workflow-service target restrictions allow the orchestrator to
+call only the coder and the researcher, never a verifier. Verifiers may make several
+read-only calls in one response, which run together. `run_shell` isn't parallel-safe, so
+it runs only after the calls before it have finished.
 
 ## Run
 
@@ -41,7 +41,7 @@ The example uses OpenAI models only. Credentials are tried in this order:
    ```
 
 2. A Codex login at `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, shared with
-   Codex: every token refresh reads the file again first, adopting tokens Codex
+   Codex. Every token refresh reads the file again first, adopting tokens Codex
    refreshed in the meantime, and rotated tokens are saved to it at once (see
    [ChatGPT OAuth credentials](../../../docs/arko_ai-guide.md#chatgpt-oauth-credentials)).
 3. An OpenAI API key:
@@ -66,7 +66,7 @@ cargo run -p arko_workflows --example deepcoder -- \
 | `--max-final-corrections` | `4` | Minor repairs the final verifier may request. |
 | `--shell-timeout-seconds` | `1800` | Default and maximum `run_shell` timeout. |
 | `--shell-output-bytes` | `65536` | Maximum `run_shell` output returned to an agent. |
-| `--state-dir PATH` | new directory | Run directory for checkpoints and logs; must be outside the workspace. |
+| `--state-dir PATH` | new directory | Run directory for checkpoints and logs. Must be outside the workspace. |
 | `--resume PATH` | none | Resume from a checkpoint file or a run directory. |
 | `--ephemeral` | off | Disable checkpoints and run artifacts. Cannot be combined with `--resume`. |
 | `--dangerously-allow-all-commands` | off | Turn off the `run_shell` command guard, so every command runs as written. |
@@ -101,8 +101,8 @@ receive it. It removes common token, key, and secret variables from the child
 environment. It refuses commands that would delete, move, overwrite or reformat a
 protected path (the filesystem root, the home directory or its parents, system
 directories, devices) or a path outside the workspace, using the
-[terminal command guard](../../../docs/interactive-terminals.md#command-guard);
-`--dangerously-allow-all-commands` turns that off. It is not a sandbox for untrusted code: role prompts tell verifiers
+[terminal command guard](../../../docs/interactive-terminals.md#command-guard).
+`--dangerously-allow-all-commands` turns that off. It isn't a sandbox for untrusted code. Role prompts tell verifiers
 to stay read-only and coders to avoid deployment or publication, but shell
 commands can reach anything the host process can.
 
