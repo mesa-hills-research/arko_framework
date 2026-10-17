@@ -92,6 +92,8 @@ pub struct SharedContext {
     /// The agents offered `cast_vote` (see `WorkflowBuilder::enable_voting`).
     pub voters: std::collections::HashSet<String>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
+    /// The lossless subscribers of the events.
+    pub(crate) event_hub: crate::workflow::event_stream::EventHub,
 }
 
 /// How `run_agents_parallel` runs its agents.

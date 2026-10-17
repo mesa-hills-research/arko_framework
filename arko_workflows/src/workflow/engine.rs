@@ -305,13 +305,16 @@ async fn publish_event(
     ctx: &SharedContext,
     persistence: Option<&Arc<PersistenceManager>>,
 ) {
-    let _ = ctx.event_tx.send(crate::workflow::result::WorkflowEvent {
+    let event = crate::workflow::result::WorkflowEvent {
         timestamp: chrono::Utc::now(),
         workflow_run_id: ctx.workflow_run_id,
         agent_name: agent_name.to_string(),
         agent_run_id,
         event: event.clone(),
-    });
+    };
+    ctx.event_hub.publish(&event);
+    let _ = ctx.event_tx.send(event.clone());
+    let event = &event.event;
     if let Some(persistence) = persistence {
         // Never fails: a failed write is logged and retried.
         persistence

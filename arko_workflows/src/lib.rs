@@ -58,6 +58,7 @@ pub mod python;
 pub use error::WorkflowError;
 pub use workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
 pub use workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
+pub use workflow::event_stream::EventReceiver;
 pub use workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
 pub use workflow::stop::{
     Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp, stop_on_signals,
@@ -109,6 +110,7 @@ pub mod prelude {
     pub use crate::voting::{BallotConfig, BallotResult, CastVote, TieBreak, VoteOption};
     pub use crate::workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
     pub use crate::workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
+    pub use crate::workflow::event_stream::EventReceiver;
     pub use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
     pub use crate::workflow::stop::{
         Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp,

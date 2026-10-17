@@ -1,6 +1,7 @@
 pub mod cancel;
 pub mod config;
 pub mod engine;
+pub mod event_stream;
 pub(crate) mod options;
 pub mod result;
 pub mod stop;
@@ -1139,8 +1140,22 @@ impl Workflow {
         self.engine.checkpoint(&self.context).await
     }
 
+    /// Every agent event of the workflow from now on, through a broadcast
+    /// channel of 8,192 events: a receiver that lags behind it misses the
+    /// oldest ones (`RecvError::Lagged`). A host that shows streamed text,
+    /// or needs every lifecycle event, uses
+    /// [`subscribe_events_lossless`](Self::subscribe_events_lossless).
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent> {
         self.context.event_tx.subscribe()
+    }
+
+    /// Every agent event of the workflow from now on, in order, none lost
+    /// however far the receiver lags: while it lags, the streamed chunks of
+    /// one run's text (or reasoning) wait joined into one event, so the text
+    /// arrives whole in fewer pieces and the queue holds little more than
+    /// the lifecycle events. See [`event_stream::EventReceiver`].
+    pub fn subscribe_events_lossless(&self) -> event_stream::EventReceiver {
+        self.context.event_hub.subscribe()
     }
 
     /// Posts a note to the agents: guidance that refines their task while
@@ -2678,7 +2693,7 @@ impl WorkflowBuilder {
             hook_registry.register(point, callback);
         }
 
-        let (event_tx, _) = tokio::sync::broadcast::channel(1_024);
+        let (event_tx, _) = tokio::sync::broadcast::channel(8_192);
         let context = Arc::new(SharedContext {
             workflow_run_id,
             workflow_name: name.clone(),
@@ -2757,6 +2772,7 @@ impl WorkflowBuilder {
                 .then(|| Arc::new(BallotStore::default())),
             voters: self.voters.clone().unwrap_or_default(),
             event_tx,
+            event_hub: Default::default(),
         });
 
         if let Some(services_config) = self.services_config {
@@ -3209,3 +3225,6 @@ mod cut_back_tests;
 #[cfg(test)]
 #[path = "keep_warm_tests.rs"]
 mod keep_warm_tests;
+
+#[cfg(test)]
+mod event_stream_tests;
