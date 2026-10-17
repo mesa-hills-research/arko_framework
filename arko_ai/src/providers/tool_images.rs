@@ -1,5 +1,5 @@
 //! Tool-result images for models that don't take them inside a result
-//! ([`Model::accepts_tool_result_images`] is false): they follow all of the
+//! ([`Model::accepts_tool_result_images`] is false). They follow all of the
 //! turn's results, in the layout the arko_agents runtime has always used for
 //! tool images, so requests for these models are unchanged.
 //!

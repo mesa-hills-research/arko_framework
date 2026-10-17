@@ -77,7 +77,7 @@ const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
 /// session unless its options set it ([`ClaudeOptions::env`]).
 const BASH_WORKING_DIRECTORY: (&str, &str) = ("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
 
-/// The CLI doesn't update itself: an update swaps the installed binary
+/// Disables CLI self-updates. An update swaps the installed binary
 /// while a host's sessions run (a session started during the swap can't
 /// find it), and changes the version the user chose. The user's own
 /// setting for it isn't read when the host leaves the user's settings out
@@ -121,7 +121,7 @@ struct Handlers {
 /// A running Claude Code process holding one conversation.
 ///
 /// The CLI runs in a process group of its own (a job object on Windows)
-/// with the programs it starts, such as a Bash call's commands: closing or
+/// with the programs it starts, such as a Bash call's commands. Closing or
 /// dropping the session stops them all, a command left running in the
 /// background included.
 pub struct ClaudeSession {
@@ -243,7 +243,7 @@ impl ClaudeSession {
         Ok(session)
     }
 
-    /// The CLI's answer to `initialize`: slash commands, models, account.
+    /// The CLI's answer to `initialize`, including slash commands, models and account.
     pub fn initialization(&self) -> &Value {
         &self.initialization
     }
@@ -322,7 +322,7 @@ impl ClaudeSession {
         .map(drop)
     }
 
-    /// Ends the conversation: closes stdin so the CLI finishes and saves its
+    /// Ends the conversation by closing stdin so the CLI finishes and saves its
     /// transcript, and kills it if it has not exited within a grace period.
     /// The programs it started that still run are killed with it.
     /// Interrupt a running turn first, or its prompt may be missing from the
@@ -507,7 +507,7 @@ async fn write_line(stdin: &Mutex<Option<ChildStdin>>, message: &Value) -> std::
 }
 
 /// The log target of the raw stream-json traffic, one line per message
-/// (`->` to the CLI, `<-` from it), at trace level:
+/// (`->` to the CLI, `<-` from it), at trace level. Enable it with
 /// `RUST_LOG=arko_ai::claude_code::wire=trace`.
 pub const WIRE_LOG: &str = "arko_ai::claude_code::wire";
 

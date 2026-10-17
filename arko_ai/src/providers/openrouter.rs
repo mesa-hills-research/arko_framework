@@ -2,9 +2,9 @@
 //! (`POST https://openrouter.ai/api/v1/chat/completions`) with OpenRouter's
 //! routing, caching and reasoning extensions.
 //!
-//! Library-neutral by default: no attribution or metadata headers are sent
-//! (see [`AppAttribution`] to opt in), no model fallbacks, no network call
-//! beyond the requests you make. Models are dynamic slugs
+//! Attribution headers, metadata headers and model fallbacks are off by
+//! default (see [`AppAttribution`] to opt in to attribution). Network calls
+//! are limited to the requests you make. Models are dynamic slugs
 //! ([`Model::openrouter`]). The catalog ([`OpenRouterClient::fetch_models`])
 //! adds limits, prices and request validation.
 //! <https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion>
@@ -90,7 +90,7 @@ impl OpenRouterClient {
     /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
     /// `None` (the default) waits as long as the connection stays open. See
     /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
-    /// before setting one: models can think for a long time without sending
+    /// before setting one. Models can think for a long time without sending
     /// anything, so a value must be generous.
     pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.stream_idle_timeout = timeout;
@@ -112,8 +112,8 @@ impl OpenRouterClient {
     }
 
     /// Sends app attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`,
-    /// ...) with chat requests. Off unless set: a library shouldn't credit
-    /// itself, so binaries opt in with their own app.
+    /// ...) with chat requests. Off unless set, so binaries opt in with their
+    /// own app rather than crediting the library.
     pub fn with_app_attribution(mut self, attribution: AppAttribution) -> Self {
         self.attribution = Some(attribution);
         self

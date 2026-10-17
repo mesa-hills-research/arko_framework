@@ -3,9 +3,9 @@
 //! One `GenerationConfig` can be shared by agents on different providers, or
 //! kept when an agent moves to another model. A setting the provider in use
 //! has no equivalent for is dropped with a warning (logged once per provider
-//! and setting), on every provider: an OpenAI service tier on Claude, an
-//! Anthropic thinking option on Gemini, another provider's
-//! `ReasoningConfig` variant. A setting the provider does take but whose
+//! and setting). This applies to every provider, for example an OpenAI service
+//! tier on Claude, an Anthropic thinking option on Gemini, or another
+//! provider's `ReasoningConfig` variant. A setting the provider does take but whose
 //! value it can't accept (an effort the model lacks, a temperature on an
 //! OpenAI reasoning model) is still an error, raised where the request is
 //! built.

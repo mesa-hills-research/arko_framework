@@ -1,4 +1,4 @@
-//! The opt-in stream idle timeout: the longest a streamed response may go
+//! The opt-in stream idle timeout limits how long a streamed response may go
 //! without receiving any data. Off unless set, since models can reason for a
 //! long time without sending anything. See
 //! [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout).

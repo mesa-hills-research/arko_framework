@@ -21,7 +21,7 @@ pub enum SessionStart {
     /// `fork`, the resumed conversation gets a new session ID and the
     /// original is left unchanged. With `at`, the conversation goes on from
     /// the message with that UUID (CLI 2.1's hidden `--resume-session-at`,
-    /// which the Agent SDK's `resumeSessionAt` passes): the messages after
+    /// which the Agent SDK's `resumeSessionAt` passes). The messages after
     /// it stay in the transcript, but not in the conversation.
     Resume {
         session: String,
@@ -139,7 +139,7 @@ impl HookEvent {
 }
 
 /// A host function Claude Code calls at a hook event. `input` is the hook
-/// input Claude Code documents for the event (for `PreToolUse`:
+/// input Claude Code documents for the event (for `PreToolUse`, this includes
 /// `tool_name`, `tool_input`, `session_id`, `cwd`, …). The returned JSON is
 /// the hook output, for example [`Hook::deny_tool`].
 #[async_trait]
@@ -198,7 +198,7 @@ impl Hook {
 /// control protocol.
 #[derive(Clone, Default)]
 pub struct ClaudeOptions {
-    /// The CLI to run: `claude` on the `PATH` by default. On Windows an npm
+    /// The CLI to run, `claude` on the `PATH` by default. On Windows an npm
     /// launcher script (`claude.cmd`) is followed to the package's
     /// `claude.exe`, or its `cli.js` run with `node`.
     pub cli_path: Option<PathBuf>,
@@ -206,7 +206,7 @@ pub struct ClaudeOptions {
     /// interpreter (`node cli.js`).
     pub cli_prefix_args: Vec<String>,
     pub working_directory: Option<PathBuf>,
-    /// `--model`: an alias (`opus`, `sonnet`, `fable`) or a model ID.
+    /// An alias (`opus`, `sonnet`, `fable`) or a model ID, passed as `--model`.
     pub model: Option<String>,
     pub fallback_model: Option<String>,
     pub effort: Option<Effort>,
@@ -227,11 +227,11 @@ pub struct ClaudeOptions {
     pub permission_mode: Option<PermissionMode>,
     pub max_turns: Option<u32>,
     pub session: SessionStart,
-    /// `--settings`: Claude Code settings for this session.
+    /// Claude Code settings for this session, passed as `--settings`.
     pub settings: Option<Value>,
-    /// `--setting-sources`: which of the user's settings files (`user`,
-    /// `project`, `local`), with their `CLAUDE.md`, hooks and skills, the
-    /// session loads. `None` leaves the CLI's default. `Some(vec![])` loads
+    /// Which of the user's settings files (`user`, `project`, `local`), with
+    /// their `CLAUDE.md`, hooks and skills, the session loads. Passed as
+    /// `--setting-sources`. `None` leaves the CLI's default. `Some(vec![])` loads
     /// none, so the session behaves the same on any machine.
     pub setting_sources: Option<Vec<String>>,
     pub add_directories: Vec<PathBuf>,

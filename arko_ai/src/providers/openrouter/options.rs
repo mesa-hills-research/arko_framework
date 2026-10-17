@@ -1,4 +1,4 @@
-//! OpenRouter request options: provider routing preferences, the Auto
+//! OpenRouter request options for provider routing preferences, the Auto
 //! Router, model fallbacks, the Auto Exacto policy and app attribution.
 //!
 //! Every field is optional and omitted from the request unless set, so
@@ -18,7 +18,7 @@ pub struct OpenRouterOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderPreferences>,
     /// Models to try, in order, when the requested model fails (`models`).
-    /// Not sent by default: without it OpenRouter never switches models.
+    /// Not sent by default. Without it OpenRouter never switches models.
     /// With it, OpenRouter falls back on any error of the primary model,
     /// including rate limits, downtime and moderation or refusal errors raised
     /// before any output, so a refused prompt may be answered by another model.
@@ -28,7 +28,7 @@ pub struct OpenRouterOptions {
     /// or `openrouter/auto-beta` and ignored for every other model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_router: Option<AutoRouterOptions>,
-    /// How to handle Auto Exacto on tool requests. Default:
+    /// How to handle Auto Exacto on tool requests. Defaults to
     /// [`AutoExactoPolicy::CacheAware`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_exacto: Option<AutoExactoPolicy>,
@@ -80,7 +80,7 @@ impl OpenRouterOptions {
         self
     }
 
-    /// These options over `defaults`: fields set here win. `provider` and
+    /// Merges these options over `defaults`. Fields set here win. `provider` and
     /// `auto_router` merge field by field.
     pub fn merged_over(&self, defaults: &OpenRouterOptions) -> OpenRouterOptions {
         OpenRouterOptions {
@@ -132,20 +132,20 @@ pub enum OpenRouterServiceTier {
 #[serde(rename_all = "snake_case")]
 pub enum AutoExactoPolicy {
     /// Send `provider.sort: "price"` on tool requests with prompt caching
-    /// enabled when cache misses are costly: the model charges for cache
+    /// enabled when cache misses are costly because the model charges for cache
     /// writes (catalog `input_cache_write` above zero, for example Claude and
     /// GPT-5.6 and later) or, without catalog metadata, is an `anthropic/` or
     /// `openai/` model. Otherwise OpenRouter's default routing applies.
     #[default]
     CacheAware,
-    /// Never add a sort: Auto Exacto runs on every tool request.
+    /// Never add a sort, so Auto Exacto runs on every tool request.
     AllowAutoExacto,
     /// Always send `provider.sort: "price"` on tool requests.
     DisableAutoExacto,
 }
 
-/// The `provider` routing object. Unset fields are omitted, so OpenRouter's
-/// defaults apply: price-weighted load balancing across healthy providers,
+/// The `provider` routing object. Unset fields are omitted. OpenRouter defaults
+/// to price-weighted load balancing across healthy providers,
 /// fallbacks allowed, unsupported parameters silently dropped
 /// (`require_parameters: false`), data collection allowed, no per-request ZDR
 /// (account settings still apply), no sort (tool requests get Auto Exacto).
@@ -377,7 +377,7 @@ pub enum SortPartition {
     None,
 }
 
-/// `provider.sort`: a strategy (`"price"`) or an object with a partition.
+/// A `provider.sort` strategy (`"price"`) or an object with a partition.
 /// When set, OpenRouter doesn't load-balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -406,9 +406,10 @@ impl ProviderSort {
     }
 }
 
-/// `provider.max_price`, in USD per million tokens (`request`: per request,
-/// `image`: per image, `audio`: per audio unit). Requests with no endpoint
-/// under the limits fail. Sent as JSON numbers, as in OpenRouter's routing
+/// `provider.max_price`, in USD per million tokens. The `request`, `image`
+/// and `audio` fields are per request, image and audio unit instead.
+/// Requests with no endpoint under the limits fail. Sent as JSON numbers,
+/// as in OpenRouter's routing
 /// guide (the OpenAPI schema types them as strings).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -437,7 +438,7 @@ impl MaxPrice {
 }
 
 /// `preferred_min_throughput` (tokens per second) or `preferred_max_latency`
-/// (seconds): a single p50 value or per-percentile cutoffs. Endpoints missing
+/// (seconds), as a single p50 value or per-percentile cutoffs. Endpoints missing
 /// the thresholds are deprioritized, not excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

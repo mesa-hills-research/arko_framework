@@ -58,8 +58,8 @@ fn tls_config() -> rustls::ClientConfig {
     config
 }
 
-/// A [`reqwest::ClientBuilder`] with the setup this crate's providers use:
-/// rustls with the *ring* crypto provider passed explicitly (nothing is
+/// A [`reqwest::ClientBuilder`] with the setup this crate's providers use.
+/// It uses rustls with the *ring* crypto provider passed explicitly (nothing is
 /// installed process-wide), the operating system's trust store, HTTP/1.1, a
 /// 30-second connect timeout, no total request deadline, and no redirects
 /// (a 3xx response is returned as it is). Use it, or
@@ -69,8 +69,8 @@ fn tls_config() -> rustls::ClientConfig {
 /// This crate builds reqwest without a default crypto provider, so
 /// `reqwest::Client::new()` and `reqwest::Client::builder().build()` panic
 /// unless the application installs a process-wide rustls `CryptoProvider` or
-/// enables one through reqwest's own features. The TLS setup here is complete:
-/// reqwest's TLS options (extra root certificates, TLS versions, disabling
+/// enables one through reqwest's own features. The TLS setup here is complete,
+/// so reqwest's TLS options (extra root certificates, TLS versions, disabling
 /// certificate verification) do not apply to this builder.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     // No total request deadline: a connected generation may take arbitrarily
