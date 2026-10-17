@@ -55,6 +55,13 @@ impl AgentLoop {
     /// run left settled, and the prompts written.
     pub(super) async fn start(&mut self) -> Result<(), ArkoAgentsError> {
         let interrupted = self.start_state().await?;
+        // Images found gone become lines saying so, and are reported.
+        self.task.settle_unavailable_images();
+        if !self.task.unavailable_images.is_empty() {
+            let reasons = std::mem::take(&mut self.task.unavailable_images);
+            self.emit_event(AgentEvent::ImagesUnavailable { reasons })
+                .await?;
+        }
         // A task saved while its tool calls ran (by a host that stopped)
         // settles them before anything else.
         let recovered = self.recover_running_calls().await?;

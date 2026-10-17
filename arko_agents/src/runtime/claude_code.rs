@@ -933,6 +933,12 @@ impl ClaudeCodeRun {
         if matches!(self.task.current_state, TaskState::Pending) {
             self.set_state(TaskState::InProgress).await?;
         }
+        // Images found gone become lines saying so, and are reported.
+        self.task.settle_unavailable_images();
+        if !self.task.unavailable_images.is_empty() {
+            let reasons = std::mem::take(&mut self.task.unavailable_images);
+            self.emit(AgentEvent::ImagesUnavailable { reasons }).await?;
+        }
         if self.task.conversation.messages.is_empty() {
             let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
             let first =

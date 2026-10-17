@@ -230,6 +230,14 @@ impl ImageStore for ImageFiles {
         let path = self.dir.join(name);
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("could not read image {}: {error}", path.display()))?;
+        // The name is the content's hash: a file cut short or changed is
+        // damaged.
+        if !name.starts_with(&crate::digest::sha256_hex(&bytes)) {
+            return Err(format!(
+                "image {} is damaged: its content doesn't match its name",
+                path.display()
+            ));
+        }
         let data = if name.ends_with(TEXT_EXTENSION) {
             String::from_utf8(bytes)
                 .map_err(|error| format!("image {} isn't text: {error}", path.display()))?

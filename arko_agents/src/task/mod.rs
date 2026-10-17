@@ -453,6 +453,11 @@ pub struct Task {
     /// with it, after its text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_context_images: Vec<crate::runtime::ContextImage>,
+    /// Why images of the task were found gone
+    /// ([`settle_unavailable_images`](Self::settle_unavailable_images)), until
+    /// its run reports them (`AgentEvent::ImagesUnavailable`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_images: Vec<String>,
     /// Set while the runtime waits for the agent's handover report; see
     /// [`crate::handover`]. Saved so a task stopped in between still hands
     /// over when it runs again.
@@ -765,6 +770,7 @@ impl Task {
             monitor_pause: false,
             pending_context_injections: Vec::new(),
             pending_context_images: Vec::new(),
+            unavailable_images: Vec::new(),
             handover_requested: None,
             handovers: Vec::new(),
             conversation_usage_start: 0,
@@ -899,6 +905,62 @@ impl Task {
             self.claude_code_prompt_changed = true;
         }
         Ok(())
+    }
+
+    /// Replaces the placeholders of images that are gone
+    /// ([`arko_ai::Image::unavailable`], read back from a store that no
+    /// longer had them) with text saying so: in a message, the image becomes
+    /// the line `(image no longer available: REASON)`, in a tool result the
+    /// line goes after its output, and images still to be sent are dropped.
+    /// Returns the reasons, one per image, and keeps them in
+    /// [`unavailable_images`](Self::unavailable_images) for the run to
+    /// report. The runtimes do this as a task starts, so a provider never
+    /// gets a placeholder.
+    pub fn settle_unavailable_images(&mut self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let gone = |reason: &str| format!("(image no longer available: {reason})");
+        for message in &mut self.conversation.messages {
+            for content in &mut message.content {
+                match content {
+                    arko_ai::Content::Image(image) => {
+                        if let Some(reason) = image.unavailable_reason() {
+                            reasons.push(reason.to_string());
+                            *content = arko_ai::Content::Text(gone(reason));
+                        }
+                    }
+                    arko_ai::Content::ToolResult(result) => {
+                        let mut lines = Vec::new();
+                        result
+                            .images
+                            .retain(|image| match image.image.unavailable_reason() {
+                                Some(reason) => {
+                                    reasons.push(reason.to_string());
+                                    lines.push(format!("{}: {}", image.label, gone(reason)));
+                                    false
+                                }
+                                None => true,
+                            });
+                        for line in lines {
+                            result.output.push_str("\n");
+                            result.output.push_str(&line);
+                        }
+                    }
+                    arko_ai::Content::Text(_) => {}
+                }
+            }
+        }
+        let mut drop_gone = |image: &arko_ai::Image| match image.unavailable_reason() {
+            Some(reason) => {
+                reasons.push(reason.to_string());
+                false
+            }
+            None => true,
+        };
+        self.initial_task_images.retain(&mut drop_gone);
+        self.pending_context_images
+            .retain(|image| drop_gone(&image.image));
+        self.unavailable_images.extend(reasons.iter().cloned());
+        reasons
     }
 
     /// Moves the task to working directory `directory`: its tools work

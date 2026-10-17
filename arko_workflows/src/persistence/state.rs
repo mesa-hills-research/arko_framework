@@ -192,7 +192,20 @@ impl WorkflowState {
             let task = std::fs::read_to_string(&path)
                 .map_err(crate::WorkflowError::from)
                 .and_then(|json| {
-                    Ok(images.with(|| serde_json::from_str::<arko_agents::Task>(&json))?)
+                    let mut task = images.with(|| serde_json::from_str::<arko_agents::Task>(&json))?;
+                    // An image file gone or damaged doesn't keep the task from
+                    // loading: the image becomes a line saying so.
+                    let gone = task.settle_unavailable_images();
+                    if !gone.is_empty() {
+                        warnings.push(format!(
+                            "{} image(s) of agent '{}' ({}) are no longer available, each replaced by a line saying so: {}",
+                            gone.len(),
+                            record.agent_name,
+                            record.agent_run_id,
+                            gone.join("; ")
+                        ));
+                    }
+                    Ok(task)
                 })
                 .map_err(|error| {
                     crate::WorkflowError::Persistence(format!(

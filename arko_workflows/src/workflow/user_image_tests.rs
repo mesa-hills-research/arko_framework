@@ -307,3 +307,75 @@ async fn a_conversation_full_of_images_takes_no_more() {
     );
     assert!(server.bodies().is_empty());
 }
+
+/// A session whose image file was deleted or damaged after it was saved
+/// still resumes: each such image becomes a line saying it is gone, in the
+/// message that held it, and the run reports them as it goes on.
+#[tokio::test]
+async fn a_session_resumes_without_the_image_files_it_lost() {
+    for damage in ["deleted", "truncated"] {
+        let workspace = Workspace::new();
+        let server = done_server().await;
+        let run = workspace.0.join(".run");
+        let persisted = || {
+            Workflow::builder()
+                .name("user-image-test")
+                .workspace(&workspace.0)
+                .llm_client(Arc::new(server.client()))
+                .agent("worker", agent_config("Worker"))
+                .persistence(crate::persistence::PersistenceConfig::new(&run))
+        };
+        let first = persisted().build().unwrap();
+        let worker = first
+            .run_agent_with(
+                "worker",
+                "Describe this.",
+                RunOptions::new().images([sized_png(40, 30)]),
+            )
+            .await
+            .unwrap();
+        first.checkpoint().await.unwrap();
+        drop(first);
+        let file = std::fs::read_dir(run.join("images"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        match damage {
+            "deleted" => std::fs::remove_file(&file).unwrap(),
+            _ => std::fs::write(&file, &std::fs::read(&file).unwrap()[..20]).unwrap(),
+        }
+
+        let latest = std::fs::read_to_string(run.join("latest-checkpoint")).unwrap();
+        let resumed = persisted()
+            .resume_from(run.join(latest.trim()))
+            .build()
+            .unwrap();
+        let restored = resumed.agent_result(worker.agent_run_id).unwrap();
+        let first_message = &restored.task.conversation.messages[0];
+        assert!(
+            first_message.content.iter().any(|content| matches!(
+                content,
+                arko_ai::Content::Text(text) if text.starts_with("(image no longer available: ")
+            )),
+            "{damage}: {first_message:?}"
+        );
+        assert_eq!(first_message.image_count(), 0, "{damage}");
+        let mut events = resumed.subscribe_events_lossless();
+        resumed.continue_agent(&restored, "And now?").await.unwrap();
+        let mut reported = Vec::new();
+        while let Some(event) = events.try_recv() {
+            if let arko_agents::AgentEvent::ImagesUnavailable { reasons } = event.event {
+                reported.extend(reasons);
+            }
+        }
+        assert_eq!(reported.len(), 1, "{damage}: {reported:?}");
+        let expected = if damage == "deleted" {
+            "could not read image"
+        } else {
+            "is damaged"
+        };
+        assert!(reported[0].contains(expected), "{damage}: {reported:?}");
+    }
+}

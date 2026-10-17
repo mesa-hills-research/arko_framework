@@ -171,3 +171,42 @@ async fn a_context_update_s_image_past_the_request_s_room_is_left_out() {
         message_text(update)
     );
 }
+
+/// Images gone from where they were saved become lines saying so: in a
+/// message in the image's place, in a tool result after its output, and
+/// those still to be sent are dropped. The reasons wait for the run to
+/// report them.
+#[test]
+fn images_that_are_gone_become_lines_saying_so() {
+    let mut task = Task::new(
+        super::tests::test_config(),
+        "Hello.".into(),
+        std::env::temp_dir(),
+        None,
+    );
+    let gone = ai::Image::unavailable("its file was deleted");
+    task.conversation
+        .add_user_message_with_contents(vec![ai::Content::Image(gone.clone())]);
+    let mut result = ai::ToolResult::from_tool_call(
+        &super::image_tests::call("call_1", "read_file"),
+        "a.png is an image.",
+    );
+    result.images = vec![ai::ToolResultImage::new("a.png", gone.clone())];
+    task.conversation.add_tool_results(vec![result]);
+    task.initial_task_images = vec![gone.clone(), pixels()];
+
+    assert_eq!(task.settle_unavailable_images().len(), 3);
+    assert!(matches!(&task.conversation.messages[0].content[0],
+        ai::Content::Text(text) if text == "(image no longer available: its file was deleted)"));
+    let ai::Content::ToolResult(result) = &task.conversation.messages[1].content[0] else {
+        panic!("{:?}", task.conversation.messages[1]);
+    };
+    assert!(result.images.is_empty());
+    assert!(
+        result
+            .output
+            .ends_with("a.png: (image no longer available: its file was deleted)")
+    );
+    assert_eq!(task.initial_task_images, [pixels()]);
+    assert_eq!(task.unavailable_images.len(), 3);
+}

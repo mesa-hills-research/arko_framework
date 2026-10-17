@@ -5,6 +5,11 @@
 //! `{"Base64": {"mime_type": .., "stored": REFERENCE}}`, and such JSON reads
 //! back through the store. Outside, images serialize with their data, as
 //! always, and JSON written with data reads back without a store.
+//!
+//! An image the store can't give back (its file was deleted, or is damaged)
+//! reads as a placeholder ([`Image::unavailable`]) with the reason, so the
+//! rest of the value still loads: arko_agents' tasks turn placeholders into
+//! a line of text saying the image is gone ([`MISSING_IMAGE_TYPE`]).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -71,6 +76,28 @@ pub fn sample_hash(data: &str) -> u64 {
     hasher.finish()
 }
 
+/// The MIME type of a placeholder for an image a store couldn't give back:
+/// its data is the reason.
+pub const MISSING_IMAGE_TYPE: &str = "application/x-missing-image";
+
+impl Image {
+    /// A placeholder for an image that is gone, saying why.
+    pub fn unavailable(reason: &str) -> Self {
+        Image::Base64 {
+            data: reason.to_string(),
+            mime_type: MISSING_IMAGE_TYPE.to_string(),
+        }
+    }
+
+    /// Why the image is gone, for a placeholder ([`Image::unavailable`]).
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Image::Base64 { data, mime_type } if mime_type == MISSING_IMAGE_TYPE => Some(data),
+            _ => None,
+        }
+    }
+}
+
 fn current() -> Option<Arc<dyn ImageStore>> {
     STORE.with(|store| store.borrow().clone())
 }
@@ -129,10 +156,13 @@ impl<'de> Deserialize<'de> for Image {
                         "image '{reference}' is saved outside this JSON, and no image store is set to read it"
                     ))
                 })?;
-                let data = store
-                    .load(&reference, &mime_type)
-                    .map_err(D::Error::custom)?;
-                Image::Base64 { data, mime_type }
+                match store.load(&reference, &mime_type) {
+                    Ok(data) => Image::Base64 { data, mime_type },
+                    Err(reason) => {
+                        log::warn!("An image can't be read back: {reason}");
+                        Image::unavailable(&reason)
+                    }
+                }
             }
             Repr::Base64 {
                 data: None,
@@ -195,8 +225,16 @@ mod tests {
         );
         let error = serde_json::from_value::<Image>(stored.clone()).unwrap_err();
         assert!(error.to_string().contains("no image store"), "{error}");
-        let read = with_image_store(store, || serde_json::from_value::<Image>(stored).unwrap());
+        let read = with_image_store(store.clone(), || {
+            serde_json::from_value::<Image>(stored).unwrap()
+        });
         assert_eq!(read, image);
+        // An image the store can't give back reads as a placeholder saying
+        // why, so what holds it still loads.
+        let gone = serde_json::json!({"Base64": {"stored": "ref-99", "mime_type": "image/png"}});
+        let placeholder =
+            with_image_store(store, || serde_json::from_value::<Image>(gone).unwrap());
+        assert_eq!(placeholder.unavailable_reason(), Some("no image ref-99"));
         let url = Image::new_url("https://example.com/a.png");
         assert_eq!(
             serde_json::to_value(&url).unwrap(),

@@ -33,6 +33,10 @@ pub enum AgentEvent {
         text_bytes: usize,
         reasoning_bytes: usize,
     },
+    /// Images of the task's conversation are gone (their saved files were
+    /// deleted or damaged), each now a line saying so in its place; one
+    /// reason per image. Reported as the run starts.
+    ImagesUnavailable { reasons: Vec<String> },
 
     /// A tool call has been initiated.
     ToolCallInitiated {
