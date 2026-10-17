@@ -261,7 +261,7 @@ impl<'a> PromptBuilder<'a> {
     }
 
     /// The text that goes beside a turn's native tool results in their user
-    /// message: `text` (an answer or a note) followed by the sections
+    /// message, with `text` (an answer or a note) followed by the sections
     /// [`augment_user_message_with_env_details_and_reminder`](Self::augment_user_message_with_env_details_and_reminder)
     /// adds, or those sections alone. `None` when there is neither. Providers
     /// take it after the results in the same turn.

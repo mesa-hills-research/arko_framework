@@ -42,13 +42,13 @@ pub(crate) const CACHE_PING: &str =
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CacheRefresh {
-    /// The refresh request's usage: its cache reads show what it kept.
+    /// The refresh request's usage. Its cache reads show what it kept.
     pub usage: arko_ai::UsageInfo,
-    /// The output limit the request was sent with: `None` where the
+    /// The output limit the request was sent with, or `None` where the
     /// provider takes none (ChatGPT OAuth) or Claude Code chooses it.
     pub output_cap: Option<usize>,
     /// The task's last request went again unchanged, instead of a ping
-    /// after its conversation: the task waits with calls of the model's
+    /// after its conversation, because the task waits with calls of the model's
     /// that have no results yet (paused for an approval).
     pub resent_last_request: bool,
     /// Why the provider refused the smaller output limit tried first, when
@@ -69,24 +69,24 @@ impl CacheRefresh {
 }
 const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
 
-/// Whether the host decides every wait of a run itself: every tool
+/// Whether the host decides every wait of a run itself. Every tool
 /// approval, answer and error-recovery decision the task waits for is
 /// decided by the host (or the host stops the run), however long it takes.
 /// While it is set, the task's
 /// [`user_command_timeout_seconds`](crate::agent_config::AgentConfig::user_command_timeout_seconds)
-/// doesn't apply: no wait of the run is timed. A workflow sets it for the
+/// doesn't apply, so no wait of the run is timed. A workflow sets it for the
 /// runs it drives.
 ///
-/// A run-level setting: it is not part of the task and is not saved, so a
+/// This run-level setting is not part of the task and is not saved, so a
 /// task run later without it is timed as configured. Clones share the
-/// setting, and the host may change it while the run runs: turned on during
+/// setting, and the host may change it while the run runs. Turned on during
 /// a wait, that wait is no longer timed. Turned off, the waits that start
 /// afterwards are.
 #[derive(Clone, Debug, Default)]
 pub struct HostDecisions(Arc<AtomicBool>);
 
 impl HostDecisions {
-    /// `true`: the host decides every wait of the run.
+    /// With `true`, the host decides every wait of the run.
     pub fn new(host_decides: bool) -> Self {
         Self(Arc::new(AtomicBool::new(host_decides)))
     }
@@ -137,7 +137,7 @@ impl AgentRuntime {
         self
     }
 
-    /// Runs tasks with `decisions`: while it is set, the host decides every
+    /// Runs tasks with `decisions`. While it is set, the host decides every
     /// wait of the runs itself, and their command timeout doesn't apply.
     /// See [`HostDecisions`].
     pub fn with_host_decisions(mut self, decisions: HostDecisions) -> Self {
@@ -178,10 +178,10 @@ impl AgentRuntime {
     }
 
     /// Tells the tool calls of the tasks this runtime runs when the host is
-    /// stopping them: `signal` reaches each call as part of
+    /// stopping them. The `signal` reaches each call as part of
     /// [`TaskContext::stop`](crate::tool::TaskContext::stop), which also
     /// fires when the runtime receives `CancelTask` or `SuspendTask` while
-    /// the call runs. Firing it changes nothing else: the task goes on until
+    /// the call runs. Firing it changes nothing else. The task goes on until
     /// the host cancels or suspends it (a workflow's graceful stop fires it
     /// at the start of its wrap-up, and cancels its agents afterwards).
     pub fn with_stop_signal(mut self, signal: StopSignal) -> Self {
@@ -189,11 +189,11 @@ impl AgentRuntime {
         self
     }
 
-    /// Keeps `task`'s prompt cache warm while it waits between turns: its
+    /// Keeps `task`'s prompt cache warm while it waits between turns. Sends its
     /// next request (system prompt, tools, conversation) with a short ping
-    /// after it, the output capped where the provider allows (one token on
-    /// Anthropic, OpenAI's minimum of 16, the ChatGPT backend takes no cap)
-    /// and the reply discarded, so the provider reads the cached prefix and
+    /// after it and caps the output where the provider allows (one token on
+    /// Anthropic, OpenAI's minimum of 16, the ChatGPT backend takes no cap).
+    /// Discards the reply, so the provider reads the cached prefix and
     /// its lifetime starts over. A task waiting with calls of the model's
     /// that have no results yet (paused for an approval) sends its last
     /// request again unchanged instead, which ends where the cache entry the

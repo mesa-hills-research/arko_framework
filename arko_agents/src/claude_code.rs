@@ -9,12 +9,12 @@
 //!
 //! - The agent's arko tools (`complete_task`, `ask_user`, a workflow's
 //!   `send_message`, custom tools) are served to Claude Code in-process, as
-//!   the MCP server `arko`: the model sees them as `mcp__arko__<name>`. They
+//!   the MCP server `arko`. The model sees them as `mcp__arko__<name>`. They
 //!   run as they do for any agent, with the execution middleware, result
 //!   interception and time limits.
-//! - Claude Code's own tools ([`BUILT_IN_TOOLS`]: `Read`, `Edit`, `Bash`, …)
+//! - Claude Code's own tools ([`BUILT_IN_TOOLS`], such as `Read`, `Edit`, `Bash`)
 //!   are offered when `available_tool_names` lists them, and only then. Every
-//!   call, built-in or arko, first passes the runtime's gate: auto-approval or
+//!   call, built-in or arko, first passes the runtime's gate for auto-approval or
 //!   an approval wait, the workspace path policy, and (for built-ins) the
 //!   execution middleware's `before`. Claude Code runs a built-in itself, so
 //!   its output can't be intercepted and arko's per-tool time limit doesn't
@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 /// Claude Code built-in tools this crate knows, as of Claude Code 2.1.
 /// `available_tool_names` may name others the installed CLI has. They are
-/// offered as built-ins too. `AskUserQuestion` is left out: arko's `ask_user`
+/// offered as built-ins too. `AskUserQuestion` is left out because arko's `ask_user`
 /// asks through the host.
 pub const BUILT_IN_TOOLS: &[&str] = &[
     "Read",
@@ -64,7 +64,7 @@ pub const BUILT_IN_TOOLS: &[&str] = &[
 ];
 
 /// The [built-in tools](BUILT_IN_TOOLS) that only read (files, the web, a
-/// background command's output): a call to one that was running when its
+/// background command's output). A call to one that was running when its
 /// task stopped needs no care, so the runtime doesn't wait for the task to
 /// be saved before it runs (see
 /// [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink)).
@@ -79,8 +79,8 @@ pub const READ_ONLY_BUILT_IN_TOOLS: &[&str] = &[
     "ToolSearch",
 ];
 
-/// Built-in tools arko doesn't offer: they would bypass the host (a question
-/// to the user, or leaving plan mode).
+/// Built-in tools arko doesn't offer because they would bypass the host
+/// (asking the user a question, or entering or leaving plan mode).
 pub const UNSUPPORTED_BUILT_IN_TOOLS: &[&str] =
     &["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"];
 
@@ -110,12 +110,12 @@ pub fn built_in_path_parameters(name: &str) -> &'static [&'static str] {
 pub struct ClaudeCodeTools;
 
 impl ClaudeCodeTools {
-    /// Reading and searching files: `Read`, `Glob`, `Grep`.
+    /// Tools for reading and searching files (`Read`, `Glob`, `Grep`).
     pub fn read_only() -> Vec<String> {
         names(&["Read", "Glob", "Grep"])
     }
 
-    /// [`read_only`](Self::read_only), and editing files: `Edit`, `Write`,
+    /// [`read_only`](Self::read_only), plus the file-editing tools `Edit`, `Write`,
     /// `NotebookEdit`.
     pub fn editing() -> Vec<String> {
         let mut tools = Self::read_only();
@@ -123,13 +123,13 @@ impl ClaudeCodeTools {
         tools
     }
 
-    /// Running shell commands: `Bash` (and `PowerShell` on Windows), with
+    /// Tools for running shell commands (`Bash` and `PowerShell`), with
     /// the tools for background commands.
     pub fn shell() -> Vec<String> {
         names(&["Bash", "PowerShell", "Monitor", "TaskOutput", "TaskStop"])
     }
 
-    /// Fetching and searching the web: `WebFetch`, `WebSearch`.
+    /// Tools for fetching and searching the web (`WebFetch`, `WebSearch`).
     pub fn web() -> Vec<String> {
         names(&["WebFetch", "WebSearch"])
     }
@@ -158,7 +158,7 @@ pub struct ClaudeCodeSettings {
     pub cli_args: Vec<String>,
     /// The user's settings files the session loads (`user`, `project`,
     /// `local`), with their `CLAUDE.md`, hooks, MCP servers and skills. Empty
-    /// (the default): none, so the agent behaves the same on any machine.
+    /// by default, so none are loaded and the agent behaves the same on any machine.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub setting_sources: Vec<String>,
     /// Replace Claude Code's system prompt with the agent's, instead of
@@ -170,8 +170,8 @@ pub struct ClaudeCodeSettings {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Commands the `Bash` and `PowerShell` tools run pass arko's terminal
-    /// command guard (see [`CommandGuard`](crate::terminal::CommandGuard)):
-    /// one that would delete, move, overwrite or reformat a protected path
+    /// command guard (see [`CommandGuard`](crate::terminal::CommandGuard)).
+    /// A command that would delete, move, overwrite or reformat a protected path
     /// (a root, the home directory, system directories) or a path outside the
     /// workspace is refused. This allows destructive commands outside the
     /// workspace. Protected paths stay refused.
@@ -180,19 +180,19 @@ pub struct ClaudeCodeSettings {
     /// Paths outside the workspace that destructive commands may target.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowed_command_paths: Vec<PathBuf>,
-    /// Turn the command guard off: every command runs as written, and
+    /// Turn the command guard off. Every command runs as written, and
     /// `command_rules` don't apply.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dangerously_allow_all_commands: bool,
     /// Programs and arguments the `Bash` and `PowerShell` tools may or may
-    /// not run: the guard's [`rules`](crate::terminal::CommandGuard::rules),
-    /// such as read-only git only. Empty (the default): none.
+    /// not run, using the guard's [`rules`](crate::terminal::CommandGuard::rules),
+    /// such as read-only git only. Empty by default, with no rules.
     #[cfg(any(unix, windows))]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub command_rules: Vec<crate::terminal::CommandRule>,
-    /// Whether the CLI's usage is billed per token. `false` (the default):
+    /// Whether the CLI's usage is billed per token. With `false` (the default),
     /// it's covered by a Claude subscription, so nothing is billed per call
-    /// and budgets don't count it. `true`: the CLI is billed per token (an
+    /// and budgets don't count it. With `true`, the CLI is billed per token (an
     /// API key, cloud credits, a host-managed provider), so each call's
     /// list-price estimate is its billed cost and counts against budgets.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

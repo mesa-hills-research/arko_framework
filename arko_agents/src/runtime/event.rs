@@ -24,7 +24,7 @@ pub enum AgentEvent {
     /// belonging to a response as `AssistantResponseChunk` does.
     ReasoningChunk(String),
     /// The response the latest `ModelRequestStarted` began failed after
-    /// streaming part of it: the `AssistantResponseChunk` and
+    /// streaming part of it. The `AssistantResponseChunk` and
     /// `ReasoningChunk` events since then belong to no response, and a host
     /// that showed them drops them (`text_bytes` and `reasoning_bytes` say
     /// how much of each). A retry streams its response anew, after its own
@@ -86,7 +86,7 @@ pub enum AgentEvent {
         /// The questions asked by the agent.
         questions: String,
     },
-    /// The agent sent the user a message without ending its turn: it called
+    /// The agent sent the user a message without ending its turn. It called
     /// the built-in `message_user` tool, or, with
     /// [`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message),
     /// replied in plain text without a tool call. Nothing waits for an
@@ -141,7 +141,7 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<arko_ai::ErrorKind>,
     },
-    /// A tool result was shortened before it went into the conversation:
+    /// A tool result was shortened before it went into the conversation
     /// by the overflow guard, by an opt-in cap, or to recover from a
     /// request the provider found over the model's input limit (see
     /// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). The
@@ -184,8 +184,8 @@ pub enum AgentEvent {
         #[serde(default)]
         rate_limit: bool,
     },
-    /// The model called a tool the task can't run: in native mode, a tool it
-    /// is not offered (see
+    /// The model called a tool the task can't run. In native mode, this can be
+    /// a tool it is not offered (see
     /// [`AgentToolConfig::available_tool_names`](crate::agent_config::AgentToolConfig::available_tool_names)),
     /// or in either mode an offered tool the registry doesn't hold. The call
     /// was not run.
@@ -193,7 +193,7 @@ pub enum AgentEvent {
     /// The task stream has ended.
     TaskStreamEnd,
     /// A model request of the task is going out. In arko's own runtime it
-    /// is emitted just before each request is sent: every attempt, a retry
+    /// is emitted just before each request is sent, for every attempt, a retry
     /// and a refusal fallback's request included. A Claude Code model's
     /// requests are made by Claude Code, which shows one when its response
     /// starts (its `message_start`), so it is emitted then, for the
@@ -204,15 +204,15 @@ pub enum AgentEvent {
     /// `ModelCallUsageReported` that follows tells whether it read or
     /// wrote the cache.
     ModelRequestStarted {
-        /// The model the request goes to: the configured model's id, or the
+        /// The model the request goes to, given by the configured model's id, or the
         /// refusal fallback's, or the model Claude Code reports.
         model: String,
         /// For a request of a subagent the model runs itself (Claude Code's
-        /// `Agent` tool): the id of the tool call that started it. `None`
+        /// `Agent` tool), the id of the tool call that started it. `None`
         /// for the conversation's own requests.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent: Option<String>,
-        /// The request's size by section, as the runtime knows it: what it
+        /// The request's size by section, as the runtime knows it. This covers what it
         /// sends in arko's own runtime or, for a Claude Code model, the task's
         /// conversation, system prompt and arko tools, without what Claude
         /// Code adds of its own. `None` for a subagent's request.
@@ -253,7 +253,7 @@ pub enum AgentEvent {
         action: PlanUsageAction,
     },
     /// The provider served a model call with another model than the one
-    /// requested ([`ModelCallUsage::served_model_changed`]): an OpenRouter
+    /// requested ([`ModelCallUsage::served_model_changed`]) through an OpenRouter
     /// fallback, router or alias, or a ChatGPT backend reroute. Emitted after
     /// `ModelCallUsageReported`.
     ModelRerouted {
@@ -262,7 +262,7 @@ pub enum AgentEvent {
         served_model: String,
     },
     /// The provider refused the reasoning summaries the run's configuration
-    /// asks for ([`ModelCallUsage::reasoning_summaries_refused`]: an OpenAI
+    /// asks for ([`ModelCallUsage::reasoning_summaries_refused`], for an OpenAI
     /// organization that isn't verified for them), and the request was sent
     /// again without them. The run asks for none from then on (its saved
     /// configuration too), nor does any request of that provider's client,
@@ -270,8 +270,8 @@ pub enum AgentEvent {
     /// `ModelCallUsageReported`. A host can tell the user once.
     ReasoningSummariesRefused { provider: String, model: String },
     /// The conversation's prompt-cache efficiency after a model call (opt-in
-    /// [`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)):
-    /// cache reads divided by the most that could have been read, for the
+    /// [`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)).
+    /// This is cache reads divided by the most that could have been read, for the
     /// call and over the last `calls` judged calls.
     CacheEfficiencyReported {
         call_efficiency: f64,
@@ -279,7 +279,7 @@ pub enum AgentEvent {
         calls: usize,
     },
     /// The rolling cache efficiency fell below a monitor threshold
-    /// (`warn_below`, or `pause_below` with `pausing` set: the task pauses
+    /// (`warn_below`, or `pause_below` with `pausing` set so the task pauses
     /// before its next request). Reported once until it recovers.
     CacheEfficiencyLow {
         rolling_efficiency: f64,
@@ -287,7 +287,7 @@ pub enum AgentEvent {
         pausing: bool,
     },
     /// A model response ended at its output-token limit
-    /// ([`arko_ai::StopReason::MaxTokens`]): its text may be cut short, and a
+    /// ([`arko_ai::StopReason::MaxTokens`]). Its text may be cut short, and a
     /// tool call still being written when the limit was reached was dropped.
     /// Emitted after the call's usage events. The response is then handled
     /// as usual (a turn without a tool call gets the runtime's note). A host
@@ -314,7 +314,7 @@ pub enum AgentEvent {
         waiting_until_unix_ms: Option<u64>,
         error_message: String,
     },
-    /// A handover started: the agent was asked for its handover report,
+    /// A handover started. The agent was asked for its handover report,
     /// and its tool calls other than `complete_task` (and `handover_report`,
     /// where it is offered) are rejected until it gives it. See
     /// [`crate::handover`].
@@ -323,7 +323,7 @@ pub enum AgentEvent {
         /// replaced. 0 when a host asked before any request.
         input_tokens: usize,
     },
-    /// A context update joined the conversation: content the host sent with
+    /// A context update joined the conversation, holding content the host sent with
     /// [`InjectContext`](crate::runtime::command::UserCommand::InjectContext)
     /// and its turn context source's context
     /// ([`TurnContextSource`](crate::runtime::TurnContextSource)), added as
@@ -357,7 +357,7 @@ pub enum AgentEvent {
         handovers: usize,
     },
     /// Claude Code compacted the conversation of an agent whose model runs
-    /// in it: at the runtime's request (see
+    /// in it, at the runtime's request (see
     /// [`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
     /// or on its own. Its summary replaced the earlier messages in the
     /// session, and the agent goes on from it. The task's conversation
@@ -371,7 +371,7 @@ pub enum AgentEvent {
     },
     /// The host cut the conversation back to just before message
     /// `message_index` ([`Task::cut_back`](crate::task::Task::cut_back)),
-    /// and `removed_messages` messages went: an edit or a regenerate. A
+    /// and `removed_messages` messages were removed for an edit or a regenerate. A
     /// workflow reports it as the run goes on
     /// (`ContinueOptions::cut_back_to`), before the run's own events.
     ConversationCutBack {
@@ -380,7 +380,7 @@ pub enum AgentEvent {
     },
     /// The host continued the task under another configuration
     /// ([`Task::reconfigure`](crate::task::Task::reconfigure)), such as a
-    /// switch between a chat and an agent: `chat` says whether it is a chat
+    /// switch between a chat and an agent. The `chat` field says whether it is a chat
     /// now, and `tools` how many tools of its own it is offered. A workflow
     /// reports it as the run goes on (`ContinueOptions::reconfigure`),
     /// before the run's own events.
@@ -391,8 +391,8 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShortenReason {
-    /// The overflow guard: the turn's results would have put the next
-    /// request over the model's input limit.
+    /// The overflow guard shortened the turn's results because they would
+    /// have put the next request over the model's input limit.
     Overflow,
     /// The result was over its opt-in cap
     /// ([`ToolResultLimits::max_result_tokens`](crate::agent_config::ToolResultLimits::max_result_tokens)

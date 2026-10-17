@@ -41,9 +41,9 @@ struct Cli {
     #[arg(long)]
     save_task_state: Option<PathBuf>,
 
-    /// Opt-in: seconds a task waiting for an approval, an answer or error
-    /// recovery waits before it is returned interrupted. Without it the task
-    /// waits until a command arrives.
+    /// An optional timeout in seconds for a task waiting for an approval,
+    /// an answer or error recovery. The task is returned interrupted when
+    /// the timeout expires. Without it the task waits until a command arrives.
     #[arg(long)]
     user_command_timeout: Option<u64>,
 
