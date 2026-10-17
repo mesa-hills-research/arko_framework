@@ -26,10 +26,10 @@ pub(super) struct RunEnvironment {
     pub stop: crate::stop::StopSignal,
     /// The model whose image capabilities apply to tool results.
     pub model: arko_ai::Model,
-    /// Receives the images calls return; see [`ToolImageSink`].
+    /// Receives the images calls return. See [`ToolImageSink`].
     pub image_sink: Option<Arc<dyn ToolImageSink>>,
     /// How many more images the conversation takes before a request would
-    /// hold more than the model's provider takes; `None` for no count.
+    /// hold more than the model's provider takes, or `None` for no count.
     pub image_room: Option<Arc<crate::tool::ImageRoom>>,
 }
 

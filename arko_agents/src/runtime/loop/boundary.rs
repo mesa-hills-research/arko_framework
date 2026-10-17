@@ -119,8 +119,8 @@ impl AgentLoop {
     /// ([`Task::pending_context_injections`]) to the conversation as one
     /// user message headed `# Workflow context update`, in the order it was
     /// sent, with its images after the text. Only where a user message can
-    /// go now; see
-    /// [`context_can_be_added_now`](Self::context_can_be_added_now).
+    /// go now (see
+    /// [`context_can_be_added_now`](Self::context_can_be_added_now)).
     pub(super) fn add_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
         // While the handover report is due, context waits for the fresh
         // conversation: added now, it would be read only through the report

@@ -207,7 +207,7 @@ fn a_reconfiguration_starts_the_cache_window_over() {
 }
 
 /// A chat is what says so: `AgentToolConfig::chat()` is offered nothing and
-/// ends its task with text; an agent that merely lists no tools isn't one.
+/// ends its task with text, and an agent that merely lists no tools isn't one.
 /// A chat can't list tools, run output-based, or send replies as messages.
 #[test]
 fn a_chat_is_explicit() {

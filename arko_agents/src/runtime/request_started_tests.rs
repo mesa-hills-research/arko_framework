@@ -41,7 +41,7 @@ fn with_calls(calls: Vec<ai::ToolCall>) -> ai::Message {
 
 /// Reported before each request, in order with the responses: the first
 /// at the default ratio, the next at the ratio the first one's reported
-/// input calibrated; sizes count what each request holds.
+/// input calibrated. Sizes count what each request holds.
 #[tokio::test]
 async fn each_request_is_reported_as_it_goes_out() {
     let task = Task::new(

@@ -50,7 +50,7 @@ impl TurnContextSource for Once {
 }
 
 /// A context update's images follow its text, each after its label, in
-/// the same message; one with images and no text is added too.
+/// the same message. One with images and no text is added too.
 #[tokio::test]
 async fn a_context_update_s_images_follow_its_text_each_after_its_label() {
     for content in ["A new note on your task.", ""] {
@@ -82,7 +82,7 @@ async fn a_context_update_s_images_follow_its_text_each_after_its_label() {
     }
 }
 
-/// A continuation's images follow its text; so do an answer's.
+/// A continuation's images follow its text, and so do an answer's.
 #[test]
 fn a_continuation_and_an_answer_hold_their_images_after_their_text() {
     let mut task = Task::new(
@@ -110,7 +110,7 @@ fn a_continuation_and_an_answer_hold_their_images_after_their_text() {
     assert_eq!(images(last), [&pixels()]);
 }
 
-/// A task saved without images loads; the images are saved with it.
+/// A task saved without images loads, and the images are saved with it.
 #[test]
 fn a_task_s_images_are_saved_with_it() {
     let mut task = Task::new(

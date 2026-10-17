@@ -726,7 +726,7 @@ pub(super) struct ClaudeCodeRun {
     /// The host's stop signal for the task's arko tool calls; see
     /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
     pub(super) host_stop: crate::stop::StopSignal,
-    /// Receives the images the task's calls return; see
+    /// Receives the images the task's calls return. See
     /// [`AgentRuntime::with_tool_image_sink`](super::AgentRuntime::with_tool_image_sink).
     pub(super) image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     /// Fired when the host stops the session, so that a running arko tool
@@ -1622,8 +1622,8 @@ impl ClaudeCodeRun {
             }));
         }
         self.served_tools = Some(ai::ToolConfig::new(served));
-        // A cut back resumes at the entry the task recorded; a branch first
-        // copies the session it was branched from into its own. Both hold
+        // A cut back resumes at the entry the task recorded, and a branch
+        // first copies the session it was branched from into its own. Both hold
         // until the session has the task's first new message (see
         // `record_sent`): Claude Code saves a cut, and creates a fork, only
         // with that message.
@@ -2979,7 +2979,7 @@ impl ClaudeCodeRun {
                         self.flush_thread(&parent_tool_use_id).await?;
                     }
                 }
-                // The main conversation's text and thinking as they come; a
+                // The main conversation's text and thinking as they come. A
                 // subagent's are its own.
                 Some("content_block_delta") if parent_tool_use_id.is_none() => {
                     let delta = &event["delta"];
@@ -3419,7 +3419,7 @@ impl ClaudeCodeRun {
     /// fork of the session that Claude Code doesn't save (`--fork-session
     /// --no-session-persistence`), launched with the session's own flags,
     /// so its request reads the conversation's cache. The reply is
-    /// discarded; the task and its session are unchanged. Returns the
+    /// discarded, and the task and its session are unchanged. Returns the
     /// ping's usage. Checked against Claude Code 2.1.299: such a fork read
     /// the conversation's cache and left no transcript.
     pub(super) async fn refresh_prompt_cache(mut self) -> Result<ai::UsageInfo, ArkoAgentsError> {
@@ -4532,7 +4532,7 @@ impl ClaudeCodeRun {
             None => HandoverSeed::for_task(&self.task),
         };
         // A chat's fresh conversation answers the user's latest input, with
-        // the images it held; a task's restates the task, with its images.
+        // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
         let input_tokens = self
             .task

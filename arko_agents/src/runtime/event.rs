@@ -34,7 +34,7 @@ pub enum AgentEvent {
         reasoning_bytes: usize,
     },
     /// Images of the task's conversation are gone (their saved files were
-    /// deleted or damaged), each now a line saying so in its place; one
+    /// deleted or damaged), each now a line saying so in its place, with one
     /// reason per image. Reported as the run starts.
     ImagesUnavailable { reasons: Vec<String> },
 
@@ -200,7 +200,7 @@ pub enum AgentEvent {
     /// conversation's own requests and its subagents'. A prompt cache is
     /// refreshed by each request that reads or writes it, so a host times
     /// the cache's lifetime from the latest one (its
-    /// `WorkflowEvent::timestamp` in arko_workflows); the
+    /// `WorkflowEvent::timestamp` in arko_workflows). The
     /// `ModelCallUsageReported` that follows tells whether it read or
     /// wrote the cache.
     ModelRequestStarted {
@@ -213,7 +213,7 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent: Option<String>,
         /// The request's size by section, as the runtime knows it: what it
-        /// sends in arko's own runtime; for a Claude Code model, the task's
+        /// sends in arko's own runtime or, for a Claude Code model, the task's
         /// conversation, system prompt and arko tools, without what Claude
         /// Code adds of its own. `None` for a subagent's request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,7 +221,7 @@ pub enum AgentEvent {
         /// The bytes per token of the task's earlier requests (their text
         /// bytes over the input tokens the provider reported, see
         /// [`calibrated_bytes_per_token`](crate::runtime::calibrated_bytes_per_token)),
-        /// which turns `sizes` into estimated tokens;
+        /// which turns `sizes` into estimated tokens, or
         /// [`DEFAULT_BYTES_PER_TOKEN`](crate::runtime::DEFAULT_BYTES_PER_TOKEN)
         /// until one was answered.
         bytes_per_token: f64,

@@ -442,7 +442,7 @@ impl HandoverSeed {
     pub fn for_chat(task: &Task) -> Self {
         // Each message as the host sent it, without the environment details
         // and reminder the runtime added (the fresh conversation's first
-        // message gets its own); a message of images alone says so.
+        // message gets its own), and a message of images alone says so.
         let text = unanswered_user_messages(task)
             .into_iter()
             .map(|message| {
@@ -486,7 +486,7 @@ impl HandoverSeed {
 /// report request, oldest first: the input the conversation hasn't answered
 /// yet, which a chat's fresh conversation answers. Messages the runtime
 /// added (the report request, notes on errors) and tool results don't
-/// count; context updates (notes from the user, mail) do.
+/// count, while context updates (notes from the user, mail) do.
 pub fn unanswered_user_messages(task: &Task) -> Vec<&arko_ai::Message> {
     let messages = &task.conversation.messages;
     // The report request, and the report after it, if it came.
@@ -660,8 +660,8 @@ mod tests {
 
     /// A chat's seed restates the user's messages since the model's last
     /// reply (context updates included, the runtime's report request and
-    /// the report itself left out), with their images; without any, the
-    /// task's initial prompt.
+    /// the report itself left out), with their images. Without any, it
+    /// restates the task's initial prompt.
     #[test]
     fn a_chat_seed_restates_the_unanswered_messages() {
         let config = crate::agent_config::AgentConfig::builder(
@@ -696,8 +696,8 @@ mod tests {
         );
         assert_eq!(unanswered_user_messages(&task).len(), 2);
         assert_eq!(unanswered_images(&task).len(), 1);
-        // A chat's fresh conversation gets the unanswered images; a task's
-        // gets the task's own, which go with the prompt it restates.
+        // A chat's fresh conversation gets the unanswered images, and a
+        // task's gets the task's own, which go with the prompt it restates.
         let chart = arko_ai::Image::new_base64("Y2hhcnQ=", "image/png");
         task.initial_task_images = vec![chart.clone()];
         assert_eq!(seed_images(&task, true).len(), 1);

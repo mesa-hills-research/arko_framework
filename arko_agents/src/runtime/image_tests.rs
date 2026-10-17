@@ -369,7 +369,7 @@ fn png(width: u32, height: u32) -> ai::Image {
     ai::Image::from_bytes(&bytes, "image/png")
 }
 
-/// Images over the model's limits are shrunk to fit them; one that can't be
+/// Images over the model's limits are shrunk to fit them. One that can't be
 /// read to shrink it, or that the model can't take (a URL on Anthropic), is
 /// left out with a line saying why, without losing the others or the text.
 #[test]

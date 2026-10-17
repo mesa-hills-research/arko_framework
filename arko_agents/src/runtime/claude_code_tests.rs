@@ -675,7 +675,7 @@ fn histories(fake: &Fake) -> Vec<Vec<String>> {
 }
 
 /// Cut back to the follow-up, the session resumes at the reply before it
-/// and gets the new message in its place; a branch copies the session up
+/// and gets the new message in its place. A branch copies the session up
 /// to there into its own, and the original goes on with all of it.
 #[tokio::test]
 async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
@@ -744,7 +744,7 @@ async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
 }
 
 /// The reply and the thinking stream as Claude Code streams them, and the
-/// complete messages don't repeat them; Claude Code's retries are reported
+/// complete messages don't repeat them. Claude Code's retries are reported
 /// as the runtime reports its own.
 #[tokio::test]
 async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
@@ -2390,7 +2390,7 @@ async fn a_failed_login_pauses_as_non_retryable() {
         let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
         let mut run = start(task);
         // Claude Code's retry is reported first (an error needing no
-        // decision); the pause's error follows.
+        // decision), and the pause's error follows.
         let events = run
             .events_until(|event| {
                 matches!(

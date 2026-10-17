@@ -37,7 +37,7 @@ const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 pub(crate) const CACHE_PING: &str =
     "Reply with the single word ok. This message only checks the connection.";
 
-/// What a prompt-cache refresh sent and cost; see
+/// What a prompt-cache refresh sent and cost. See
 /// [`AgentRuntime::refresh_prompt_cache`].
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -130,7 +130,7 @@ impl AgentRuntime {
     }
 
     /// Gives `sink` the images the tool calls of the tasks this runtime runs
-    /// return, keyed by each call's ID; see
+    /// return, keyed by each call's ID. See
     /// [`ToolImageSink`](crate::tool::ToolImageSink).
     pub fn with_tool_image_sink(mut self, sink: Arc<dyn crate::tool::ToolImageSink>) -> Self {
         self.image_sink = Some(sink);

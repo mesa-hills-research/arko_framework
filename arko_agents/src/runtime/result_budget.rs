@@ -143,10 +143,12 @@ pub(crate) fn request_bytes_of(
 /// the tokens only, which lowers it. arko's runtime passes the input its
 /// requests' images leave (their estimated tokens taken off). A Claude Code
 /// model's requests also hold Claude Code's own prompt and tools, which the
-/// ratio absorbs, so it runs low there. `None` when either is zero. The ratio arko's runtime estimates requests by, and what
+/// ratio absorbs, so it runs low there. `None` when either is zero.
+///
+/// This is the ratio arko's runtime estimates requests by, and the one
 /// [`AgentEvent::ModelRequestStarted`](crate::runtime::event::AgentEvent::ModelRequestStarted)
-/// reports; [`DEFAULT_BYTES_PER_TOKEN`] before a task's first answered
-/// request.
+/// reports. Before a task's first answered request,
+/// [`DEFAULT_BYTES_PER_TOKEN`] stands in.
 pub fn calibrated_bytes_per_token(request_bytes: usize, input_tokens: usize) -> Option<f64> {
     calibrated_ratio(request_bytes, input_tokens)
 }

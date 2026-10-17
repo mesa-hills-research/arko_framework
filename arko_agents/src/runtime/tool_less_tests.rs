@@ -87,7 +87,7 @@ async fn an_agent_offered_no_tools_makes_requests_without_tools() {
 }
 
 /// A chat whose conversation holds two questions, the second with an
-/// image, unanswered; a handover is set.
+/// image, unanswered, and a handover set.
 fn chat_with_history() -> (
     AgentLoop,
     mpsc::Receiver<AgentEvent>,

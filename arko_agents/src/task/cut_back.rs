@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{Task, TaskState};
 use crate::error::ArkoAgentsError;
 
-/// What a message the host sent to a task was; see [`Task::user_turns`].
+/// What a message the host sent to a task was. See [`Task::user_turns`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserTurnKind {
@@ -21,7 +21,7 @@ pub enum UserTurnKind {
     ContextUpdate,
 }
 
-/// A message the host sent to a task; see [`Task::user_turns`].
+/// A message the host sent to a task. See [`Task::user_turns`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserTurn {
     /// Its index in the task's conversation, which [`Task::cut_back`] and
@@ -231,7 +231,7 @@ impl Task {
 
     /// Where a cut back to just before message `index` leaves the Claude
     /// Code session: resumed at the last entry before it, with the host's
-    /// messages after that entry sent again; or, with no entry before it,
+    /// messages after that entry sent again, or, with no entry before it,
     /// a new session.
     fn cut_claude_code_session(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
         if self.claude_code_session.is_none() {
@@ -304,9 +304,10 @@ mod tests {
             .unwrap()
     }
 
-    /// A conversation of two turns: the prompt (with environment details),
-    /// a reply; a follow-up with an image, a call, its result, a context
-    /// update, a reply; and a runtime note.
+    /// A conversation of two turns and a runtime note. The first turn is the
+    /// prompt (with environment details) and a reply. The second is a
+    /// follow-up with an image, a call, its result, a context update and a
+    /// reply.
     fn conversation(task: &mut Task) {
         let messages = &mut task.conversation;
         messages.add_user_message("Plan a trip.\n\n# Initial Environment Information\ncwd: /w");
@@ -353,7 +354,7 @@ mod tests {
     }
 
     /// The cut leaves what came before the message, and the task ready for
-    /// a follow-up; the usage stays, the context size starts over.
+    /// a follow-up. The usage stays, and the context size starts over.
     #[test]
     fn a_cut_leaves_the_conversation_before_the_message() {
         let mut task = task();
@@ -411,7 +412,7 @@ mod tests {
     }
 
     /// A Claude Code session resumes at the entry before the cut, and the
-    /// host's messages after that entry go again; without the model's
+    /// host's messages after that entry go again. Without the model's
     /// entries, the cut is refused.
     #[test]
     fn a_claude_code_session_resumes_at_the_entry_before_the_cut() {

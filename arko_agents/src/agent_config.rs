@@ -575,7 +575,7 @@ pub struct AgentToolConfig {
     /// the same reply another meaning.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_reply_ends_task: bool,
-    /// The agent is a chat (off by default; the `AgentToolConfig::chat()`
+    /// The agent is a chat (off by default, and the `AgentToolConfig::chat()`
     /// constructor makes one): it is offered no tools, not even `complete_task`, and its
     /// reply in text ends its task, as with
     /// [`text_reply_ends_task`](Self::text_reply_ends_task). Hosts give it
@@ -669,7 +669,7 @@ fn default_auto_approve_tool_use_false() -> bool {
 
 impl AgentToolConfig {
     /// A chat's tool configuration: no tools, and a reply in text ends the
-    /// task; see the `chat` field.
+    /// task. See the `chat` field.
     pub fn chat() -> Self {
         Self {
             available_tool_names: Vec::new(),

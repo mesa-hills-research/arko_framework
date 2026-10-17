@@ -13,7 +13,7 @@ const FALLBACK_OUTPUT_CAP: usize = 1_024;
 impl AgentLoop {
     /// Sends the task's next request (system prompt, tools, conversation) with
     /// a short ping after it and the output capped where the provider
-    /// allows, so the provider reads the cached prefix and keeps it; the
+    /// allows, so the provider reads the cached prefix and keeps it. The
     /// reply is discarded and the task is unchanged. A task waiting with
     /// calls of the model's that have no results yet (paused for an
     /// approval) can't take a message after them: its last request goes
