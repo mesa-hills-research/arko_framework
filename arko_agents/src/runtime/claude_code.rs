@@ -1877,6 +1877,12 @@ impl ClaudeCodeRun {
     ) -> Result<SessionEnd, ArkoAgentsError> {
         self.retrying_since = None;
         self.streamed_bytes = (0, 0);
+        // Message IDs are a launch's own: what an earlier launch streamed
+        // says nothing about this one's messages.
+        self.streaming = None;
+        self.response = None;
+        self.streamed.clear();
+        self.streamed_text.clear();
         // A compaction due as the session starts (asked for while the task
         // waited, or the conversation's last turn ended over the threshold)
         // comes first, and the task's input follows Claude Code's summary.

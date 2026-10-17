@@ -538,6 +538,42 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
     );
 }
 
+/// A launch's message IDs are its own: after an answer relaunches Claude
+/// Code (whose IDs may start over), a reply whose ID an earlier launch
+/// streamed is still sent to the host.
+#[tokio::test]
+async fn a_relaunch_s_replies_reach_the_host_whatever_their_ids() {
+    let fake = Fake::new(json!([
+        [
+            {"text": "Let me ask.", "stream": true},
+            {"tool": "mcp__arko__ask_user", "input": {"questions": "Blue or green?"}},
+        ],
+        [{"text": "Noted your colour."}, complete("Noted")],
+    ]));
+    let task = Task::new(
+        config(&fake, &["ask_user"]),
+        "Pick a colour.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    run.events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "Blue.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, events) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("argv").len(), 2);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::AssistantResponseChunk(text) if text == "Noted your colour."
+    )));
+}
+
 /// Context for the model once it has been asked for context before.
 struct SecondUpdate {
     asked: std::sync::atomic::AtomicUsize,
