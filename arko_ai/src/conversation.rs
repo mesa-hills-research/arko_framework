@@ -61,7 +61,7 @@ pub struct Conversation {
     ///
     /// The backend returns `x-codex-turn-state` on its responses. Like Codex,
     /// arko keeps the first token of a turn and echoes it, unchanged, on
-    /// every later ChatGPT OAuth request of the same turn: tool-result
+    /// every later ChatGPT OAuth request of the same turn, including tool-result
     /// follow-ups and retries. It is never sent in a different turn.
     ///
     /// A turn starts at a user message that holds no tool results. Adding
@@ -230,7 +230,7 @@ impl Conversation {
     /// the request-level effort, earlier turns keep their cache.
     ///
     /// Supported for OpenRouter models that accept mid-conversation effort
-    /// changes. Support is per model: OpenRouter names Claude Fable 5.1 and
+    /// changes. Support is per model. OpenRouter names Claude Fable 5.1 and
     /// OpenAI GPT-6 Astra as the first, and Claude Opus 5 as accepting them
     /// too, and rejects models without support with a 400
     /// (<https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#mid-conversation-effort>).
@@ -294,10 +294,10 @@ impl Conversation {
     /// and after executing the requested tools locally.
     ///
     /// Each provider serializes tool results in its native format:
-    /// - **OpenAI**: `function_call_output` input entries
-    /// - **Anthropic**: `tool_result` content blocks in a user message
-    /// - **Gemini**: `function_result` steps in the Interactions API
-    ///   `input`, correlated via `call_id`
+    /// - OpenAI uses `function_call_output` input entries.
+    /// - Anthropic uses `tool_result` content blocks in a user message.
+    /// - Gemini uses `function_result` steps in the Interactions API
+    ///   `input`, correlated via `call_id`.
     ///
     /// [`add_assistant_message_from_response`]: Self::add_assistant_message_from_response
     pub fn add_tool_results(&mut self, results: Vec<ToolResult>) -> &mut Self {
@@ -330,14 +330,14 @@ impl Conversation {
 
 /// Editing the input of a refused turn (or any earlier input) before sending
 /// it again. A provider that refused a request refuses it again unchanged, so
-/// the input has to change: rephrase or remove the user's message, or redact
+/// the input has to change. Rephrase or remove the user's message, or redact
 /// a tool result the model or a filter objected to. Edits that end a turn's
 /// history early also remove the messages after the edited one (the refused
 /// turn and anything after it). Tool calls and their results always stay
 /// paired. A ChatGPT turn-state token tied to an edited turn start is no
 /// longer echoed (see [`openai_turn_state`](Self::openai_turn_state)).
 impl Conversation {
-    /// Index of the last user turn: the last user message holding no tool
+    /// Index of the last user turn, the last user message holding no tool
     /// results.
     pub fn last_user_turn(&self) -> Option<usize> {
         self.messages
@@ -377,7 +377,7 @@ impl Conversation {
     /// and its result stay paired. Returns the index of the message holding
     /// it. Messages after it are kept. Truncate `messages` to drop them.
     ///
-    /// Only the text is redacted: images the result holds
+    /// Only the text is redacted. Images the result holds
     /// ([`ToolResult::images`]) are kept. Remove those separately, with the
     /// message's other images, through [`Message::remove_images`].
     pub fn redact_tool_result(&mut self, call_id: &str, replacement: &str) -> Result<usize, Error> {

@@ -1,7 +1,7 @@
 //! Price variants that depend on how a request was processed.
 //!
 //! [`ModelPricing`] holds a model's standard list prices. The types here
-//! describe documented modifiers: processing tiers ([`TierPricing`]), data
+//! describe documented modifiers for processing tiers ([`TierPricing`]), data
 //! residency ([`ResidencyPricing`]) and dated price changes
 //! ([`ScheduledPricing`]). [`UsageInfo::calculate_cost`] applies them using
 //! the values a provider reports for the call (falling back to what was
@@ -21,7 +21,7 @@ pub enum ServiceTier {
     Standard,
     /// Lower-priority, discounted processing (OpenAI `flex`, Gemini `flex`).
     Flex,
-    /// Premium low-latency processing: OpenAI Fast mode (formerly Priority,
+    /// Premium low-latency processing through OpenAI Fast mode (formerly Priority,
     /// requested or echoed as `priority` or `fast`) and Anthropic fast mode
     /// (`speed: "fast"`).
     Fast,
@@ -149,7 +149,7 @@ impl ScheduledPricing {
 }
 
 impl ModelPricing {
-    /// The prices in effect at `at`: the latest scheduled period that has
+    /// The prices in effect at `at`, from the latest scheduled period that has
     /// started, else the base prices.
     pub fn at(&self, at: SystemTime) -> &ModelPricing {
         let now = unix_seconds(at);

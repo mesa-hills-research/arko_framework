@@ -1,17 +1,18 @@
-//! Failover between ChatGPT accounts: an ordered list of ChatGPT OAuth
+//! Failover between ChatGPT accounts uses an ordered list of ChatGPT OAuth
 //! sign-ins (for example two Codex `auth.json` files) behind one OpenAI
 //! provider. Requests go to the first account that can serve them. One that
 //! reaches its usage limit is set aside until it resets, or until a status
 //! check finds it usable again, and the request goes to the next account at
 //! once.
 //!
-//! What the ChatGPT backend does, from openai/codex (`codex-rs`, ac9b5b8):
+//! The ChatGPT backend behaves as follows, as shown in openai/codex
+//! (`codex-rs`, ac9b5b8):
 //!
 //! - A used-up plan answers HTTP 429 with `error.type: "usage_limit_reached"`
 //!   and the reset time in `resets_at` (`codex-api/src/api_bridge.rs`), and
 //!   credit or spend walls with codes such as `credit_balance_exhausted` or
 //!   `usage_not_included`. Codex stops the turn on either. No retry helps.
-//! - Credits need no opt-in: Codex sends no flag, and counts an account
+//! - Credits need no opt-in. Codex sends no flag, and counts an account
 //!   whose credits are left (or unlimited) as usable when its plan's windows
 //!   are used up (`tui/src/chatwidget/backend_banners.rs`,
 //!   `update_backend_banner`). So an account with credits keeps serving
@@ -23,12 +24,12 @@
 //!   the credits, spend control and the reached-limit type. A manual usage
 //!   reset shows there at once.
 //! - The `x-codex-turn-state` routing token belongs to the account that
-//!   issued it: Codex drops it when the signed-in account changes
+//!   issued it. Codex drops it when the signed-in account changes
 //!   (`core/src/client.rs`, the `owner_changed` reset). Codex has no
 //!   evidence either way on whether one account accepts another's encrypted
 //!   reasoning (it never switches accounts within a conversation and handles
-//!   no encrypted-content error), so a switch takes the safe path here: a
-//!   request replays only the reasoning the serving account produced.
+//!   no encrypted-content error), so after a switch a request replays only
+//!   the reasoning the serving account produced.
 
 use super::{OpenAIAuth, OpenAIClient};
 use crate::{
@@ -74,7 +75,7 @@ const USAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// remembered (about 40 MB). Past it the record starts over.
 const MAX_ORIGINS: usize = 1 << 20;
 
-/// One ChatGPT OAuth account of a [`ChatGptAccounts`] list: a label (used in
+/// One ChatGPT OAuth account of a [`ChatGptAccounts`] list, with a label (used in
 /// events, logs and [`ModelCallUsage::account`](crate::usage::ModelCallUsage::account),
 /// never a secret) and the client holding its credentials, which refreshes
 /// them on its own (with a Codex `auth.json`, kept in step with the file).
@@ -127,9 +128,9 @@ impl ChatGptAccount {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ChatGptAccountEvent {
-    /// The backend refused `account`: its usage limit (or its credits) ran
-    /// out. It is set aside until `resets_at`, when known, or until a status
-    /// check finds it usable. Sent once per setting aside: refusals while it
+    /// The backend refused `account` because its usage limit (or its credits)
+    /// ran out. It is set aside until `resets_at`, when known, or until a status
+    /// check finds it usable. Sent once per setting aside. Refusals while it
     /// is set aside (other requests under way, a retry refused again) send
     /// nothing.
     Exhausted {
@@ -144,22 +145,22 @@ pub enum ChatGptAccountEvent {
         to: String,
         reason: SwitchReason,
     },
-    /// An exhausted account serves requests again: the backend accepted a
+    /// An exhausted account serves requests again because the backend accepted a
     /// request to it, or it was [marked usable](ChatGptAccounts::mark_usable).
     Usable {
         account: String,
         reason: UsableReason,
     },
-    /// Every account is exhausted: requests fail with a usage-limit error
+    /// Every account is exhausted, so requests fail with a usage-limit error
     /// until the earliest known reset (`resets_at`), unless an account is
     /// found usable sooner.
     AllExhausted { resets_at: Option<SystemTime> },
     /// A report on `account` (a response's usage headers, or a usage check)
-    /// says a plan window is used up while credits are left: the backend is
+    /// says a plan window is used up while credits are left, so the backend is
     /// drawing on them. Sent once until a report says it no longer is (no
     /// window used up, or no credits left) or the account is
     /// [marked usable](ChatGptAccounts::mark_usable). Reports are taken in
-    /// the order they arrived: a response's usage headers arrive when its
+    /// the order they arrived. A response's usage headers arrive when its
     /// request is accepted, so the headers of a request accepted before a
     /// usage check (such as after a manual usage reset), or before another
     /// request's headers, change nothing when the response ends later.
@@ -265,7 +266,7 @@ pub struct ChatGptUsageStatus {
     /// `plan_type`, such as `pro`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
-    /// `rate_limit.allowed`: the plan's own usage lets requests through.
+    /// Whether the plan's own usage lets requests through (`rate_limit.allowed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed: Option<bool>,
     /// `rate_limit.limit_reached`.
@@ -287,8 +288,8 @@ pub struct ChatGptUsageStatus {
     /// `workspace_owner_credits_depleted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_reached_type: Option<String>,
-    /// `rate_limit_reset_credits.available_count`: the manual usage resets
-    /// the account has left.
+    /// The manual usage resets the account has left
+    /// (`rate_limit_reset_credits.available_count`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits_available: Option<u64>,
 }
@@ -356,7 +357,7 @@ impl ChatGptUsageStatus {
     }
 
     /// Whether the account can serve requests, as Codex decides that its
-    /// ordinary usage has recovered: the plan allows requests or credits are
+    /// ordinary usage has recovered. The plan allows requests or credits are
     /// left, no spend control is reached and no limit type is reported.
     /// `None` when the response doesn't say (no `rate_limit.allowed`).
     pub fn usable(&self) -> Option<bool> {
@@ -391,7 +392,7 @@ pub struct ChatGptAccountStatus {
     /// [`ChatGptAccountEvent::Exhausted`].
     pub exhausted: bool,
     /// Set aside, but the next request tries it (with why it may be usable
-    /// again): it is taken back once the backend accepts a request.
+    /// again). It is taken back once the backend accepts a request.
     pub retry: Option<UsableReason>,
     pub exhausted_since: Option<SystemTime>,
     /// When the backend said the limit resets, if it did.
@@ -406,8 +407,8 @@ pub struct ChatGptAccountStatus {
     /// The last usage-endpoint report, and when it came.
     pub usage: Option<ChatGptUsageStatus>,
     pub checked_at: Option<SystemTime>,
-    /// The newest report says a window is used up and credits are left:
-    /// the backend is drawing on them. See
+    /// The newest report says a window is used up and credits are left,
+    /// so the backend is drawing on them. See
     /// [`ChatGptAccountEvent::UsingCredits`].
     pub drawing_credits: bool,
 }
@@ -584,7 +585,7 @@ type Observer = Arc<dyn Fn(&ChatGptAccountEvent) + Send + Sync>;
 /// [`LLMClient::with_chatgpt_accounts`](crate::LLMClient::with_chatgpt_accounts).
 ///
 /// - Each request goes to the first account not set aside. An account is
-///   set aside only when the backend refuses it: a usage limit
+///   set aside only when the backend refuses it because of a usage limit
 ///   (`usage_limit_reached`) or a credit, spend or quota wall. An account
 ///   with credits keeps serving on them, as in Codex.
 /// - A refused request goes to the next account at once (nothing was

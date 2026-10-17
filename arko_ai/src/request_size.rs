@@ -1,5 +1,5 @@
-//! How large a request is, by section: what a host shows as the split of
-//! a conversation's context, estimated from bytes without a tokenizer.
+//! How large a request is, by section, estimated from bytes without a
+//! tokenizer. A host can show this as the split of a conversation's context.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use crate::message::{Content, Image, Message, Role};
 use crate::model::Model;
 use crate::tool::ToolConfig;
 
-/// The size of a request by section: bytes of text, which a bytes-per-token
+/// The size of a request by section, in bytes of text, which a bytes-per-token
 /// ratio turns into tokens, and images, counted with their estimated
 /// tokens. The text sections add up to the request's text as this crate
 /// sends it, before each provider's own framing. Reasoning a provider
@@ -24,15 +24,15 @@ pub struct RequestSizes {
     pub system_prompt: usize,
     /// Bytes of the tool definitions, as JSON.
     pub tool_definitions: usize,
-    /// Bytes of the text in user messages: the user's own messages and
+    /// Bytes of the text in user messages, including the user's own messages and
     /// everything else sent as one (notes, context updates, an agent
     /// runtime's messages).
     pub user_text: usize,
     /// Bytes of the model's text in assistant messages.
     pub assistant_text: usize,
-    /// Bytes of the model's tool calls: each tool's name and arguments.
+    /// Bytes of the model's tool calls, counting each tool's name and arguments.
     pub tool_calls: usize,
-    /// Bytes of tool results: each tool's name, output and image labels.
+    /// Bytes of tool results, counting each tool's name, output and image labels.
     pub tool_results: usize,
     /// How many images the request holds, in user messages and tool
     /// results.
@@ -84,7 +84,7 @@ impl RequestSizes {
     }
 
     /// [`of_messages`](Self::of_messages) without the images' tokens
-    /// (`image_tokens` stays 0, `images` counts them): for what needs only
+    /// (`image_tokens` stays 0, `images` counts them), for what needs only
     /// the text, without reading each image's header.
     pub fn text_of_messages(
         conversation: &Conversation,
@@ -162,8 +162,8 @@ impl RequestSizes {
         (bytes as f64 / bytes_per_token).ceil() as usize
     }
 
-    /// The request's estimated input tokens: its text at `bytes_per_token`,
-    /// and its images' estimated tokens.
+    /// The request's estimated input tokens, adding its text at
+    /// `bytes_per_token` to its images' estimated tokens.
     pub fn estimated_tokens(&self, bytes_per_token: f64) -> usize {
         Self::tokens(self.text_bytes(), bytes_per_token) + self.image_tokens
     }

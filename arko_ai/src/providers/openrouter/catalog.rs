@@ -86,10 +86,10 @@ pub struct OpenRouterReasoningInfo {
 /// Which catalog endpoint a catalog came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogSource {
-    /// `GET /api/v1/models`: every public text model.
+    /// Every public text model, from `GET /api/v1/models`.
     Public,
-    /// `GET /api/v1/models/user`: filtered by the key's provider preferences,
-    /// privacy settings and guardrails.
+    /// Models from `GET /api/v1/models/user`, filtered by the key's provider
+    /// preferences, privacy settings and guardrails.
     User,
     /// Loaded from JSON supplied by the caller.
     Supplied,

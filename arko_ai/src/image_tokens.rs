@@ -1,6 +1,6 @@
 //! How many input tokens an image takes, by the rule of the model's
-//! provider: what a host shows as the images' share of a request, and what
-//! request estimates count for them.
+//! provider. Hosts and request estimates use this as the images' share of a
+//! request.
 
 use crate::message::Image;
 use crate::model::{Model, Provider};
@@ -10,16 +10,16 @@ use crate::model::{Model, Provider};
 const UNKNOWN_SIZE_TOKENS: usize = 1_600;
 
 impl Model {
-    /// The input tokens `image` takes in a request to this model, by its
-    /// provider's rule:
-    /// - Anthropic (and Claude Code, and OpenRouter's `anthropic/` models):
+    /// Counts the input tokens `image` takes in a request to this model using
+    /// its provider's rule:
+    /// - Anthropic (and Claude Code, and OpenRouter's `anthropic/` models) uses
     ///   a token per 28 × 28 pixels, after scaling the image down to the
     ///   model's limit, 2,576 pixels on the long side and 4,784 tokens for
     ///   Claude 4.7 and later, 1,568 and 1,568 for earlier models.
-    /// - OpenAI: patches of 32 × 32 pixels, after the model's own scaling,
+    /// - OpenAI uses patches of 32 × 32 pixels, after the model's own scaling,
     ///   times its multiplier (1.2 for current models), or tiles of 512
     ///   pixels for older models.
-    /// - Google: 258 tokens for an image up to 384 pixels a side, else 258
+    /// - Google uses 258 tokens for an image up to 384 pixels a side, else 258
     ///   per tile of about two thirds of its shorter side.
     ///
     /// An image whose size can't be read (a URL, a format whose header isn't

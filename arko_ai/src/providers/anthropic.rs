@@ -44,7 +44,7 @@ impl AnthropicClient {
     /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
     /// `None` (the default) waits as long as the connection stays open. See
     /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
-    /// before setting one: models can think for a long time without sending
+    /// before setting one. Models can think for a long time without sending
     /// anything, so a value must be generous.
     pub fn with_stream_idle_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.stream_idle_timeout = timeout;

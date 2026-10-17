@@ -1,6 +1,6 @@
 //! Images kept outside the JSON they belong to. A host that saves
 //! conversations often (a task journal, checkpoints) saves each image once,
-//! in a store of its own, and writes a reference in its place: inside
+//! in a store of its own, and writes a reference in its place. Inside
 //! [`with_image_store`], an [`Image::Base64`] serializes as
 //! `{"Base64": {"mime_type": .., "stored": REFERENCE}}`, and such JSON reads
 //! back through the store. Outside, images serialize with their data, as
@@ -8,7 +8,7 @@
 //!
 //! An image the store can't give back (its file was deleted, or is damaged)
 //! reads as a placeholder ([`Image::unavailable`]) with the reason, so the
-//! rest of the value still loads: arko_agents' tasks turn placeholders into
+//! rest of the value still loads. arko_agents' tasks turn placeholders into
 //! a line of text saying the image is gone ([`MISSING_IMAGE_TYPE`]).
 
 use std::cell::RefCell;
@@ -37,7 +37,7 @@ thread_local! {
     static STORE: RefCell<Option<Arc<dyn ImageStore>>> = const { RefCell::new(None) };
 }
 
-/// Runs `f` with `store` as the thread's image store: images serialized in
+/// Runs `f` with `store` as the thread's image store. Images serialized in
 /// `f` are saved in it and written as references, and references read in
 /// `f` are loaded from it. The previous store is back afterwards.
 pub fn with_image_store<R>(store: Arc<dyn ImageStore>, f: impl FnOnce() -> R) -> R {
@@ -54,7 +54,7 @@ pub fn with_image_store<R>(store: Arc<dyn ImageStore>, f: impl FnOnce() -> R) ->
 }
 
 /// A hash of `data`'s length and of 32 slices of it spread evenly over it
-/// (all of it when short): a cheap stand-in for an image's content, to find
+/// (all of it when short). A cheap stand-in for an image's content, to find
 /// candidates that are then compared in full, or where an image only needs
 /// telling apart from the images around it.
 pub fn sample_hash(data: &str) -> u64 {
@@ -76,8 +76,8 @@ pub fn sample_hash(data: &str) -> u64 {
     hasher.finish()
 }
 
-/// The MIME type of a placeholder for an image a store couldn't give back:
-/// its data is the reason.
+/// The MIME type of a placeholder for an image a store couldn't give back.
+/// Its data is the reason.
 pub const MISSING_IMAGE_TYPE: &str = "application/x-missing-image";
 
 impl Image {

@@ -21,8 +21,8 @@ use image::{AnimationDecoder as _, DynamicImage, ImageDecoder as _, ImageFormat,
 use crate::message::Image;
 use crate::model::{Model, Provider};
 
-/// What a model's provider takes of images, as its documentation gives it,
-/// with some room: inline images, by their base64 data.
+/// Limits on inline images' base64 data, from the model provider's
+/// documentation with some room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageLimits {
     /// The most bytes of one image's base64 data.
@@ -43,7 +43,7 @@ pub struct ImageLimits {
     pub animations: bool,
 }
 
-/// A limit on the squares of `size` pixels an image covers:
+/// A limit on the squares of `size` pixels an image covers, with
 /// `⌈width / size⌉ × ⌈height / size⌉` at most `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchLimit {
@@ -60,7 +60,7 @@ impl PatchLimit {
 
 const MIB: usize = 1024 * 1024;
 
-/// The most memory decoding one image may take: an image larger than this
+/// The most memory decoding one image may take. An image larger than this
 /// once decoded is too large to shrink.
 pub const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -116,7 +116,7 @@ const GOOGLE: ImageLimits = ImageLimits {
 };
 
 impl Model {
-    /// What this model's provider takes of images ([`ImageLimits`]):
+    /// The image limits for this model's provider ([`ImageLimits`]). Uses
     /// Anthropic's for Anthropic and Claude Code models and OpenRouter's
     /// `anthropic/` ones, OpenAI's and Google's likewise, and Anthropic's,
     /// the strictest, for other OpenRouter models.
@@ -133,7 +133,7 @@ impl Model {
         }
     }
 
-    /// `image` as this model can be sent it: `None` when it can be sent as
+    /// `image` as this model can be sent it. Returns `None` when it can be sent as
     /// it is, the image converted or shrunk to the model's
     /// [`image_limits`](Self::image_limits) otherwise (see [`fit_image`]),
     /// or why it can't be sent (the reasons of
@@ -147,8 +147,8 @@ impl Model {
     }
 
     /// Whether [`sendable_image`](Self::sendable_image) would send `image`,
-    /// as it is or fitted, judged from its header without decoding it:
-    /// cheap enough to check every recipient of an image before fitting it
+    /// as it is or fitted, judged from its header without decoding it. This
+    /// is cheap enough to check every recipient of an image before fitting it
     /// for one. `Err` with the reason it can't go.
     pub fn check_image(&self, image: &Image) -> Result<(), String> {
         if let Some(reason) = self.image_refusal(image) {
@@ -177,7 +177,7 @@ impl Model {
     }
 }
 
-/// `image` fitted to `limits`: `None` when it can go as it is (and for an
+/// `image` fitted to `limits`. Returns `None` when it can go as it is (and for an
 /// image by URL, whose size isn't known here). Otherwise the image decoded,
 /// turned upright (its EXIF orientation applied), scaled down to
 /// [`max_long_edge`](ImageLimits::max_long_edge) and

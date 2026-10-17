@@ -4,7 +4,7 @@
 //! `std::process::Command` searches `PATH` only for `.exe` files, and a
 //! launcher script would pass every argument through `cmd.exe`, whose quoting
 //! breaks JSON and multi-line prompts. So the script is followed to the
-//! package entry next to it: the native `bin/claude.exe` of newer releases,
+//! package entry next to it, the native `bin/claude.exe` of newer releases,
 //! or `cli.js` (run with `node`) of older ones. Native installs are an `.exe`
 //! already. Elsewhere the name is used as given.
 

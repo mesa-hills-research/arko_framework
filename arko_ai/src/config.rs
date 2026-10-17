@@ -14,7 +14,7 @@ pub enum Verbosity {
 /// YAML config (for example `{"max_tokens": 4096}`) is valid.
 ///
 /// Configs saved by earlier versions carry a `temperature_specified` flag next
-/// to `temperature`. They still load: `temperature_specified: false` means no
+/// to `temperature`. They still load. `temperature_specified: false` means no
 /// temperature, whatever `temperature` holds.
 ///
 /// One config can serve models of several providers. A setting the model's
@@ -35,10 +35,10 @@ pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Output token limit. `None` (the default) lets the model produce up to
-    /// its maximum: OpenAI (API key), Anthropic and Gemini requests send the
+    /// its maximum. OpenAI (API key), Anthropic and Gemini requests send the
     /// model's registered maximum, since Anthropic requires a value. OpenRouter
     /// requests send none. ChatGPT OAuth requests never send one, because the
-    /// backend rejects `max_output_tokens`: a set limit is ignored there, with
+    /// backend rejects `max_output_tokens`. A set limit is ignored there, with
     /// a warning logged once.
     pub max_tokens: Option<usize>,
     pub verbosity: Option<Verbosity>,
@@ -63,20 +63,20 @@ pub struct GenerationConfig {
     /// Caching is on by default. Turning it off takes effect where the
     /// provider offers a switch. Where caching is implicit it stays on:
     ///
-    /// - **Anthropic**, and Claude models on OpenRouter: caching happens only
+    /// - On Anthropic and Claude models on OpenRouter, caching happens only
     ///   through the `cache_control` this client sends while caching is
     ///   enabled, so turning it off stops caching.
-    /// - **OpenAI GPT-5.6 and GPT-6 with an API key**: enabled sends
+    /// - On OpenAI GPT-5.6 and GPT-6 with an API key, enabled sends
     ///   `prompt_cache_options.mode: "implicit"`, disabled `"explicit"` with
     ///   no breakpoints, so nothing is read from or written to the cache.
-    /// - **OpenAI models before GPT-5.6**: caching is automatic and can't be
+    /// - On OpenAI models before GPT-5.6, caching is automatic and can't be
     ///   turned off.
-    /// - **ChatGPT OAuth** (any model): the backend caches implicitly and
+    /// - Over ChatGPT OAuth (any model), the backend caches implicitly and
     ///   takes no cache options. Disabled caching is ignored, with a warning
     ///   logged once.
-    /// - **Gemini**: implicit caching, managed by Google. It can't be turned
+    /// - Gemini uses implicit caching, managed by Google. It can't be turned
     ///   off.
-    /// - **OpenRouter**: enabled sends `prompt_cache_key` and, on Claude
+    /// - On OpenRouter, enabled sends `prompt_cache_key` and, on Claude
     ///   models, a top-level `cache_control`. Disabled sends neither, and on
     ///   OpenAI models that bill cache writes (GPT-5.6 and later) also
     ///   `prompt_cache_options.mode: "explicit"`. Other upstreams that cache
@@ -103,7 +103,7 @@ pub struct GenerationConfig {
     ///
     /// Claude 4.6 and later models include 1M context without a beta header, so
     /// the flag is accepted there and sends nothing. Their prices don't depend on
-    /// it: Claude Haiku 5.5 charges more for any prompt over 100,000 tokens, and
+    /// it. Claude Haiku 5.5 charges more for any prompt over 100,000 tokens, and
     /// the other models charge the same rate across the window. The
     /// `context-1m-2025-08-07` beta that gave Claude Sonnet 4 and 4.5 1M context
     /// was retired on 2026-04-30, so the flag is rejected for those models and
@@ -153,8 +153,8 @@ pub struct GenerationConfig {
     /// in place of the provider's
     /// ([`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime)),
     /// for a host that knows how long its route keeps the cache. `None` (the
-    /// default) reports the provider's. Nothing is sent to the provider:
-    /// the setting changes only what arko takes the lifetime to be, such as
+    /// default) reports the provider's. Nothing is sent to the provider.
+    /// The setting changes only what arko takes the lifetime to be, such as
     /// for the automatic limit of arko_workflows' `wait_for_message`. A
     /// request that isn't cached (a model without caching, or caching
     /// turned off where the provider allows it) is still reported as
@@ -430,10 +430,10 @@ impl GenerationConfig {
         self
     }
 
-    /// The tool configuration a request sends: `tool_config` when it lists
-    /// at least one tool. A configuration with no tools sends nothing, on
-    /// every provider: no tool list, tool choice or parallel-call setting,
-    /// which providers refuse without tools.
+    /// The tool configuration a request sends, `tool_config` when it lists
+    /// at least one tool. On every provider, a configuration with no tools
+    /// omits the tool list, tool choice and parallel-call setting because
+    /// providers refuse them without tools.
     pub fn offered_tools(&self) -> Option<&ToolConfig> {
         self.tool_config
             .as_ref()

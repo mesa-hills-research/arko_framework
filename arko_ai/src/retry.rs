@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// The longest delay hint arko_ai takes from a provider response
 /// (`Retry-After`, rate-limit reset headers, `retry_after`/`resets_at` in an
-/// error body): 30 days, longer than any real reset window (ChatGPT usage
+/// error body), 30 days, longer than any real reset window (ChatGPT usage
 /// limits reset within a week). Longer hints are capped to it, so callers can
 /// add a hint to the current time without overflowing.
 pub const MAX_SERVER_DELAY_HINT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -19,7 +19,7 @@ pub const MAX_SERVER_DELAY_HINT: Duration = Duration::from_secs(30 * 24 * 60 * 6
 ///
 /// For attempt `n` (starting at 1) the backoff cap is
 /// `min(initial * 2^(n-1), max)`. With jitter the delay is drawn from
-/// `[cap / 2, cap]`. A server hint (such as `Retry-After`) is a minimum: the
+/// `[cap / 2, cap]`. A server hint (such as `Retry-After`) is a minimum. The
 /// delay is never shorter than the hint, and with jitter up to `cap / 2` is
 /// added above it so callers sharing a reset time do not retry in lockstep.
 /// A server hint may exceed `max`.

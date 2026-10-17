@@ -1,4 +1,4 @@
-//! Response and stream parsing: text, refusals, tool calls, verbatim
+//! Response and stream parsing for text, refusals, tool calls, verbatim
 //! `reasoning_details`, stop reasons, usage and cost.
 //!
 //! Unknown fields and enum values are ignored. OpenRouter adds them without

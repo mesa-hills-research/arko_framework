@@ -3,7 +3,7 @@
 //!
 //! [`ClaudeSession::start`] runs `claude` with `--input-format stream-json
 //! --output-format stream-json` and keeps it running for a whole
-//! conversation: each [`ClaudeSession::send`] starts a turn, and
+//! conversation. Each [`ClaudeSession::send`] starts a turn, and
 //! [`ClaudeSession::receive_turn`] collects its messages up to the turn's
 //! [`ResultMessage`]. Over the same pipes the CLI asks the host to approve
 //! tool calls ([`PermissionHandler`]), runs host hook callbacks
@@ -12,8 +12,8 @@
 //! permission mode mid-session.
 //!
 //! The CLI runs as published, under the user's own login (or an API key in
-//! its environment). This client does not touch credentials. Model and
-//! effort are fixed per process: to change the effort, start a new session
+//! its environment). This client does not touch credentials. Effort is
+//! fixed per process. To change it, start a new session
 //! with [`SessionStart::Resume`].
 //!
 //! The protocol follows Anthropic's Python Agent SDK, which bundles the same

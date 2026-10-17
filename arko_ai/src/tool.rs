@@ -39,7 +39,7 @@ impl ToolDefinition {
 ///
 /// Contains the function name and parsed arguments. The `id` field is
 /// populated by all supported providers and is used to match results back
-/// to calls: OpenAI (`call_id`), Anthropic (`tool_use` `id`), and Google
+/// to calls on OpenAI (`call_id`), Anthropic (`tool_use` `id`), and Google
 /// Gemini via the Interactions API (`function_call` step `id`). This is
 /// especially important for parallel tool calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub struct ToolCall {
     /// correlation `id`.
     ///
     /// For the OpenAI Responses API, function call output items carry
-    /// two identifiers: an item `id` prefixed with `fc_` and a
+    /// both an item `id` prefixed with `fc_` and a
     /// `call_id` prefixed with `call_`. The `call_id` is stored in
     /// [`id`](Self::id) for result matching, while the `fc_`-prefixed
     /// item identifier is stored here so it can be round-tripped when

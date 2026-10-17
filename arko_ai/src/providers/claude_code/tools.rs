@@ -23,8 +23,8 @@ pub trait ClaudeTool: Send + Sync {
 pub struct ToolOutput {
     pub text: String,
     pub is_error: bool,
-    /// Images sent after the text, as MCP `image` content: base64 images
-    /// only (an image given by URL is sent as a line of text with its URL).
+    /// Base64 images sent after the text, as MCP `image` content. An image
+    /// given by URL is sent as a line of text with its URL.
     pub images: Vec<crate::Image>,
 }
 

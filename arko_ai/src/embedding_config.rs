@@ -23,14 +23,14 @@ pub struct EmbeddingConfig {
     pub output_dimensionality: Option<usize>,
     pub voyage_input_type: Option<VoyageInputType>,
     /// Voyage's `truncation` flag. `None` sends `false` (Voyage's own
-    /// default is `true`). arko never truncates silently: an input over the
-    /// model's per-input token limit fails locally with
+    /// default is `true`). An input over the model's per-input token limit
+    /// fails locally with
     /// `Error::TokenLimitExceeded` before any request, whatever this is set
     /// to, so no input over the limit reaches Voyage to be truncated.
     pub voyage_truncation: Option<bool>,
     /// Hugging Face access token for tokenizers that require authentication.
     /// Never serialized, so a saved config doesn't hold the secret (`Debug`
-    /// redacts it too): after loading a config, set it again with
+    /// redacts it too). After loading a config, set it again with
     /// [`with_hf_token`](Self::with_hf_token), from wherever the application
     /// keeps it (for example an environment variable it reads). A config
     /// saved by an earlier version that holds it still loads it.
