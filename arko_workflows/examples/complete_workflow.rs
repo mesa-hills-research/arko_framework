@@ -68,7 +68,7 @@ const MAX_FOLLOW_UP_ROUNDS: usize = 5;
 #[derive(Debug, Parser)]
 #[command(
     name = "complete_workflow",
-    about = "Three agents write an incident report: memory, messaging, verification, distillation, checkpoints and resume"
+    about = "Three agents write an incident report using memory, messaging, verification, distillation, checkpoints and resume"
 )]
 struct Args {
     /// Directory for the workspace (`workspace/`) and the run directories
@@ -491,7 +491,7 @@ fn chatgpt_oauth_client() -> ExampleResult<LLMClient> {
         return Err(format!("no Codex login at {}", path.display()).into());
     }
     let auth = CodexAuthFile::load(&path)?;
-    println!("credentials: ChatGPT OAuth from {}", path.display());
+    println!("credentials from ChatGPT OAuth in {}", path.display());
     Ok(auth.client()?)
 }
 
@@ -641,7 +641,7 @@ fn describe(workflow: &Workflow) {
             .collect::<Vec<_>>();
         println!("  memory: {}", list(memory));
         println!(
-            "  may message: {}; may be messaged by: {}",
+            "  may message {}, may be messaged by {}",
             list(context.message_recipients(name)),
             list(context.message_senders(name))
         );

@@ -303,7 +303,7 @@ async fn run(args: Args) -> Result<(), String> {
             .is_some()
     {
         return Err(format!(
-            "{} is not empty; choose a new --out directory",
+            "{} is not empty. Choose a new --out directory",
             args.out.display()
         ));
     }
@@ -313,7 +313,7 @@ async fn run(args: Args) -> Result<(), String> {
         .auth_file
         .clone()
         .or_else(CodexAuthFile::default_path)
-        .ok_or("no home directory to find ~/.codex/auth.json in; pass --auth-file")?;
+        .ok_or("no home directory to find ~/.codex/auth.json in. Pass --auth-file")?;
     let tokens = TokenKeeper::load(&auth_path)?;
     fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
     let client = probe_client(tokens.client()?, &args.out, &settings);
@@ -362,7 +362,7 @@ fn plans(args: &Args) -> Result<Vec<Plan>, String> {
     }
     if args.conversations.is_some() {
         return Err(
-            "--conversations doesn't apply with --idle-gap: each gap runs as its own conversation"
+            "--conversations doesn't apply with --idle-gap. Each gap runs as its own conversation"
                 .into(),
         );
     }
@@ -378,7 +378,7 @@ fn plans(args: &Args) -> Result<Vec<Plan>, String> {
                 gap_secs: Some(seconds),
             }),
             Err(_) => Err(format!(
-                "invalid --idle-gap {seconds}: seconds must be 0 or more"
+                "invalid --idle-gap {seconds}. Seconds must be 0 or more"
             )),
         })
         .collect()
@@ -730,7 +730,7 @@ where
         retries += 1;
         let delay = rate_limit_delay(hint, arko_ai::retry::random_sample());
         eprintln!(
-            "conversation {index}: rate limited ({}); retry {retries}/{RATE_LIMIT_RETRIES} in {:.1}s",
+            "conversation {index} was rate limited ({}). Retry {retries}/{RATE_LIMIT_RETRIES} in {:.1}s",
             truncate(&error.to_string(), 160),
             delay.as_secs_f64(),
         );
@@ -1058,7 +1058,7 @@ impl TokenKeeper {
     fn load(path: &Path) -> Result<Arc<Self>, String> {
         let file = CodexAuthFile::load(path).map_err(|e| {
             format!(
-                "cannot use {}: {e}; sign in with Codex first",
+                "cannot use {}: {e}. Sign in with Codex first",
                 path.display()
             )
         })?;
@@ -1154,14 +1154,14 @@ impl ChatGptOAuthStore for TokenKeeper {
         match self.store.save_refreshed(refreshed, id_token) {
             Ok(()) => {
                 self.note(format!(
-                    "access token refreshed; new tokens written to {} (previous contents in its .bak)",
+                    "access token refreshed. New tokens written to {} (previous contents in its .bak)",
                     self.file.path().display()
                 ));
                 Ok(())
             }
             Err(error) => {
                 // The error names the recovery file (never a token).
-                let message = format!("{}; stopping", error_message(&error));
+                let message = format!("{}. Stopping", error_message(&error));
                 self.note(message.clone());
                 *self.unsaved.lock().unwrap() = Some(message);
                 Err(error)
@@ -1483,7 +1483,7 @@ fn write_summary(out: &Path, summary: &Value) -> Result<(), String> {
     }
     let overall = &summary["overall"];
     text.push_str(&format!(
-        "empty response.completed output: {} of {} calls; streamed reasoning items with encrypted_content: {}; rerouted calls: {}; latency {}\n",
+        "empty response.completed output in {} of {} calls, streamed reasoning items with encrypted_content {}, rerouted calls {}, latency {}\n",
         overall["calls_with_empty_completed_output"], overall["successful_calls"],
         overall["streamed_reasoning_items_with_encrypted_content"], overall["rerouted_calls"], overall["latency_ms"]
     ));
@@ -2046,7 +2046,7 @@ mod tests {
             (ours.clone(), "rt_unsaved_2".to_string())
         );
         assert!(error.contains(&recovery.display().to_string()), "{error}");
-        assert!(error.ends_with("; stopping"), "{error}");
+        assert!(error.ends_with(". Stopping"), "{error}");
         assert!(
             !error.contains("rt_unsaved_2") && !error.contains(&ours),
             "no tokens in messages: {error}"

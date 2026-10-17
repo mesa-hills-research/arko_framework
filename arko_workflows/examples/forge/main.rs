@@ -138,7 +138,7 @@ impl std::str::FromStr for ModelSpec {
             Some((id, effort)) => (
                 id.trim(),
                 <Effort as ValueEnum>::from_str(effort.trim(), true).map_err(|_| {
-                    format!("`{effort}` isn't an effort: low, medium, high, xhigh or max")
+                    format!("`{effort}` isn't an effort. Use low, medium, high, xhigh or max")
                 })?,
             ),
             None => (text.trim(), Effort::Xhigh),
@@ -162,7 +162,7 @@ impl std::fmt::Display for ModelSpec {
 #[derive(Debug, Parser)]
 #[command(
     name = "forge",
-    about = "Describe a use case; get an arko workflow that does it"
+    about = "Describe a use case and get an arko workflow that does it"
 )]
 struct Args {
     /// The use case, in your own words.
@@ -466,7 +466,7 @@ async fn main() -> ForgeResult<()> {
                         .ok_or("the crate's package needs a name starting with a letter")?;
                     if !scaffold::depends_on(&dir, &arko) {
                         eprintln!(
-                            "forge: warning: {} doesn't depend on the arko crates in {}, which the agents read",
+                            "forge: {} doesn't depend on the arko crates in {}, which the agents read",
                             dir.display(),
                             arko.display()
                         );
@@ -484,7 +484,7 @@ async fn main() -> ForgeResult<()> {
                                 .map(|name| name.to_string_lossy().into_owned())
                         })
                         .and_then(|name| scaffold::crate_name(&name))
-                        .ok_or("pass --name: the crate needs a name starting with a letter")?;
+                        .ok_or("pass --name. The crate needs a name starting with a letter")?;
                     (output, name)
                 }
             };
@@ -853,7 +853,7 @@ async fn main() -> ForgeResult<()> {
         Some(earlier) if earlier.status == AgentRunStatus::Failed => {
             if let Some(error) = deliberation::login_failure(&state_dir, &earlier) {
                 eprintln!(
-                    "forge: the architect couldn't reach its model ({}); starting it again from the crate",
+                    "forge: the architect couldn't reach its model ({}). Starting it again from the crate",
                     cut(&error, 200)
                 );
                 restarted.store(true, Ordering::SeqCst);
@@ -871,7 +871,7 @@ async fn main() -> ForgeResult<()> {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!(
-                        "forge: couldn't continue the earlier task ({error}); starting again"
+                        "forge: couldn't continue the earlier task ({error}). Starting again"
                     );
                     architect
                         .call(workflow.run_agent(ARCHITECT, &resume))
@@ -928,7 +928,7 @@ async fn main() -> ForgeResult<()> {
             Err(failure) if repairs < settings.max_repairs => {
                 repairs += 1;
                 eprintln!(
-                    "forge: `{}` failed; back to the architect (repair {repairs} of {})",
+                    "forge: `{}` failed. Back to the architect (repair {repairs} of {})",
                     failure.check, settings.max_repairs
                 );
                 let prompt = format!(
@@ -1090,7 +1090,7 @@ impl Architect<'_> {
                 ));
             }
             eprintln!(
-                "forge: the architect couldn't reach its model ({}); starting it again from the crate",
+                "forge: the architect couldn't reach its model ({}). Starting it again from the crate",
                 cut(&error, 200)
             );
             failed_before = self.failed_runs();
@@ -1141,7 +1141,7 @@ fn explorer_failed(
     let error = context.error_message.clone().unwrap_or_default();
     if !failed_once.swap(true, Ordering::SeqCst) {
         eprintln!(
-            "forge: an explorer couldn't reach its model ({}); the architect may ask again",
+            "forge: an explorer couldn't reach its model ({}). The architect may ask again",
             cut(&error, 200)
         );
         return HookResult::Continue;
@@ -1152,7 +1152,7 @@ fn explorer_failed(
 /// The budget is used up: saves the paused agents and exits with status 2.
 async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
     if let Err(error) = workflow.checkpoint().await {
-        eprintln!("forge: couldn't save a checkpoint ({error}); the latest one is kept");
+        eprintln!("forge: couldn't save a checkpoint ({error}). The latest one is kept");
     }
     let spent = workflow.cost_ledger().total();
     let mut used_up = Vec::new();
@@ -1482,7 +1482,7 @@ fn forge_metadata(
     let mut dependencies = vec![
         WorkflowDependency::new(
             "cargo",
-            "Rust's build tool: the forge and its agents build, test and run the workflow crate with it",
+            "Rust's build tool, used by the forge and its agents to build, test and run the workflow crate",
         )
         .executable("cargo")
         .install_hint("rustup (https://rustup.rs)"),
@@ -1509,7 +1509,7 @@ fn forge_metadata(
         dependencies.push(
             WorkflowDependency::new(
                 "Claude Code",
-                "the Claude Code CLI, signed in: the agents on Claude models run in it (`--backend claude-code`)",
+                "the Claude Code CLI, signed in, where agents on Claude models run (`--backend claude-code`)",
             )
             .executable("claude")
             .install_hint("`npm install -g @anthropic-ai/claude-code` or Anthropic's native installer, then run `claude` once to sign in (or run the agents through the API with `--backend api`)"),
@@ -1518,7 +1518,7 @@ fn forge_metadata(
     dependencies.push(
         WorkflowDependency::new(
             "ripgrep",
-            "the fast code search the agents run in their shells; without it they search with slower tools such as grep",
+            "the fast code search the agents run in their shells. Without it they search with slower tools such as grep",
         )
         .executable("rg")
         .install_hint(
@@ -1555,10 +1555,12 @@ fn check_dependencies(metadata: &WorkflowMetadata) {
         .into_iter()
         .partition(|dependency| dependency.optional);
     for dependency in optional {
-        eprintln!("forge: warning: not found: {}", describe(dependency));
+        eprintln!("forge: {} was not found", describe(dependency));
     }
     if !required.is_empty() {
-        eprintln!("forge: can't start; not found on this machine:");
+        eprintln!(
+            "forge: can't start because required dependencies were not found on this machine"
+        );
         for dependency in required {
             eprintln!("  - {}", describe(dependency));
         }
@@ -1760,7 +1762,7 @@ fn providers() -> String {
         })
     };
     if on_path("claude") {
-        found.push("the Claude Code CLI (`claude`, a plan login: Claude models through `Model::claude_code`)");
+        found.push("the Claude Code CLI (`claude`, with a plan login for Claude models through `Model::claude_code`)");
     }
     for (variable, provider) in [
         ("ANTHROPIC_API_KEY", "an Anthropic API key"),
@@ -1861,7 +1863,7 @@ async fn print_events(
                 *count += 1;
                 if shown && (*count).is_multiple_of(10) {
                     println!(
-                        "[{who}]   ({count} requests; this one {}k input tokens)",
+                        "[{who}]   ({count} requests, this one {}k input tokens)",
                         usage.input_tokens / 1_000
                     );
                 }
@@ -1893,7 +1895,7 @@ async fn print_events(
                 )
             }
             AgentEvent::ConversationHandedOver { handovers, .. } => {
-                println!("[{who}] handover {handovers} done; continuing in a fresh conversation")
+                println!("[{who}] handover {handovers} done. Continuing in a fresh conversation")
             }
             AgentEvent::ErrorEncountered { error_message, .. } => {
                 println!("[{who}] error: {}", cut(&error_message, 600))
@@ -2000,7 +2002,7 @@ fn report(
     ));
     if trials > 0.0 {
         text.push_str(&format!(
-            "; reserved for trial runs: ${trials:.2} (their caps, in full; what they spent isn't measured here, but each trial's own output reports it)"
+            ", ${trials:.2} reserved for trial runs (their full caps, with spending reported in each trial's output)"
         ));
     }
     if !plan_usage.is_empty() {

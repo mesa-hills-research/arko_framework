@@ -668,7 +668,7 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
         .map(|pair| progress[pair].to_write(options.per_kind, options.oversample, max_runs))
         .sum();
     eprintln!(
-        "generate: {queued_writes} questions to write over {} repository/kind pairs, {} to verify; writer and verifier tools: {}{}",
+        "generate: {queued_writes} questions to write over {} repository/kind pairs, {} to verify, writer and verifier tools {}{}",
         pairs.len(),
         verify_queue.len(),
         options.writer_arm.label(),
@@ -795,7 +795,7 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
                 );
                 if is_login_failure(record.failure_kind.as_deref()) {
                     eprintln!(
-                        "the ChatGPT login failed; stopping. Fix the login, then run `generate` again to resume."
+                        "the ChatGPT login failed. Stopping. Fix the login, then run `generate` again to resume."
                     );
                     stop.raise_to(1, "login failure");
                 }
@@ -841,7 +841,7 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
                 );
                 if is_login_failure(record.failure_kind.as_deref()) {
                     eprintln!(
-                        "the ChatGPT login failed; stopping. Fix the login, then run `generate` again to resume."
+                        "the ChatGPT login failed. Stopping. Fix the login, then run `generate` again to resume."
                     );
                     stop.raise_to(1, "login failure");
                 }
@@ -865,12 +865,12 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
     eprintln!(
         "generate: {written} questions written, {checked} verified ({agreed} agreed){}",
         stop.reason().map_or(String::new(), |reason| format!(
-            "; stopped ({reason}): run again to resume"
+            ". Stopped ({reason}). Run again to resume"
         ))
     );
     if !short.is_empty() && stop.reason().is_none() {
         eprintln!(
-            "short of {per_kind} tasks (writer runs used up; raise --oversample to write more): {}",
+            "short of {per_kind} tasks (writer runs used up, raise --oversample to write more), {}",
             short.join(", ")
         );
     }

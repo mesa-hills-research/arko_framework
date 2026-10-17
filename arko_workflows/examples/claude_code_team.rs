@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("[{who}] === handover requested at {input_tokens} tokens ===")
                 }
                 AgentEvent::ConversationHandedOver { report, .. } => {
-                    println!("[{who}] === handed over; report:\n{report}\n===")
+                    println!("[{who}] === handed over\nReport\n{report}\n===")
                 }
                 AgentEvent::ErrorEncountered { error_message, .. } => {
                     println!("[{who}] error: {error_message}")

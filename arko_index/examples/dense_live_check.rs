@@ -266,7 +266,7 @@ fn main() -> Result<(), Error> {
         let s = build(&args.corpus, &scratch, &Options::default(), &settings)?;
         let d = s.dense.expect("built with embeddings");
         println!(
-            "dry run: {} chunks, {} distinct texts; {} would be embedded: {} tokens counted ({} cached)",
+            "dry run found {} chunks, {} distinct texts, {} to embed, {} tokens counted ({} cached)",
             d.docs, d.texts, d.not_embedded, d.not_embedded_tokens, d.cached
         );
         std::fs::remove_dir_all(&scratch)?;
@@ -304,7 +304,7 @@ fn main() -> Result<(), Error> {
         d.tokens,
         if d.cap_reached {
             format!(
-                "; STOPPED AT THE CAP: {} texts ({} tokens) not embedded",
+                ". Stopped at the cap with {} texts ({} tokens) not embedded",
                 d.not_embedded, d.not_embedded_tokens
             )
         } else {
@@ -330,7 +330,7 @@ fn main() -> Result<(), Error> {
     let mut totals = [[0usize; 4]; 3];
     let (mut n_depth, mut n_def, mut n_callers, mut n_behaviour) = (0, 0, 0, 0);
     println!(
-        "\ncase  kind       lexical  dense  hybrid  (rank of the expected chunk in the top 10; breadth: definition, then callers found)"
+        "\ncase  kind       lexical  dense  hybrid  (rank of the expected chunk in the top 10, breadth shows the definition and then callers found)"
     );
     for (case, vector) in cases.iter().zip(&embedded.vectors) {
         let mut cells = Vec::new();
@@ -393,7 +393,7 @@ fn main() -> Result<(), Error> {
             case.id, case.kind, cells[0], cells[1], cells[2], case.query
         );
     }
-    println!("(depth cells: expected rank / best distractor rank)\n");
+    println!("(depth cells show expected rank / best distractor rank)\n");
     println!("mode     depth  definitions  callers  behaviour");
     for (m, mode) in modes.iter().enumerate() {
         let t = totals[m];
@@ -411,10 +411,10 @@ fn main() -> Result<(), Error> {
         );
     }
     println!(
-        "\nearlier evaluation (2026-10-04, no headers): lexical 4/9, 4/4, 5/7, 4/6; dense (path + source) 9/9, 4/4, 2/7, 5/6"
+        "\nearlier evaluation (2026-10-04, no headers) had lexical 4/9, 4/4, 5/7, 4/6 and dense (path + source) 9/9, 4/4, 2/7, 5/6"
     );
     println!(
-        "tokens: index build {} (this run), queries {query_tokens}; total {}",
+        "tokens used for index build {} (this run), queries {query_tokens}, total {}",
         d.tokens,
         d.tokens + query_tokens
     );

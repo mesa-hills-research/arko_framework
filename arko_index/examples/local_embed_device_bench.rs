@@ -198,7 +198,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
     let embedder = LocalEmbedder::load_on(model, &dir, precision, device)?;
     let load_seconds = started.elapsed().as_secs_f64();
     eprintln!(
-        "{} in {precision} on {}: loaded in {load_seconds:.1} s (model found in {found:.1} s); {}",
+        "{} in {precision} on {} loaded in {load_seconds:.1} s (model found in {found:.1} s), {}",
         model.repo,
         embedder.device(),
         memory()
@@ -249,7 +249,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
     lens.sort_unstable();
     let pct = |q: f64| lens[((lens.len() - 1) as f64 * q).round() as usize];
     eprintln!(
-        "{} texts, {total_tokens} tokens (median {}, 90th percentile {}, longest {}); tokenizing {tokenize_seconds:.2} s",
+        "{} texts, {total_tokens} tokens (median {}, 90th percentile {}, longest {}), tokenizing {tokenize_seconds:.2} s",
         corpus.len(),
         pct(0.5),
         pct(0.9),
@@ -342,7 +342,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
         });
         println!("{line}");
         eprintln!(
-            "{precision} on {device_name}, {} batch tokens: {:.1} texts/s, {:.0} tokens/s (median of {}; {:.0} to {:.0}); first pass {first_seconds:.1} s; {:.1} texts and {:.0} padded tokens per pass ({:.1}% padding); GPU peak {} MiB; {}",
+            "{precision} on {device_name}, {} batch tokens, {:.1} texts/s, {:.0} tokens/s (median of {}, {:.0} to {:.0}), first pass {first_seconds:.1} s, {:.1} texts and {:.0} padded tokens per pass ({:.1}% padding), GPU peak {} MiB, {}",
             embedder.batch_tokens(),
             median(&rates),
             median(&tok_rates),

@@ -184,7 +184,7 @@ pub fn find_index_cli(explicit: Option<&Path>) -> BenchResult<PathBuf> {
             return Ok(sibling);
         }
     }
-    Err("the arko_index CLI was not found next to this binary: build it with `cargo build --release -p arko_index --example arko_index_cli` (into the same target directory), or pass --index-cli".into())
+    Err("the arko_index CLI was not found next to this binary. Build it with `cargo build --release -p arko_index --example arko_index_cli` (into the same target directory), or pass --index-cli".into())
 }
 
 pub fn sha256_file(path: &Path) -> BenchResult<String> {
@@ -218,7 +218,7 @@ pub async fn prepare(options: PrepareOptions<'_>) -> BenchResult<BTreeMap<String
     for dir in busy {
         if let Some(pid) = crate::ledger::DirLock::holder(&dir) {
             return Err(format!(
-                "{} is in use by process {pid}: prepare changes the checkouts and indexes it uses; wait for it, or stop it",
+                "{} is in use by process {pid}. Prepare changes the checkouts and indexes it uses. Wait for it, or stop it",
                 dir.display()
             )
             .into());

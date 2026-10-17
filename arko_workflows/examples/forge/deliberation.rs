@@ -223,7 +223,7 @@ impl Flags {
             [lead] if lead.eq_ignore_ascii_case("lead") => Vec::new(),
             given if given.iter().any(|judge| judge.eq_ignore_ascii_case("lead")) => {
                 return Err(
-                    "`--judges lead` means the architect rules alone; give it alone, or give models"
+                    "`--judges lead` means the architect rules alone. Give it alone, or give models"
                         .into(),
                 );
             }
@@ -1105,7 +1105,7 @@ fn render_spike(spike: &Spike) -> String {
             result.what_ran.trim(),
             result.evidence.trim()
         ),
-        None => format!("- Spike on **{}**: didn't finish.\n", spike.finding),
+        None => format!("- Spike on **{}** didn't finish.\n", spike.finding),
     }
 }
 
@@ -1200,7 +1200,7 @@ pub fn render_record(decision: &Decision, config: &Config) -> String {
     if let Some(later) = &decision.reopened_by {
         let _ = write!(
             text,
-            "> Reopened and replaced by {later}: see its record in this folder.\n\n"
+            "> Reopened and replaced by {later}. See its record in this folder.\n\n"
         );
     }
     if let Some(earlier) = &decision.reopens {
@@ -1948,7 +1948,7 @@ impl Submit {
                         }
                     })
                     .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
-                eprintln!("forge: {id} decided by the architect; record in {record}");
+                eprintln!("forge: {id} decided by the architect. Record in {record}");
                 let waiting: Vec<String> = self
                     .store
                     .get()
@@ -2138,7 +2138,7 @@ pub(crate) fn login_reason(agent: &str, model: Option<&ModelSpec>, error: &str) 
         )
     };
     format!(
-        "{agent} ({}, {via}) can't reach its model, also when started again: the request needs a new credential or a configuration change ({}). To continue, {fix}",
+        "{agent} ({}, {via}) can't reach its model, also when started again. The request needs a new credential or a configuration change ({}). To continue, {fix}",
         model.map_or_else(|| "its model".to_string(), ModelSpec::to_string),
         crate::cut(error.trim(), 400)
     )
@@ -2148,7 +2148,7 @@ pub(crate) fn login_reason(agent: &str, model: Option<&ModelSpec>, error: &str) 
 /// needs a new credential or a configuration change (`reason`).
 pub(crate) async fn login_stop(workflow: &Workflow, state_dir: &Path, reason: &str) -> ! {
     if let Err(error) = workflow.checkpoint().await {
-        eprintln!("forge: couldn't save a checkpoint ({error}); the latest one is kept");
+        eprintln!("forge: couldn't save a checkpoint ({error}). The latest one is kept");
     }
     eprintln!(
         "\nforge: stopped: {reason}.\nforge: the run is saved. To continue, sign in again (or fix the configuration), then resume:\n\n    forge --resume {}\n",
@@ -2607,7 +2607,7 @@ impl Deliberator<'_> {
             return self.fail(id, "no judge submitted a ruling".into());
         }
         let record = self.store.decide(id, config).map_err(WorkflowError::Io)?;
-        eprintln!("forge: {id} decided; record in {record}");
+        eprintln!("forge: {id} decided. Record in {record}");
         Ok(())
     }
 
@@ -2661,7 +2661,7 @@ impl Deliberator<'_> {
                                 return Err(self.login_error(agent, &error));
                             }
                             eprintln!(
-                                "forge: {agent} couldn't reach its model ({}); starting its part again",
+                                "forge: {agent} couldn't reach its model ({}). Starting its part again",
                                 crate::cut(error.trim(), 200)
                             );
                             nudges = 0;
@@ -2911,16 +2911,19 @@ pub fn summary_line(decision: &Decision) -> String {
             let findings = decision.all_findings().count();
             let spikes = decision.spikes.as_ref().map(Vec::len).unwrap_or(0);
             format!(
-                "- **{}** {question}: {}{chosen}; {} proposals, {findings} findings, {spikes} spikes. Record: `{record}`.",
+                "- **{}** {question} — {}{chosen}, {} proposals, {findings} findings, {spikes} spikes. See `{record}`.",
                 decision.id,
                 ruling.chosen,
                 decision.submitted().count()
             )
         }
         Some(Outcome::Failed { reason }) => {
-            format!("- **{}** {question}: not settled ({reason}).", decision.id)
+            format!(
+                "- **{}** {question} is not settled ({reason}).",
+                decision.id
+            )
         }
-        None => format!("- **{}** {question}: not finished.", decision.id),
+        None => format!("- **{}** {question} is not finished.", decision.id),
     }
 }
 
@@ -3954,7 +3957,7 @@ mod tests {
         assert!(text.contains(&format!("**Question:** {long}")));
         assert!(
             summary_line(&store.decision("D1").unwrap())
-                .starts_with("- **D1** Workflow architecture: P1")
+                .starts_with("- **D1** Workflow architecture — P1")
         );
         let old: Frame = serde_json::from_value(json!({"question": "Q?"})).unwrap();
         assert_eq!((old.name(), old.title), ("Q?".to_string(), None));

@@ -26,7 +26,7 @@ pub fn crate_name(name: &str) -> Option<String> {
 pub fn scaffold(dir: &Path, name: &str, arko: &Path, use_case: &str) -> io::Result<()> {
     if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
         return Err(io::Error::other(format!(
-            "{} is not empty; choose a new output directory, or pass --resume to continue a run",
+            "{} is not empty. Choose a new output directory, or pass --resume to continue a run",
             dir.display()
         )));
     }

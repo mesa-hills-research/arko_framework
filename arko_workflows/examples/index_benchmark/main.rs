@@ -86,7 +86,7 @@ impl Arm {
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                 {
                     return Err(format!(
-                        "arm {name:?}: A, B, C or a variant's name (1 to 32 letters, digits, - or _)"
+                        "arm {name:?} must be A, B, C or a variant's name (1 to 32 letters, digits, - or _)"
                     )
                     .into());
                 }
@@ -527,7 +527,7 @@ fn load_task_set(
             let path = layout.default_tasks();
             if !path.exists() {
                 return Err(format!(
-                    "{} doesn't exist: run `generate` (or `assemble`), or pass --tasks seed for the seed tasks",
+                    "{} doesn't exist. Run `generate` (or `assemble`), or pass --tasks seed for the seed tasks",
                     path.display()
                 )
                 .into());
@@ -628,7 +628,7 @@ fn prepare_variants(args: PrepareVariantsArgs) -> BenchResult<()> {
     }
     let mut prepared = repos::load_prepared(&layout)?;
     if prepared.is_empty() {
-        return Err("no prepared repositories: run `prepare` first".into());
+        return Err("no prepared repositories. Run `prepare` first".into());
     }
     if let Some(only) = split_list(&args.only) {
         for id in &only {
@@ -683,7 +683,7 @@ async fn prepare(args: PrepareArgs) -> BenchResult<()> {
     for source in &args.source {
         let (id, location) = source
             .split_once('=')
-            .ok_or_else(|| format!("--source {source}: expected ID=PATH_OR_URL"))?;
+            .ok_or_else(|| format!("--source {source} must be ID=PATH_OR_URL"))?;
         sources.insert(id.to_string(), location.to_string());
     }
     let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
@@ -744,17 +744,17 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
         repo_ids.retain(|id| only.contains(id));
     }
     if repo_ids.is_empty() {
-        return Err("no prepared repositories: run `prepare` first".into());
+        return Err("no prepared repositories. Run `prepare` first".into());
     }
     let kinds = parse_kinds(&args.kinds)?.unwrap_or_else(|| tasks::TaskKind::ALL.to_vec());
     let writer_arm = match args.writer_tools.as_str() {
         "terminal" => Arm::A,
         "index" => Arm::B,
-        other => return Err(format!("--writer-tools {other}: terminal or index").into()),
+        other => return Err(format!("--writer-tools {other} must be terminal or index").into()),
     };
     let _lock = ledger::DirLock::acquire(&layout.tasks_dir(), "a `generate`")?;
     if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {
-        return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+        return Err(format!("`prepare` is running (pid {pid}). Wait for it").into());
     }
     if writer_arm == Arm::B {
         let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
@@ -835,7 +835,7 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             .collect();
         if !missing.is_empty() {
             return Err(format!(
-                "arm C needs a dense index; run `prepare --dense` for: {}",
+                "arm C needs a dense index. Run `prepare --dense` for {}",
                 missing.join(", ")
             )
             .into());
@@ -844,12 +844,12 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
     let _lock =
         ledger::DirLock::acquire(&layout.run_dir(&args.name), &format!("run {}", args.name))?;
     if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {
-        return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+        return Err(format!("`prepare` is running (pid {pid}). Wait for it").into());
     }
     if !variants.is_empty()
         && let Some(pid) = ledger::DirLock::holder(&layout.variants_lock_dir())
     {
-        return Err(format!("`prepare-variants` is running (pid {pid}); wait for it").into());
+        return Err(format!("`prepare-variants` is running (pid {pid}). Wait for it").into());
     }
     let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
     let index_cli_sha256 = repos::sha256_file(&index_cli)?;
@@ -859,7 +859,7 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             && arms.iter().any(|arm| matches!(arm, Arm::B | Arm::C))
         {
             eprintln!(
-                "warning: the index of {} was built by another arko_index CLI than {}; run `prepare` again to rebuild it",
+                "the index of {} was built by another arko_index CLI than {}. Run `prepare` again to rebuild it",
                 task.repo,
                 index_cli.display()
             );
@@ -873,7 +873,7 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             .any(|(id, index)| task_repos.contains(id) && index.cli_sha256 != index_cli_sha256)
         {
             eprintln!(
-                "warning: variant {name}'s indexes were built by another arko_index CLI than {}; run `prepare-variants` again to rebuild them",
+                "variant {name}'s indexes were built by another arko_index CLI than {}. Run `prepare-variants` again to rebuild them",
                 index_cli.display()
             );
         }

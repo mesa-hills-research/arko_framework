@@ -440,7 +440,7 @@ fn bind_or_validate_run_inputs(
 
     if state_dir.join("workflow-run-id").exists() || manifest_path.exists() {
         return Err(io::Error::other(
-            "state directory already belongs to a run; use --resume or choose another directory",
+            "state directory already belongs to a run. Use --resume or choose another directory",
         )
         .into());
     }

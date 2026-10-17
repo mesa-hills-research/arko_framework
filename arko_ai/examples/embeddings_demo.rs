@@ -50,7 +50,7 @@ async fn main() -> Result<(), Error> {
             Err(e) => eprintln!("Voyage embedding error: {}", e),
         }
     } else {
-        println!("\nSkipping Voyage Embedding Test: VOYAGE_API_KEY not set.");
+        println!("\nSkipping Voyage Embedding Test because VOYAGE_API_KEY is not set.");
     }
 
     Ok(())

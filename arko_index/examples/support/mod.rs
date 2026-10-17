@@ -32,7 +32,7 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
         None if spec.starts_with("voyage") => ("voyage", spec),
         None => {
             return Err(format!(
-                "unknown embedding model {spec:?}: use a Voyage model (voyage-code-4), voyage:MODEL, local, local:MODEL[:PRECISION] or hash"
+                "unknown embedding model {spec:?}. Use a Voyage model (voyage-code-4), voyage:MODEL, local, local:MODEL[:PRECISION] or hash"
             )
             .into());
         }
@@ -87,7 +87,7 @@ fn local_descriptor(spec: &str, dimensions: Option<usize>) -> Result<ModelDescri
         local::find(model).ok_or_else(|| {
             let names: Vec<&str> = local::MODELS.iter().map(|m| m.name).collect();
             format!(
-                "unknown local model {model:?}: use one of {}",
+                "unknown local model {model:?}. Use one of {}",
                 names.join(", ")
             )
         })?

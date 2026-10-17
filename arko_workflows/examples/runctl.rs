@@ -187,7 +187,7 @@ fn post(run_dir: &Path, note: &Note) -> Result<(), String> {
 fn request_stop(run_dir: &Path, stop: &control::ControlStop) -> Result<(), String> {
     let written = control::request_stop(run_dir, stop).map_err(|error| error.to_string())?;
     println!(
-        "Stop request {} written to {}. The running workflow reads it within a second; a request written while it isn't running is never applied.",
+        "Stop request {} written to {}. The running workflow reads it within a second. A request written while it isn't running is never applied.",
         written.id.map(|id| id.to_string()).unwrap_or_default(),
         control::folder(run_dir).join(control::STOPS_FILE).display()
     );
@@ -255,8 +255,8 @@ async fn status(run_dir: &Path) -> Result<(), String> {
     println!("Agent runs: {}", runs.len());
     for (agent, id, status, error, intent) in &runs {
         let intent = match intent {
-            Some(RunStopIntent::Retire) => " (stopped alone: retired)",
-            Some(RunStopIntent::Relaunch) => " (stopped alone: to relaunch)",
+            Some(RunStopIntent::Retire) => " (stopped alone and retired)",
+            Some(RunStopIntent::Relaunch) => " (stopped alone, to relaunch)",
             _ => "",
         };
         let error = error
@@ -312,7 +312,7 @@ async fn status(run_dir: &Path) -> Result<(), String> {
             written.len()
         );
     } else {
-        println!("Control folder: none (the workflow doesn't read one)");
+        println!("The workflow doesn't read a control folder");
     }
     Ok(())
 }
