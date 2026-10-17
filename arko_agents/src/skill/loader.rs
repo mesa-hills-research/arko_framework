@@ -38,7 +38,7 @@ pub fn load_skills(
                 }
             }
         }
-        found.push((source, survey_source(&directory, &label)?));
+        found.push((source, survey_or_unreadable(&directory, &label)));
     }
 
     let mut skills = Vec::new();
@@ -46,7 +46,12 @@ pub fn load_skills(
         match settled.outcome {
             Outcome::Loaded(skill) => skills.push(skill),
             Outcome::Invalid(error) => handle_skill_error(error, &config.on_invalid_skill)?,
-            Outcome::Unreadable(error) => return Err(error),
+            Outcome::Unreadable(error) => match config.on_invalid_skill {
+                InvalidSkillPolicy::Warn => {
+                    log::warn!("Skipping a skill that can't be read: {}", error);
+                }
+                InvalidSkillPolicy::Error => return Err(error),
+            },
             Outcome::LeftOut(..) | Outcome::Duplicate(..) => {}
         }
     }
@@ -56,25 +61,34 @@ pub fn load_skills(
 }
 
 /// Every skill file and folder in the sources of `config`, with what
-/// [`load_skills`] makes of it: loaded (under its name, or renamed), or
-/// skipped and why. Unlike loading, it doesn't fail: a directory that
+/// [`load_skills`] makes of it, loaded (under its name, or renamed) or
+/// skipped and why. Unlike loading, it never fails. A directory that
 /// doesn't exist has nothing to list, and one that can't be read is
-/// logged and left out.
+/// listed as a skipped entry.
 pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
     let mut found = Vec::new();
     for (source, directory, label) in sources(config, workspace_root) {
         if !directory.is_dir() {
             continue;
         }
-        match survey_source(&directory, &label) {
-            Ok(list) => found.push((source, list)),
-            Err(error) => log::warn!(
-                "Skills directory '{}' could not be read: {error}",
-                directory.display()
-            ),
-        }
+        found.push((source, survey_or_unreadable(&directory, &label)));
     }
     settle(found).into_iter().map(Settled::scan).collect()
+}
+
+/// The skill files and folders of the source directory `directory`, or,
+/// when it can't be read, the directory itself as one that can't be read.
+fn survey_or_unreadable(directory: &Path, source_label: &str) -> Vec<Found> {
+    survey_source(directory, source_label).unwrap_or_else(|error| {
+        vec![Found {
+            path: directory.to_path_buf(),
+            fallback_name: directory
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            skill: Err(Problem::Unreadable(error)),
+        }]
+    })
 }
 
 /// The sources of `config` in the order they count (the workspace's, then
@@ -109,11 +123,12 @@ struct Found {
     skill: Result<LoadedSkill, Problem>,
 }
 
-/// Why a skill file or folder can't be loaded.
+/// Why a skill file or folder can't be loaded. The policy skips or
+/// refuses either.
 enum Problem {
-    /// An invalid skill, which the policy skips or refuses.
+    /// An invalid skill.
     Invalid(SkillLoadError),
-    /// A file that can't be read, which loading always fails on.
+    /// A file or folder that can't be read.
     Unreadable(ArkoAgentsError),
 }
 
@@ -784,5 +799,58 @@ mod tests {
         strict.on_invalid_skill = InvalidSkillPolicy::Error;
         assert!(load_skills(&strict, &workspace).is_err());
         assert_eq!(scan(&strict, &workspace).len(), 7);
+    }
+
+    /// A skill file or a source directory that can't be read is skipped,
+    /// as an invalid skill is, and the scan lists it so. Loading under
+    /// `Error` still refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn what_cant_be_read_is_skipped_and_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = Temp::new();
+        let first = temp.0.join("first");
+        let closed = temp.0.join("closed");
+        write(&first.join("ok/SKILL.md"), &skill("ok", "Fine."));
+        write(&first.join("bad/SKILL.md"), &skill("bad", "Bad."));
+        std::fs::write(first.join("bad/ref.md"), [0xff, 0xfe, 0x00]).unwrap();
+        write(&closed.join("hidden/SKILL.md"), &skill("hidden", "Hidden."));
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            // (Run as root, which reads it anyway.)
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let mut config = SkillsConfig {
+            workspace_source: None,
+            global_sources: vec![global(&first), global(&closed)],
+            on_invalid_skill: InvalidSkillPolicy::Warn,
+            load_skill_interception: None,
+        };
+        let (loaded, _) = load_skills(&config, &temp.0).unwrap();
+        let names: Vec<&str> = loaded.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["ok"]);
+        let scanned = scan(&config, &temp.0);
+        let listed: Vec<(&Path, &str, bool)> = scanned
+            .iter()
+            .map(|skill| {
+                (
+                    skill.path.as_path(),
+                    skill.name.as_str(),
+                    skill.skipped.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (first.join("bad").as_path(), "bad", true),
+                (first.join("ok").as_path(), "ok", false),
+                (closed.as_path(), "closed", true),
+            ]
+        );
+        config.on_invalid_skill = InvalidSkillPolicy::Error;
+        assert!(load_skills(&config, &temp.0).is_err());
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

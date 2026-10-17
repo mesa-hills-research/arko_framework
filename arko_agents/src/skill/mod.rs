@@ -21,11 +21,11 @@ use crate::tool::ToolRegistry;
 
 /// Lists the skill files and folders in the sources of `config`, resolving
 /// workspace paths relative to `workspace_root`, with what
-/// [`SkillManager::load`] makes of each: the name it loads it under, or
-/// why it skips it. It reads them as loading does, by the same rules, but
-/// doesn't fail: a source directory that doesn't exist has nothing to
-/// list, and one that can't be read is logged and left out (loading fails
-/// on it). Within a source, entries are taken in the order of their
+/// [`SkillManager::load`] makes of each, the name it loads it under or why
+/// it skips it. It reads them by the same code as loading, under
+/// [`InvalidSkillPolicy::Warn`], and never fails. A source directory that
+/// doesn't exist has nothing to list, and one that can't be read is listed
+/// as skipped. Within a source, entries are taken in the order of their
 /// names, and earlier sources come first.
 pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
     loader::scan(config, workspace_root)
@@ -46,8 +46,9 @@ impl SkillManager {
     /// Loads skills from the given config, resolving workspace paths relative
     /// to `workspace_root`.
     ///
-    /// Returns `Err` only if `config.on_invalid_skill` is `Error` and an
-    /// invalid skill is encountered, or if there's a hard I/O failure.
+    /// Returns `Err` only if `config.on_invalid_skill` is `Error` and a
+    /// skill is invalid, can't be read, or a source directory is missing
+    /// or can't be read. Under `Warn` those are logged and skipped.
     pub fn load(config: &SkillsConfig, workspace_root: &Path) -> Result<Self, ArkoAgentsError> {
         let (all_skills, prompt_context) = loader::load_skills(config, workspace_root)?;
 

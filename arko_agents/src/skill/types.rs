@@ -107,11 +107,13 @@ pub struct SkillPromptContext {
 }
 
 /// A skill file or folder in the sources of a [`SkillsConfig`](super::SkillsConfig),
-/// as [`scan`](super::scan) lists it: what loading the skills makes of it.
+/// as [`scan`](super::scan) lists it, with what loading the skills makes of
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillScan {
-    /// Where it is: a folder skill's folder, or a bundle's (`.skill`) or a
-    /// flat skill's (`.md`) file.
+    /// Where it is, a folder skill's folder or a bundle's (`.skill`) or a
+    /// flat skill's (`.md`) file. A source directory that can't be read is
+    /// listed by its own path.
     pub path: PathBuf,
     /// Its name as agents load it, renamed (`name-2`) when a skill loaded
     /// before it has the name. One that can't be read goes by its folder's
@@ -122,8 +124,8 @@ pub struct SkillScan {
     /// Its content goes in the system prompt instead of being loaded on
     /// demand.
     pub auto_load: bool,
-    /// Why it isn't loaded, if it isn't: why it is invalid or can't be
-    /// read, its source's `include` or `exclude` list, or a skill with the
-    /// same content loaded before it.
+    /// Why it isn't loaded, if it isn't. That may be why it is invalid or
+    /// can't be read, its source's `include` or `exclude` list, or a skill
+    /// with the same content loaded before it.
     pub skipped: Option<String>,
 }

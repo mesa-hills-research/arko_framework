@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Behavior when a skill fails to parse or load.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum InvalidSkillPolicy {
-    /// Log a warning and skip the invalid skill. Other skills continue loading.
+    /// Log a warning and skip the invalid skill, or one that can't be read
+    /// (a skill file or folder, or a whole source directory). Other skills
+    /// continue loading.
     #[default]
     Warn,
     /// Return an error immediately. No skills are loaded.
