@@ -394,11 +394,18 @@ impl AgentLoop {
             self.prepare_fallback_response(&mut generation_response);
         }
         self.task.record_usage(generation_response.usage.clone());
-        // The request was answered: its usage calibrates
-        // the estimate of the next one.
+        // The request was answered: its usage calibrates the estimate of
+        // the next one. Its text's share of the input is what its images'
+        // estimated tokens leave.
         self.answered_request = self.sent_request.take();
         if let Some(ratio) = self.answered_request.and_then(|mark| {
-            result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
+            result_budget::calibrated_ratio(
+                mark.bytes,
+                generation_response
+                    .usage
+                    .input_tokens
+                    .saturating_sub(mark.image_tokens),
+            )
         }) {
             self.bytes_per_token = ratio;
         }

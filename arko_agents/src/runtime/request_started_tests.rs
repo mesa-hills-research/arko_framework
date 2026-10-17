@@ -122,3 +122,60 @@ async fn each_request_is_reported_as_it_goes_out() {
     assert!(second.tool_calls > 0 && second.tool_results > 0);
     assert!(second.text_bytes() > first.text_bytes());
 }
+
+/// The provider counts a request's images in its input tokens, and the
+/// text bytes don't hold them: the ratio is calibrated from what the
+/// images' estimated tokens leave of the input.
+#[tokio::test]
+async fn the_ratio_leaves_the_images_out() {
+    let mut task = Task::new(
+        config(ToolCallingMode::Native, &["plain_text"]),
+        "Look.".into(),
+        std::env::temp_dir(),
+        None,
+    );
+    // A PNG header of 1,500 × 750 pixels: 1,500 estimated tokens.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(1_500u32.to_be_bytes());
+    png.extend(750u32.to_be_bytes());
+    task.initial_task_images = vec![ai::Image::from_bytes(&png, "image/png")];
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(super::image_tests::TextTool));
+    let (mut agent, mut events, _commands) =
+        agent_for(task, registry, Arc::new(ai::LLMClient::new()));
+    agent.scripted_responses.get_mut().unwrap().extend([
+        answered(
+            with_calls(vec![native_call("c1", "plain_text", serde_json::json!({}))]),
+            2_500,
+        ),
+        answered(
+            with_calls(vec![native_call(
+                "c2",
+                "complete_task",
+                serde_json::json!({"summary": "done"}),
+            )]),
+            3_000,
+        ),
+    ]);
+    timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let started: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted {
+                sizes,
+                bytes_per_token,
+                ..
+            } => Some((sizes.unwrap(), bytes_per_token)),
+            _ => None,
+        })
+        .collect();
+    let (first, _) = started[0];
+    assert_eq!(first.image_tokens, 1_500);
+    assert_eq!(
+        Some(started[1].1),
+        result_budget::calibrated_bytes_per_token(first.text_bytes(), 2_500 - 1_500)
+    );
+}

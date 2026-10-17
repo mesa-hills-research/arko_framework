@@ -139,9 +139,11 @@ pub(crate) fn request_bytes_of(
 /// The bytes per token a request of `request_bytes` bytes of text (see
 /// [`ai::RequestSizes::text_bytes`]) that the provider counted as
 /// `input_tokens` input tokens shows, clamped to 2..4 (dense text such as
-/// JSON has fewer bytes per token, prose more; images and replayed
-/// reasoning count in the tokens only, which lowers it). `None` when either
-/// is zero. The ratio arko's runtime estimates requests by, and what
+/// JSON has fewer bytes per token, prose more). Replayed reasoning counts in
+/// the tokens only, which lowers it. arko's runtime passes the input its
+/// requests' images leave (their estimated tokens taken off). A Claude Code
+/// model's requests also hold Claude Code's own prompt and tools, which the
+/// ratio absorbs, so it runs low there. `None` when either is zero. The ratio arko's runtime estimates requests by, and what
 /// [`AgentEvent::ModelRequestStarted`](crate::runtime::event::AgentEvent::ModelRequestStarted)
 /// reports; [`DEFAULT_BYTES_PER_TOKEN`] before a task's first answered
 /// request.

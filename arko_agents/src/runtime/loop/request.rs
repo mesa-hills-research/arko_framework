@@ -188,6 +188,7 @@ impl AgentLoop {
         self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {
             messages: conversation.messages.len(),
             bytes: sizes.text_bytes(),
+            image_tokens: sizes.image_tokens,
             conversation: self.task.conversation_usage_start,
         });
         self.emit_event(AgentEvent::ModelRequestStarted {

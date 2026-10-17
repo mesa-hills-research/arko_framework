@@ -43,6 +43,9 @@ pub(super) struct RequestMark {
     pub(super) messages: usize,
     /// Its size in bytes ([`result_budget::request_bytes`]).
     pub(super) bytes: usize,
+    /// Its images' estimated tokens ([`ai::RequestSizes::image_tokens`]),
+    /// which the provider's input count includes and its text bytes don't.
+    pub(super) image_tokens: usize,
     /// The conversation it belongs to ([`Task::conversation_usage_start`]).
     pub(super) conversation: usize,
 }
@@ -128,17 +131,21 @@ impl AgentLoop {
             .messages
             .iter()
             .rposition(|message| message.role == ai::Role::Assistant)?;
-        let bytes = result_budget::request_bytes_of(
+        let sizes = ai::RequestSizes::of_messages(
             conversation,
             &conversation.messages[..reply],
-            &self.build_generation_config(),
+            self.build_generation_config().offered_tools(),
         );
-        if let Some(ratio) = result_budget::calibrated_ratio(bytes, input) {
+        let bytes = sizes.text_bytes();
+        if let Some(ratio) =
+            result_budget::calibrated_ratio(bytes, input.saturating_sub(sizes.image_tokens))
+        {
             self.bytes_per_token = ratio;
         }
         Some(RequestMark {
             messages: reply,
             bytes,
+            image_tokens: sizes.image_tokens,
             conversation: self.task.conversation_usage_start,
         })
     }
