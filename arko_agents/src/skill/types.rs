@@ -74,7 +74,7 @@ pub struct LoadedSkill {
     /// has been stripped.
     pub content: String,
 
-    /// Sub-resources: maps relative path (e.g., "FORMS.md") to file content.
+    /// Sub-resources mapped from relative paths (e.g., "FORMS.md") to file content.
     /// Only .md files are included. Empty for flat/minimal skills.
     pub resources: HashMap<String, String>,
 

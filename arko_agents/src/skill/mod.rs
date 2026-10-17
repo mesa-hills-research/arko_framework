@@ -33,7 +33,7 @@ pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
 
 /// Manages skill loading, deduplication, and tool creation.
 ///
-/// Created from a `SkillsConfig` at agent setup time. Provides:
+/// Created from a `SkillsConfig` at agent setup time. Provides these items:
 /// - A `LoadSkillTool` to register in the `ToolRegistry`
 /// - A `SkillPromptContext` for the `PromptBuilder`
 /// - The tool name to add to `available_tool_names`
@@ -100,11 +100,13 @@ impl SkillManager {
         self.on_demand_skills.len() + self.prompt_context.auto_loaded_skills.len()
     }
 
-    /// Convenience method that performs all setup steps:
-    /// - Registers the `load_skill` tool in the registry (only if on-demand skills exist)
-    /// - Adds the tool name to the agent config's available tools
-    /// - Sets auto-approve for the `load_skill` tool (unless already configured)
-    /// - Returns the `SkillPromptContext`
+    /// Sets up on-demand skills and returns the `SkillPromptContext`.
+    ///
+    /// When on-demand skills exist, it performs these steps:
+    /// - Registers the `load_skill` tool in the registry.
+    /// - Adds the tool name to the agent config's available tools.
+    /// - Adds an auto-approve override for `load_skill` if it has no
+    ///   per-tool configuration entry.
     pub fn setup(
         &self,
         registry: &mut ToolRegistry,
