@@ -339,6 +339,20 @@ why an image can't go to a model, before a request is built: the model has no im
 the image is a URL and the model is an Anthropic, Gemini or Claude Code one (these take
 images as data, `Image::from_bytes`), or it is a GIF for Gemini.
 
+A request with an image over its provider's limits fails, and a conversation sends its
+images again with every request. `Model::image_limits()` gives a provider's limits
+(`image_fit::ImageLimits`: bytes per image, pixels a side, images and bytes of images per
+request), and `Model::sendable_image(&image)` fits an image to them: `None` when it can go
+as it is, the image scaled down (keeping its aspect) and re-encoded until it fits, or the
+reason it can't go. A PNG stays a PNG when that is small enough, other images become JPEG.
+
+| Provider | Per image | Pixels a side | Images | Image data per request |
+| --- | --- | --- | --- | --- |
+| Anthropic, Claude Code | 5 MiB | 2,000 (8,000 up to 20 images) | 100 | 24 MiB of the 32 MB request |
+| OpenAI | 20 MiB | 8,000 | 500 | 40 MiB of the 50 MB request |
+| Google | 15 MiB | 8,000 | 3,000 | 15 MiB of 20 MB inline |
+| OpenRouter | as its model's maker, Anthropic's for others | | | |
+
 ## Stop reasons and refusals
 
 Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`,
