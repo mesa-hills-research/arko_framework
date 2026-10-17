@@ -243,56 +243,6 @@ fn state_dir(args: &Args) -> PathBuf {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args(flags: &[&str]) -> Result<Args, Error> {
-        parse_args(flags.iter().map(|s| (*s).to_owned()))
-    }
-
-    #[test]
-    fn requires_corpus_and_evaluation_paths() {
-        assert_eq!(
-            args(&[]).err().unwrap().to_string(),
-            "--corpus DIR is required. Choose the source tree to index."
-        );
-        assert_eq!(
-            args(&["--corpus", "source"]).err().unwrap().to_string(),
-            "--eval-dir DIR is required. Choose the folder containing breadth-depth-arko.json and behaviour-arko.json."
-        );
-        assert!(args(&["--eval-dir", "evaluation"]).is_err());
-    }
-
-    #[test]
-    fn state_defaults_to_evaluation_folder_and_accepts_override() {
-        let parsed = args(&["--corpus", "source", "--eval-dir", "evaluation"]).unwrap();
-        assert_eq!(parsed.corpus, PathBuf::from("source"));
-        assert_eq!(parsed.eval_dir, PathBuf::from("evaluation"));
-        assert_eq!(
-            state_dir(&parsed),
-            PathBuf::from("evaluation/.dense-live-check/voyage-code-4-default")
-        );
-        let parsed = args(&[
-            "--corpus", "source", "--eval-dir", "evaluation", "--state", "saved",
-        ])
-        .unwrap();
-        assert_eq!(state_dir(&parsed), PathBuf::from("saved"));
-    }
-
-    #[test]
-    fn model_names_stay_in_one_state_subdirectory() {
-        let parsed = args(&[
-            "--corpus", "source", "--eval-dir", "evaluation", "--model", "local:org/model",
-        ])
-        .unwrap();
-        assert_eq!(
-            state_dir(&parsed),
-            PathBuf::from("evaluation/.dense-live-check/local-org-model-default")
-        );
-    }
-}
-
 fn main() -> Result<(), Error> {
     let args = parse_args(std::env::args().skip(1))?;
     let cases = load_cases(&args.eval_dir)?;
@@ -478,4 +428,64 @@ fn main() -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(flags: &[&str]) -> Result<Args, Error> {
+        parse_args(flags.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn requires_corpus_and_evaluation_paths() {
+        assert_eq!(
+            args(&[]).err().unwrap().to_string(),
+            "--corpus DIR is required. Choose the source tree to index."
+        );
+        assert_eq!(
+            args(&["--corpus", "source"]).err().unwrap().to_string(),
+            "--eval-dir DIR is required. Choose the folder containing breadth-depth-arko.json and behaviour-arko.json."
+        );
+        assert!(args(&["--eval-dir", "evaluation"]).is_err());
+    }
+
+    #[test]
+    fn state_defaults_to_evaluation_folder_and_accepts_override() {
+        let parsed = args(&["--corpus", "source", "--eval-dir", "evaluation"]).unwrap();
+        assert_eq!(parsed.corpus, PathBuf::from("source"));
+        assert_eq!(parsed.eval_dir, PathBuf::from("evaluation"));
+        assert_eq!(
+            state_dir(&parsed),
+            PathBuf::from("evaluation/.dense-live-check/voyage-code-4-default")
+        );
+        let parsed = args(&[
+            "--corpus",
+            "source",
+            "--eval-dir",
+            "evaluation",
+            "--state",
+            "saved",
+        ])
+        .unwrap();
+        assert_eq!(state_dir(&parsed), PathBuf::from("saved"));
+    }
+
+    #[test]
+    fn model_names_stay_in_one_state_subdirectory() {
+        let parsed = args(&[
+            "--corpus",
+            "source",
+            "--eval-dir",
+            "evaluation",
+            "--model",
+            "local:org/model",
+        ])
+        .unwrap();
+        assert_eq!(
+            state_dir(&parsed),
+            PathBuf::from("evaluation/.dense-live-check/local-org-model-default")
+        );
+    }
 }
