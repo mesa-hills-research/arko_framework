@@ -82,9 +82,9 @@ impl Image {
     }
 
     /// The image's width and height in pixels, read from the header of
-    /// inline PNG, JPEG, GIF or WebP data. Only the bytes a header needs are
-    /// decoded: the first 48, and for a JPEG each segment's header up to its
-    /// frame header, however much metadata comes before it. `None` for a
+    /// inline PNG, JPEG, GIF or WebP data. Decodes only the first 48 bytes and,
+    /// for a JPEG, each segment's header up to its frame header, however much
+    /// metadata comes before it. `None` for a
     /// URL or data whose size can't be read.
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         let Image::Base64 { data, .. } = self else {
@@ -101,7 +101,7 @@ impl Image {
     /// An estimate of the input tokens the image takes in a request to a
     /// current Claude model (a token per 28 × 28 pixels, after scaling to
     /// 2,576 pixels on the long side and 4,784 tokens). Other models count
-    /// images differently: [`Model::image_tokens`](crate::Model::image_tokens)
+    /// images differently. [`Model::image_tokens`](crate::Model::image_tokens)
     /// gives a given model's count.
     pub fn estimated_tokens(&self) -> usize {
         crate::image_tokens::anthropic_tokens(
@@ -219,7 +219,7 @@ impl ConfigurationUpdate {
 pub struct Message {
     pub role: Role,
     pub content: Vec<Content>,
-    /// Provider state an assistant message needs to be replayed: reasoning
+    /// Provider state an assistant message needs to be replayed, such as reasoning
     /// signatures, or for OpenAI the response's output items (see
     /// [`ReasoningArtifact::OpenAIOutputItems`]).
     pub reasoning_artifact: Option<ReasoningArtifact>,
@@ -332,7 +332,7 @@ impl Message {
         self.image_count() > 0
     }
 
-    /// Removes every image from this message: image content and the images
+    /// Removes every image from this message, including image content and images
     /// inside its tool results (whose output text is kept, so each call and
     /// its result stay paired). Returns how many were removed. Text that
     /// labels an image, such as the runtime's `"Image from tool ..."`

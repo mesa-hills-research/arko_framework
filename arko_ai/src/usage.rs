@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Usage metrics of one model call.
 ///
-/// What the model fields hold, per provider:
+/// The model fields hold these values for each provider:
 ///
 /// | Provider | `model` | `served_model` | `requested_model` | `rerouted` |
 /// |---|---|---|---|---|
@@ -44,7 +44,7 @@ pub struct ModelCallUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_provider: Option<String>,
     /// The model the provider reports having served, when it reports one.
-    /// For OpenAI: the `openai-model` (or `x-openai-model`) response header,
+    /// For OpenAI, this is the `openai-model` (or `x-openai-model`) response header,
     /// else the response's `model`, else the model in `response.created`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_model: Option<String>,
@@ -67,14 +67,14 @@ pub struct ModelCallUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// The provider refused the reasoning summaries the request asked for,
-    /// and the request was sent again without them: the OpenAI provider on
-    /// a 400 saying the organization must be verified to generate reasoning
+    /// and the request was sent again without them. The OpenAI provider does
+    /// this on a 400 saying the organization must be verified to generate reasoning
     /// summaries. The provider's client asks for none from then on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_summaries_refused: bool,
     /// The subagent whose call this was, when the model runs its own
-    /// subagents (Claude Code's `Agent` tool): the id of the tool call that
-    /// started it. `None` for a call of the conversation itself, the one
+    /// subagents (Claude Code's `Agent` tool). Identified by the id of the tool
+    /// call that started it. `None` for a call of the conversation itself, the one
     /// whose size and prompt cache a host shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<String>,
@@ -127,8 +127,8 @@ pub struct PlanCredits {
 }
 
 impl PlanCredits {
-    /// Whether requests can go on when the plan's windows are used up:
-    /// credits are left, or unlimited.
+    /// Whether requests can go on when the plan's windows are used up
+    /// because credits are left or unlimited.
     pub fn usable(&self) -> bool {
         self.has_credits || self.unlimited
     }
@@ -301,8 +301,8 @@ impl ModelCallUsage {
         self
     }
 
-    /// Whether the provider served a different model than the one requested:
-    /// OpenRouter set `requested_model`, or OpenAI reported a reroute.
+    /// Whether the provider served a different model than the one requested.
+    /// True when OpenRouter set `requested_model` or OpenAI reported a reroute.
     pub fn served_model_changed(&self) -> bool {
         self.requested_model.is_some() || self.rerouted
     }
@@ -404,10 +404,10 @@ impl ContextEvent {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingKind {
-    /// Charged per token at list prices: the billed cost is the estimate.
+    /// Charged per token at list prices, so the billed cost is the estimate.
     #[default]
     Metered,
-    /// Covered by a subscription (ChatGPT OAuth): nothing is billed per call.
+    /// Covered by a subscription (ChatGPT OAuth), so nothing is billed per call.
     /// The estimate shows what the call would cost at API list prices.
     Subscription,
     /// The provider reported the actual charge in [`UsageInfo::reported_cost`].
@@ -458,7 +458,7 @@ pub struct UsageInfo {
     /// `output_tokens`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<usize>,
-    /// Processing tier used for pricing: the provider-reported tier when the
+    /// Processing tier used for pricing, the provider-reported tier when the
     /// response includes one, else the requested tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<crate::pricing::ServiceTier>,
@@ -503,9 +503,9 @@ impl UsageInfo {
         self
     }
 
-    /// What the account was charged: the billed cost, or for records saved
-    /// before billing kinds existed, `total_cost` (which was already zero for
-    /// subscription calls then).
+    /// What the account was charged. Returns the billed cost, or for records
+    /// saved before billing kinds existed, `total_cost` (which was already
+    /// zero for subscription calls then).
     pub fn billed(&self) -> f64 {
         self.billed_cost.unwrap_or(self.total_cost)
     }
@@ -523,7 +523,7 @@ impl UsageInfo {
     /// Estimates cost at the list prices in effect at `at`, for the tier and
     /// residency that applied, and sets `billed_cost` from the billing kind.
     ///
-    /// Rules:
+    /// The estimate follows these rules:
     /// - Long-context rates apply when total input exceeds the model's
     ///   threshold. On Claude Sonnet 4 and 4.5, whose long context needed a
     ///   (now retired) beta, they apply only when `long_context` was requested.
