@@ -75,7 +75,9 @@ Well-known file names match exactly, case included.
 
 Everything else is `text`, split by the bounded fallback.
 
-**Ambiguous extensions** are settled this way:
+### Ambiguous extensions
+
+Ambiguous extensions are settled this way:
 
 - `.h` stays C, parsed with the C++ grammar, as before the other grammars came.
 - `.m` is Objective-C (MATLAB also uses it).
@@ -85,11 +87,11 @@ Everything else is `text`, split by the bounded fallback.
   `import`/`export` lines are file metadata (see [Markdown](#markdown-and-mdx)).
 - `.erb` and `.ejs` are embedded templates, `.cu` and `.cuh` CUDA, `.svelte` Svelte,
   `.php` PHP with HTML.
-- `.pl` and `.t` are Perl only when the file starts like Perl: a `perl` shebang, or one
+- `.pl` and `.t` are Perl only when the file starts like Perl, with a `perl` shebang, or one
   of the first 50 lines (within 4 KB) starting with `use strict`, `use warnings`,
   `use v5`, `use 5.`, `use Test::`, `package Name;`, `package Name {`, `sub name` or
   `my $`/`@`/`%`/`(`.
-  Otherwise they are text: Prolog uses `.pl`, other test frameworks `.t`. `.pm` is
+  Otherwise they are text, since Prolog uses `.pl` and other test frameworks `.t`. `.pm` is
   always Perl. A search filter by language decides from the path alone and counts
   every `.pl` and `.t` file as Perl.
 - `.mli` reports the language `ocaml`, like `.tsx` reports `typescript`.
@@ -107,8 +109,8 @@ of rules (`arko_index/src/rules/tables.rs`) that names node kinds:
 | Field | What it does |
 |---|---|
 | definitions | Preferred boundaries. A definition that fits stays one chunk, and its name joins the symbol path. It shares a chunk only as a function family, as merged clauses, or in a run of eight or more tiny definitions (same kind, at most 256 bytes each, grouped up to 768 bytes). Eight grammars' tables (C#, Dart, Elm, PHP, Ruby, Scala, Solidity and Swift) start from the kinds their `tags.scm` marks `@definition.*` (`rules/tags.rs`), some of which the table skips. |
-| bindings | A kind that is a definition when the node at a path is a callable: `const f = () => {}`, R's `f <- function(x)`, Zig's `const Point = struct {}`, SQL's `CREATE TABLE` statements. |
-| keyed | A kind that is a definition, a container or an attachment when the text at a path is one of a list: Elixir's `call` whose target is `def` or `defmodule`, its `@doc` attributes. |
+| bindings | A kind that is a definition when the node at a path is a callable, as in `const f = () => {}`, R's `f <- function(x)`, Zig's `const Point = struct {}`, SQL's `CREATE TABLE` statements. |
+| keyed | A kind that is a definition, a container or an attachment when the text at a path is one of a list, as with Elixir's `call` whose target is `def` or `defmodule`, its `@doc` attributes. |
 | containers | Kinds that always expose their members, even when small (modules, class bodies). |
 | compact | Containers kept whole below 700 bytes (a small class). |
 | attach | Kinds that join the next unit (comments, doc comments, attributes, decorators, signatures, Markdown headings). Every kind whose name contains `comment` attaches. |
@@ -117,10 +119,10 @@ of rules (`arko_index/src/rules/tables.rs`) that names node kinds:
 | names, labels | The symbol name and the scope label (`fn f`, `class C`, `@media (min-width: 800px)`, `<section id="x">`). A label is a keyword and the name, a prefix joined to the name (`directive @auth`), the name alone, the text up to the body, the first line, or the text at a path. |
 | families | Callables that can pair as a `function_family`. |
 | atomic | Kinds kept whole when they fit, even if they contain definitions (HTML `<script>` and `<style>`). |
-| split small | On for most code, for HCL, Protocol Buffers and GraphQL, and for diffs: a node that fits splits into its definitions. Off for prose, markup, the other data formats, CSS, SQL, Make and CMake: what fits stays whole, and only what exceeds the bound splits. |
+| split small | On for most code, for HCL, Protocol Buffers and GraphQL, and for diffs, where a node that fits splits into its definitions. Off for prose, markup, the other data formats, CSS, SQL, Make and CMake, where what fits stays whole, and only what exceeds the bound splits. |
 | merge clauses | Adjacent definitions of the same kind and name, in the same scope, merge while they fit (Haskell equations, Elixir and Erlang function clauses). |
 
-Every table also has these behaviours, which the classic table leaves off: a whitespace
+Every table also has these behaviours, which the classic table leaves off. A whitespace
 unit attaches forward, a short header (at most 256 bytes) before a split definition's
 first member joins that member, and packing joins only units that stayed whole, so the
 end of a large JSON value never shares a chunk with the next key.
@@ -133,22 +135,22 @@ that renames a kind, fails instead of silently matching nothing.
 
 Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C and C++ share one table,
 `CLASSIC`, whose lists are the engine's original kind lists, and keep their original
-scope labels (`syntax::classic_label`). Their output is byte-identical to the build
-before the other grammars: the test `original_languages_match_the_golden_output`
-compares it with a golden file from that build, and
+scope labels (`syntax::classic_label`). Their output is the same as before the other
+grammars came, and the test `original_languages_match_the_golden_output` compares it
+with a golden file from then, and
 [`language_check.py --baseline`](#checking-whole-corpora) compares whole corpora.
 CUDA and GLSL extend C and C++ and use the same table and labels.
 
 A scope is the chain of definitions that enclose the chunk, the chunk's own definition
-included. Their labels:
+included. Their labels are these:
 
-- Rust: `mod`, `impl Trait for Type`, `trait`, `struct`, `enum`, `fn`, `macro_rules!`
-- Python: `class`, `def`, `async def`, through decorators
-- TypeScript and JavaScript: `namespace`, `module`, `class`, `interface`, `enum`, `type`,
+- Rust labels `mod`, `impl Trait for Type`, `trait`, `struct`, `enum`, `fn`, `macro_rules!`
+- Python labels `class`, `def`, `async def`, through decorators
+- TypeScript and JavaScript label `namespace`, `module`, `class`, `interface`, `enum`, `type`,
   `function` (also an arrow function bound to a name), `method`, through `export`
-- Go: `func`, `func (r *T) Name`, `type`
-- Java: `class`, `interface`, `enum`, `record`, `method`, `constructor`
-- C and C++: `namespace`, `class`, `struct`, `enum`, `function`, through templates
+- Go labels `func`, `func (r *T) Name`, `type`
+- Java labels `class`, `interface`, `enum`, `record`, `method`, `constructor`
+- C and C++ label `namespace`, `class`, `struct`, `enum`, `function`, through templates
 
 ## Code
 
@@ -188,14 +190,14 @@ curated), hand-written otherwise.
 
 ### Markdown and MDX
 
-- **Sections.** A section (an ATX heading and what follows it, nested by level) is a
+- A section (an ATX heading and what follows it, nested by level) is a
   definition. A section that fits is one chunk. A larger one splits into its heading
   with the content after it, and its subsections, recursively. Paragraphs, lists,
   tables and code blocks between headings pack together, and a code fence that fits
   stays whole.
-- **MDX.** JSX blocks parse as HTML blocks, and `import`/`export` lines later in the
+- In MDX, JSX blocks parse as HTML blocks, and `import`/`export` lines later in the
   file are ordinary content.
-- **Scopes.** The root of every chunk's scope is the document's title: the front
+- The root of every chunk's scope is the document's title, which is the front
   matter's `title`, or without one the first level-1 heading (`# H1` or a `===`
   underline). The heading chain at the chunk's start follows, for example
   `SQLite storage › ## Storage API › ### Transactions`, from ATX and setext headings.
@@ -207,7 +209,9 @@ curated), hand-written otherwise.
   ranges appear only where a result is shown (`Chunk::header`), so an edit that moves a
   chunk's lines leaves its embedded text and cached embedding unchanged.
 
-**The metadata region.** Front matter is file metadata. A YAML
+#### The metadata region
+
+Front matter is file metadata. A YAML
 (`---` … `---` or `...`) or TOML (`+++` … `+++`) block at the top of a `.md`,
 `.markdown` or `.mdx` file, and in MDX the `import`/`export` paragraphs right after it
 (or at the top), form the file's metadata region. A byte order mark at the start
@@ -252,30 +256,30 @@ definitions, labelled by their selectors or their at-rule line:
 A JSON, YAML or TOML file that fits is one chunk. A larger one splits along its
 structure, and the scope is the key path:
 
-- **JSON:** pairs, recursing into oversized values (`devDependencies › vitest`).
-- **YAML:** documents, then mapping pairs (`jobs › lint`).
-- **TOML:** tables and arrays of tables are definitions (`workers.limits`), and the
+- JSON splits into pairs, recursing into oversized values (`devDependencies › vitest`).
+- YAML splits into documents, then mapping pairs (`jobs › lint`).
+- In TOML, tables and arrays of tables are definitions (`workers.limits`), and the
   top-level keys before them pack together.
-- **HCL:** blocks are definitions labelled by their header
+- In HCL, blocks are definitions labelled by their header
   (`resource "aws_lb" "web"`), and a file splits into them like code.
-- **Protocol Buffers:** messages, enums, services, RPCs and `extend` blocks
+- Protocol Buffers split into messages, enums, services, RPCs and `extend` blocks
   (`service Orders › rpc Get`).
-- **GraphQL:** `schema`, types (`type`, `interface`, `enum`, `input`, `union`,
+- In GraphQL, `schema`, types (`type`, `interface`, `enum`, `input`, `union`,
   `scalar`), their `extend` forms, directives, fragments and named operations are
   definitions (`type Order`, `directive @auth`, `query GetOrder`), and a file splits
   into them like code. The `{ ... }` query shorthand packs with what is around it.
 
 ## Scripts and builds
 
-- **SQL:** statements. `CREATE TABLE`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TYPE`,
+- SQL splits into statements. `CREATE TABLE`, `VIEW`, `MATERIALIZED VIEW`, `FUNCTION`, `TYPE`,
   `TRIGGER`, `SCHEMA`, `SEQUENCE` and `DATABASE` statements are definitions labelled by
   their first line, and the others pack together. Block comments attach.
-- **Make:** rules (labelled by their targets) and `define` blocks. Variables and
+- Make splits into rules (labelled by their targets) and `define` blocks. Variables and
   conditionals pack.
-- **CMake:** `function()` and `macro()` definitions, and command blocks (`if`,
+- CMake splits into `function()` and `macro()` definitions, and command blocks (`if`,
   `foreach`, `while`, `block`) with their `elseif`, `else` and `end…` commands kept
   together.
-- **Bash and PowerShell:** functions (and PowerShell classes) are definitions, and the
+- In Bash and PowerShell, functions (and PowerShell classes) are definitions, and the
   top-level commands between them pack into groups.
 
 ## Diffs
@@ -290,7 +294,7 @@ sections in the grammar, and its lines pack up to the bound.
 
 ## Fields for the next chunker steps
 
-Each table also holds data for the next chunker steps: token-based bounds, breadcrumbs
+Each table also holds data for the next chunker steps, such as token-based bounds, breadcrumbs
 inside split definitions, grouping of small members and splitting at seams. They
 change no output today.
 
@@ -298,7 +302,7 @@ change no output today.
 |---|---|---|
 | `content` | `Code`, `Prose` (Markdown, HTML, embedded templates) or `Data` (JSON, YAML, TOML, XML, DTD, HCL), for one size bound per kind of content. | every grammar |
 | `breadcrumbs` | Kinds that continue the scope inside a split definition (match arms, conditionals, loops, closures, inner functions), each with the field where its label ends, for example Rust `match_arm` up to `value` gives `ToolCall { .. } =>`. | the classic nine, CUDA, GLSL, Objective-C, Bash, C#, Kotlin, Swift, Scala, Ruby, PHP, Dart, Lua, Zig, Solidity, PowerShell, Julia, Perl, Elixir, Erlang, OCaml, R |
-| `members`, `fields`, `group_in` | Members that can group when small, the field and property declarations that stay with them, and the containers where grouping applies. | `members`: the same, except Elixir. `fields` and `group_in`: most of them (`fields` is empty for Bash, Dart, Julia, OCaml, Perl and R, `group_in` for Erlang, Perl, R and Zig), and `group_in` has Markdown sections as a container |
+| `members`, `fields`, `group_in` | Members that can group when small, the field and property declarations that stay with them, and the containers where grouping applies. | `members` for the same, except Elixir. `fields` and `group_in` for most of them (`fields` is empty for Bash, Dart, Julia, OCaml, Perl and R, `group_in` for Erlang, Perl, R and Zig), and `group_in` has Markdown sections as a container |
 | `seams` | Preferred split points inside a large definition (statements, match arms, Markdown blocks). | the same, plus Markdown |
 
 ## Checking
@@ -306,7 +310,7 @@ change no output today.
 The tests in `arko_index/tests/languages.rs` run on a sample of every grammar
 (`arko_index/tests/data/languages/`) and on samples of the nine original languages:
 
-- the invariants at ten bounds from 4 to 100,000 bytes: exact coverage after the
+- the invariants at ten bounds from 4 to 100,000 bytes, which are exact coverage after the
   metadata region, the byte bound, UTF-8 boundaries, lines, IDs recomputed from path
   and trimmed content, one language per file
 - determinism
@@ -315,7 +319,7 @@ The tests in `arko_index/tests/languages.rs` run on a sample of every grammar
   unclosed tags, runs of quotes and backticks), each chunked in under a minute with every
   grammar
 - every prefix, cut at each character boundary, of the first 300 bytes of each sample
-  and of an annotated Kotlin sample (17,491 files in one walk): the invariants, no parser
+  and of an annotated Kotlin sample (17,491 files in one walk), checking the invariants, no parser
   warning, and no 30 seconds without a file finishing
 - invariants on randomly mutated samples (deletions, duplications, inserted syntax,
   swapped lines, truncation) for every grammar
@@ -331,10 +335,10 @@ the grammars' `tags.scm` and `node-types.json` (one folder per grammar key, with
 ### Checking whole corpora
 
 `arko_index/scripts/language_check.py` chunks whole corpora with the release CLI and
-checks every file without the crate's code: coverage after the metadata region, the
+checks every file without the crate's code, for coverage after the metadata region, the
 bound, UTF-8 boundaries, lines, IDs and token estimates. With `--twice` it checks
 determinism. With `--baseline` it runs a build from before the new languages too and
-requires byte-identical output for every file that build parsed as one of the original
+requires the same output for every file that build parsed as one of the original
 nine languages. It prints a table per language (files, chunks, sizes, the share of
 chunks with a scope, unparsed files, files with a metadata region, failures).
 

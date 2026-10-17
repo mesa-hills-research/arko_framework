@@ -1791,7 +1791,7 @@ local scripted model. See the
 
 Syntax-aware partitioning of source trees into chunks (tree-sitter for 53 languages, a bounded fallback for other UTF-8 text) with context headers, offline BM25 search, opt-in dense and hybrid search through a caller-supplied embedder, and durable watchers that report chunk deltas. The library makes no network calls or model requests and reads no credentials. It depends on no other arko crate (its examples use arko_ai for Voyage).
 
-Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](arko_index-reference.md) · [arko_index languages](arko_index-languages.md) · [arko_index verification](arko_index-verification.md)
+Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](arko_index-reference.md) · [arko_index languages](arko_index-languages.md) · [arko_index tests and evaluation](arko_index-evaluation.md)
 
 ### Map (arko_index)
 
