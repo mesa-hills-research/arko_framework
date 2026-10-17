@@ -1,6 +1,7 @@
 //! Opt-in, per-call request tracing for diagnosing prompt caching.
 //!
-//! When a [`RequestTrace`] is attached to a client, every model call writes
+//! Tracing is currently implemented for the OpenAI provider. When a
+//! [`RequestTrace`] is attached to a client, every traced model call writes
 //! its exact request and raw terminal response to disk, and appends one
 //! summary line to `calls.jsonl`, including prefix-parity metrics against
 //! the previous request of the same conversation:
@@ -20,7 +21,7 @@
 //! filesystems. Each `calls.jsonl` line names its directory in
 //! `conversation_dir`.
 //!
-//! The previous request is the last one that didn't fail: a failed or
+//! The previous request is the last one that didn't fail. A failed or
 //! abandoned call is traced, but the call after it (typically its retry) is
 //! compared with the call before it. A response that doesn't parse counts as
 //! a failed call.
@@ -35,7 +36,7 @@
 //! written as their SHA-256 (`sha256:<hex>`, the hash the summary line
 //! reports). Conversation directory names never leave `<dir>`. Traces still
 //! contain prompt and response content, so keep them local. Tracing never
-//! fails a model call: I/O errors are logged and ignored.
+//! fails a model call. I/O errors are logged and ignored.
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};

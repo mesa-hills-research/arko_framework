@@ -6,7 +6,7 @@ use thiserror::Error;
 
 /// What kind of failure an error is, beside how it may be retried
 /// ([`RetryClass`], which this doesn't change). A host decides by it what a
-/// failure means for the work around the request: a lost login stops
+/// failure means for the work around the request. A lost login stops
 /// everything that uses the credential, a request over the model's input
 /// limit can be made smaller, and an invalid request fails one task. Read
 /// it with [`Error::kind`].
@@ -15,14 +15,14 @@ use thiserror::Error;
 /// or type, then its HTTP status), then from the documented phrases of its
 /// message. Anything else is [`Unknown`](Self::Unknown), which callers
 /// treat as before kinds existed. Temporary failures (rate limits,
-/// capacity, server and network errors) are `Unknown`: their
+/// capacity, server and network errors) are `Unknown`. Their
 /// [`RetryClass`] says what they are.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
-    /// The credential is missing, invalid, expired or revoked: an HTTP 401,
-    /// an API key the provider rejects, a ChatGPT sign-in whose refresh
+    /// The credential is missing, invalid, expired or revoked. Covers an HTTP
+    /// 401, an API key the provider rejects, a ChatGPT sign-in whose refresh
     /// failed, a Claude Code CLI that isn't signed in. A new credential (or
     /// sign-in) is needed. Every request that uses it fails until then.
     Authentication,
@@ -38,7 +38,7 @@ pub enum ErrorKind {
     /// The request body, or one value in it, is over a size limit (an HTTP
     /// 413, OpenAI `string_above_max_length`).
     RequestTooLarge,
-    /// Any other request the provider rejects: a bad parameter, schema,
+    /// Any other request the provider rejects, such as a bad parameter, schema,
     /// image or history.
     InvalidRequest,
     /// The model or resource doesn't exist or isn't available (an HTTP 404,
@@ -232,7 +232,7 @@ fn message_kind(message: &str) -> Option<ErrorKind> {
 }
 
 impl ErrorKind {
-    /// The kind's name as it is saved: `"authentication"`,
+    /// The kind's name as it is saved, such as `"authentication"`,
     /// `"context_overflow"`, ...
     pub fn as_str(self) -> &'static str {
         match self {
@@ -249,8 +249,8 @@ impl ErrorKind {
         }
     }
 
-    /// The kind of a failed Claude Code CLI turn, from what the CLI reports:
-    /// the assistant message's `error` field (`authentication_failed`,
+    /// The kind of a failed Claude Code CLI turn, from what the CLI reports.
+    /// Uses the assistant message's `error` field (`authentication_failed`,
     /// `billing_error`, `invalid_request`, ..., the Claude Agent SDK's
     /// `SDKAssistantMessageError`), the result's `api_error_status` (the
     /// HTTP status of the failed API request) and `terminal_reason`
@@ -303,7 +303,7 @@ pub enum RetryClass {
     /// An explicit provider capacity signal (overloaded / unavailable). Also
     /// retryable. Callers may choose a longer wait.
     Capacity,
-    /// A plan usage limit (ChatGPT `usage_limit_reached`): requests fail
+    /// A plan usage limit (ChatGPT `usage_limit_reached`). Requests fail
     /// until the limit resets, typically hours or days later
     /// ([`Error::retry_after`] holds the time left when the provider said).
     /// Retryable after that wait, not within a short recovery budget.
@@ -704,7 +704,7 @@ impl Error {
         self.retry_class() == RetryClass::UsageLimit
     }
 
-    /// A short request-rate limit: a retryable HTTP 429 (or a 429 code on an
+    /// A short request-rate limit, a retryable HTTP 429 (or a 429 code on an
     /// error reported after the response started), or `rate_limit_exceeded`
     /// / `slow_down`. Such errors are [`RetryClass::Transient`]. This
     /// refines that class. Quota walls (`insufficient_quota`, ...) are
@@ -741,7 +741,7 @@ impl Error {
 
     /// What kind of failure this is. See [`ErrorKind`]. A provider error is
     /// classified from its code, then its HTTP status, then documented
-    /// phrases of its message. arko's own errors: a rejected or missing
+    /// phrases of its message. For arko's own errors, a rejected or missing
     /// credential is [`ErrorKind::Authentication`], a local request check
     /// [`ErrorKind::InvalidRequest`], an unsupported provider, model or
     /// feature [`ErrorKind::Unsupported`], a refusal

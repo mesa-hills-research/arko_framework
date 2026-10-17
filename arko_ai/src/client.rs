@@ -58,17 +58,17 @@ impl LLMClient {
     /// Configures every provider whose credentials are in the environment.
     /// Empty values are ignored.
     ///
-    /// - OpenAI: ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
+    /// - OpenAI uses ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
     ///   `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`)
     ///   when both are set. Otherwise `OPENAI_API_KEY`. Setting only some of
     ///   the `OPENAI_OAUTH_*` variables is an error
     ///   ([`Error::AuthenticationFailed`]) rather than a silent switch to
     ///   API-key billing.
-    /// - Anthropic: `ANTHROPIC_API_KEY`.
-    /// - Google: `GOOGLE_API_KEY`, else `GEMINI_API_KEY`.
-    /// - OpenRouter: `OPENROUTER_API_KEY`.
+    /// - Anthropic uses `ANTHROPIC_API_KEY`.
+    /// - Google uses `GOOGLE_API_KEY`, else `GEMINI_API_KEY`.
+    /// - OpenRouter uses `OPENROUTER_API_KEY`.
     ///
-    /// ChatGPT OAuth refresh tokens rotate: a refresh makes the refresh token
+    /// ChatGPT OAuth refresh tokens rotate. A refresh makes the refresh token
     /// in the environment stop working. When `OPENAI_OAUTH_REFRESH_TOKEN` is
     /// the one the Codex `auth.json` holds (`$CODEX_HOME/auth.json`, else
     /// `~/.codex/auth.json`, compared by SHA-256 fingerprint, for the same
@@ -76,7 +76,7 @@ impl LLMClient {
     /// as [`with_codex_auth_file`](Self::with_codex_auth_file) does, so
     /// rotated tokens are written back and Codex stays signed in (logged at
     /// info level). Otherwise rotated tokens are kept in memory only, and the
-    /// first rotation logs a warning: save them from
+    /// first rotation logs a warning. Save them from
     /// [`openai_chatgpt_oauth_credentials`](Self::openai_chatgpt_oauth_credentials),
     /// or load credentials with [`CodexAuthFile`](crate::codex_auth::CodexAuthFile)
     /// and [`with_codex_auth_file`](Self::with_codex_auth_file). Without a
@@ -90,7 +90,7 @@ impl LLMClient {
 
     /// [`from_env`](Self::from_env), reading each variable (and, to locate
     /// the Codex `auth.json`, `CODEX_HOME`, `HOME` and `USERPROFILE`) through
-    /// `lookup`. A lookup that returns `None` for some names hides them: an
+    /// `lookup`. A lookup that returns `None` for some names hides them. An
     /// application that takes ChatGPT OAuth credentials from a file can hide
     /// the `OPENAI_OAUTH_*` variables so they are not read at all.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
@@ -212,7 +212,7 @@ impl LLMClient {
 
     /// Writes every model request and response to `trace` for debugging.
     /// See [`RequestTrace`]. Applies to providers configured before or after
-    /// this call. Currently implemented for the OpenAI provider only: the
+    /// this call. Currently implemented for the OpenAI provider only. The
     /// first request to another provider logs a warning (once per provider)
     /// that it is not traced.
     pub fn with_request_trace(mut self, trace: RequestTrace) -> Self {
@@ -223,10 +223,10 @@ impl LLMClient {
 
     /// Cuts a streamed response off once no data has arrived for `timeout`,
     /// on every provider, whether configured before or after this call.
-    /// Off by default, and deliberately so: there is no timeout on a
-    /// response while its connection stays open.
+    /// Off by default, so there is no timeout on a response while its
+    /// connection stays open.
     ///
-    /// Models can reason for a long time without sending anything: GPT Pro
+    /// Models can reason for a long time without sending anything. GPT Pro
     /// models can think for over an hour, and a stream may carry no event
     /// until the reasoning ends. A timeout shorter than that cuts healthy
     /// responses off. They then fail with [`Error::StreamTruncated`], which
@@ -236,7 +236,7 @@ impl LLMClient {
     /// use can have (for example two hours).
     ///
     /// Only the time between data on a streamed response counts, from its
-    /// first byte of body on: there is no total deadline, the wait for the
+    /// first byte of body on. There is no total deadline, the wait for the
     /// response to start (its status and headers) is not covered, and
     /// responses that don't stream (`generate_text`, except over ChatGPT
     /// OAuth, whose backend always streams) are unaffected. Connecting stays
@@ -392,7 +392,7 @@ impl LLMClient {
     /// bounded exponential backoff, for up to 8 retries. See
     /// [`OpenAIClient::with_oauth_rate_limit_retries`](providers::openai::OpenAIClient::with_oauth_rate_limit_retries).
     /// The refreshes requests make on their own, including those of the
-    /// arko_agents runtime, never wait: their 429 goes to the agent's own
+    /// arko_agents runtime, never wait. Their 429 goes to the agent's own
     /// rate-limit recovery.
     pub fn with_openai_chatgpt_oauth_rate_limit_retries(
         mut self,
@@ -416,7 +416,7 @@ impl LLMClient {
     }
 
     /// Configures the OpenAI provider with the ChatGPT OAuth credentials in
-    /// a Codex `auth.json`, kept in step with the file: every token refresh
+    /// a Codex `auth.json`, kept in step with the file. Every token refresh
     /// first re-reads it (adopting tokens Codex refreshed, for the same
     /// account only) and rotated tokens are written back at once. See
     /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)
@@ -495,7 +495,7 @@ impl LLMClient {
     /// without exposing provider internals. API-key and unconfigured clients
     /// return `None`.
     ///
-    /// A refresh in flight on this client (or a clone) is waited for: it
+    /// A refresh in flight on this client (or a clone) is waited for because it
     /// holds the credentials until its new tokens are installed and stored.
     /// A refresh finishes even when its caller is dropped, but a Tokio
     /// runtime shutting down cancels it, and tokens it had not stored yet are
@@ -517,7 +517,7 @@ impl LLMClient {
     /// for `model` with `config` after their last use, for a conversation
     /// with caching enabled (the default). See
     /// [`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime).
-    /// For OpenAI models it depends on the client's OpenAI auth: API key or
+    /// For OpenAI models it depends on the client's OpenAI auth, API key or
     /// ChatGPT OAuth.
     pub async fn prompt_cache_lifetime(
         &self,
@@ -531,7 +531,7 @@ impl LLMClient {
 
     /// The most input tokens this client's requests to `model` may carry.
     /// See [`effective_max_input_tokens`](crate::input_limit::effective_max_input_tokens).
-    /// For OpenAI models it depends on the client's OpenAI auth: API key or
+    /// For OpenAI models it depends on the client's OpenAI auth, API key or
     /// ChatGPT OAuth.
     pub async fn max_input_tokens(&self, model: &Model) -> Option<usize> {
         let chatgpt_oauth =
@@ -615,7 +615,7 @@ impl LLMClient {
     /// [`refresh_openai_oauth_token_once`](Self::refresh_openai_oauth_token_once)).
     ///
     /// Use this instead of checking [`is_openai_token_expired`](Self::is_openai_token_expired)
-    /// and then refreshing: two tasks sharing a client could both see an
+    /// and then refreshing. Two tasks sharing a client could both see an
     /// expiring token and rotate it twice. Here the decision is made under
     /// the credential lock, after re-reading the credential store (such as a
     /// Codex `auth.json`), so concurrent calls refresh once.
@@ -625,7 +625,7 @@ impl LLMClient {
     /// the credentials don't expire within `margin` (including ones another
     /// caller just refreshed) and for API-key and unconfigured clients.
     /// Credentials without a refresh token are used until the server rejects
-    /// them: this returns `Ok(None)` for them, and the rejected request fails
+    /// them. This returns `Ok(None)` for them, and the rejected request fails
     /// with [`Error::AuthenticationFailed`]. See
     /// [`OpenAIClient::refresh_oauth_token_if_expiring`](providers::openai::OpenAIClient::refresh_oauth_token_if_expiring).
     pub async fn refresh_openai_oauth_token_if_expiring(
@@ -677,7 +677,7 @@ impl LLMClient {
     }
 
     /// Configures the OpenAI provider with an ordered list of ChatGPT OAuth
-    /// accounts, first preferred: a request an account's usage limit (or
+    /// accounts, first preferred. A request an account's usage limit (or
     /// credits) refuses goes to the next account at once, and requests move
     /// back as soon as a higher account is usable again. See
     /// [`ChatGptAccounts`](providers::openai::ChatGptAccounts). The OpenAI
@@ -743,7 +743,7 @@ impl LLMClient {
     }
 
     /// Sets the OpenAI client of this `LLMClient` and of every clone of it,
-    /// made before or after: for an application that takes credentials while
+    /// made before or after, for an application that takes credentials while
     /// it runs. It comes before the OpenAI client (or the ChatGPT accounts)
     /// the client was built with, and replaces one set before. Requests that
     /// start afterwards use it, also those of conversations and agent runs
