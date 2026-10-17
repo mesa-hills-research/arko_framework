@@ -6,11 +6,11 @@ pub enum ToolTypeDetails {
     BuiltIn,
     DeveloperDefined,
     EndUserDefined {
-        /// The command to run, e.g. `"~/bin/my_script.sh --verbose"`: `~`
+        /// The command to run, e.g. `"~/bin/my_script.sh --verbose"`. Tildes (`~`)
         /// and environment variables are expanded, and the result is split
         /// on whitespace (quotes are not interpreted) into the program and
         /// its first arguments. The template has no placeholders. The
-        /// arguments from `ToolDefinition::parameters` follow it: string
+        /// arguments from `ToolDefinition::parameters` follow it, with string
         /// parameters without a `flag` as positional arguments, in order,
         /// then flagged string parameters as `flag value` and each true
         /// boolean parameter as its flag.

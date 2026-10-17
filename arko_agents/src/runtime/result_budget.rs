@@ -28,7 +28,7 @@ use arko_ai as ai;
 
 use super::event::ShortenReason;
 
-/// Bytes per token before a task's own usage calibrates it: about right
+/// Bytes per token before a task's own usage calibrates it. About right
 /// for code and English with current tokenizers.
 pub const DEFAULT_BYTES_PER_TOKEN: f64 = 3.0;
 /// The calibrated ratio's bounds: dense text (JSON, non-Latin scripts) has

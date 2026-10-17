@@ -109,9 +109,9 @@ impl DeveloperDefinableEnvironmentDetail {
         }
     }
 
-    /// Why this detail has no content to give, if it has none: a dynamic
-    /// detail loaded from a saved task or configuration whose provider was
-    /// not set again (providers are not saved), or a detail with neither
+    /// Why this detail has no content to give, if it has none. This can be a
+    /// dynamic detail loaded from a saved task or configuration whose provider
+    /// was not set again (providers are not saved), or a detail with neither
     /// content nor a provider. The runtime refuses to start a task with such
     /// a detail.
     pub fn missing_content_error(&self) -> Option<String> {
@@ -176,15 +176,15 @@ pub struct PerToolConfigOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub out_of_workspace_path_policy: Option<PathSafetyPolicy>,
     /// This tool's host-side time limit instead of
-    /// [`AgentToolConfig::tool_timeout_seconds`]: `Some(Some(seconds))`, or
+    /// [`AgentToolConfig::tool_timeout_seconds`]. Use `Some(Some(seconds))`, or
     /// `Some(None)` (JSON `null`) for none. It applies to the tools that are
     /// otherwise exempt, such as the terminal tools, too. `None` (the field
     /// left out) uses the agent's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_seconds: Option<Option<u64>>,
-    /// Opt-in: at most this many (estimated) tokens of this tool's result
+    /// An opt-in cap on the estimated tokens of this tool's result that
     /// go into the conversation, instead of
-    /// [`ToolResultLimits::max_result_tokens`]: `Some(Some(tokens))`, or
+    /// [`ToolResultLimits::max_result_tokens`]. Use `Some(Some(tokens))`, or
     /// `Some(None)` (JSON `null`) for no cap on this tool. `None` (the field
     /// left out) uses the agent's setting. A longer result keeps its start
     /// and end, up to the cap, with a notice. See [`ToolResultLimits`].
@@ -226,28 +226,28 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 
 /// Host-side limits on what tool results add to an agent's conversation
 /// ([`AgentToolConfig::result_limits`]). None of them is shown to the
-/// model: it sees only a shortened result's notice.
+/// model, which sees only a shortened result's notice.
 ///
 /// **The overflow guard** (on by default) acts only when the next request
 /// would certainly be over the model's input limit
-/// ([`LLMClient::max_input_tokens`](arko_ai::LLMClient::max_input_tokens):
-/// the model's limit, or 272,000 tokens on ChatGPT OAuth). It runs once per
+/// ([`LLMClient::max_input_tokens`](arko_ai::LLMClient::max_input_tokens),
+/// which is the model's limit, or 272,000 tokens on ChatGPT OAuth). It runs once per
 /// turn, over all of the turn's tool results (parallel calls included),
 /// after result interceptors and distillers, as the results go into the
-/// conversation. No tokenizer is used. It decides by a lower bound on the
-/// next request: the latest request's reported input tokens, plus every
+/// conversation. It decides by a lower bound on the next request, without
+/// a tokenizer. This is the latest request's reported input tokens, plus every
 /// byte added since (the reply and the results) at 10 bytes per token,
 /// more than any content measured packs into a token (code 3.6 to 4.8
 /// bytes per o200k token, English 3.8 to 4.3, padded tables 8.6, Claude's
 /// tokenizer counts more tokens for the same text). Only when even that is
-/// over the limit does it act: the largest results are shortened first,
+/// over the limit does it act. The largest results are shortened first,
 /// each to a head-and-tail preview (about 2% of the input limit, between
 /// 4,000 and 16,000 tokens), until the overflow is no longer certain. If
 /// the previews leave it certain (a nearly full context), the room left is
 /// shared between the results above 500 tokens, by a bytes-per-token ratio
 /// calibrated from the task's own reported usage, keeping
 /// [`margin_tokens`](Self::margin_tokens) free. A shortened result is
-/// followed by a notice: with a terminal tool offered, the notice names
+/// followed by a notice. With a terminal tool offered, the notice names
 /// commands to look at the rest (`wc -l`, `head`, `grep -n`,
 /// `sed -n 'a,bp'`, a short script). Without one, with
 /// [`AgentToolConfig::read_file_line_ranges`] on, a `read_file` result's
@@ -271,10 +271,10 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
 /// the task stops on the error, its kind recorded.
 ///
 /// The guard covers native tool calling in arko's own runtime. Output-based
-/// (legacy) tool calling and Claude Code agents are not guarded: Claude
+/// (legacy) tool calling and Claude Code agents are not guarded. Claude
 /// Code manages its own context.
 ///
-/// **Caps** are opt-in: [`max_result_tokens`](Self::max_result_tokens) for
+/// **Caps** are opt-in. Use [`max_result_tokens`](Self::max_result_tokens) for
 /// every tool, and [`PerToolConfigOverride::max_result_tokens`] for one. A
 /// result over its cap keeps its head and tail up to the cap, with the same
 /// notice.
@@ -288,12 +288,12 @@ pub struct ToolResultLimits {
     /// Tokens of the input limit the guard keeps free when it shares the
     /// room left between shortened results (a nearly full context), for
     /// what the runtime adds to the next request and for estimate error.
-    /// It doesn't decide whether the guard acts. `None` (the default): 2% of
-    /// the limit, at least 4,000 tokens.
+    /// It doesn't decide whether the guard acts. `None` (the default) keeps
+    /// 2% of the limit free, at least 4,000 tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margin_tokens: Option<usize>,
-    /// Opt-in: at most this many (estimated) tokens of any one tool result
-    /// go into the conversation. `None` (the default): no cap.
+    /// An opt-in cap on the estimated tokens of any one tool result that
+    /// go into the conversation. `None` (the default) sets no cap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_result_tokens: Option<usize>,
 }
@@ -309,7 +309,7 @@ impl Default for ToolResultLimits {
 }
 
 impl ToolResultLimits {
-    /// The defaults: the overflow guard on, no caps.
+    /// Whether the overflow guard is on with its default margin and no caps.
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -351,7 +351,7 @@ where
 /// The model responds with structured tool call objects rather than text
 /// markup, which is what current models are trained for.
 ///
-/// Key behavioral differences from output-based mode:
+/// Native mode differs from output-based mode in these ways:
 /// - One response can call several *different* tools (output-based mode
 ///   restricts batches to the same tool).
 /// - XML usage examples are not sent to the model. Only the tool description
@@ -424,7 +424,7 @@ where
 /// # Several calls in one response
 ///
 /// A response's tool calls all run, and each gets exactly one result. They
-/// run in call order as under a fair read/write lock, as Codex runs them: a
+/// run in call order as under a fair read/write lock, as Codex runs them. A
 /// parallel-safe call starts once every earlier call that isn't
 /// parallel-safe has finished, and any other call once every earlier call
 /// has finished. So `[read, read]` run together, and `[read, write, read]`
@@ -437,7 +437,7 @@ where
 /// [`one_tool_call_per_turn`](Self::one_tool_call_per_turn) asks for one
 /// call per response instead.
 ///
-/// Approvals keep that order: a call awaiting approval counts as not
+/// Approvals keep that order. A call awaiting approval counts as not
 /// finished, and so does a call held behind one. A call that must wait for
 /// one is held (saved with the task) until the approvals are decided, and
 /// then runs with the approved calls, in call order under the same rule.
@@ -449,16 +449,17 @@ where
 /// approvals are decided, only one that ends the task stops the others.
 ///
 /// `complete_task` after an earlier call of its turn was rejected or failed
-/// doesn't complete the task: the model chose to finish before it saw those
+/// doesn't complete the task. The model chose to finish before it saw those
 /// results, so its result says the task was not completed and asks it to
 /// review the results and call `complete_task` again if the task is done.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {
     /// The tools the agent is offered, besides `complete_task`, which is
-    /// always offered (unless a reply in text ends the task:
-    /// [`text_reply_ends_task`](Self::text_reply_ends_task)). The runtime offers and runs only these (those the
-    /// task's registry holds): a native call to any other tool gets an error
+    /// offered unless a reply in text ends the task
+    /// ([`ends_task_with_text`](Self::ends_task_with_text)). A chat is offered
+    /// no tools. The runtime offers and runs only the tools the task's registry
+    /// holds from this set. A native call to any other tool gets an error
     /// result and `AgentEvent::UnavailableToolAttempted`, and output-based
     /// parsing recognizes only these tools' tags.
     pub available_tool_names: Vec<String>,
@@ -486,9 +487,9 @@ pub struct AgentToolConfig {
     /// See [`ToolCallingMode`].
     #[serde(default = "loaded_tool_calling_mode")]
     pub tool_calling_mode: ToolCallingMode,
-    /// The host-side time limit of a tool call, in seconds: 20 minutes
-    /// ([`DEFAULT_TOOL_TIMEOUT_SECONDS`]) by default, `None` (JSON `null`)
-    /// for none. It is never shown to the model as a parameter. A call that
+    /// The host-side time limit of a tool call, in seconds. Defaults to
+    /// 20 minutes ([`DEFAULT_TOOL_TIMEOUT_SECONDS`]). Use `None` (JSON `null`)
+    /// for no limit. It is never shown to the model as a parameter. A call that
     /// runs longer is stopped (a command it started is killed), and its
     /// result tells the model it did not finish within the host's time
     /// limit. The tool-error policy then applies as to any failed call
@@ -500,13 +501,13 @@ pub struct AgentToolConfig {
     /// nothing, so no limit applies.
     #[serde(default = "default_tool_timeout_seconds")]
     pub tool_timeout_seconds: Option<u64>,
-    /// Host-side limits on what tool results add to the conversation: the
-    /// overflow guard (on by default) and opt-in caps. See
+    /// Host-side limits on what tool results add to the conversation,
+    /// with the overflow guard (on by default) and opt-in caps. See
     /// [`ToolResultLimits`].
     #[serde(default, skip_serializing_if = "ToolResultLimits::is_default")]
     pub result_limits: ToolResultLimits,
-    /// Opt-in (off by default): the built-in `read_file` takes optional
-    /// `start_line` and `end_line` parameters (1-based, inclusive) and reads
+    /// Lets the built-in `read_file` take optional `start_line` and `end_line`
+    /// parameters (1-based, inclusive). Off by default. When on, it reads
     /// only those lines. Its schema and description show them, and the
     /// overflow guard's notice for a shortened `read_file` result names
     /// them. Off, they are neither shown nor mentioned, and a call that
@@ -516,10 +517,10 @@ pub struct AgentToolConfig {
     /// already points to.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_file_line_ranges: bool,
-    /// Opt-in (off by default): a reply in plain text, without a tool call,
-    /// is a message to the user, and the task carries on. Off, a native
+    /// Treats a reply in plain text, without a tool call, as a message to the
+    /// user, and the task carries on. Off by default. When off, a native
     /// response with text but no tool call is a response the runtime can't
-    /// use: it goes through error recovery (an `ErrorEncountered` and a
+    /// use. It goes through error recovery (an `ErrorEncountered` and a
     /// `RetryScheduled` event, and the runtime's note that the response
     /// called no tool, which counts against the recovery's attempts).
     ///
@@ -528,34 +529,34 @@ pub struct AgentToolConfig {
     /// (without a `tool_call_id`), adds a note that the user has the message
     /// and the task is still open, and asks again, without an error event.
     /// Only the first such reply since the agent's last tool call or new
-    /// message is a message: another one right after it is handled as with
+    /// message is a message. Another one right after it is handled as with
     /// the setting off, so a model that keeps replying in text still reaches
     /// the recovery's attempt limit. The native system prompt tells the
     /// model that a reply in plain text reaches the user. A Claude Code
     /// agent's turn that ends without `complete_task` sends its final text
     /// as `MessageToUser` before the runtime's note. Output-based mode
-    /// ignores the setting: its format asks for a tool call in every
+    /// ignores the setting because its format asks for a tool call in every
     /// response.
     ///
     /// The built-in `message_user` tool sends a message without this
     /// setting, when `available_tool_names` lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_reply_as_message: bool,
-    /// Opt-in (off by default): a reply in plain text, without a tool call,
-    /// is the agent's final reply and ends the task, as if it had called
+    /// Treats a reply in plain text, without a tool call, as the agent's final
+    /// reply and ends the task. Off by default. It acts as if the agent had called
     /// `complete_task` with that text as the summary. The agent is not
     /// offered `complete_task`, even where `available_tool_names` lists it,
-    /// and text written beside tool calls stays what it is: text of a
+    /// and text written beside tool calls stays part of a
     /// response that goes on with its calls.
     ///
     /// On, in native mode, a response with text and no tool call completes
-    /// the task with the text (trimmed) as the summary: the task's state is
+    /// the task with the text (trimmed) as the summary. The task's state is
     /// `Completed { summary }` and the host gets the
     /// `TaskStateChanged` event a `complete_task` call sends (the text
     /// itself has streamed as `AssistantResponseChunk`). A response without
     /// text or a tool call is still a response the runtime can't use, with
     /// a note that asks for a tool call or a reply. A handover report that
-    /// is due comes first: a reply then is the report (or, for an agent
+    /// is due comes first. A reply then is the report (or, for an agent
     /// offered `handover_report`, gets the note asking for that call), and
     /// the task ends with a reply in the fresh conversation. A reply cut off
     /// at the output-token limit ends the task too, after
@@ -563,12 +564,12 @@ pub struct AgentToolConfig {
     /// text completes the task the same way, except a turn Claude Code was
     /// told to end without tools (after `ask_user`, or for a handover or a
     /// `/compact`), and a turn that ends without text gets the runtime's
-    /// note. Output-based mode ignores the setting: its format asks for a
+    /// note. Output-based mode ignores the setting because its format asks for a
     /// tool call in every response, and `complete_task` ends the task.
     ///
     /// Unlike a `complete_task` call, a reply in text needs no approval and
     /// runs through no execution middleware, so a host's checks of
-    /// `complete_task` calls don't see it: arko_workflows refuses the
+    /// `complete_task` calls don't see it. arko_workflows refuses the
     /// setting on an agent a completion verifier reviews, and on a
     /// verifier agent. [`AgentConfig::validate`] refuses it together with
     /// [`text_reply_as_message`](Self::text_reply_as_message), which gives
@@ -576,17 +577,17 @@ pub struct AgentToolConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_reply_ends_task: bool,
     /// The agent is a chat (off by default, and the `AgentToolConfig::chat()`
-    /// constructor makes one): it is offered no tools, not even `complete_task`, and its
+    /// constructor makes one). It is offered no tools, not even `complete_task`, and its
     /// reply in text ends its task, as with
     /// [`text_reply_ends_task`](Self::text_reply_ends_task). Hosts give it
-    /// none of their own tools either: a workflow adds neither its
+    /// none of their own tools either. A workflow adds neither its
     /// messaging, memory and subagent tools nor its workflow-wide and
     /// agent tools, and lists no agents to message. A handover asks it for
     /// a summary in text, and the fresh conversation answers the user's
     /// latest message ([`HandoverSeed::for_chat`](crate::handover::HandoverSeed::for_chat)).
     /// Native mode only, with no `available_tool_names` (other than
     /// `complete_task`) and without `text_reply_as_message`. An agent is a
-    /// chat only when this is set: one that merely lists no tools keeps the
+    /// chat only when this is set. One that merely lists no tools keeps the
     /// tools and behaviour its host gives every agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat: bool,
@@ -596,7 +597,7 @@ pub struct AgentToolConfig {
 /// terminal (`TerminalTool::NAMES`).
 const TERMINAL_START_TOOL_NAME: &str = "terminal_start";
 
-/// The default [`AgentToolConfig::tool_timeout_seconds`]: 20 minutes.
+/// The default [`AgentToolConfig::tool_timeout_seconds`], equal to 20 minutes.
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 20 * 60;
 
 fn default_tool_timeout_seconds() -> Option<u64> {
@@ -668,7 +669,7 @@ fn default_auto_approve_tool_use_false() -> bool {
 }
 
 impl AgentToolConfig {
-    /// A chat's tool configuration: no tools, and a reply in text ends the
+    /// A chat's tool configuration, with no tools and a reply in text ending the
     /// task. See the `chat` field.
     pub fn chat() -> Self {
         Self {
@@ -679,7 +680,7 @@ impl AgentToolConfig {
         }
     }
 
-    /// The names of the tools the agent is offered and can run:
+    /// The names of the tools the agent is offered and can run. These are
     /// `available_tool_names` and `complete_task`, without `complete_task`
     /// for an agent whose reply in text ends the task
     /// ([`ends_task_with_text`](Self::ends_task_with_text)), and none for a
@@ -698,16 +699,16 @@ impl AgentToolConfig {
             .collect()
     }
 
-    /// Whether a reply in plain text, without a tool call, ends the task:
-    /// [`text_reply_ends_task`](Self::text_reply_ends_task) in native mode
-    /// (output-based mode ignores it). Such an agent is not offered
-    /// `complete_task`.
+    /// Whether a reply in plain text, without a tool call, ends the task.
+    /// True when either [`text_reply_ends_task`](Self::text_reply_ends_task)
+    /// or `chat` is set in native mode (output-based mode ignores both).
+    /// Such an agent is not offered `complete_task`.
     pub fn ends_task_with_text(&self) -> bool {
         (self.text_reply_ends_task || self.chat)
             && self.tool_calling_mode == ToolCallingMode::Native
     }
 
-    /// The host-side time limit of a call to `tool_name`: its
+    /// The host-side time limit of a call to `tool_name`, given by its
     /// [`PerToolConfigOverride::tool_timeout_seconds`], or else
     /// [`tool_timeout_seconds`](Self::tool_timeout_seconds) unless the tool
     /// is exempt (`uses_host_timeout` false).
@@ -737,7 +738,7 @@ impl AgentToolConfig {
             .any(|name| name == TERMINAL_START_TOOL_NAME)
     }
 
-    /// The opt-in cap on `tool_name`'s results, in estimated tokens: its
+    /// The opt-in cap on `tool_name`'s results, in estimated tokens, given by its
     /// [`PerToolConfigOverride::max_result_tokens`], or else
     /// [`ToolResultLimits::max_result_tokens`].
     pub fn max_result_tokens(&self, tool_name: &str) -> Option<usize> {
@@ -936,7 +937,7 @@ impl Default for LLMErrorPolicy {
 
 /// Timing limits shared by model-call and proactive token-refresh recovery.
 /// The elapsed budget starts at the first failure of an episode and limits
-/// the waits between attempts and the decision to make another: a failure
+/// the waits between attempts and the decision to make another. A failure
 /// after it is spent ends recovery. The budget doesn't count the time a
 /// response the provider accepted runs (it resumes if the response fails).
 /// It never cuts off a request in flight,
@@ -952,12 +953,12 @@ pub struct LLMRetryConfig {
     /// but must still fit the elapsed recovery budget.
     pub max_delay_ms: u64,
     pub max_elapsed_ms: u64,
-    /// Equal jitter: choose a delay between half and all of the backoff cap.
+    /// Uses equal jitter to choose a delay between half and all of the backoff cap.
     pub jitter: bool,
     /// None retains bounded recovery. Some retries explicit capacity errors until
     /// success or cancellation, without consuming the ordinary recovery budget.
     pub capacity_retry: Option<LLMCapacityRetryConfig>,
-    /// On by default: short rate limits (HTTP 429, `rate_limit_exceeded`,
+    /// On by default. Short rate limits (HTTP 429, `rate_limit_exceeded`,
     /// `slow_down`) and, unless `capacity_retry` is set, capacity errors
     /// (`server_is_overloaded`, ...) are retried after the provider's delay
     /// (with jitter), until success or cancellation, without consuming the
@@ -968,17 +969,17 @@ pub struct LLMRetryConfig {
     /// `usage_limit_reached`, or a rate limit whose reset is further off than
     /// [`LLMRateLimitRetryConfig::max_wait_ms`]). Pauses by default.
     pub usage_limit_policy: UsageLimitPolicy,
-    /// Opt-in: cut a streamed model response off once no data has arrived
-    /// for this long (arko_ai's
+    /// An opt-in limit that cuts a streamed model response off once no data
+    /// has arrived for this long (arko_ai's
     /// [`LLMClient::with_stream_idle_timeout`](arko_ai::LLMClient::with_stream_idle_timeout),
     /// applied to this agent's requests). `None`, the default, waits as long
-    /// as the connection stays open, and that is deliberate: models can
+    /// as the connection stays open because models can
     /// reason silently for a long time (GPT Pro models for over an hour),
     /// and a stream may carry nothing until the reasoning ends. A value
     /// shorter than that cuts healthy responses off. The cut surfaces as a
     /// truncated stream, which ordinary recovery sends again, paying for the
     /// work again. If you set one, make it generous (for example two hours).
-    /// Only the gaps between data count: there is no total deadline. Never
+    /// Only the gaps between data count, with no total deadline. Never
     /// sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_idle_timeout_ms: Option<u64>,
@@ -1048,12 +1049,12 @@ impl LLMRateLimitRetryConfig {
 /// [`LLMRetryConfig::usage_limit_policy`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum UsageLimitPolicy {
-    /// Stop retrying and return control like exhausted recovery: the task
+    /// Stop retrying and return control like exhausted recovery. The task
     /// awaits error-recovery approval under the pausing error policies, or
     /// is interrupted (returned to the host) otherwise.
     #[default]
     Pause,
-    /// Opt-in: wait until the limit resets (plus a 1-second margin and up to
+    /// Opt into waiting until the limit resets (plus a 1-second margin and up to
     /// 30 seconds of jitter) and retry unchanged, when the provider says
     /// when that is and the whole wait, margin and jitter included, fits in
     /// `max_wait_ms`. Otherwise pause. Applies under every error policy
@@ -1165,9 +1166,9 @@ pub struct MonitoringConfig {
 }
 
 /// See [`MonitoringConfig::cache`]. A call's cache efficiency is the input
-/// it read from the prompt cache divided by the most it could have read:
-/// the smaller of the previous call's input and its own (the shared prefix
-/// can't be longer). Above 100% means the provider also cached earlier
+/// it read from the prompt cache divided by the most it could have read.
+/// That maximum is the smaller of the previous call's input and its own
+/// (the shared prefix can't be longer). Above 100% means the provider also cached earlier
 /// output. The first `warmup_calls` calls of the conversation, and calls
 /// whose provider reports no cache figure, are not judged. The rolling
 /// efficiency sums the last `window_calls` judged calls. The thresholds
@@ -1234,7 +1235,7 @@ impl MonitoringConfig {
 }
 
 /// See [`MonitoringConfig::plan_usage`]. Checked before each model request
-/// against the most recent report: when the most-used window is at or above
+/// against the most recent report. When the most-used window is at or above
 /// `percent`, `AgentEvent::PlanUsageThresholdReached` is emitted (once per
 /// window and reset) and `action` applies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1246,27 +1247,27 @@ pub struct PlanUsageThreshold {
 
 /// What a [`PlanUsageThreshold`] does.
 ///
-/// Neither action saves usage: the task's requests count the same against
+/// Neither action saves usage. The task's requests count the same against
 /// the plan whenever they are made. What differs is whether the task keeps
 /// going as the limit nears. Choose with the window's reset in mind (the
-/// threshold event carries it) and the prompt cache: a request made after
+/// threshold event carries it) and the prompt cache. A request made after
 /// the cache has expired reads the whole context again as uncached input,
 /// which uses more of the plan than cached input, more than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
-/// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
+/// gives the model's lifetime, which is 5 minutes for Anthropic by default (1 hour
 /// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI
 /// with an API key and 30 minutes over ChatGPT OAuth. For a Claude Code
 /// model, `anthropic_cache_ttl` when set (Claude Code's
-/// `promptCacheTtl`), otherwise Claude Code's choice: 1 hour on a Claude
+/// `promptCacheTtl`), otherwise Claude Code's choice of 1 hour on a Claude
 /// subscription within its usage limits, 5 minutes on an API key. Claude
 /// Code's subagents (its `Agent` tool) and helper requests cache for 5
 /// minutes whatever the main conversation's TTL, so a stop of more than
 /// about 4½ minutes loses their caches even when the main conversation's
 /// lasts an hour.
 ///
-/// - The reset is far off: [`Pause`](Self::Pause), so the rest of the
+/// - If the reset is far off, use [`Pause`](Self::Pause), so the rest of the
 ///   window isn't spent before someone decides. The request that resumes
 ///   after the cache expired reads the context uncached, once.
-/// - The reset is close: let the task run, with
+/// - If the reset is close, let the task run, with
 ///   [`UsageLimitPolicy::WaitUntilReset`] to wait out the limit if it is
 ///   reached first (again, one uncached read once the wait ends), or
 ///   [`SlowDown`](Self::SlowDown) to stretch what is left until the reset.
@@ -1280,10 +1281,10 @@ pub enum PlanUsageAction {
     /// Wait `delay_ms` (cancellable) before every model request while usage
     /// stays at or above the threshold. It spends the same usage over more
     /// time, so it only helps when the reset comes before the rest of the
-    /// window runs out: pace the task to reach the reset without stopping.
+    /// window runs out. Pace the task to reach the reset without stopping.
     ///
     /// Keep `delay_ms` well under the model's prompt-cache lifetime (see
-    /// [`PlanUsageAction`]): a delay that reaches it makes every request after
+    /// [`PlanUsageAction`]). A delay that reaches it makes every request after
     /// it miss the cache, which uses the window up faster than no delay at
     /// all. The runtime logs a warning, once per run, for a delay within 30
     /// seconds of the lifetime. For a Claude Code agent offered the `Agent`
@@ -1380,12 +1381,12 @@ pub struct AgentConfig {
     pub llm_error_policy: LLMErrorPolicy,
     #[serde(default)]
     pub llm_retry_config: LLMRetryConfig,
-    /// Opt-in (default `None`, no limit): a task awaiting a command (an
+    /// An opt-in timeout (default `None`, no limit). A task awaiting a command (an
     /// approval, an answer, or error recovery) that has no decision this
     /// many seconds after the wait started is returned `Interrupted`, and
     /// calls awaiting approval get a result saying so. At least 1
     /// ([`validate`](Self::validate)). The deadline is set
-    /// once per wait: `InjectContext` and commands the wait ignores don't
+    /// once per wait. `InjectContext` and commands the wait ignores don't
     /// move it, and a decision ends the wait (the next wait gets its own).
     /// A wait the host says it is deciding
     /// ([`UserCommand::HostDeciding`](crate::runtime::command::UserCommand::HostDeciding))
@@ -1405,7 +1406,7 @@ pub struct AgentConfig {
     /// Opt-in monitors of model calls. See [`MonitoringConfig`].
     #[serde(default, skip_serializing_if = "MonitoringConfig::is_empty")]
     pub monitoring: MonitoringConfig,
-    /// Opt-in: a model (with its generation settings) that a refused turn is
+    /// An optional model (with its generation settings) that a refused turn is
     /// sent to once, unchanged, before the refusal stops the task. The
     /// refused turn is not kept. The fallback's response continues the task,
     /// and later turns use `llm_config` again. If the fallback also refuses,
@@ -1415,10 +1416,10 @@ pub struct AgentConfig {
     /// by default.
     ///
     /// The fallback must use the configured model's provider ([`validate`](AgentConfig::validate)
-    /// rejects others): providers can't replay each other's assistant turns.
+    /// rejects others) because providers can't replay each other's assistant turns.
     /// Its `tool_config` is sent with its requests (in native mode, its
     /// `tool_choice` and `parallel_tool_calls`), but the calls of its
-    /// response run under the agent's settings: one at a time only when
+    /// response run under the agent's settings, one at a time only when
     /// [`AgentToolConfig::one_tool_call_per_turn`] or the configured model's
     /// `tool_config` asks for it.
     /// Its ChatGPT turn-state token is kept apart from the configured
@@ -1431,7 +1432,7 @@ pub struct AgentConfig {
     /// of the same provider is unverified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_fallback: Option<AgentLLMConfig>,
-    /// Opt-in: once the context reaches a threshold, the agent writes a
+    /// An opt-in handover. Once the context reaches a threshold, the agent writes a
     /// report and continues from it in a fresh conversation, in the same
     /// task. See [`crate::handover`]. Off by default. With native tool
     /// calling, set means the agent is offered the `handover_report` tool
@@ -1441,7 +1442,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover: Option<HandoverConfig>,
     /// How the Claude Code CLI runs, for an agent whose model is a Claude
-    /// Code model. See [`crate::claude_code`]. `None`: the defaults.
+    /// Code model. See [`crate::claude_code`]. `None` uses the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeSettings>,
 }
@@ -1474,7 +1475,7 @@ impl AgentConfig {
         })
     }
 
-    /// Determines if tool use should be auto-approved for a given tool: its
+    /// Determines if tool use should be auto-approved for a given tool using its
     /// `tool_specific_configs` override, or else
     /// `default_auto_approve_tool_use`. `ask_user` is auto-approved unless
     /// its override says otherwise, since the question already waits for an
@@ -1504,7 +1505,7 @@ impl AgentConfig {
     }
 
     /// Whether calls to a tool may run at the same time as other
-    /// parallel-safe calls of a response: its
+    /// parallel-safe calls of a response, given by its
     /// [`PerToolConfigOverride::parallel_safe`], or else its definition's
     /// [`parallel_safe`](crate::tool::ToolDefinition::parallel_safe). See
     /// [`AgentToolConfig`].
@@ -1517,7 +1518,7 @@ impl AgentConfig {
     }
 
     /// Whether, in output-based mode, a response may hold a batch of calls
-    /// to this tool: a parallel-safe tool, unless the agent asks for one
+    /// to this tool. Allowed for a parallel-safe tool, unless the agent asks for one
     /// call per response.
     pub fn allows_batched_calls_for_tool(
         &self,
@@ -1526,7 +1527,7 @@ impl AgentConfig {
         !self.asks_one_tool_call_per_turn() && self.is_parallel_safe(tool_definition)
     }
 
-    /// Whether the agent asks for one tool call per response:
+    /// Whether the agent asks for one tool call per response through
     /// [`AgentToolConfig::one_tool_call_per_turn`], or `parallel_tool_calls:
     /// Some(false)` in the model's configured
     /// [`tool_config`](arko_ai::GenerationConfig::tool_config), which means the
@@ -1543,7 +1544,7 @@ impl AgentConfig {
     }
 
     /// A tool's definition as the agent is shown it, in either tool calling
-    /// mode: with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
+    /// mode, with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
     /// as `complete_task`'s `summary` description, and the built-in
     /// `read_file` and `write_file` as the agent's tools shape them (see
     /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition)
@@ -1584,7 +1585,7 @@ impl AgentConfig {
         self.tool_config.tool_calling_mode == ToolCallingMode::Native
     }
 
-    /// Checks the settings the builder checks: retry timing, monitors, the
+    /// Checks the same settings as the builder, including retry timing, monitors, the
     /// handover (and, beside it in native mode, no agent tool named
     /// `handover_report`), a command timeout and reminder frequency of at
     /// least 1, a forced tool

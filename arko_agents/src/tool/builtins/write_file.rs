@@ -14,8 +14,8 @@ const CONTENT_PARAM_NAME: &str = "content";
 /// offered `edit_file`.
 pub const EDIT_FILE_HINT: &str = "To change part of a file, use `edit_file`.";
 
-/// `write_file`'s definition as an agent with `tool_config` is shown it:
-/// the built-in `write_file` (not a host's own tool of that name) gains
+/// `write_file`'s definition as an agent with `tool_config` is shown it.
+/// The built-in `write_file` (not a host's own tool of that name) gains
 /// [`EDIT_FILE_HINT`] when the agent is also offered `edit_file`. Any other
 /// definition is returned unchanged. As with
 /// [`read_file::offered_definition`](super::read_file::offered_definition),

@@ -33,7 +33,7 @@ impl LoadSkillTool {
 
 #[async_trait]
 impl Tool for LoadSkillTool {
-    /// Loading a skill has no side effects: a call running when its task
+    /// Loading a skill has no side effects. A call running when its task
     /// stopped loads it again.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         crate::tool::ToolRecovery::Rerun

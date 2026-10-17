@@ -7,7 +7,7 @@ use uuid::Uuid;
 pub enum ToolApprovalDecision {
     /// Approve the tool call.
     Approve {
-        /// Optional: If the downstream code executes the tool itself as part of the approval workflow,
+        /// If the downstream code executes the tool itself as part of the approval workflow,
         /// it can provide the output string here. If `None`, the agent runtime
         /// will call `tool.execute()`.
         custom_tool_output: Option<String>,
@@ -29,7 +29,7 @@ pub enum UserCommand {
 
     /// The host is deciding the current wait itself (a tool approval, an
     /// answer, or error recovery), for example with an approval handler or
-    /// by waiting out a usage limit before it continues:
+    /// by waiting out a usage limit before it continues.
     /// [`user_command_timeout_seconds`](crate::agent_config::AgentConfig::user_command_timeout_seconds)
     /// doesn't end this wait. The next wait is timed again. Ignored outside
     /// a wait. For a host that decides every wait of a run (as a workflow
@@ -40,7 +40,7 @@ pub enum UserCommand {
     /// Approve the use of a single tool that was awaiting approval.
     ApproveToolUse {
         tool_call_id: Uuid,
-        /// Optional: If the downstream code executes the tool, provide output.
+        /// Provide output if the downstream code executes the tool.
         custom_tool_output: Option<String>,
         /// Optional message from the user to include with the tool result.
         message_to_agent: Option<String>,
@@ -73,34 +73,34 @@ pub enum UserCommand {
 
     /// Continue after an error-recovery pause as the host's own decision,
     /// without the user-approval note of
-    /// [`ApproveErrorRecovery`](Self::ApproveErrorRecovery): with no `note`
+    /// [`ApproveErrorRecovery`](Self::ApproveErrorRecovery). With no `note`
     /// the failed request is sent again unchanged (with the tool results the
     /// pause left waiting, which report their errors). With a `note`, it is
     /// added as the runtime's text before the next request. Like an
     /// approval, it starts a new recovery and clears a refused input.
     ContinueAfterError { note: Option<String> },
 
-    /// Reject recovery after an error: the task fails, with `message` as its
+    /// Reject recovery after an error. The task fails, with `message` as its
     /// reason when given (otherwise "Error recovery rejected by user for
     /// error: …").
     RejectErrorRecovery { message: Option<String> },
 
     /// Change the input of a refused turn (reported with
-    /// `AgentEvent::RefusedInput`) and continue: the refused turn is removed
+    /// `AgentEvent::RefusedInput`) and continue. The refused turn is removed
     /// and the changed input is sent. Accepted while the refusal awaits
     /// error-recovery approval. See [`crate::task::Task::resolve_refusal`].
-    /// The changes apply together, or none does: an invalid one is reported
+    /// The changes apply together, or none does. An invalid one is reported
     /// with `ErrorEncountered` and the task keeps waiting.
     ResolveRefusal {
         changes: Vec<crate::task::RefusalResolution>,
     },
 
-    /// Start a handover at the next turn boundary where one can start: the
+    /// Start a handover at the next turn boundary where one can start. The
     /// agent writes a report, and its conversation is replaced with a fresh
     /// one that starts from the task prompt and the report. Works whether
     /// or not [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover)
     /// is set. Ignored while a handover is already under way. It doesn't
-    /// end a wait: a task awaiting a command hands over after the wait. An
+    /// end a wait, so a task awaiting a command hands over after the wait. An
     /// agent that compacts in Claude Code
     /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
     /// compacts instead. See [`crate::handover`].

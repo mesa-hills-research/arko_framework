@@ -9,7 +9,7 @@
 //! A workflow fires it when a graceful stop begins. A tool that watches it
 //! can save its state and return early instead of being dropped mid-work.
 //!
-//! [`StopAwareCommand`] does this for a child process: the child is told
+//! [`StopAwareCommand`] does this for a child process. The child is told
 //! through a stop file, then sent `SIGTERM`, then killed.
 
 use std::fmt;
@@ -22,8 +22,8 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
-/// The environment variable [`StopAwareCommand`] sets for its child: the
-/// path of the stop file, which exists once the task is stopping. A script
+/// The environment variable [`StopAwareCommand`] sets for its child to name
+/// the stop file, which exists once the task is stopping. A script
 /// checks it between units of work, saves its state and exits, for example
 /// `os.path.exists(os.environ["ARKO_STOP_FILE"])` in Python.
 pub const STOP_FILE_ENV: &str = "ARKO_STOP_FILE";
@@ -49,7 +49,7 @@ pub struct StopSignal {
 }
 
 impl StopSignal {
-    /// A signal that never fires: for a [`TaskContext`](crate::tool::TaskContext)
+    /// A signal that never fires, for a [`TaskContext`](crate::tool::TaskContext)
     /// a host builds outside a runtime, and for tests.
     pub fn never() -> Self {
         Self::default()
@@ -104,7 +104,7 @@ impl fmt::Debug for StopSignal {
     }
 }
 
-/// Fires a [`StopSignal`]: what a host keeps to tell a runtime's tools that
+/// Fires a [`StopSignal`] so a host can tell a runtime's tools that
 /// their task is stopping. Clones fire the same signal.
 #[derive(Clone)]
 pub struct StopSource(Arc<watch::Sender<Option<Arc<str>>>>);
@@ -123,7 +123,7 @@ impl StopSource {
     }
 
     /// Fires the signal with `reason`. Returns `false`, changing nothing,
-    /// when it had fired already: the first reason stands.
+    /// when it had fired already, so the first reason stands.
     pub fn stop(&self, reason: impl Into<String>) -> bool {
         let reason: Arc<str> = reason.into().into();
         self.0.send_if_modified(|state| {
@@ -159,12 +159,12 @@ impl fmt::Debug for StopSource {
 /// How a [`StopAwareCommand`]'s child ended once its task was stopping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildStop {
-    /// It exited within the grace after the stop file was created: on its
-    /// own, having seen the file or not.
+    /// It exited on its own within the grace after the stop file was
+    /// created, having seen the file or not.
     Exited,
     /// It exited after `SIGTERM` was sent to its process group (Unix only).
     Terminated,
-    /// It was killed: its process group was sent `SIGKILL` (on Unix), or
+    /// It was killed. Its process group was sent `SIGKILL` (on Unix), or
     /// the process was terminated (elsewhere).
     Killed,
 }
@@ -187,25 +187,25 @@ pub struct StopAwareOutput {
 /// exist yet. When the [`StopSignal`] fires while the child runs (or has
 /// fired before it starts), the stop sequence runs:
 ///
-/// 1. the stop file is created, and the child has [`grace`](Self::grace)
+/// 1. The stop file is created, and the child has [`grace`](Self::grace)
 ///    (default [`DEFAULT_STOP_GRACE`], 10 seconds) to save its state and
 ///    exit.
-/// 2. on Unix, its process group is then sent `SIGTERM`, with
+/// 2. On Unix, its process group is then sent `SIGTERM`, with
 ///    [`terminate_grace`](Self::terminate_grace) (default
 ///    [`DEFAULT_TERMINATE_GRACE`], 5 seconds) to exit.
-/// 3. then it is killed: `SIGKILL` to its process group on Unix, and
+/// 3. Then it is killed with `SIGKILL` to its process group on Unix, and
 ///    `TerminateProcess` on the child alone elsewhere.
 ///
 /// On Unix the child leads a new process group, so the signals reach the
 /// processes it starts, unless one of them leaves the group (a `setsid`, a
 /// daemon). After a stop, the group is sent `SIGKILL` once the child has
-/// ended, so nothing the child started outlives the stop. Elsewhere only the
-/// child itself is terminated: processes it started may keep running, and a
-/// stop has no `SIGTERM` step.
+/// ended, so processes still in the group are killed too. Elsewhere only the
+/// child itself is terminated, so processes it started may keep running. A
+/// stop outside Unix has no `SIGTERM` step.
 ///
 /// Being in its own group, the child is not in the terminal's foreground
-/// group: the terminal's Ctrl-C doesn't reach it (the host's stop does), and
-/// it can't read the terminal: a read stops it (`SIGTTIN`) until it is
+/// group, so the terminal's Ctrl-C doesn't reach it (the host's stop does).
+/// It can't read the terminal because a read stops it (`SIGTTIN`) until it is
 /// killed. Give a child that may read its standard input a null one (or a
 /// file) when it runs with [`status`](Self::status). [`output`](Self::output)
 /// always does. A host that exits at once (`std::process::exit`, which runs
@@ -213,14 +213,14 @@ pub struct StopAwareOutput {
 /// keep running.
 ///
 /// Dropping the future (the runtime drops an interruptible call when its
-/// task is cancelled, or when the call's time limit passes) kills the child
-/// at once: its process group on Unix, the child elsewhere.
+/// task is cancelled, or when the call's time limit passes) kills its process
+/// group at once on Unix, or the child alone elsewhere.
 ///
 /// The grace only runs once a stop is under way, so a call that is not
 /// stopped runs as long as the command does. A tool that wants its child to
 /// get the grace when its task is cancelled outright (not only in a
 /// workflow's wrap-up) declares itself not
-/// [interruptible](crate::tool::Tool::interruptible): the runtime then waits
+/// [interruptible](crate::tool::Tool::interruptible). The runtime then waits
 /// for the call, whose signal fires on the cancellation.
 ///
 /// The stop file is a fresh path in the system's temporary directory unless
@@ -273,7 +273,7 @@ impl StopAwareCommand {
 
     /// Runs the child to its end, stopping it as described above when
     /// `stop` fires, and returns its exit status and output. Its standard
-    /// output and error are captured, and its standard input is null: it
+    /// output and error are captured, and its standard input is null, so it
     /// never reads the host's input.
     ///
     /// Once the child has ended after a stop, output still held open by a
@@ -292,7 +292,7 @@ impl StopAwareCommand {
     /// Returns its exit status and how a stop ended it.
     ///
     /// On Unix a child that inherits a terminal as its standard input can't
-    /// read it (see above): give one that may read a null standard input
+    /// read it (see above). Give one that may read a null standard input
     /// (`command_mut().stdin(Stdio::null())`), or a file.
     pub async fn status(self, stop: &StopSignal) -> io::Result<(ExitStatus, Option<ChildStop>)> {
         let output = self.run(stop).await?;
@@ -441,11 +441,11 @@ async fn wait_with_stop(
 }
 
 /// Kills the process group of every [`StopAwareCommand`] child running in
-/// this process, at once (`SIGKILL`, on Unix, elsewhere it does nothing):
-/// for a host about to exit without unwinding. `std::process::exit` runs no
+/// this process, at once (`SIGKILL` on Unix, no effect elsewhere).
+/// For a host about to exit without unwinding. `std::process::exit` runs no
 /// destructors, so the calls' own kill on drop never runs, and since each
 /// child leads its own process group the terminal's Ctrl-C doesn't reach it
-/// either: without this the children keep running after the host has gone.
+/// either. Without this the children keep running after the host has gone.
 /// arko_workflows' `stop_on_signals` calls it before it exits on a third
 /// signal. The calls themselves then end as their children were killed.
 pub fn kill_stop_aware_commands() {

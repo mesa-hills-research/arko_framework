@@ -23,9 +23,9 @@ pub(crate) const UNREACHED_CALL: &str = "The turn ended before this call ran. It
 pub enum UserTurnKind {
     /// The task's prompt, the conversation's first message.
     Prompt,
-    /// A later message: a follow-up, or an answer to the agent's question.
+    /// A later message, either a follow-up or an answer to the agent's question.
     Message,
-    /// A `# Workflow context update`: notes, messages and other context the
+    /// A `# Workflow context update` with notes, messages and other context the
     /// host added while the task ran.
     ContextUpdate,
 }
@@ -49,7 +49,7 @@ const CONTEXT_UPDATE: &str = "# Workflow context update";
 
 impl Task {
     /// The messages of the current conversation the host sent, oldest
-    /// first: the task's prompt, later messages and context updates. The
+    /// first, including the task's prompt, later messages and context updates. The
     /// runtime's own messages (requests to continue, notes on errors) and
     /// tool results are left out. Messages before a handover are not in
     /// the conversation any more.

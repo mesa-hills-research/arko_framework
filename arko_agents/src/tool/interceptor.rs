@@ -57,7 +57,7 @@ pub enum InterceptionFailurePolicy {
 }
 
 impl InterceptionFailurePolicy {
-    /// Interception attempts before the policy's fallback: at least one.
+    /// Interception attempts before the policy's fallback, at least one.
     pub fn max_attempts(&self) -> u32 {
         match self {
             Self::UseRawResult | Self::InformAgent => 1,

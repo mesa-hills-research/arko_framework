@@ -16,9 +16,9 @@ pub enum InvalidSkillPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSource {
     /// Path to the directory containing skills.
-    /// For workspace sources: relative to the `workspace_root` given to
+    /// For workspace sources, relative to the `workspace_root` given to
     /// [`SkillManager::load`](super::SkillManager::load) (e.g., ".skills").
-    /// For global sources: absolute path (e.g., "/home/user/.skills/global").
+    /// For global sources, an absolute path (e.g., "/home/user/.skills/global").
     pub path: String,
 
     /// If set, only skills whose names are in this list are loaded from this source.
@@ -51,12 +51,12 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub on_invalid_skill: InvalidSkillPolicy,
 
-    /// Opt-in: let the tool-result interceptor given to the runtime (such as
-    /// a workflow's distiller) replace `load_skill` results, with this
-    /// failure policy for the failures the interceptor reports: retry, fall
-    /// back to the full result, or give the full result with a note that it
-    /// could not be shortened. `None`, the default, sends skills as written:
-    /// a skill carries exact instructions, which a summary would lose.
+    /// Lets the tool-result interceptor given to the runtime (such as
+    /// a workflow's distiller) replace `load_skill` results. This policy
+    /// handles the failures the interceptor reports by retrying, falling
+    /// back to the full result, or giving the full result with a note that it
+    /// could not be shortened. `None`, the default, sends skills as written
+    /// because a skill carries exact instructions, which a summary would lose.
     /// (When arko_workflows chains several interceptors, the chain applies
     /// this policy to each interceptor in it and reports no failures
     /// itself.)

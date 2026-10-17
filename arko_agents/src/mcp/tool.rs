@@ -159,7 +159,7 @@ impl Tool for McpTool {
 
     /// The call's text, and its images (MCP `image` content, and embedded
     /// image resources) as the result's images. Other content is described
-    /// in the text: a resource's text is included, and audio, other binary
+    /// in the text. A resource's text is included, and audio, other binary
     /// resources and images of a type the providers don't take are named.
     async fn execute_with_output(
         &self,

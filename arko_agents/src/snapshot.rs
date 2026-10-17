@@ -11,7 +11,7 @@ use crate::task::Task;
 /// Receives a running task at its safe points, so that the host can save
 /// it while it runs
 /// ([`AgentRuntime::with_task_snapshots`](crate::runtime::AgentRuntime::with_task_snapshots)).
-/// A task saved this way runs again from where it was saved: calls that
+/// A task saved this way runs again from where it was saved. Calls that
 /// were running when the host stopped
 /// ([`Task::running_tool_calls`]) are settled by their tools'
 /// [`recovery_mode`](crate::tool::Tool::recovery_mode).
@@ -20,8 +20,8 @@ use crate::task::Task;
 /// - after the model's turn is added to the conversation, before its tool
 ///   calls run.
 /// - before a group of tool calls starts, with the calls recorded as
-///   running: the write-ahead point, reported `durable` (unless every
-///   call in the group is one recovery simply runs again:
+///   running. This is the write-ahead point, reported `durable` (unless every
+///   call in the group is one recovery simply runs again through
 ///   [`ToolRecovery::Rerun`](crate::tool::ToolRecovery::Rerun) without the
 ///   host's own output, or, for a Claude Code agent, a
 ///   [read-only built-in](crate::claude_code::READ_ONLY_BUILT_IN_TOOLS)).
@@ -35,11 +35,11 @@ use crate::task::Task;
 pub trait TaskSnapshotSink: Send + Sync {
     /// The task changed. With `durable` set (before tool calls run), return
     /// only once this snapshot, and whatever the host must save with it, is
-    /// on disk: the calls start once it returns. Otherwise the sink may
+    /// on disk. The calls start once it returns. Otherwise the sink may
     /// save it later, and a snapshot that arrives meanwhile may replace it
     /// (only the latest one matters).
     ///
-    /// An error is logged as a warning and the run goes on: a task is never
+    /// An error is logged as a warning and the run goes on. A task is never
     /// stopped because it could not be saved, not even at a durable point.
     async fn task_changed(&self, task: &Task, durable: bool) -> Result<(), String>;
 }

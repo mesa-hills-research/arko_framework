@@ -3,7 +3,7 @@
 use uuid::Uuid;
 
 /// Context for a task's next model request, with the identifiers of what it
-/// holds: [`TurnContextSource::context_update`] returns it, and the
+/// holds. [`TurnContextSource::context_update`] returns it, and the
 /// identifiers are reported in
 /// [`AgentEvent::ContextInjected`](crate::runtime::event::AgentEvent::ContextInjected)
 /// once the content is in the conversation.
@@ -16,7 +16,7 @@ pub struct TurnContext {
     pub ids: Vec<String>,
     /// Images that go with `content`, each after its label, following the
     /// text in the same message. A Claude Code agent gets them with its
-    /// next input: an update with images that arrives during a turn waits
+    /// next input. An update with images that arrives during a turn waits
     /// for the turn's end, with any context taken after it.
     pub images: Vec<ContextImage>,
 }
@@ -49,7 +49,7 @@ impl ContextImage {
     }
 }
 
-/// Supplies context a task receives at each safe turn boundary: before each
+/// Supplies context a task receives at each safe turn boundary, before each
 /// model request, where queued
 /// [`InjectContext`](crate::runtime::command::UserCommand::InjectContext)
 /// content is added, as part of the same "Workflow context update" user
@@ -83,7 +83,7 @@ pub trait TurnContextSource: Send + Sync {
         None
     }
 
-    /// Whether to hold the task's next model request, and why: with
+    /// Whether to hold the task's next model request, and why. With
     /// `Some(reason)` the request isn't made and the task pauses for
     /// error-recovery approval with
     /// [`ErrorRecoveryCause::BudgetExceeded`](crate::task::ErrorRecoveryCause::BudgetExceeded)

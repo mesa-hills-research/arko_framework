@@ -13,12 +13,12 @@ pub const MESSAGE_USER_MESSAGE_PARAM_NAME: &str = "message";
 /// The result the model gets for a `message_user` call.
 pub const MESSAGE_USER_RESULT: &str = "Your message was sent to the user. Carry on with your work.";
 
-/// Shows the user a message without ending the agent's turn: `ask_user`
+/// Shows the user a message without ending the agent's turn, like `ask_user`
 /// without the wait. The runtime sends the message to the host as
 /// [`AgentEvent::MessageToUser`](crate::AgentEvent::MessageToUser) and the
 /// task carries on. Its state doesn't change.
 ///
-/// A host's own tool registered under the same name replaces this one: it
+/// A host's own tool registered under the same name replaces this one. It
 /// runs as any other tool, and the runtime sends no `MessageToUser` for its
 /// calls.
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ pub(crate) fn message_to_user(
 
 #[async_trait]
 impl Tool for MessageUserTool {
-    /// Sending again only shows the message again: a call running when its
+    /// Sending again only shows the message again. A call running when its
     /// task stopped is run again.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         crate::tool::ToolRecovery::Rerun

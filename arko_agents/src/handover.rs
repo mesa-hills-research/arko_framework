@@ -1,10 +1,10 @@
-//! Conversation handover: when an agent's context grows large, it writes a
-//! report of its progress and continues from that report in a fresh
+//! Conversation handover lets an agent whose context grows large write a
+//! report of its progress and continue from that report in a fresh
 //! conversation, in the same task.
 //!
 //! Performance and cost both suffer as a conversation grows. A handover keeps
 //! the task (its ID, state, budget and usage history) and replaces only the
-//! conversation: the runtime asks the agent for a report, then starts a new
+//! conversation. The runtime asks the agent for a report, then starts a new
 //! conversation whose first message is the task prompt followed by the
 //! report. Nothing outside the task sees the agent stop, so hosts that
 //! address the agent by name or task ID are unaffected.
@@ -27,16 +27,16 @@
 //! an agent without `handover`) the report is a reply without a tool call.
 //!
 //! A request still over the model's input limit after the overflow guard
-//! shortened its results hands over too, for an agent that hands over: the
+//! shortened its results hands over too, for an agent that hands over. The
 //! step that request added (the model's reply and its results) is left
 //! out, and the report is asked for from the conversation as it was at the
 //! last request the provider answered, with [`STEP_LEFT_OUT`] before the
 //! request. An agent whose model runs in Claude Code does the same for a
-//! turn that goes over the limit: the Claude Code session resumes at the
+//! turn that goes over the limit. The Claude Code session resumes at the
 //! message that ended the last request Claude Code answered.
 //!
 //! An agent whose model runs in Claude Code can compact instead
-//! ([`HandoverConfig::compact_in_claude_code`]): at the threshold, or at a
+//! ([`HandoverConfig::compact_in_claude_code`]). At the threshold, or at a
 //! host's request, the runtime sends Claude Code's own `/compact` into the
 //! session, and the agent goes on in the same session from Claude Code's
 //! summary of the conversation. See [`crate::claude_code`].
@@ -77,7 +77,7 @@ pub const DEFAULT_REPORT_REQUEST: &str = concat!(
 );
 
 /// [`DEFAULT_REPORT_REQUEST`] for an agent not offered `complete_task`
-/// (its reply in text ends the task:
+/// (its reply in text ends the task through
 /// [`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)).
 pub const DEFAULT_REPORT_REQUEST_NO_COMPLETION: &str = concat!(
     "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Call `handover_report` with that report. Your other tool calls are not run until you do. ",
@@ -93,8 +93,8 @@ pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
     report_contents!()
 );
 
-/// What the runtime asks an agent offered no tools (a chat: no tools, and a
-/// reply in text ends its task) for when its conversation is handed over.
+/// What the runtime asks a chat agent, whose reply in text ends its task,
+/// for when its conversation is handed over.
 /// The fresh conversation starts from the user's latest message and this
 /// summary (see [`HandoverSeed::for_chat`]).
 pub const DEFAULT_CHAT_REPORT_REQUEST: &str = "This conversation is getting long, so it will continue in a fresh one that starts from a summary you write now. Reply with that summary as plain text. Cover what the user wants and asked, what you answered, the facts, preferences and decisions to keep, and anything still open. The user's latest message comes before this request, and you haven't answered it yet: don't answer it here. The fresh conversation answers it from your summary, and will have only that message and the summary, so be complete.";
@@ -112,11 +112,11 @@ pub const REPORT_INTRODUCTION: &str = "Your earlier conversation on this task wa
 
 /// When an agent hands over. See the [module docs](self). At least one
 /// threshold must be set. In arko's own runtime it is checked before each
-/// model request against the estimated input of that request: the latest
+/// model request against the estimated input of that request, using the latest
 /// request's reported input, plus what the conversation gained since (the
 /// reply, at least its reported output tokens, and the turn's tool
 /// results) at the bytes-per-token ratio calibrated from the task's own
-/// requests: the overflow guard's calibrated estimate, not the
+/// requests. This is the overflow guard's calibrated estimate, not the
 /// 10-bytes-per-token lower bound it decides by (see
 /// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). So a turn
 /// whose results take the conversation over the threshold hands over
@@ -131,17 +131,17 @@ pub struct HandoverConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_input_tokens: Option<usize>,
     /// Hand over once a request's input reaches this share of the model's
-    /// input limit: above 0 and at most 1. Ignored for a model whose limit
+    /// input limit, above 0 and at most 1. Ignored for a model whose limit
     /// is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_context_fraction: Option<f64>,
     /// Replaces [`DEFAULT_REPORT_REQUEST`] (or [`DEFAULT_TEXT_REPORT_REQUEST`]
     /// where the report is a reply without a tool call). It should say how
-    /// to give the report: with the [`HANDOVER_REPORT_TOOL_NAME`] tool where
+    /// to give the report, using the [`HANDOVER_REPORT_TOOL_NAME`] tool where
     /// it is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_request: Option<String>,
-    /// On a Claude Code model, compact instead of handing over: at the
+    /// On a Claude Code model, compact instead of handing over. At the
     /// threshold, or when a host asks with
     /// [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover),
     /// the runtime has Claude Code compact the conversation with its own
@@ -172,7 +172,7 @@ impl HandoverConfig {
     }
 
     /// The input size, in tokens, at which to hand over for a model that
-    /// accepts `max_input_tokens` (0 when unknown): the lower of the two
+    /// accepts `max_input_tokens` (0 when unknown), given by the lower of the two
     /// thresholds that apply.
     pub fn threshold(&self, max_input_tokens: usize) -> Option<usize> {
         let fraction = self
@@ -185,7 +185,7 @@ impl HandoverConfig {
         }
     }
 
-    /// The request the agent receives when the handover starts:
+    /// The request the agent receives when the handover starts, taken from
     /// `report_request`, or by default [`DEFAULT_REPORT_REQUEST`] when the
     /// agent gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
     /// (`with_tool`) and [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
@@ -194,7 +194,7 @@ impl HandoverConfig {
     }
 
     /// [`report_request`](Self::report_request) for an agent offered
-    /// `complete_task` or not (`completes`): the default request mentions
+    /// `complete_task` or not (`completes`). The default request mentions
     /// it only where it is offered.
     pub fn report_request_for(&self, with_tool: bool, completes: bool) -> &str {
         self.report_request
@@ -202,7 +202,7 @@ impl HandoverConfig {
             .unwrap_or(default_report_request_for(with_tool, completes))
     }
 
-    /// The request an agent offered no tools (a chat) receives:
+    /// The request an agent offered no tools (a chat) receives, taken from
     /// `report_request`, or by default [`DEFAULT_CHAT_REPORT_REQUEST`].
     pub fn chat_report_request(&self) -> &str {
         self.report_request
@@ -240,7 +240,7 @@ impl HandoverConfig {
     }
 }
 
-/// The default report request: [`DEFAULT_REPORT_REQUEST`] when the agent
+/// The default report request, using [`DEFAULT_REPORT_REQUEST`] when the agent
 /// gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
 /// (`with_tool`), [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
 pub fn default_report_request(with_tool: bool) -> &'static str {
@@ -248,7 +248,7 @@ pub fn default_report_request(with_tool: bool) -> &'static str {
 }
 
 /// [`default_report_request`] for an agent offered `complete_task` or not
-/// (`completes`): [`DEFAULT_REPORT_REQUEST_NO_COMPLETION`] for one given
+/// (`completes`), using [`DEFAULT_REPORT_REQUEST_NO_COMPLETION`] for one given
 /// the tool and not offered `complete_task`.
 pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static str {
     match (with_tool, completes) {
@@ -259,7 +259,7 @@ pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static 
 }
 
 /// A handover threshold a host sets for the runs it starts, in place of
-/// their configuration's ([`HandoverConfig::threshold`]): a run hands over
+/// their configuration's ([`HandoverConfig::threshold`]). A run hands over
 /// (or compacts, see [`HandoverConfig::compact_in_claude_code`]) once a
 /// request's input reaches it, as at
 /// [`at_input_tokens`](HandoverConfig::at_input_tokens), also for an agent
@@ -267,14 +267,14 @@ pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static 
 /// Unset, the configuration's threshold applies. Set with
 /// [`AgentRuntime::with_handover_threshold`](crate::runtime::AgentRuntime::with_handover_threshold).
 ///
-/// The host may change it while the runs run, larger or smaller: each
-/// check reads it, so the next one goes by the new threshold. A run-level
-/// setting, like [`HostDecisions`](crate::runtime::HostDecisions): it is
+/// The host may change it while the runs run, larger or smaller. Each
+/// check reads it, so the next one goes by the new threshold. Like
+/// [`HostDecisions`](crate::runtime::HostDecisions), this run-level setting is
 /// not part of the task or its configuration and is not saved, so the
 /// tools, the instructions and the conversation (and their prompt cache)
 /// stay as they are, and a task run later without it hands over as
 /// configured. Clones share the setting. The runtime doesn't cap it at the
-/// model's input limit: the host keeps it under that limit, with room for
+/// model's input limit, so the host keeps it under that limit, with room for
 /// the report, or gives each run its cap with [`with_most`](Self::with_most)
 /// when one threshold serves runs on models of different sizes.
 #[derive(Clone, Default)]
@@ -305,7 +305,7 @@ impl HandoverThreshold {
     }
 
     /// This threshold, capped for each run at what `most` gives for the
-    /// run's configuration (`None`: no cap), whichever threshold the run
+    /// run's configuration (`None` sets no cap), whichever threshold the run
     /// goes by, the host's or its configuration's. One threshold then
     /// serves runs on models of different sizes, each kept under its own
     /// model's limit. `most` is asked at every check. Clones made from it
@@ -318,7 +318,7 @@ impl HandoverThreshold {
         self
     }
 
-    /// Changes the threshold for every clone: `Some(tokens)` hands over at
+    /// Changes the threshold for every clone. `Some(tokens)` hands over at
     /// `tokens` of input, and `None` (or `Some(0)`) goes back to the
     /// configuration's.
     pub fn set(&self, input_tokens: Option<usize>) {
@@ -347,7 +347,7 @@ impl HandoverThreshold {
 }
 
 /// The definition of the [`HANDOVER_REPORT_TOOL_NAME`] tool. The runtime
-/// answers its calls itself: it isn't in a [`ToolRegistry`](crate::tool::ToolRegistry).
+/// answers its calls itself rather than through a [`ToolRegistry`](crate::tool::ToolRegistry).
 pub fn report_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: HANDOVER_REPORT_TOOL_NAME.to_string(),
@@ -417,7 +417,7 @@ pub struct HandoverRecord {
 /// environment details and reminder it adds to every task prompt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HandoverSeed {
-    /// The task, restated: by default the task's initial prompt.
+    /// The task, restated. Defaults to the task's initial prompt.
     pub task_prompt: String,
     /// Context the host adds after the report, such as the agents the task
     /// can message.
@@ -425,7 +425,7 @@ pub struct HandoverSeed {
 }
 
 impl HandoverSeed {
-    /// The default: the task's initial prompt, and no further context.
+    /// The default seed, with the task's initial prompt and no further context.
     pub fn for_task(task: &Task) -> Self {
         Self {
             task_prompt: task.initial_task_prompt.clone(),
@@ -433,7 +433,7 @@ impl HandoverSeed {
         }
     }
 
-    /// The default for an agent offered no tools (a chat): the user's
+    /// The default for an agent offered no tools (a chat), using the user's
     /// messages the conversation hasn't answered yet (see
     /// [`unanswered_user_messages`]), which the fresh conversation answers,
     /// in place of the task's initial prompt. Falls back to
@@ -466,7 +466,7 @@ impl HandoverSeed {
         }
     }
 
-    /// The message text: the task prompt, the report under
+    /// The message text, with the task prompt, the report under
     /// [`REPORT_HEADING`], then the context.
     pub fn message(&self, report: &str) -> String {
         let mut message = format!(
@@ -483,7 +483,7 @@ impl HandoverSeed {
 }
 
 /// The user's messages since the model's last reply before the handover's
-/// report request, oldest first: the input the conversation hasn't answered
+/// report request, oldest first. This is the input the conversation hasn't answered
 /// yet, which a chat's fresh conversation answers. Messages the runtime
 /// added (the report request, notes on errors) and tool results don't
 /// count, while context updates (notes from the user, mail) do.
@@ -552,7 +552,7 @@ pub trait HandoverHook: Send + Sync {
         HandoverSeed::for_task(task)
     }
 
-    /// Claude Code compacted `task`'s conversation: its summary replaced the
+    /// Claude Code compacted `task`'s conversation. Its summary replaced the
     /// earlier messages in the session (`task` keeps them all). Returns
     /// context to give the agent again with its next input, such as
     /// standing instructions a summary may leave out, or `None` (the

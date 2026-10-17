@@ -1,5 +1,5 @@
-//! Offline demonstration: a known fixture asks Y/N; the host receives a notice
-//! and submits its predetermined fixture answer. No model or credentials needed.
+//! An offline example in which a test program asks Y/N. The host receives a
+//! notice and submits a predetermined answer, without a model or credentials.
 #[cfg(any(unix, windows))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

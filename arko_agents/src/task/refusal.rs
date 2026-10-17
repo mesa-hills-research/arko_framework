@@ -6,7 +6,7 @@ use arko_ai::{Content, Message, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// The input a refused turn answered: every user message after the last
+/// The input a refused turn answered, with every user message after the last
 /// assistant turn, in order. Besides the host's own input (the task prompt,
 /// a user response, a context update, tool results) the runtime adds some
 /// (a file-tree update, an error or recovery note, a request to continue).
@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 /// approved, or a later turn completes.
 ///
 /// Approving recovery without a change (`ApproveErrorRecovery`) accepts the
-/// input as it is: the refused turn stays in history followed by the
+/// input as it is. The refused turn stays in history followed by the
 /// runtime's recovery note, so if the model refuses again, the reported
 /// input is only that note, which can't be changed. Change the input with
 /// `ResolveRefusal` instead of approving when it should be changed.
@@ -34,7 +34,7 @@ pub struct RefusedMessage {
     /// Added by the runtime rather than taken from the host or a tool.
     pub runtime: bool,
     /// The message holds tool results with a note the runtime added beside
-    /// them (a recovery note): its text can't be rephrased, while its tool
+    /// them (a recovery note). Its text can't be rephrased, while its tool
     /// results and images can still be changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_text: bool,
@@ -42,7 +42,7 @@ pub struct RefusedMessage {
     /// output-based tool mode, results are text in the message instead.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<RefusedToolResult>,
-    /// Images in the message, such as tool screenshots: its own and those
+    /// Images in the message, such as tool screenshots, including its own and those
     /// inside its tool results.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub images: usize,
@@ -79,7 +79,7 @@ pub enum RefusalResolution {
     /// added by the runtime must remain in the conversation, so the task
     /// prompt can't be removed when it is the only one.
     RemoveUserMessage { message_index: usize },
-    /// Remove a message's images: those inside its tool results (which keep
+    /// Remove a message's images, including those inside its tool results (which keep
     /// their text) and its own, with the descriptions the runtime added
     /// before tool images sent beside the results.
     RemoveImages { message_index: usize },

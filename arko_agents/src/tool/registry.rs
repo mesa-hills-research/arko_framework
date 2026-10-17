@@ -67,7 +67,7 @@ impl ToolRegistry {
     /// Registers a tool in the registry, replacing a tool registered under
     /// its name before (a built-in included), except that `complete_task`
     /// can't be replaced by a tool that isn't built-in. A host's own
-    /// `message_user` replaces the built-in: it runs as any other tool, and
+    /// `message_user` replaces the built-in. It runs as any other tool, and
     /// the runtime sends no
     /// [`AgentEvent::MessageToUser`](crate::AgentEvent::MessageToUser) for
     /// its calls.

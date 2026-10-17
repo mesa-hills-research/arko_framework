@@ -1,7 +1,7 @@
 //! Opt-in interactive background jobs with explicit and inferred input notices.
 //!
 //! Program declarations travel over a dedicated stream. Prompt rules report
-//! possible input only: silence and descriptor writability are never detectors.
+//! possible input only. Silence and descriptor writability are never detectors.
 mod detection;
 mod guard;
 mod io;
@@ -49,7 +49,8 @@ pub enum TerminalError {
 pub struct TerminalConfig {
     pub directory: PathBuf,
     pub shell: PathBuf,
-    /// Arguments before the command string (default: sh -c or cmd /D /S /C).
+    /// Arguments before the command string. Defaults to `-c` for `sh`, or
+    /// `/D /S /C` for `cmd`.
     pub shell_args: Vec<String>,
     pub output_buffer_bytes: usize,
     pub max_log_bytes: u64,
@@ -59,7 +60,7 @@ pub struct TerminalConfig {
     pub default_timeout: Option<Duration>,
     /// PTY jobs get [`QUIET_TERMINAL_ENVIRONMENT`] on top of the host's
     /// environment (default `true`), so programs that see a terminal print
-    /// plain text: no colours, no pagers, UTF-8 output. Full-screen programs
+    /// plain UTF-8 text without colours or pagers. Full-screen programs
     /// (editors, `top`, `less`) refuse to run or degrade under `TERM=dumb`.
     /// Set `false` to give PTY jobs the host's environment unchanged. Pipe
     /// jobs always get it unchanged.
@@ -72,7 +73,7 @@ pub struct TerminalConfig {
     pub command_guard: CommandGuard,
 }
 
-/// The UTF-8 locale PTY jobs get: `C.UTF-8`, except on macOS, which may
+/// The UTF-8 locale PTY jobs get, set to `C.UTF-8`, except on macOS, which may
 /// not have it (a shell would then print locale warnings into the output),
 /// where it is `en_US.UTF-8`.
 pub const QUIET_TERMINAL_LOCALE: &str = if cfg!(target_os = "macos") {
@@ -83,7 +84,7 @@ pub const QUIET_TERMINAL_LOCALE: &str = if cfg!(target_os = "macos") {
 
 /// The variables PTY jobs get when
 /// [`TerminalConfig::quiet_terminal_environment`] is on (the default), on
-/// every platform: no colour (`TERM=dumb`, `NO_COLOR=1`), no pager
+/// every platform, with no colour (`TERM=dumb`, `NO_COLOR=1`), no pager
 /// (`PAGER=cat`, `GIT_PAGER=cat`), and a UTF-8 locale
 /// ([`QUIET_TERMINAL_LOCALE`] as `LANG`, `LC_CTYPE` and `LC_ALL`).
 pub const QUIET_TERMINAL_ENVIRONMENT: [(&str, &str); 7] = [
@@ -138,7 +139,7 @@ pub struct StartOptions {
     pub terminal: bool,
     pub detect_prompts: bool,
     pub timeout: Option<Duration>,
-    /// The job is held for its host (default `false`): it sends no terminal
+    /// The job is held for its host (default `false`). It sends no terminal
     /// updates and isn't listed until [`TerminalManager::release`] moves it
     /// to the background. For a host that waits for the job itself (a
     /// command run to completion) and may hand it to the agent later.
@@ -147,8 +148,8 @@ pub struct StartOptions {
     /// [`TerminalConfig::shell_args`] (default `None`).
     pub shell_args: Option<Vec<String>>,
     /// What [`TerminalManager::background_jobs`] shows as the command, for
-    /// a host that wraps the command it was given (default `None`: the
-    /// command).
+    /// a host that wraps the command it was given. Defaults to `None`, which
+    /// shows the command.
     pub label: Option<String>,
 }
 impl Default for StartOptions {
@@ -485,7 +486,7 @@ impl TerminalManager {
 
     /// Sets the command guard's
     /// [`allow_outside_workspace`](CommandGuard::allow_outside_workspace)
-    /// while the manager runs: it applies from the next `terminal_start`
+    /// while the manager runs. It applies from the next `terminal_start`
     /// command or `terminal_input` text. Jobs already running keep going.
     pub fn set_allow_outside_workspace(&self, allow: bool) {
         self.allow_outside_workspace
@@ -514,7 +515,7 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Tools remain opt-in: registering them does not add their names to an agent's allowlist.
+    /// Registers the tools. Add their names to an agent's allowlist to offer them.
     pub fn register_tools(self: &Arc<Self>, registry: &mut ToolRegistry) {
         for tool in TerminalTool::all(self.clone()) {
             registry.register(Arc::new(tool));
@@ -785,7 +786,7 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Moves a held job (see [`StartOptions::held`]) to the background: it
+    /// Moves a held job (see [`StartOptions::held`]) to the background. It
     /// is listed, and its terminal updates go to its owner from now on,
     /// starting with an event it already has. A job that has finished
     /// stays held ([`TerminalError::Finished`]), as its host has its result.
@@ -823,14 +824,14 @@ impl TerminalManager {
         Ok(snapshot)
     }
 
-    /// The jobs that finish in the background (not held) from now on: a
+    /// The jobs that finish in the background (not held) from now on. A
     /// host can wake an idle agent for them.
     pub fn subscribe_finished(&self) -> tokio::sync::broadcast::Receiver<JobFinished> {
         self.finished.subscribe()
     }
 
-    /// The jobs running in the background, of every owner, oldest first:
-    /// what [`shutdown`](Self::shutdown) would stop, for a host to say so
+    /// The jobs running in the background, of every owner, oldest first.
+    /// These are what [`shutdown`](Self::shutdown) would stop, for a host to say so
     /// before it exits.
     pub fn background_jobs(&self) -> Vec<BackgroundJob> {
         background(&self.jobs.lock().unwrap())
@@ -838,11 +839,11 @@ impl TerminalManager {
 
     /// Closes the manager for its host's exit, unless a job runs in the
     /// background that isn't one of `known` (those the host's user agreed
-    /// to stop): then it stays open, and the jobs running in the background
+    /// to stop). In that case it stays open, and the jobs running in the background
     /// come back. Closed, it starts no job and moves none to the background
     /// ([`release`](Self::release)), so [`shutdown`](Self::shutdown) stops
     /// no background job the user didn't know of. The check and the closing
-    /// are one step: no job gets past it.
+    /// are one step, so no job gets past it.
     pub fn close(&self, known: &[Uuid]) -> std::result::Result<(), Vec<BackgroundJob>> {
         let jobs = self.jobs.lock().unwrap();
         let running = background(&jobs);

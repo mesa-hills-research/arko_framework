@@ -29,10 +29,10 @@ pub struct PendingToolCallInfo {
     pub approval_reason: ApprovalReason,
 }
 
-/// Why a tool call awaits approval: the agent's configuration doesn't
+/// Why a tool call awaits approval. The agent's configuration doesn't
 /// auto-approve the tool, a path it names is outside the workspace under
 /// [`PathSafetyPolicy::RequireApproval`](crate::agent_config::PathSafetyPolicy::RequireApproval),
-/// or both. Both unset: not recorded (a call saved by an older version).
+/// or both. Both unset means not recorded (a call saved by an older version).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalReason {
     /// The agent's tool configuration doesn't auto-approve the tool
@@ -76,11 +76,11 @@ impl ApprovalReason {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorRecoveryCause {
-    /// Not recorded: a task saved by an older version.
+    /// Not recorded in a task saved by an older version.
     #[default]
     Unknown,
     /// A request that may succeed later (a network, server, capacity or
-    /// rate-limit error) kept failing until recovery ended: its attempts or
+    /// rate-limit error) kept failing until recovery ended. Its attempts or
     /// its elapsed budget ran out. Approving starts a new recovery.
     /// `retry_after_ms` is how long the provider asked to wait before the
     /// next attempt (or the wait the runtime had scheduled), when known.
@@ -88,7 +88,7 @@ pub enum ErrorRecoveryCause {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
     },
-    /// A failure retrying unchanged can't fix: the request, a credential or
+    /// A failure retrying unchanged can't fix. The request, a credential or
     /// the configuration must change (for example an authentication or
     /// invalid-request error).
     NonRetryable,
@@ -106,7 +106,7 @@ pub enum ErrorRecoveryCause {
     /// Tool calls failed under `ToolErrorPolicy::PauseAndAwaitApproval`.
     /// Their results report the errors.
     ToolError,
-    /// An opt-in monitor paused the task before a request: the plan usage
+    /// An opt-in monitor paused the task before a request, either the plan usage
     /// threshold or the cache-efficiency monitor.
     Monitor,
     /// The tool execution middleware paused the task at a call
@@ -166,7 +166,7 @@ pub enum TaskState {
         #[serde(default)]
         cause: ErrorRecoveryCause,
         /// The kind of the model-request error that ended recovery, when it
-        /// was classified ([`arko_ai::Error::kind`]): a lost login
+        /// was classified ([`arko_ai::Error::kind`]), such as a lost login
         /// ([`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication)),
         /// a request over the model's input limit
         /// ([`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)),
@@ -183,12 +183,11 @@ pub enum TaskState {
     },
     Failed {
         reason: String,
-        /// Why, when the task failed at an error-recovery pause the host
-        /// rejected (a workflow's error recovery policy fails a pause whose
-        /// cause retrying can't fix): the pause's cause, such as
+        /// The cause of an error-recovery pause the host rejected, such as
         /// [`ErrorRecoveryCause::NonRetryable`] for a request that needs a
-        /// new credential or a configuration change. `None` for other
-        /// failures, and in a task saved by an older version.
+        /// new credential or a configuration change. A workflow's error
+        /// recovery policy fails a pause whose cause retrying can't fix.
+        /// `None` for other failures, and in a task saved by an older version.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<ErrorRecoveryCause>,
         /// The error's kind, when the task failed at an error-recovery
@@ -343,7 +342,7 @@ pub struct Task {
     pub agent_config: AgentConfig,
     pub initial_task_prompt: String,
     /// Images that go with the initial prompt. Set before the task first
-    /// runs: the runtime moves them into the task's first message, after
+    /// runs. The runtime moves them into the task's first message, after
     /// its text, so a task holds them once. [`Task::initial_images`] gives
     /// them either way.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -382,7 +381,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_native_tool_results: Vec<arko_ai::ToolResult>,
     /// Native calls of the last turn that haven't run yet, by their
-    /// runtime call id: the calls awaiting approval (those the awaiting
+    /// runtime call id. Includes the calls awaiting approval (those the awaiting
     /// state lists) and the auto-approved calls held until an earlier call's
     /// approval is decided (see
     /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig)).
@@ -391,7 +390,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tool_images: Vec<crate::tool::ToolImage>,
     /// Output-based tool results of a turn or approval that ended waiting
-    /// for a command (an approval, or a pause on a tool error): they are
+    /// for a command (an approval, or a pause on a tool error). They are
     /// added before the message that ends the wait. The output-based
     /// counterpart of `pending_native_tool_results`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -418,8 +417,8 @@ pub struct Task {
     /// rephrase.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub runtime_text_messages: BTreeSet<usize>,
-    /// Set after a refusal when the opt-in refusal fallback will answer the
-    /// refused input: the refusal the fallback request answers. The next
+    /// The refusal the opt-in fallback request answers. Set after a refusal
+    /// when the fallback will answer the refused input. The next
     /// model request goes to the fallback model. Saved so a task suspended
     /// in between still makes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,7 +440,7 @@ pub struct Task {
     /// and not yet added to the conversation, in the order it was sent. It
     /// is added, as one workflow context update, at the next safe turn
     /// boundary, before any context sent later. A task that stops keeps here
-    /// what could not be added before it stopped: in an awaiting state (a
+    /// what could not be added before it stopped, in an awaiting state (a
     /// user message must not come between a call and its result), while a
     /// refusal is unresolved (a pending fallback answers exactly the refused
     /// input, and [`Task::resolve_refusal`] needs it to be the last input),
@@ -468,7 +467,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub handovers: Vec<HandoverRecord>,
     /// Index in `usage_history` of the current conversation's first model
-    /// call: 0 until a handover. Calls before it belong to replaced
+    /// call. This is 0 until a handover. Calls before it belong to replaced
     /// conversations.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conversation_usage_start: usize,
@@ -476,14 +475,14 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conversation_model_call_start: usize,
     /// The conversation was cut back ([`Task::cut_back`]) since its latest
-    /// model call, so that call's size is no longer the conversation's:
+    /// model call, so that call's size is no longer the conversation's.
     /// [`current_conversation_context_size`](Self::current_conversation_context_size)
     /// is `None` until the next call. The conversation's first call stays
     /// where it was.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_size_unknown: bool,
-    /// Index in `usage_history` of the first call the cache monitor judges:
-    /// the conversation's first, or the first after a change of the prompt
+    /// Index in `usage_history` of the first call the cache monitor judges.
+    /// This is the conversation's first, or the first after a change of the prompt
     /// prefix ([`Task::reconfigure`]), whose full cache write is expected.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_window_start: usize,
@@ -493,7 +492,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_session: Option<String>,
     /// The directory the Claude Code CLI runs in for the task's session,
-    /// when it differs from the task's working directory: the one the
+    /// when it differs from the task's working directory. This is the one the
     /// session started in, which Claude Code finds it from. Set when the
     /// task moves ([`Task::move_to`]). arko's tools and checks work in
     /// [`current_working_directory`](Self::current_working_directory), and
@@ -507,19 +506,19 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub claude_code_synced: usize,
     /// The system prompt changed after the Claude Code session recorded
-    /// its first one ([`Task::reconfigure`]): the session's launches pass
+    /// its first one ([`Task::reconfigure`]). The session's launches pass
     /// `--system-prompt-snapshot off`, so that it gets the current prompt.
     /// A handover's fresh session records the current one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claude_code_prompt_changed: bool,
     /// For each message of the conversation whose entry in the Claude Code
     /// session's transcript the runtime saw, by its index, the UUID of its
-    /// last entry there: a model response, a turn's tool results, or the
+    /// last entry there, for a model response, a turn's tool results, or the
     /// input the task sent. [`Task::cut_back`] resumes the session at one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub claude_code_entries: BTreeMap<usize, String>,
     /// The entry of the Claude Code session that its next launch resumes
-    /// at, after [`Task::cut_back`]: the transcript after it is left out.
+    /// at, after [`Task::cut_back`]. The transcript after it is left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_resume_at: Option<String>,
     /// The Claude Code session that the next launch copies into the task's
@@ -538,8 +537,8 @@ pub struct Task {
     /// runs (and reports the task to its
     /// [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink) before the
     /// call starts), and drops it once the call's result is in the task. A
-    /// task saved while calls ran (by a host that crashed) still lists them:
-    /// when the task runs again, each is settled by its tool's
+    /// task saved while calls ran (by a host that crashed) still lists them.
+    /// When the task runs again, each is settled by its tool's
     /// [`recovery_mode`](crate::tool::Tool::recovery_mode) before anything
     /// else happens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -568,9 +567,9 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
-/// A user message's content: `text`, then `images`.
+/// Access to the task's initial images.
 impl Task {
-    /// The images that go with the initial prompt: `initial_task_images`
+    /// The images that go with the initial prompt, from `initial_task_images`
     /// before the first message is written, then the images right after the
     /// text of the conversation's first message (a fresh conversation's
     /// first message after a handover restates the task with them).
@@ -695,7 +694,7 @@ pub struct RunningToolCall {
     /// A Claude Code built-in (Claude Code runs it, not arko).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub built_in: bool,
-    /// Claude Code: the arko call's result once it finished, until the
+    /// For Claude Code, the arko call's result once it finished, until the
     /// session reports the result (and the conversation records it). A
     /// call recovered with its output completed before the host stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -861,12 +860,12 @@ impl Task {
         }
     }
 
-    /// Continues the task with `config` in place of its configuration: its
+    /// Continues the task with `config` in place of its configuration. Its
     /// next run offers `config`'s tools and writes a system message from
     /// `config` in place of the current one. The conversation, with its
     /// prompt cache key, and the task's usage stay. Between turns only (a
     /// task pending, completed, or awaiting the user's answer), and with the
-    /// same model (provider and ID): `InvalidTaskState` otherwise, and
+    /// same model (provider and ID). Returns `InvalidTaskState` otherwise, or
     /// `config`'s own validation errors. A Claude Code task's session gets
     /// the new prompt and flags when it resumes
     /// ([`claude_code_prompt_changed`](Self::claude_code_prompt_changed)).
@@ -910,7 +909,7 @@ impl Task {
 
     /// Replaces the placeholders of images that are gone
     /// ([`arko_ai::Image::unavailable`], read back from a store that no
-    /// longer had them) with text saying so: in a message, the image becomes
+    /// longer had them) with text saying so. In a message, the image becomes
     /// the line `(image no longer available: REASON)`, in a tool result the
     /// line goes after its output, and images still to be sent are dropped.
     /// Returns the reasons, one per image, and keeps them in
@@ -964,7 +963,7 @@ impl Task {
         reasons
     }
 
-    /// Moves the task to working directory `directory`: its tools work
+    /// Moves the task to working directory `directory`. Its tools work
     /// there from its next run, and its system prompt (which may name the
     /// directory) is written again. A Claude Code task with a session keeps
     /// running the CLI in the session's directory, where Claude Code finds
@@ -1154,21 +1153,21 @@ impl Task {
         self.total_usage().output_tokens
     }
 
-    /// Returns the context size of the most recent LLM call, if available:
-    /// its total input tokens, including cached input.
+    /// Returns the total input tokens of the most recent LLM call, including
+    /// cached input, if available.
     pub fn current_context_size(&self) -> Option<usize> {
         self.usage_history.last().map(|u| u.input_tokens)
     }
 
-    /// The context size of the current conversation's latest model call:
-    /// [`current_context_size`](Self::current_context_size), but `None`
-    /// after a handover until the fresh conversation's first call.
+    /// The context size of the current conversation's latest model call.
+    /// Returns [`current_context_size`](Self::current_context_size), but `None`
+    /// after a handover or cut back until the next model call.
     pub fn current_conversation_context_size(&self) -> Option<usize> {
         self.latest_conversation_usage()
             .map(|usage| usage.input_tokens)
     }
 
-    /// The usage of the current conversation's latest model call: `None`
+    /// The usage of the current conversation's latest model call, or `None`
     /// before its first, and after a cut back until the next call.
     pub fn latest_conversation_usage(&self) -> Option<&UsageInfo> {
         if self.context_size_unknown {
@@ -1179,13 +1178,13 @@ impl Task {
             .and_then(<[UsageInfo]>::last)
     }
 
-    /// The first call the cache monitor judges: the conversation's first,
+    /// The first call the cache monitor judges, either the conversation's first,
     /// or the first after a reconfiguration.
     pub fn cache_monitor_start(&self) -> usize {
         self.conversation_usage_start.max(self.cache_window_start)
     }
 
-    /// Records a model call's usage: the conversation's size is known again.
+    /// Records a model call's usage, so the conversation's size is known again.
     pub fn record_usage(&mut self, usage: UsageInfo) {
         self.usage_history.push(usage);
         self.context_size_unknown = false;

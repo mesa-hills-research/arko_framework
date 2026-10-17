@@ -1,10 +1,10 @@
-//! Refuses terminal commands that would delete, move, overwrite, or reformat
-//! something drastic by accident: the filesystem root, a drive root, the home
+//! Refuses terminal commands that would accidentally delete, move, overwrite,
+//! or reformat the filesystem root, a drive root, the home
 //! directory or its parents, top-level and system directories, mounted
 //! volumes, or devices. Paths outside the working directory need opt-in.
 //!
 //! This is a guard against accidents, not a sandbox. It reads the command
-//! text: the shell's own words, variables it can resolve, `cd`, redirections,
+//! text, including the shell's own words, variables it can resolve, `cd`, redirections,
 //! pipelines, and nested `sh -c`, `cmd /c`, and `powershell -Command`
 //! strings. A script or program the command runs is not inspected.
 //!
@@ -38,7 +38,7 @@ pub enum ShellDialect {
 }
 
 impl ShellDialect {
-    /// The dialect of a shell program: `cmd` and `cmd.exe` are
+    /// The dialect of a shell program. `cmd` and `cmd.exe` are
     /// [`Cmd`](Self::Cmd), `powershell` and `pwsh` are
     /// [`PowerShell`](Self::PowerShell), anything else is
     /// [`Posix`](Self::Posix).
@@ -64,15 +64,15 @@ pub struct CommandGuard {
     /// the job's working directory. Protected paths can't be allowed here,
     /// except a top-level directory named exactly.
     pub allowed_paths: Vec<PathBuf>,
-    /// Turn the guard off: every command runs as written, including ones
+    /// Turn the guard off. Every command runs as written, including ones
     /// that delete the filesystem root or the home directory, and the
     /// `rules` don't apply.
     pub dangerously_allow_all_commands: bool,
     /// Programs and arguments to allow or refuse, matched against every
-    /// command the guard finds in the line: each pipeline and list item,
+    /// command the guard finds in the line, including each pipeline and list item,
     /// commands after `cd` and wrappers (`sudo`, `env`, `timeout`, …), in
     /// `sh -c`, `eval`, `$(…)` and backticks, and run by `xargs` and
-    /// `find -exec`. Empty (the default): none.
+    /// `find -exec`. Empty by default, with no rules.
     ///
     /// A command is refused when a [`Deny`](RuleAction::Deny) rule matches
     /// it, or when its program has [`Allow`](RuleAction::Allow) rules and
@@ -82,8 +82,8 @@ pub struct CommandGuard {
     pub rules: Vec<CommandRule>,
 }
 
-/// Why the guard refused a command. The message is written for the model:
-/// what the command would have done and what to do instead.
+/// Why the guard refused a command. The message tells the model what the
+/// command would have done and what to do instead.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct CommandRefusal {
@@ -91,7 +91,7 @@ pub struct CommandRefusal {
     /// The path the command would have affected, as the guard resolved it.
     /// For a refusal by the [`rules`](CommandGuard::rules), the command.
     pub target: String,
-    /// The path is protected: only `dangerously_allow_all_commands` allows it.
+    /// The path is protected, so only `dangerously_allow_all_commands` allows it.
     pub protected: bool,
 }
 

@@ -27,7 +27,7 @@ impl Default for AskUserTool {
 
 #[async_trait]
 impl Tool for AskUserTool {
-    /// Asking again only returns the questions: a call running when its
+    /// Asking again only returns the questions. A call running when its
     /// task stopped asks them again.
     fn recovery_mode(&self) -> crate::tool::ToolRecovery {
         crate::tool::ToolRecovery::Rerun

@@ -1,5 +1,5 @@
 //! Runs an arko agent in the installed Claude Code CLI, under its login, and
-//! prints what happens: tool calls through the gate, usage, handovers and
+//! prints tool calls through the gate, usage, handovers and
 //! compactions.
 //!
 //! ```text
@@ -12,7 +12,7 @@
 //!
 //! It uses the CLI's login and counts against its plan usage. For the raw
 //! stream-json traffic (every line to and from the CLI), add
-//! `RUST_LOG=arko_ai::claude_code::wire=trace`; `--prompt-file` reads the
+//! `RUST_LOG=arko_ai::claude_code::wire=trace`. The `--prompt-file` option reads the
 //! task from a file, and `--refusal-fallback` sets the model arko switches to
 //! for one turn when a refusal stands.
 
