@@ -1,10 +1,10 @@
 //! Stopping a workflow run gracefully, and restarting what the stop ended.
 //!
 //! [`Workflow::stop`](crate::Workflow::stop) stops the run with a
-//! [`StopRequest`]: why ([`StopKind`] and a reason) and, optionally, a
+//! [`StopRequest`] supplies why ([`StopKind`] and a reason) and, optionally, a
 //! [wrap-up](StopRequest::wrap_up) in which running agents are told to save
 //! their progress and finish before they are cancelled. The stop is built on
-//! the run's cancellation (see [`WorkflowCancelHandle`]): after the wrap-up
+//! the run's cancellation (see [`WorkflowCancelHandle`]). After the wrap-up
 //! the run is cancelled with [`CancelCause::Stopped`], its agents are
 //! stopped within the grace period, and the stop is checkpointed.
 //!
@@ -16,7 +16,7 @@
 //! [`Workflow::stop_run`](crate::Workflow::stop_run) and
 //! [`Workflow::stop_agent`](crate::Workflow::stop_agent) stop one run, or
 //! one agent's runs, the same way while the rest of the workflow runs on,
-//! with a [`RunStopIntent`]: a retired run is never relaunched, and one to
+//! with a [`RunStopIntent`]. A retired run is never relaunched, and one to
 //! relaunch is listed by `stopped_runs` at once.
 
 use std::time::Duration;
@@ -33,12 +33,12 @@ use crate::workflow::result::AgentResult;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StopKind {
-    /// Someone asked for it: Ctrl-C, `SIGTERM`, a command from a person.
+    /// Someone asked for it with Ctrl-C, `SIGTERM`, or a command from a person.
     Operator,
-    /// The process is going away and the run will be resumed: a redeploy,
+    /// The process is going away and the run will be resumed after a redeploy,
     /// a host shutting down, a move to another machine.
     Drain,
-    /// A limit of the host's own was reached: a deadline, a budget, a
+    /// A limit of the host's own was reached, such as a deadline, a budget, a
     /// number of jobs.
     Limit,
     /// The host stops the run because something failed (a lost login, a
@@ -47,7 +47,7 @@ pub enum StopKind {
 }
 
 impl StopKind {
-    /// The kind's name, as saved: `operator`, `drain`, `limit` or
+    /// The kind's saved name, `operator`, `drain`, `limit` or
     /// `failure`.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -65,7 +65,7 @@ impl std::fmt::Display for StopKind {
     }
 }
 
-/// The opt-in wrap-up of a [`StopRequest`]: how long agents get to save
+/// The opt-in wrap-up of a [`StopRequest`] sets how long agents get to save
 /// their progress and finish before they are cancelled, and what they are
 /// told.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,11 +88,11 @@ pub struct WrapUp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopRequest {
     pub kind: StopKind,
-    /// Why, in words: shown to agents in their stop notices and recorded
+    /// Why, in words, shown to agents in their stop notices and recorded
     /// with the stop and on the results it ends.
     pub reason: String,
-    /// `None` (the default): the run is cancelled at once, as
-    /// [`cancel`](crate::Workflow::cancel) does. `Some`: a wrap-up first.
+    /// With `None` (the default), the run is cancelled at once, as
+    /// [`cancel`](crate::Workflow::cancel) does. `Some` allows a wrap-up first.
     /// See [`wrap_up`](Self::wrap_up).
     pub wrap_up: Option<WrapUp>,
 }
@@ -112,7 +112,7 @@ impl StopRequest {
         Self::new(StopKind::Operator, reason)
     }
 
-    /// [`StopKind::Drain`]: the run is stopped to be resumed (a redeploy).
+    /// [`StopKind::Drain`] stops the run to resume it later (a redeploy).
     pub fn drain(reason: impl Into<String>) -> Self {
         Self::new(StopKind::Drain, reason)
     }
@@ -127,7 +127,7 @@ impl StopRequest {
         Self::new(StopKind::Failure, reason)
     }
 
-    /// Adds a wrap-up of `within`: no new agent run starts, every running
+    /// Adds a wrap-up of `within`. No new agent run starts, every running
     /// agent's tools see their stop signal at once, and each agent is told
     /// at its next turn boundary to save its progress and call
     /// `complete_task` ([`wrap_up_notice`]). The wrap-up ends when no agent
@@ -157,18 +157,18 @@ impl StopRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStopIntent {
-    /// The run is done for good: the agent is removed, or another run
+    /// The run is done for good. The agent is removed, or another run
     /// replaces it. [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
     /// never lists it, [`Workflow::restart`](crate::Workflow::restart)
     /// refuses it, and a delegated run's caller can't resume it.
     Retire,
-    /// The host wants the run back: `stopped_runs` lists it, while the
+    /// The host wants the run back. `stopped_runs` lists it, while the
     /// workflow runs and after a resume, for `restart`.
     Relaunch,
 }
 
 impl RunStopIntent {
-    /// The intent's name, as saved: `retire` or `relaunch`.
+    /// The intent's saved name, `retire` or `relaunch`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Retire => "retire",
@@ -292,14 +292,14 @@ fn describe_seconds(duration: Duration) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Restart {
     /// The run was running when the process ended (its status is
-    /// `Interrupted`): [`recover_agent`](crate::Workflow::recover_agent)
+    /// `Interrupted`), [`recover_agent`](crate::Workflow::recover_agent)
     /// continues it where its task was saved, without a message.
     Recover,
-    /// A stop cancelled the run:
+    /// A stop cancelled the run.
     /// [`reopen_agent`](crate::Workflow::reopen_agent) continues it, with
     /// the restart's note.
     Reopen,
-    /// The run completed in a stop's wrap-up:
+    /// The run completed in a stop's wrap-up.
     /// [`continue_agent`](crate::Workflow::continue_agent) continues it,
     /// telling it it was restarted, with the restart's note.
     Continue,
@@ -358,7 +358,7 @@ pub(crate) fn continued_message(result: &AgentResult, note: &str) -> String {
 /// (130 for Ctrl-C), as an unhandled signal would end it. Handles Ctrl-C (`SIGINT`) and `SIGTERM` on Unix, and
 /// Ctrl-C and Ctrl-Break on Windows.
 ///
-/// Call it within a Tokio runtime, before the signals can arrive: the
+/// Call it within a Tokio runtime, before the signals can arrive. The
 /// handlers are installed before it returns. Once installed they replace
 /// the default action for the rest of the process. Abort the returned task
 /// to stop listening (the signals are then ignored).

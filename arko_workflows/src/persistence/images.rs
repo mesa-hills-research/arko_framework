@@ -1,6 +1,6 @@
 //! The images of a persisted run, saved once each in the run directory's
 //! `images` folder. The checkpoints, task files and event log refer to them
-//! by name (see [`arko_ai::image_store`]): a conversation saved at every
+//! by name (see [`arko_ai::image_store`]). A conversation saved at every
 //! step doesn't rewrite its images.
 
 use std::collections::HashMap;
@@ -20,10 +20,10 @@ pub const IMAGES_DIR: &str = "images";
 /// the images it saved without hashing them again.
 const CACHE_BYTES: usize = 256 << 20;
 
-/// A run directory's image files: `images/<SHA-256 of the image>.<type>`,
+/// A run directory's image files, `images/<SHA-256 of the image>.<type>`,
 /// each written once (atomically, flushed to disk before a file that refers
 /// to it is written). Files are never removed while the run directory
-/// exists: older checkpoints, task versions and the event log may refer to
+/// exists. Older checkpoints, task versions and the event log may refer to
 /// them.
 ///
 /// Wrap code that reads a run directory's task files or checkpoints
@@ -78,7 +78,7 @@ impl ImageFiles {
         }
     }
 
-    /// Runs `f` with these files as the thread's image store: images
+    /// Runs `f` with these files as the thread's image store. Images
     /// serialized in `f` are saved here and written by name, and names read
     /// in `f` are loaded from here.
     pub fn with<R>(self: &Arc<Self>, f: impl FnOnce() -> R) -> R {

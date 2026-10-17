@@ -19,12 +19,12 @@ pub enum HookPoint {
     /// error recovery policy (or the caller) rejected has the pause's cause
     /// in the metadata's `cause` (`non_retryable`, `refusal`, …).
     PostAgentFailure,
-    /// An agent run ended cancelled: stopped with the workflow run, or by the
+    /// An agent run ended cancelled, stopped with the workflow run or by the
     /// workflow over its budget.
     PostAgentCancellation,
     OnUserInputRequired,
     /// An agent paused for a decision the workflow's approval or error
-    /// recovery policy leaves to the caller (`AgentRunStatus::Paused`):
+    /// recovery policy leaves to the caller (`AgentRunStatus::Paused`), which
     /// fires once per pause. `metadata["pause"]` is `"tool_approval"` or
     /// `"error_recovery"`. An error-recovery pause also sets
     /// `metadata["cause"]` and `error_message`, a tool-approval pause
@@ -57,7 +57,7 @@ pub enum HookPoint {
 pub enum HookResult {
     /// Continue normal execution.
     Continue,
-    /// Abort the workflow run with this reason: every running agent is
+    /// Abort the workflow run with this reason. Every running agent is
     /// cancelled, and every run call in progress or made later returns
     /// [`WorkflowError::AbortedByHook`](crate::WorkflowError::AbortedByHook).
     Abort(String),

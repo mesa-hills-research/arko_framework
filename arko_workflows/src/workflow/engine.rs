@@ -480,13 +480,13 @@ async fn answer_budget_hold(
 #[derive(Default)]
 struct RecoveryState {
     /// The cause of the error-recovery pause the agent is in (its latest
-    /// state, or the state it was resumed in), if it is in one: an error it
+    /// state, or the state it was resumed in), if it is in one. An error it
     /// reports needing a decision is about that pause.
     paused: Option<arko_agents::ErrorRecoveryCause>,
     /// That pause's error kind, when it recorded one.
     paused_kind: Option<arko_ai::ErrorKind>,
     /// An error needing a decision that arrived before the state change
-    /// giving its cause: answered once that pause arrives, so the decision
+    /// giving its cause, answered once that pause arrives, so the decision
     /// doesn't depend on the order a runtime reports them in.
     unanswered: Option<String>,
     /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
@@ -1342,18 +1342,18 @@ pub(crate) struct StartOptions {
     pub admitted: bool,
     /// The workflow drives the run from its start, so it decides every wait
     /// (see [`StartedRun::host_decisions`]). Off for `spawn_agent`, whose
-    /// caller chooses: `AgentHandle::wait` turns it on.
+    /// caller chooses. `AgentHandle::wait` turns it on.
     pub driven: bool,
     /// The tool call the run runs inside (a delegated agent's or a
     /// verifier's), recorded in its task ([`Task::parent`]).
     pub parent: Option<arko_agents::TaskParent>,
-    /// A completion verifier's review: it may start during a graceful
+    /// A completion verifier's review, which may start during a graceful
     /// stop's wrap-up, and isn't told to wrap up.
     pub review: bool,
     /// The run's working directory, when not the workflow's workspace (see
     /// [`RunOptions::workspace`](super::RunOptions::workspace)).
     pub workspace: Option<std::path::PathBuf>,
-    /// The run is a background subagent's: its tools are a subagent's (see
+    /// The run is a background subagent's. Its tools are a subagent's (see
     /// [`crate::subagents`]).
     pub subagent: bool,
     /// The configuration it starts with, instead of its agent's registered
@@ -1768,7 +1768,7 @@ pub(crate) struct StartedRun {
     pub event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
     pub cmd_tx: tokio::sync::mpsc::Sender<UserCommand>,
     pub join_handle: AbortOnDrop,
-    /// The task as the run started it: the record of an agent that had to be
+    /// The task as the run started it, the record of an agent that had to be
     /// aborted, unless the task journal saved a later state.
     pub started_task: Task,
     /// Messages delivered in the prompt, acknowledged once the agent
@@ -1780,14 +1780,14 @@ pub(crate) struct StartedRun {
     /// Stops the run when set, with the reason (fail-fast in
     /// `run_agents_parallel`).
     pub batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
-    /// Set while the workflow drives the run: it decides every wait the
+    /// Set while the workflow drives the run. It decides every wait the
     /// agent reaches (under its policies and handlers, however long they
     /// take, also while the workflow is paused) or suspends the agent for
     /// its caller, so the agent's own command timeout doesn't apply. Not
-    /// saved with the task: resumed outside a workflow, it is timed as
+    /// saved with the task. Resumed outside a workflow, it is timed as
     /// configured.
     pub host_decisions: HostDecisions,
-    /// The run was recovered after the workflow stopped while it ran: a
+    /// The run was recovered after the workflow stopped while it ran. A
     /// wait its task was saved in is answered first (see
     /// [`answer_saved_wait`]).
     pub recovered: bool,
@@ -2275,7 +2275,7 @@ async fn recovery_ended(mut recovering: tokio::sync::watch::Receiver<()>) {
 pub(crate) struct Recovery<'a> {
     /// The run's depth (see [`StartedRun::depth`]).
     pub depth: u32,
-    /// Replaces the run's parent link: `Some(None)` releases it (the host
+    /// Replaces the run's parent link. `Some(None)` releases it (the host
     /// recovers an orphaned run), `Some(Some(call))` points it at the tool
     /// call resuming it, so that a later stop finds it there.
     pub parent: Option<Option<arko_agents::TaskParent>>,
@@ -2287,7 +2287,7 @@ pub(crate) struct Recovery<'a> {
     /// When another recovery runs it, wait for that recovery and return
     /// the outcome it recorded, instead of failing.
     pub wait: bool,
-    /// Reopens a cancelled run: it is recovered as an interrupted one
+    /// Reopens a cancelled run. It is recovered as an interrupted one
     /// would be (see [`WorkflowEngine::reopen_agent`]).
     pub reopen: bool,
 }
@@ -3225,7 +3225,7 @@ impl WorkflowEngine {
     /// The agents are marked running together before any of them is
     /// prompted, so each one's roster shows the others as running. With a
     /// concurrency cap (`WorkflowBuilder::max_parallel_agents`), at most that
-    /// many run at once: each is marked running when it starts. With
+    /// many run at once. Each is marked running when it starts. With
     /// fail-fast (`WorkflowBuilder::fail_fast`), the first failure stops the
     /// others, and agents not started yet don't start.
     pub async fn run_agents_parallel(
@@ -3866,7 +3866,7 @@ impl WorkflowEngine {
     /// Continue an agent run that was running when the workflow stopped
     /// (see [`Workflow::recover_agent`](super::Workflow::recover_agent)). A
     /// run started inside another run's tool call is recovered with that
-    /// run, unless it is orphaned ([`is_orphaned`]): then the host recovers
+    /// run, unless it is orphaned ([`is_orphaned`]). Then the host recovers
     /// it, and its parent link is released.
     pub async fn recover_agent(
         &self,
@@ -3956,10 +3956,10 @@ impl WorkflowEngine {
 
     /// Continue a cancelled agent run (see
     /// [`Workflow::reopen_agent`](super::Workflow::reopen_agent)) where its
-    /// task stopped, with `prompt` after [`REOPENED_NOTE`]: it is recovered
+    /// task stopped, with `prompt` after [`REOPENED_NOTE`]. It is recovered
     /// as an interrupted run is (calls without results are settled in
     /// doubt, and the like), under its run identity. A run started inside
-    /// another run's tool call becomes the host's: its parent link is
+    /// another run's tool call becomes the host's. Its parent link is
     /// released. `options`' images go after `prompt`.
     pub async fn reopen_agent_with(
         &self,

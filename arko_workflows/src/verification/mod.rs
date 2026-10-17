@@ -13,7 +13,7 @@ use crate::freshness::{ActorId, ResourceId};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VerificationKind {
     Correctness,
-    /// Efficiency verifiers are advisory: a reported major issue is coerced
+    /// Efficiency verifiers are advisory. A reported major issue is coerced
     /// to a minor correction and the gate is skipped after its repair cap.
     Efficiency,
 }
@@ -42,7 +42,7 @@ pub struct CompletionVerifierConfig {
     /// How many failed reviews (the verifier's run failed, or its verdict
     /// stayed unusable) of one task are answered by asking the agent to call
     /// `complete_task` again, which starts a new review. On the next failure
-    /// the completion is neither accepted nor rejected: the task pauses and
+    /// the completion is neither accepted nor rejected. The task pauses and
     /// the run call returns
     /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed).
     /// Continuing it starts the count again. Default 1.
@@ -104,7 +104,7 @@ impl CompletionVerifierConfig {
     }
 
     /// Gate this agent's completions (by registration name). A verifier
-    /// needs at least one target: `build` rejects one without.
+    /// needs at least one target. `build` rejects one without.
     pub fn target(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self

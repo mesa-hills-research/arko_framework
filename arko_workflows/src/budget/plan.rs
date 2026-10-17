@@ -1,14 +1,14 @@
-//! Plan budgets: limits on how much of subscription plans' usage windows a
+//! Plan budgets limit how much of subscription plans' usage windows a
 //! run uses, in percentage points of each window, measured from the
 //! window's level when the run first saw it.
 //!
 //! Each plan ([`SubscriptionPlan`]) is counted on its own. Plan usage is
-//! account-wide: every agent's report of a plan
+//! account-wide. Every agent's report of a plan
 //! ([`AgentEvent::PlanUsageReported`](arko_agents::AgentEvent::PlanUsageReported))
 //! updates the same windows, the latest report winning, and use of the same
 //! plan outside the run while it runs counts too. The points are known
 //! only once a request has completed and its report has arrived, so a plan
-//! budget is a soft limit, as a dollar budget is: the requests in flight
+//! budget is a soft limit, as a dollar budget is. The requests in flight
 //! when it is reached still complete.
 
 use std::collections::{BTreeMap, HashSet};
@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 const RESET_TOLERANCE_SECS: u64 = 60;
 
 /// Limits on a run's use of its subscription plans' usage windows, in
-/// percentage points of each window (`Some(25.0)`: a quarter of the
-/// window), counted from each window's level when the run started. `None`:
+/// percentage points of each window (`Some(25.0)` means a quarter of the
+/// window), counted from each window's level when the run started. `None` means
 /// no limit for that window. Set with
 /// [`WorkflowBuilder::plan_budget`](crate::WorkflowBuilder::plan_budget).
 ///
@@ -85,7 +85,7 @@ impl PlanBudget {
         }
     }
 
-    /// The limit that applies to `plan`'s `window`: the plan's own, else
+    /// The limit that applies to `plan`'s `window`, the plan's own, else
     /// [`limit`](Self::limit).
     pub fn limit_for(&self, plan: SubscriptionPlan, window: PlanWindow) -> Option<f64> {
         self.own(Some(plan), window).or(self.limit(window))
@@ -159,7 +159,7 @@ impl PlanBudget {
 }
 
 /// One plan's own limits in a [`PlanBudget`], in points of each of its
-/// windows. `None`: the budget's limit for that window applies.
+/// windows. With `None`, the budget's limit for that window applies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanLimits {
     /// Points of the plan's five-hour window.
@@ -277,7 +277,7 @@ impl PlanUsageSpent {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanWindowUsage {
     /// The window's level (percent used) at the start of the current
-    /// period: the first report the run saw, or 0 after a reset.
+    /// period, the first report the run saw, or 0 after a reset.
     pub baseline: f64,
     /// The latest level reported.
     pub latest: f64,
@@ -290,7 +290,7 @@ pub struct PlanWindowUsage {
 }
 
 impl PlanWindowUsage {
-    /// The points used: earlier periods and the current one.
+    /// The points used in earlier periods and the current one.
     pub fn used(&self) -> f64 {
         (self.accumulated + self.latest - self.baseline).max(0.0)
     }
@@ -402,7 +402,7 @@ impl PlanUsageTracking {
 pub struct PlanBudgetState {
     #[serde(default)]
     pub limits: PlanBudget,
-    /// Tracking without a plan: what a checkpoint from before plans were
+    /// Tracking without a plan, as in a checkpoint from before plans were
     /// counted apart recorded (the first plan to report after the resume
     /// takes it over), and reports that name no plan.
     #[serde(default)]
@@ -426,7 +426,7 @@ pub struct PlanBudgetCrossing {
 }
 
 impl PlanBudgetCrossing {
-    /// "Claude Code five-hour window 25.4 of 25 points" (without a plan:
+    /// "Claude Code five-hour window 25.4 of 25 points" (without a plan,
     /// "five-hour window 25.4 of 25 points").
     pub fn describe(&self) -> String {
         format!(
@@ -444,7 +444,7 @@ impl PlanBudgetCrossing {
 #[derive(Debug, Default)]
 pub(crate) struct PlanBudgetTracker {
     pub(crate) limits: PlanBudget,
-    /// Each plan's tracking. `None`: tracking without a plan (see
+    /// Each plan's tracking. `None` means tracking without a plan (see
     /// [`PlanBudgetState::usage`]).
     usage: BTreeMap<Option<SubscriptionPlan>, PlanUsageTracking>,
     /// Windows reported over their limit since last within it.

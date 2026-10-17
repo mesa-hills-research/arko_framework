@@ -70,13 +70,13 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// Running or waiting: a message is delivered at its next safe turn
+    /// Running or waiting, so a message is delivered at its next safe turn
     /// boundary.
     pub fn is_reachable(&self) -> bool {
         matches!(self, Self::Running | Self::Waiting(_))
     }
 
-    /// A compact description, as agents are shown it: `not_started`,
+    /// A compact description, as agents are shown it, `not_started`,
     /// `running`, `waiting (rate_limited until 2026-09-27T12:00:00Z)`, or
     /// `finished (completed)`.
     pub fn describe(&self) -> String {
@@ -121,14 +121,14 @@ fn outcome_name(outcome: &AgentRunStatus) -> &'static str {
 /// What the registry records about one agent across runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRecord {
-    /// The registry version at the agent's latest start (0: never started).
+    /// The registry version at the agent's latest start (0 means never started).
     #[serde(default)]
     pub last_start: u64,
     /// How the agent's latest run ended, when no run is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<AgentRunStatus>,
-    /// The registry version at which the agent last finished: its last
-    /// running run ended (0: never, or not recorded by an older version).
+    /// The registry version at which the agent last finished, when its last
+    /// running run ended (0 means never, or not recorded by an older version).
     #[serde(default)]
     pub last_finish: u64,
 }
@@ -144,7 +144,7 @@ pub(crate) enum ActivityChange {
     Finished(String, AgentRunStatus),
 }
 
-/// The registry state a checkpoint saves:
+/// The registry state a checkpoint saves in
 /// [`WorkflowState::agent_registry`](crate::persistence::state::WorkflowState::agent_registry).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistrySnapshot {
@@ -163,7 +163,7 @@ pub struct RegistrySnapshot {
 struct Run {
     agent: String,
     waiting: Option<WaitReason>,
-    /// In `wait_for_message`: set and cleared by the tool alone, so the
+    /// In `wait_for_message`, set and cleared by the tool alone, so the
     /// driver's events (observed a little later) can't end the wait early.
     awaiting_message: bool,
     /// The agent's record before this run started, restored if the run is
@@ -181,7 +181,7 @@ struct RegistryState {
     saved: RegistrySnapshot,
     runs: HashMap<Uuid, Run>,
     /// Per run being recovered (see
-    /// [`AgentRegistry::claim_recovery`]): a receiver that closes when its
+    /// [`AgentRegistry::claim_recovery`]), a receiver that closes when its
     /// recovery ends. Closed entries are removed as they are found.
     recoveries: HashMap<Uuid, watch::Receiver<()>>,
 }
@@ -214,7 +214,7 @@ pub(crate) struct Activity {
 
 impl AgentRegistry {
     /// Restores the registry of a resumed run. No run is running after a
-    /// resume: an agent that was running at the checkpoint counts as
+    /// resume. An agent that was running at the checkpoint counts as
     /// finished, interrupted. A checkpoint from before the registry existed
     /// gives each agent with a recorded result its latest result's outcome.
     pub fn restore(snapshot: Option<RegistrySnapshot>, results: &[AgentResult]) -> Self {
@@ -277,7 +277,7 @@ impl AgentRegistry {
         self.state.lock().saved.clone()
     }
 
-    /// Marks agent runs as running, together: a batch started at once sees
+    /// Marks agent runs as running, together. A batch started at once sees
     /// each other as running. An agent that had no running run starts at a
     /// new version.
     pub fn start(&self, runs: &[(Uuid, &str)]) {
@@ -374,7 +374,7 @@ impl AgentRegistry {
         Ok(RecoveryClaim(claim))
     }
 
-    /// The recovery running run `task_id`, if one does: its receiver's
+    /// The recovery running run `task_id`, if one does. Its receiver's
     /// `changed` fails once the recovery has ended (and recorded the run's
     /// outcome).
     pub fn recovery(&self, task_id: Uuid) -> Option<watch::Receiver<()>> {
@@ -519,7 +519,7 @@ impl AgentRegistry {
         }
     }
 
-    /// Whether the budget holds up the whole run: some run waits for a
+    /// Whether the budget holds up the whole run because some run waits for a
     /// raise ([`WaitReason::BudgetExceeded`]), and every other running run
     /// does too, waits for a message, or waits in a tool call for a run it
     /// started (one of them, in turn). Nothing then runs until the budget

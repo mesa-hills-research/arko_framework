@@ -34,14 +34,14 @@ impl SupportedPlatform {
     }
 }
 
-/// Something outside the workflow it needs or uses: a program it runs, a
+/// Something outside the workflow it needs or uses, such as a program it runs, a
 /// service or a login. [`WorkflowMetadata::missing_dependencies`] checks the
 /// ones that name an `executable`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowDependency {
     pub name: String,
     pub description: String,
-    /// The program to look for: a name found on `PATH` (on Windows, with or
+    /// The program to look for, a name found on `PATH` (on Windows, with or
     /// without a `PATHEXT` extension), or a path to a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
@@ -54,8 +54,8 @@ pub struct WorkflowDependency {
     /// when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
-    /// The dependency helps but isn't required: the workflow works without
-    /// it. `false` (the default): required.
+    /// The dependency helps but isn't required. The workflow works without
+    /// it. `false` (the default) means required.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub optional: bool,
 }
@@ -98,7 +98,7 @@ impl WorkflowDependency {
         self
     }
 
-    /// Marks it optional: the workflow works without it.
+    /// Marks it optional, so the workflow works without it.
     pub fn optional(mut self) -> Self {
         self.optional = true;
         self
@@ -132,7 +132,7 @@ pub struct WorkflowMetadata {
 }
 
 impl WorkflowMetadata {
-    /// The dependencies this host lacks: those that apply to it (their `os`
+    /// The dependencies this host lacks, among those that apply to it (their `os`
     /// and `arch` match `std::env::consts::{OS, ARCH}`, or are unset) whose
     /// `executable` isn't found, required and optional alike. A dependency
     /// without an `executable` is never reported. Nothing is printed or

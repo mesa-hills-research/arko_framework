@@ -1,4 +1,4 @@
-//! The control folder: notes for a workflow written by another process,
+//! The control folder holds notes for a workflow written by another process,
 //! such as a binary's `note` subcommand or the `runctl` example, while the
 //! workflow runs or while it is stopped, and requests to stop agent runs
 //! alone while it runs.
@@ -6,7 +6,7 @@
 //! A workflow built with
 //! [`WorkflowBuilder::control_folder`](crate::WorkflowBuilder::control_folder)
 //! creates `<run dir>/control/` and reads its notes file,
-//! [`NOTES_FILE`]: one JSON [`ControlNote`] per line, appended under an
+//! [`NOTES_FILE`] holds one JSON [`ControlNote`] per line, appended under an
 //! exclusive lock on [`LOCK_FILE`] (a [`std::fs::File::lock`], never a lock
 //! of the run's own). The workflow reads new lines under a shared lock at
 //! its agents' turn boundaries, when it starts an agent, and in
@@ -23,7 +23,7 @@
 //! only the requests written after it was built.
 //!
 //! Whoever can write the folder can post notes, as any source, and stop
-//! runs: keep the run
+//! runs. Keep the run
 //! directory out of the agents' reach (outside their workspace, or behind a
 //! path policy), as a host keeps its own command line out of their sandbox.
 
@@ -43,25 +43,25 @@ use std::sync::Arc;
 /// The control folder's name in the run directory.
 pub const FOLDER: &str = "control";
 
-/// The notes file in the control folder: one [`ControlNote`] per line.
+/// The notes file in the control folder holds one [`ControlNote`] per line.
 pub const NOTES_FILE: &str = "notes.jsonl";
 
 /// The file locked while the notes file or the stops file is written
 /// (exclusively) or read (shared).
 pub const LOCK_FILE: &str = "notes.lock";
 
-/// The stops file in the control folder: one [`ControlStop`] per line.
+/// The stops file in the control folder holds one [`ControlStop`] per line.
 pub const STOPS_FILE: &str = "stops.jsonl";
 
 /// How often a running workflow reads the stops file.
 pub const STOPS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The control folder of run directory `run_dir`: `<run_dir>/control`.
+/// The control folder of run directory `run_dir`, `<run_dir>/control`.
 pub fn folder(run_dir: &Path) -> PathBuf {
     run_dir.join(FOLDER)
 }
 
-/// A line of the notes file: a [`Note`]'s fields, with the identity and time
+/// A line of the notes file holds a [`Note`]'s fields, with the identity and time
 /// [`post_note`] gives it. A line written by hand may leave both out. The
 /// workflow then gives the note an identity when it reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,15 +80,15 @@ pub struct ControlNote {
 /// Appends `note` to the notes file of the workflow whose run directory is
 /// `run_dir`, durably (synced), under the control folder's lock, and returns
 /// the line written, with a new `id` and the current time. Works whether the
-/// workflow is running or stopped: the workflow posts the note at its next
+/// workflow is running or stopped. The workflow posts the note at its next
 /// read.
 ///
 /// Fails with [`io::ErrorKind::NotFound`] when the run directory has no
-/// control folder (the workflow doesn't read one: see
+/// control folder (the workflow doesn't read one, see
 /// [`WorkflowBuilder::control_folder`](crate::WorkflowBuilder::control_folder)),
 /// and with [`io::ErrorKind::InvalidInput`] for an empty note or one over
 /// [`MAX_NOTE_BYTES`](super::MAX_NOTE_BYTES). The audience is checked when the
-/// workflow reads the note: one naming an unknown agent is skipped there,
+/// workflow reads the note. One naming an unknown agent is skipped there,
 /// with a warning in the workflow's log.
 pub fn post_note(run_dir: &Path, note: &Note) -> io::Result<ControlNote> {
     let folder = folder(run_dir);
@@ -123,7 +123,7 @@ pub fn post_note(run_dir: &Path, note: &Note) -> io::Result<ControlNote> {
 
 /// Every note in the notes file of run directory `run_dir`, oldest first,
 /// read under the control folder's lock. Lines that aren't notes are
-/// skipped. Empty when there is no notes file. For status tools: which of
+/// skipped. Empty when there is no notes file. For status tools, which of
 /// them the workflow has posted is in its checkpoint
 /// ([`NotesSnapshot::notes`](super::NotesSnapshot::notes), by `id`).
 pub fn read_notes(run_dir: &Path) -> io::Result<Vec<ControlNote>> {
@@ -191,9 +191,9 @@ fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// The lines of the notes file after `offset`, read once no writer holds the
 /// lock.
 pub(crate) struct Batch {
-    /// Each complete line: a note, or why it isn't one.
+    /// Each complete line holds a note, or why it isn't one.
     pub entries: Vec<Result<ControlNote, String>>,
-    /// The offset after the last complete line: an unfinished last line
+    /// The offset after the last complete line. An unfinished last line
     /// (one a writer crashed in) is read once a later write ends it.
     pub end: u64,
 }
@@ -270,7 +270,7 @@ fn read_lines_from(folder: &Path, name: &str, offset: u64) -> io::Result<Option<
     }))
 }
 
-/// A line of the stops file: a request to stop agent runs alone
+/// A line of the stops file holds a request to stop agent runs alone
 /// ([`Workflow::stop_run`](crate::Workflow::stop_run) or
 /// [`Workflow::stop_agent`](crate::Workflow::stop_agent)), written by
 /// another process while the workflow runs. It names one run (`run`) or
@@ -295,7 +295,7 @@ pub struct ControlStop {
     pub kind: StopKind,
     #[serde(default)]
     pub reason: String,
-    /// The wrap-up's length in seconds. None: the runs are cancelled at
+    /// The wrap-up's length in seconds. With `None`, the runs are cancelled at
     /// once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_up_secs: Option<u64>,
@@ -435,7 +435,7 @@ pub fn read_stops(run_dir: &Path) -> io::Result<Vec<ControlStop>> {
 pub(crate) struct StopReader {
     /// The control folder, when enabled.
     folder: Option<PathBuf>,
-    /// How much of the stops file has been read: from its length when the
+    /// How much of the stops file has been read, from its length when the
     /// workflow was built, so that the requests written before are skipped.
     offset: parking_lot::Mutex<u64>,
     /// The reading task was started.

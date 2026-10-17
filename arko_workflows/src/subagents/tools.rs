@@ -1,4 +1,4 @@
-//! The subagent tools: `start_agent`, `message_agent`, `wait_for_agents`,
+//! The subagent tools, `start_agent`, `message_agent`, `wait_for_agents`,
 //! `list_agents`, `stop_agent` and `link_agents`.
 
 use std::collections::{BTreeMap, HashMap};

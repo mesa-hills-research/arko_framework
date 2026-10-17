@@ -29,7 +29,7 @@ pub const RESUME_RUN_PARAMETER: &str = "resume_run";
 
 /// Which agents may run which other agents with `run_workflow_agent`.
 ///
-/// Callers and targets are named explicitly: with none named, no agent is
+/// Callers and targets are named explicitly. With none named, no agent is
 /// offered the tool, and a caller may run no agent. The opt-ins
 /// [`allow_all_callers`](Self::allow_all_callers) and
 /// [`allow_all_targets`](Self::allow_all_targets) admit every agent except
@@ -40,9 +40,9 @@ pub struct WorkflowServicesConfig {
     pub allowed_callers: HashSet<String>,
     /// Agents a caller may run.
     pub allowed_targets: HashSet<String>,
-    /// Opt-in: every agent is a caller, except verifier agents.
+    /// When enabled, every agent is a caller, except verifier agents.
     pub all_callers: bool,
-    /// Opt-in: a caller may run every agent, except itself and verifier
+    /// When enabled, a caller may run every agent, except itself and verifier
     /// agents.
     pub all_targets: bool,
     /// Calls running at once, workflow-wide (nested delegation included).
@@ -50,10 +50,10 @@ pub struct WorkflowServicesConfig {
     /// [`queue_active_calls`](Self::queue_active_calls). Default
     /// [`DEFAULT_MAX_ACTIVE_CALLS`].
     pub max_active_calls: NonZeroU32,
-    /// Opt-in: no limit on calls running at once
+    /// When enabled, no limit on calls running at once
     /// ([`max_active_calls`](Self::max_active_calls) is ignored).
     pub unlimited_active_calls: bool,
-    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// When enabled, a call over [`max_active_calls`](Self::max_active_calls)
     /// waits until one ends, instead of failing.
     pub queue_active_calls: bool,
     /// `max_active_calls(0)` was asked for. `WorkflowBuilder::build`
@@ -61,7 +61,7 @@ pub struct WorkflowServicesConfig {
     zero_max_active_calls: bool,
 }
 
-/// The default [`WorkflowServicesConfig::max_active_calls`]: 4.
+/// The default [`WorkflowServicesConfig::max_active_calls`] of 4.
 pub const DEFAULT_MAX_ACTIVE_CALLS: NonZeroU32 = NonZeroU32::new(4).unwrap();
 
 impl Default for WorkflowServicesConfig {
@@ -92,14 +92,14 @@ impl WorkflowServicesConfig {
         self
     }
 
-    /// Opt-in: offer `run_workflow_agent` to every agent except
+    /// Opt in to offering `run_workflow_agent` to every agent except
     /// completion-verifier agents.
     pub fn allow_all_callers(mut self) -> Self {
         self.all_callers = true;
         self
     }
 
-    /// Opt-in: let a caller run every agent except itself and
+    /// Opt in to letting a caller run every agent except itself and
     /// completion-verifier agents.
     pub fn allow_all_targets(mut self) -> Self {
         self.all_targets = true;
@@ -119,13 +119,13 @@ impl WorkflowServicesConfig {
         self
     }
 
-    /// Opt-in: no limit on calls running at once.
+    /// Opt in to unlimited calls running at once.
     pub fn unlimited_active_calls(mut self) -> Self {
         self.unlimited_active_calls = true;
         self
     }
 
-    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// When enabled, a call over [`max_active_calls`](Self::max_active_calls)
     /// waits until one ends, instead of failing.
     pub fn queue_active_calls(mut self) -> Self {
         self.queue_active_calls = true;
@@ -194,14 +194,14 @@ impl WorkflowServices {
         })
     }
 
-    /// Whether `caller` is offered `run_workflow_agent`: named, or every
+    /// Whether `caller` is offered `run_workflow_agent`, when named or every
     /// agent but verifier agents under `allow_all_callers`.
     pub fn is_allowed(&self, caller: &str) -> bool {
         self.config.allowed_callers.contains(caller)
             || (self.config.all_callers && !self.is_verifier(caller))
     }
 
-    /// Whether `caller` may run `target`: named, or every agent but the
+    /// Whether `caller` may run `target`, when named or every agent but the
     /// caller and verifier agents under `allow_all_targets`.
     pub fn is_target_allowed(&self, caller: &str, target: &str) -> bool {
         self.config.allowed_targets.contains(target)

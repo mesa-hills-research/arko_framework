@@ -129,7 +129,7 @@ impl CachedFile {
 }
 
 /// Durable, at-least-once event delivery. Polling deliberately does not depend on an OS
-/// event queue: missed notifications/queue overflow cannot silently lose filesystem changes.
+/// event queue, so missed notifications or queue overflow cannot silently lose filesystem changes.
 pub struct Watcher {
     root: PathBuf,
     dir: PathBuf,

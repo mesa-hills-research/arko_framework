@@ -18,7 +18,7 @@ pub enum AgentRunStatus {
     Completed,
     Failed,
     Interrupted,
-    /// The task ended `TaskState::Cancelled`: stopped with the workflow run
+    /// The task ended `TaskState::Cancelled`, stopped with the workflow run
     /// (cancelled, or aborted by a hook), or by the workflow (over budget).
     Cancelled,
     /// Suspended at an `ask_user` question. `Workflow::continue_agent`
@@ -32,7 +32,7 @@ pub enum AgentRunStatus {
 }
 
 impl AgentRunStatus {
-    /// A pause (`WaitingForInput` or `Paused`): the run can go on.
+    /// A pause (`WaitingForInput` or `Paused`) from which the run can go on.
     pub fn is_paused(&self) -> bool {
         matches!(self, Self::WaitingForInput | Self::Paused)
     }
@@ -134,7 +134,7 @@ impl AgentResult {
     }
 
     /// The stop that ended this run, when a stop the host asked for ended
-    /// it: the run was cancelled by
+    /// it. The run was cancelled by
     /// [`Workflow::stop`](crate::Workflow::stop),
     /// [`Workflow::cancel`](crate::Workflow::cancel) or its own stop
     /// ([`Workflow::stop_run`](crate::Workflow::stop_run)) (status
@@ -144,7 +144,7 @@ impl AgentResult {
     /// interrupted in its wrap-up (status `Interrupted`, such as a run the
     /// process ended), and its record's
     /// [`intent`](crate::workflow::stop::StopRecord::intent) says what the
-    /// host means to do with it. A stopped run is blameless: its outcome
+    /// host means to do with it. A stopped run is blameless. Its outcome
     /// says nothing about the agent's work, so don't count it as a failure
     /// (or a success). [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
     /// lists it for a restart unless the host retired it. `None` for every
@@ -155,9 +155,9 @@ impl AgentResult {
     }
 
     /// Why the run failed, when it failed at an error-recovery pause the
-    /// error recovery policy (or a caller) rejected: the pause's cause, as
+    /// error recovery policy (or a caller) rejected, with the pause's cause, as
     /// its task recorded it (`TaskState::Failed::cause`). For example
-    /// [`ErrorRecoveryCause::NonRetryable`](arko_agents::ErrorRecoveryCause::NonRetryable):
+    /// [`ErrorRecoveryCause::NonRetryable`](arko_agents::ErrorRecoveryCause::NonRetryable) means
     /// the model request needs a new credential (an expired login) or a
     /// configuration change, so starting the agent again only helps once
     /// that is fixed. `None` for a run that didn't fail, failed otherwise,
@@ -175,7 +175,7 @@ impl AgentResult {
 
     /// The kind of the model-request error the run failed on, when it
     /// failed at an error-recovery pause that recorded one
-    /// (`TaskState::Failed::error_kind`): for example
+    /// (`TaskState::Failed::error_kind`), for example
     /// [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication) for
     /// a lost login, which fails every run on that credential until it is
     /// renewed, or [`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)

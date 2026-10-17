@@ -28,9 +28,9 @@ pub enum WorkflowError {
 
     /// The host stopped the run alone
     /// ([`Workflow::stop_run`](crate::Workflow::stop_run)), and it was
-    /// cancelled: its wrap-up's time was up, or the stop had none. Its
+    /// cancelled because its wrap-up's time was up, or the stop had none. Its
     /// result ([`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`)
-    /// is `Cancelled`, with `stopped_by` set. Not a failure: the rest of
+    /// is `Cancelled`, with `stopped_by` set. This isn't a failure, so the rest of
     /// the workflow runs on.
     #[error("Agent '{agent}' was stopped: {reason}")]
     AgentStopped {
@@ -40,7 +40,7 @@ pub enum WorkflowError {
     },
 
     /// The agent asked the user a question and no user input handler is
-    /// set: it is suspended, recorded with status `WaitingForInput`. Answer
+    /// set. It is suspended, recorded with status `WaitingForInput`. Answer
     /// with `Workflow::continue_agent`. A pause, not a failure.
     #[error("Agent '{agent}' requires user input: {questions}")]
     UserInputRequired {
@@ -50,7 +50,7 @@ pub enum WorkflowError {
     },
 
     /// The agent paused for a decision the workflow's approval or error
-    /// recovery policy leaves to the caller: it is suspended, recorded with
+    /// recovery policy leaves to the caller. It is suspended, recorded with
     /// status `Paused`. Continue it with `Workflow::resume_agent`. A pause,
     /// not a failure.
     #[error("Agent '{agent}' paused, {pause}")]
@@ -63,10 +63,10 @@ pub enum WorkflowError {
     /// A completion verifier couldn't review the agent's completion (its run
     /// failed, or its verdict stayed unusable) more times than its
     /// `max_review_retries` allow. The completion was neither accepted nor
-    /// rejected: the agent's task is paused (status `Paused`, an
+    /// rejected. The agent's task is paused (status `Paused`, an
     /// error-recovery pause with the cause `Middleware`). Continue it with
     /// [`Workflow::continue_agent`](crate::Workflow::continue_agent) on
-    /// [`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`:
+    /// [`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`, where
     /// the prompt is its next message, and its next `complete_task` is
     /// reviewed again. [`Workflow::resume_agent`](crate::Workflow::resume_agent)
     /// can also continue or fail it.
@@ -101,8 +101,8 @@ pub enum WorkflowError {
     },
 
     /// Under `BudgetExceededPolicy::Cancel`, the plan budget is exceeded
-    /// (`plan`: `ChatGPT` or `Claude Code`, `None` for tracking without a
-    /// plan, `window`: `five-hour` or `seven-day`, points of the window).
+    /// (`plan` is `ChatGPT` or `Claude Code`, `None` for tracking without a
+    /// plan, and `window` is `five-hour` or `seven-day`, points of the window).
     #[error(
         "Plan budget exceeded: {}{window} window used {used:.1} of {limit} points",
         plan.as_ref().map_or(String::new(), |plan| format!("{plan} "))

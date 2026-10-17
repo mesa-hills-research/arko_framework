@@ -56,7 +56,7 @@ pub(crate) fn is_cachedir_tagged(dir: &Path) -> bool {
 
 /// Which files a directory walk indexes.
 ///
-/// The default indexes every regular file under the root except: `.git` directories,
+/// The default indexes every regular file under the root except `.git` directories,
 /// directories tagged with a valid `CACHEDIR.TAG`, and the tool's own state directories.
 /// Ignore files are not read unless `respect_ignore` is set, and ignore files in
 /// directories *above* the root never apply. Symlinks are never followed.
@@ -113,7 +113,7 @@ pub enum SkipReason {
     GitInfoExclude,
 }
 impl SkipReason {
-    /// The built-in exclusions (`.git`, `CACHEDIR.TAG`, state directories): reported,
+    /// The built-in exclusions (`.git`, `CACHEDIR.TAG`, state directories) are reported,
     /// but not worth a line on stderr.
     pub fn is_default_exclusion(self) -> bool {
         matches!(
@@ -181,7 +181,7 @@ pub struct Report {
     pub ignored_by_ignore_file: u64,
     /// Files and directories removed by `.git/info/exclude`.
     pub ignored_by_git_info_exclude: u64,
-    /// The entries removed by ignore files, sorted by path: the first
+    /// The entries removed by ignore files, sorted by path. The first
     /// `IGNORED_LIST_CAP`. The three counts above are complete.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<Skipped>,
@@ -207,7 +207,7 @@ impl Report {
             *self.counts.entry(s.reason).or_insert(0) += 1;
         }
     }
-    /// One line: files indexed, skipped entries per reason, and pattern exclusions.
+    /// One line with files indexed, skipped entries per reason, and pattern exclusions.
     pub fn summary(&self) -> String {
         let mut s = format!("{} files indexed", self.files);
         let skipped: u64 = self.counts.values().sum();
@@ -246,7 +246,7 @@ impl Report {
     pub fn ignored_total(&self) -> u64 {
         self.ignored_by_gitignore + self.ignored_by_ignore_file + self.ignored_by_git_info_exclude
     }
-    /// Whether a one-line summary is worth printing for an interactive command:
+    /// Whether a one-line summary is worth printing for an interactive command, because
     /// something other than the built-in exclusions was skipped, there are warnings,
     /// or nothing was indexed. The user's own rules alone do not count.
     pub fn worth_printing(&self) -> bool {
@@ -727,7 +727,7 @@ pub(crate) fn list_files(
 
 /// The outcome of reading one listed file.
 pub(crate) enum Read {
-    /// UTF-8 text without NUL bytes: the relative path and the contents.
+    /// UTF-8 text without NUL bytes, with the relative path and the contents.
     Text(String, FileData),
     /// Not indexable. The report entry says why.
     Skip(Skipped),

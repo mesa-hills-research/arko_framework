@@ -1,10 +1,10 @@
-//! Dense (embedding) search: the [`Embedder`] interface that providers implement,
+//! Dense (embedding) search includes the [`Embedder`] interface that providers implement,
 //! the [`ModelDescriptor`] that names the vectors an embedder produces, the per-index
 //! [`DenseConfig`], the text that is embedded for a chunk ([`render`]), and the
 //! statistics of an embedding run ([`EmbedStats`]).
 //!
-//! arko_index makes no network calls itself: an [`Embedder`] is supplied by the
-//! caller. The crate ships [`HashEmbedder`] (offline, deterministic, not semantic: for
+//! arko_index uses an [`Embedder`] supplied by the
+//! caller. The crate ships [`HashEmbedder`] (offline and deterministic, for
 //! tests and examples) and, with the `local-embed` feature, `local::LocalEmbedder`,
 //! which runs a code-embedding model on the CPU. The `arko_index_cli` example adapts
 //! arko_ai's Voyage client too.
@@ -39,7 +39,7 @@ use std::{
 pub const RENDER_VERSION: u32 = 1;
 
 /// The text embedded for a chunk (render version 1) with the default
-/// [`EmbedText::PathScopeSource`]: the path, the scope on its own line when there is
+/// [`EmbedText::PathScopeSource`] holds the path, the scope on its own line when there is
 /// one, then the chunk's source with leading and trailing whitespace removed:
 ///
 /// ```text
@@ -48,14 +48,14 @@ pub const RENDER_VERSION: u32 = 1;
 /// pub fn backoff(&self, attempt: u32) -> Duration { ... }
 /// ```
 ///
-/// Line numbers are left out on purpose: an edit above a chunk moves its lines but
+/// Line numbers are left out because an edit above a chunk moves its lines but
 /// leaves this text, and so its cached embedding, unchanged. `chunk_text` is the
 /// chunk's source (`file[start_byte..end_byte]`).
 pub fn render(chunk: &Chunk, chunk_text: &str) -> String {
     render_with(chunk, chunk_text, EmbedText::default())
 }
 
-/// [`render`] with the parts `embed_text` chooses: [`EmbedText::Source`] is the
+/// [`render`] with the parts `embed_text` chooses. [`EmbedText::Source`] is the
 /// trimmed source alone, [`EmbedText::PathSource`] the path line and the source.
 pub fn render_with(chunk: &Chunk, chunk_text: &str, embed_text: EmbedText) -> String {
     let body = chunk_text.trim();
@@ -87,7 +87,7 @@ pub enum EmbedText {
     PathScopeSource,
 }
 impl EmbedText {
-    /// The name the CLI and `dense.json` use: `source`, `path-source` or
+    /// The name the CLI and `dense.json` use, `source`, `path-source` or
     /// `path-scope-source`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -134,7 +134,7 @@ pub enum InputKind {
 }
 
 /// Names the vectors an embedder produces. Two embedders with equal descriptors must
-/// produce interchangeable vectors: the descriptor is part of the embedding cache key,
+/// produce interchangeable vectors. The descriptor is part of the embedding cache key,
 /// so changing any field re-embeds everything.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -170,7 +170,7 @@ impl ModelDescriptor {
         self.revision = Some(revision.into());
         self
     }
-    /// A short stable key: the first 16 hex digits of the SHA-256 of the descriptor's
+    /// A short stable key, the first 16 hex digits of the SHA-256 of the descriptor's
     /// JSON. Names the descriptor's directory in the embedding cache.
     pub fn key(&self) -> String {
         let json = serde_json::to_vec(self).expect("descriptor serializes");
@@ -223,7 +223,7 @@ pub struct Embedding {
 /// texts within [`limits`](Self::limits), stops at the caller's token cap, caches
 /// the vectors and stores them. Calls come from one thread at a time.
 ///
-/// `embed` should not retry by itself in a way that bills twice without saying so:
+/// `embed` should report every billed retry because
 /// the tokens it returns are what the run accounts.
 pub trait Embedder: Send + Sync {
     /// Names the vectors this embedder produces.
@@ -237,7 +237,7 @@ pub trait Embedder: Send + Sync {
     fn embed(&self, texts: &[&str], kind: InputKind) -> Result<Embedding, Error>;
 }
 
-/// Embeds a search query: its vector and the tokens billed.
+/// Embeds a search query and returns its vector and the tokens billed.
 pub fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<(Vec<f32>, u64), Error> {
     let mut e = embedder.embed(&[query], InputKind::Query)?;
     if e.vectors.len() != 1 {
@@ -259,9 +259,9 @@ pub fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<(Vec<f32>, u6
     Ok((e.vectors.remove(0), tokens))
 }
 
-/// An offline, deterministic embedder for tests and examples: feature hashing of the
+/// An offline, deterministic embedder for tests and examples, using feature hashing of the
 /// lexical search terms (words and identifier parts), with a sign per term. Texts
-/// that share terms get similar vectors. It knows nothing of meaning. Descriptor:
+/// that share terms get similar vectors. Its descriptor uses
 /// provider `hash`, model `hash-v1`. One token per term, at least one per text.
 #[derive(Clone, Debug)]
 pub struct HashEmbedder {
@@ -308,7 +308,7 @@ impl Embedder for HashEmbedder {
     }
 }
 
-/// The embedding settings saved with an index (`STATE_DIR/dense.json`): which model
+/// The embedding settings saved with an index (`STATE_DIR/dense.json`), including which model
 /// embeds it and how. Written by a build with embeddings, so later builds (after a
 /// watcher reported changes, for example) can use the same model without being told
 /// again. See [`DenseConfig::load`]. Removing it makes later builds lexical only, in
@@ -319,20 +319,20 @@ pub struct DenseConfig {
     /// The file format version (1).
     #[serde(default = "one")]
     pub version: u32,
-    /// The model: provider, model name, dimensions and input-type use.
+    /// The model's provider, model name, dimensions and input-type use.
     pub embedder: ModelDescriptor,
     /// The [`render`] version the last build embedded with.
     #[serde(default = "render_version")]
     pub render_version: u32,
     #[serde(default)]
     pub quantization: Quantization,
-    /// How dense search finds candidates (default: a flat scan).
+    /// How dense search finds candidates (a flat scan by default).
     #[serde(default)]
     pub vector_index: VectorIndex,
-    /// The token cap of each build (`None`: no cap).
+    /// The token cap of each build (`None` means no cap).
     #[serde(default)]
     pub max_tokens_per_run: Option<u64>,
-    /// What each chunk's embedded text holds besides its source (default: the path
+    /// What each chunk's embedded text holds besides its source (by default, the path
     /// and the scope).
     #[serde(default)]
     pub embed_text: EmbedText,
@@ -383,7 +383,7 @@ impl DenseConfig {
         }
     }
     /// Reads a config file anywhere (the format of `dense.json`). `render_version`
-    /// is informational: a build always renders with [`RENDER_VERSION`] and records it.
+    /// is informational. A build always renders with [`RENDER_VERSION`] and records it.
     pub fn read(path: &Path) -> Result<Self, Error> {
         Self::parse(&std::fs::read(path)?, path)
     }
@@ -426,7 +426,7 @@ pub struct DenseBuild<'a> {
     pub quantization: Quantization,
     pub vector_index: VectorIndex,
     /// Stop embedding before a request would bring this run's tokens over the cap.
-    /// `None`: no cap.
+    /// `None` means no cap.
     pub max_tokens: Option<u64>,
     /// What each chunk's embedded text holds besides its source.
     pub embed_text: EmbedText,
@@ -434,7 +434,7 @@ pub struct DenseBuild<'a> {
     pub progress: Option<&'a dyn Fn(&EmbedProgress)>,
     /// Return from [`index2::build`](crate::index2::build) once the generation is
     /// published, leaving the embedding to [`index2::embed`](crate::index2::embed).
-    /// `false` (the default): the build embeds after publishing, before it returns.
+    /// With `false` (the default), the build embeds after publishing, before it returns.
     pub embed_later: bool,
     /// When it is stopped, the run stops after its current request and records the
     /// reason. The vectors paid for are kept, and a later run continues.
@@ -496,7 +496,7 @@ impl<'a> DenseBuild<'a> {
 
 /// Asks an embedding run to stop after its current request ([`DenseBuild::stop`]), with
 /// a reason the run records for [`index2::status`](crate::index2::status). Shared
-/// between threads: a signal handler, or a thread watching the program that started
+/// between threads, such as a signal handler or a thread watching the program that started
 /// the run.
 #[derive(Debug, Default)]
 pub struct StopSignal {
@@ -550,7 +550,7 @@ pub struct EmbedProgress {
 
 /// What an index build's embedding did ([`BuildStats::dense`](crate::index2::BuildStats::dense)),
 /// or one embedding run ([`index2::embed`](crate::index2::embed)). A build with
-/// [`DenseBuild::embed_later`] reports the generation it published: its chunks, those
+/// [`DenseBuild::embed_later`] reports the generation it published, including its chunks, those
 /// with a vector already, and its texts, of which `texts - cached` are left to embed.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
@@ -575,22 +575,22 @@ pub struct EmbedStats {
     pub max_tokens: Option<u64>,
     /// Whether embedding stopped at the cap.
     pub cap_reached: bool,
-    /// Texts left without a vector: stopped by the cap, or too long.
+    /// Texts left without a vector because they were stopped by the cap or were too long.
     pub not_embedded: u64,
-    /// The counted tokens of those texts: what embedding them would take.
+    /// The counted tokens of those texts, which is what embedding them would take.
     pub not_embedded_tokens: u64,
     /// Texts over the embedder's per-input limit.
     pub too_long: u64,
     /// Vectors in the model's cache after the build (after compaction, if any).
     pub cache_records: u64,
-    /// Vectors this build added to the vector store, and removed from it: the chunks
+    /// Vectors this build added to the vector store and removed from it, corresponding to the chunks
     /// whose embedded text or path changed (all of them when the store is new).
     pub vectors_added: u64,
     pub vectors_removed: u64,
-    /// Whether this build created the vector store: the first build with this model
-    /// and these settings, or the store was unusable (damaged, or another format).
+    /// Whether this build created the vector store. True on the first build with this
+    /// model and these settings, or when the store was unusable (damaged or another format).
     pub store_created: bool,
-    /// The run stopped because a newer generation was published: the run for that
+    /// The run stopped because a newer generation was published. The run for that
     /// generation takes over, with what this one embedded in the cache.
     pub superseded: bool,
     /// The run stopped when [`DenseBuild::stop`] was stopped. A later run continues.
@@ -632,7 +632,7 @@ impl EmbedStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EmbedState {
-    /// Vectors are still being added: a run is embedding the generation, or one
+    /// Vectors are still being added. A run is embedding the generation, or one
     /// stopped before it finished and [`index2::embed`](crate::index2::embed) continues.
     Embedding,
     /// Every chunk that can have a vector has one. Texts over the model's input limit
@@ -657,7 +657,7 @@ impl EmbedState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DenseIndexInfo {
-    /// The format version: 2. Generations of version 1 (earlier arko_index versions)
+    /// The format version is 2. Generations of version 1 (earlier arko_index versions)
     /// kept their own vectors, and are searched lexically only.
     pub version: u32,
     pub embedder: ModelDescriptor,
@@ -672,11 +672,11 @@ pub struct DenseIndexInfo {
     pub store: String,
     /// Chunks in the generation.
     pub docs: u64,
-    /// Chunks with a vector in the store, at least: it grows while the generation is
+    /// At least this many chunks have a vector in the store. The count grows while the generation is
     /// embedded.
     pub embedded: u64,
     /// How far the embedding has come. Generations whose `dense.json` lacks it were
-    /// embedded before they were published: `Complete`.
+    /// embedded before they were published and have status `Complete`.
     #[serde(default)]
     pub state: EmbedState,
 }

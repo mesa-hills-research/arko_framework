@@ -42,8 +42,8 @@ pub enum WriteMode {
     FullEdit,
 }
 
-/// One write to a tier, with its text: what
-/// [`MemoryStore::entries`] returns.
+/// One write to a tier, with its text, as returned by
+/// [`MemoryStore::entries`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: uuid::Uuid,
@@ -54,7 +54,7 @@ pub struct MemoryEntry {
     pub content: String,
 }
 
-/// One write to a tier, as the tier stores it. Its text is stored once: as
+/// One write to a tier, as the tier stores it. Its text is stored once, as
 /// a range of the tier's `content` while it is there (every write of an
 /// append-only tier, and the latest of a full-edit tier), otherwise here
 /// (an earlier version of a full-edit tier).
@@ -68,7 +68,7 @@ pub struct MemoryWrite {
     /// The text, when it is not in the tier's content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Where the text is in the tier's content: byte offsets, start
+    /// Where the text is in the tier's content, as byte offsets, start
     /// inclusive and end exclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<(usize, usize)>,
@@ -379,7 +379,7 @@ impl MemoryStore {
         accessible
     }
 
-    /// Whether the agent can read any tier, and whether it can write any:
+    /// Whether the agent can read any tier, and whether it can write any, determining
     /// which memory tools it is offered.
     pub fn access_of(&self, agent_name: &str) -> (bool, bool) {
         self.tiers

@@ -1,4 +1,4 @@
-//! Scaling prototype: a disk-resident inverted index that scores exactly like
+//! A disk-resident inverted index that scores exactly like
 //! `search::search` (same tokens, same BM25 expression, same tie-break) but reads
 //! only the postings of the query terms instead of deserializing every document.
 //! [`BuildOptions::lexical_scope`] (off by default) also indexes each chunk's scope,
@@ -15,7 +15,7 @@
 //!   post.dat   per term: (varint doc delta, varint tf)*
 //!   files.dat  per file with chunks: u32 LE first doc, u32 LE path length, path
 //!              (for path and language filters)
-//! With embeddings ([`BuildOptions::dense`]) also:
+//! With embeddings ([`BuildOptions::dense`]), the following files are also written:
 //!   dense.json  the generation's embedding model, settings and vector store
 //!               ([`DenseIndexInfo`]), with the coverage it had when published
 //!   vkeys.dat   per doc, sorted by vector id: u128 BE id, u32 LE doc
@@ -23,16 +23,16 @@
 //!   embed.spool the texts the cache lacked when the generation was built, until a
 //!               run has embedded them all
 //! The vectors themselves are in a store beside the generations,
-//! `STATE_DIR/vectors-<digest of model and settings>/` ([`CaprockStore`]): a doc's vector
+//! In `STATE_DIR/vectors-<digest of model and settings>/` ([`CaprockStore`]), a doc's vector
 //! id is a digest of its path and its embedded text, so an unchanged chunk keeps its
 //! vector, whatever its doc id, and a stored vector always embeds its doc's current text.
 //! A build publishes its generation as soon as the lexical files are written. An
 //! embedding run ([`embed`], or the build itself unless [`DenseBuild::embed_later`])
-//! then brings the store up to date for the current generation: it removes the vectors
+//! then brings the store up to date for the current generation. It removes the vectors
 //! the generation lacks, adds the ones the cache holds, embeds the rest request by
 //! request, and records the coverage in `STATE_DIR/embed-progress.json` after each
 //! commit of the store. A run stops when a newer generation is published.
-//! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
+//! Build memory is bounded. Postings accumulate up to `mem_budget` bytes, then spill
 //! to a sorted run file. Runs cover increasing doc ranges and are merged by term.
 //! Texts to embed are spooled to disk.
 use crate::{
@@ -373,7 +373,7 @@ pub struct BuildStats {
     pub dense: Option<EmbedStats>,
 }
 
-/// Settings of [`build`]. `Default`: [`threads()`](crate::threads), a 256 MB postings
+/// Settings of [`build`]. Defaults to [`threads()`](crate::threads), a 256 MB postings
 /// budget, the default [`FileRules`], no scope terms, no embeddings.
 #[non_exhaustive]
 pub struct BuildOptions<'a> {
@@ -386,7 +386,7 @@ pub struct BuildOptions<'a> {
     /// a Markdown heading chain) for lexical search, beside its path and source.
     /// Off by default.
     pub lexical_scope: bool,
-    /// Embed the chunks too (dense search). `None`: lexical only. Opt-in: embedding
+    /// Embed the chunks too (dense search). `None` means lexical only. Embedding
     /// calls the embedder's provider, which may bill for it.
     pub dense: Option<DenseBuild<'a>>,
 }
@@ -465,7 +465,7 @@ pub fn index_with(
 }
 
 /// Builds a new generation and publishes it. With [`BuildOptions::dense`] the chunks
-/// are also embedded: texts the state's embedding cache holds for the embedder's
+/// are also embedded. These are texts the state's embedding cache holds for the embedder's
 /// model are reused, the others are embedded (stopping cleanly at the token cap), the
 /// vector store of the model and settings is brought up to date, and the settings are
 /// saved as the index's [`DenseConfig`]. Without it, a saved config is left as it is.
@@ -988,7 +988,7 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 /// in progress to finish, or to stop because this call's generation is newer. Then the
 /// store's vectors of chunks the generation lacks are removed, the vectors the
 /// embedding cache holds are added, and the remaining texts are embedded request by
-/// request: each request's vectors are stored and committed at once, so dense and
+/// request. Each request's vectors are stored and committed at once, so dense and
 /// hybrid search use them while the run goes on.
 ///
 /// The run returns when every chunk has a vector (except texts over the model's input
@@ -996,7 +996,7 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 /// set ([`EmbedStats::stopped`]), or when a newer generation is published
 /// ([`EmbedStats::superseded`]). What it embedded stays in the cache, so a later run
 /// continues without paying for it again. Only the embedder, the cap, the progress
-/// callback and the stop flag of `dense` apply: the quantization, vector index and
+/// callback and the stop flag of `dense` apply. The quantization, vector index and
 /// embedded text are the generation's. An error when the generation has no embeddings
 /// or embeds with another model.
 pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Error> {

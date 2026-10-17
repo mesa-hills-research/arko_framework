@@ -41,7 +41,7 @@ pub struct WorkflowState {
     /// stored once, however many checkpoints refer to it).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_runs: Vec<AgentRunRecord>,
-    /// The agent runs whose latest task state could not be saved: their
+    /// The agent runs whose latest task state could not be saved. Their
     /// records in [`agent_runs`](Self::agent_runs) refer to their last
     /// saved state instead, and a run with none is left out. Resuming from
     /// the checkpoint restores them as last saved, with a warning.
@@ -64,7 +64,7 @@ pub struct WorkflowState {
     /// The notes posted to the run's agents, what each agent run has been
     /// given, and how much of the control folder has been read. Absent
     /// while there is nothing to record, and in checkpoints from before
-    /// notes existed: a resume then starts with none.
+    /// notes existed. A resume then starts with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<crate::notes::NotesSnapshot>,
     /// The budget limits in force at the checkpoint, which may have been
@@ -91,7 +91,7 @@ pub struct WorkflowState {
 /// The budget limits a checkpoint records.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BudgetLimits {
-    /// The workflow's limit in dollars. `None`: no limit.
+    /// The workflow's limit in dollars. `None` means no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<f64>,
     /// The agents' own limits in dollars, by agent name.
@@ -110,11 +110,11 @@ pub struct AgentRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The version of the task the checkpoint recorded, relative to the
-    /// run directory: `agents/<agent_run_id>/<content hash>.json`, or, for
+    /// run directory, `agents/<agent_run_id>/<content hash>.json`, or, for
     /// a run that was running, its live file (`agents/<agent_run_id>/live.json`)
     /// in the live checkpoint.
     pub task_file: String,
-    /// For a run that was running (status `Interrupted`): how many entries
+    /// For a run that was running (status `Interrupted`), how many entries
     /// of its task's `usage_history` the checkpoint's cost ledger has
     /// charged. Resuming charges the rest. Absent for a finished run, and in
     /// checkpoints from before it existed.
@@ -160,7 +160,7 @@ pub struct MissingTaskState {
 }
 
 impl WorkflowState {
-    /// The checkpoint's agent results, with their tasks: those it holds (a
+    /// The checkpoint's agent results, with their tasks, including those it holds (a
     /// checkpoint written before task files were referenced), then those
     /// whose tasks are in the task files of `run_dir`, the directory
     /// holding the checkpoint. A run whose latest state the checkpoint

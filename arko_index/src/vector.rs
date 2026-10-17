@@ -1,9 +1,9 @@
-//! Vector storage for dense search: the [`VectorStore`] trait and [`CaprockStore`], its
+//! Vector storage for dense search through the [`VectorStore`] trait and [`CaprockStore`], its
 //! implementation on [Caprock](https://github.com/mesa-hills-research/caprock).
 //!
 //! A store maps 128-bit ids to vectors, each with the path and language of what it
 //! embeds, and returns the `k` most similar ids for a query, optionally restricted by a
-//! [`Filter`]. Similarity is cosine: stores normalize vectors and queries, so scores are
+//! [`Filter`]. Similarity is cosine. Stores normalize vectors and queries, so scores are
 //! in `[-1, 1]`. Results are ordered by score, best first, then by id ascending, so
 //! equal scores always come out in the same order.
 use crate::{bench_v1::Error, dense::ModelDescriptor};
@@ -24,7 +24,7 @@ pub type VectorId = u128;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Filter {
-    /// A relative, slash-separated path prefix matched by whole components: `src/net`
+    /// A relative, slash-separated path prefix matched by whole components. `src/net`
     /// matches `src/net/retry.rs` (and a file named `src/net`), but not
     /// `src/network.rs`. A trailing `/` is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,14 +74,14 @@ pub struct VectorRecord<'a> {
     pub meta: VectorMeta<'a>,
 }
 
-/// One search result: a stored id and its cosine similarity to the query.
+/// One search result with a stored id and its cosine similarity to the query.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VectorHit {
     pub id: VectorId,
     pub score: f32,
 }
 
-/// A searchable set of vectors. Implementation: [`CaprockStore`].
+/// A searchable set of vectors, implemented by [`CaprockStore`].
 ///
 /// `upsert` and `delete` change what the store's own searches see at once. `persist`
 /// makes every change since the last `persist` durable at once, and visible to stores
@@ -102,7 +102,7 @@ pub trait VectorStore: Send + Sync {
     fn delete(&mut self, ids: &[VectorId]) -> Result<usize, Error>;
     /// Every stored id, ascending.
     fn ids(&self) -> Result<Vec<VectorId>, Error>;
-    /// The `k` most similar vectors that pass `filter`: by score, best first, then
+    /// The `k` most similar vectors that pass `filter`, by score, best first, then
     /// by id ascending.
     fn search(&self, query: &[f32], k: usize, filter: &Filter) -> Result<Vec<VectorHit>, Error>;
     /// Makes all changes durable, atomically.
@@ -115,9 +115,9 @@ pub trait VectorStore: Send + Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Quantization {
-    /// The vectors themselves, 4 bytes per dimension: exact results.
+    /// The vectors themselves, 4 bytes per dimension, for exact results.
     F32,
-    /// One byte per dimension, scaled to each dimension's range: a search scans these
+    /// One byte per dimension, scaled to each dimension's range. A search scans these
     /// codes, then rescores the best `max(4 × k, 40)` candidates of each segment.
     /// A vector the codes rank below the candidates can be missed.
     #[default]
@@ -132,7 +132,7 @@ pub enum VectorIndex {
     #[default]
     Flat,
     /// A Vamana graph (DiskANN's) on each segment of 20,000 vectors or more, searched
-    /// approximately: for very large indexes or high query rates. It costs build
+    /// approximately, for very large indexes or high query rates. It costs build
     /// time, and a little recall.
     Graph,
 }
@@ -209,7 +209,7 @@ impl StoreConfig {
         Ok(config)
     }
 
-    /// The name of this config's store directory in an index's state directory:
+    /// The name of this config's store directory in an index's state directory is
     /// `vectors-` and 16 hex digits of a digest of the model and the settings, so
     /// another model or setting gets its own store.
     pub fn dir_name(&self) -> Result<String, Error> {
@@ -220,11 +220,11 @@ impl StoreConfig {
     }
 }
 
-/// A vector store in a directory, kept by Caprock: segments of codes held in memory
+/// A vector store in a directory, kept by Caprock, with segments of codes held in memory
 /// (1 byte per dimension with [`Quantization::Int8`]) beside full-precision vectors read
 /// from disk for rescoring, an in-memory delta of recent upserts, and deletions as
 /// tombstones. [`persist`](VectorStore::persist) merges segments by its policy and
-/// commits a new generation atomically: a crash keeps the last persisted state.
+/// commits a new generation atomically, so a crash keeps the last persisted state.
 ///
 /// One handle writes a directory at a time (an exclusive lock). Any number of
 /// read-only handles ([`CaprockStore::open`]) search its last persisted state meanwhile.

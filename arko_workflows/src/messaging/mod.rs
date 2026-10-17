@@ -55,9 +55,9 @@ pub struct MessagingPolicy {
     /// set is empty). An agent without an entry may message every other
     /// agent.
     pub recipients: HashMap<String, HashSet<String>>,
-    /// Opt-in: `send_message` to a finished agent queues the message for
+    /// When enabled, `send_message` to a finished agent queues the message for
     /// the agent's next run (a continuation or a new run) instead of
-    /// failing. Off by default: a message to a finished agent may never be
+    /// failing. Off by default. A message to a finished agent may never be
     /// read, and the sender should know. See
     /// [`keep_messages_for_finished`](Self::keep_messages_for_finished).
     pub keep_for_finished: bool,
@@ -85,7 +85,7 @@ impl MessagingPolicy {
 
     /// Messages to a finished agent are kept for its next run instead of
     /// being refused. Its finish notice says so. Suits workflows that
-    /// continue or run agents again: a lead that finished before a worker
+    /// continue or run agents again. For example, a lead that finished before a worker
     /// replied gets the reply when it is continued.
     pub fn keep_messages_for_finished(mut self) -> Self {
         self.keep_for_finished = true;
@@ -147,11 +147,11 @@ pub struct AgentMessage {
     pub attachments: Vec<MessageAttachment>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// The agent run a context notice is for (set on notices
-    /// [`MessageBus::inject_task`] queues): it is dropped when that run
+    /// [`MessageBus::inject_task`] queues). It is dropped when that run
     /// stops, whatever its outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_task_id: Option<Uuid>,
-    /// The agent runs (task IDs) that stopped holding this message: in
+    /// The agent runs (task IDs) that stopped holding this message, in
     /// their conversation (in a prompt, or added as a context update) or
     /// taken to be added when they run again. It is not presented to them
     /// again when they are continued or resumed. Other runs of the agent
@@ -160,7 +160,7 @@ pub struct AgentMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held_by: Vec<Uuid>,
     /// The agent runs that read this message in a conversation they later
-    /// handed over (see [`arko_agents::handover`]): it counts as in their
+    /// handed over (see [`arko_agents::handover`]). It counts as in their
     /// conversation when they stop, though the fresh conversation no
     /// longer holds it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,7 +174,7 @@ impl AgentMessage {
         self.held_by.contains(&task_id)
     }
 
-    /// Whether the message is still to be presented to run `task_id`: the
+    /// Whether the message is still to be presented to run `task_id`. The
     /// run doesn't hold it, and it isn't another run's context notice.
     pub fn is_for(&self, task_id: Uuid) -> bool {
         !self.is_held_by(task_id) && self.to_task_id.is_none_or(|to| to == task_id)
@@ -193,7 +193,7 @@ pub struct MessageBus {
 struct BusState {
     queues: HashMap<String, Vec<AgentMessage>>,
     active: HashMap<String, HashMap<Uuid, ActiveRecipient>>,
-    /// Per agent run (task ID): a counter bumped whenever an agent message
+    /// Per agent run (task ID), a counter bumped whenever an agent message
     /// arrives for the run or the run's delivery worker forwards a message.
     /// Created by whichever comes first, the registration or a waiter, and
     /// removed when the run is unregistered.
@@ -211,7 +211,7 @@ struct ActiveRecipient {
     sender: mpsc::Sender<UserCommand>,
     outbound: VecDeque<(Uuid, String)>,
     /// Agent messages sent to this run that its conversation doesn't hold
-    /// yet: `(id, sender, injected payload)`. Context notices are left out.
+    /// yet, as `(id, sender, injected payload)`. Context notices are left out.
     unseen: Vec<(Uuid, String, String)>,
     wake: Arc<Notify>,
     pump: Option<AbortHandle>,
@@ -620,7 +620,7 @@ impl MessageBus {
     /// Queue a task-specific context notice without waiting for the recipient.
     /// True means retained for a known active task, not yet consumed. The
     /// queue is persisted by workflow checkpoints, just like inter-agent
-    /// messages. A notice is for its run only: it is dropped when that run
+    /// messages. A notice is for its run only. It is dropped when that run
     /// stops (`settle_run`).
     pub async fn inject_task(&self, task_id: Uuid, content: String) -> bool {
         let mut state = self.state.lock();
@@ -743,7 +743,7 @@ impl MessageBus {
     }
 
     /// The messages queued for the agent that are for run `task_id` (see
-    /// [`AgentMessage::is_for`]): what its prompt presents.
+    /// [`AgentMessage::is_for`]), matching what its prompt presents.
     pub fn pending_for(&self, agent_name: &str, task_id: Uuid) -> Vec<AgentMessage> {
         self.state
             .lock()
@@ -827,7 +827,7 @@ impl MessageBus {
     }
 
     /// Records that run `task_id` of `agent_name` is handing over
-    /// `conversation` (see [`arko_agents::handover`]): the queued messages
+    /// `conversation` (see [`arko_agents::handover`]). The queued messages
     /// it holds (presented in `prompt_ids` or a prompt, or added as a
     /// runtime context update) are marked as read by the run
     /// ([`AgentMessage::read_by`]) and held by it, so they are neither

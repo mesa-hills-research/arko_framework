@@ -99,7 +99,7 @@ pub struct PyWorkflowBuilder {
     max_parallel_agents: Option<usize>,
     fail_fast: bool,
     cancel_grace_period: Option<f64>,
-    /// `None`: the automatic limit.
+    /// `None` means the automatic limit.
     wait_for_message_timeout: Option<f64>,
     agent_wait_for_message_timeouts: Vec<(String, Option<f64>)>,
 }
@@ -747,13 +747,13 @@ pub struct PyAgentResult {
     #[pyo3(get)]
     pub error: Option<String>,
     /// Why a `"Failed"` run failed, when it failed at a rejected
-    /// error-recovery pause: the pause's cause, such as `"non_retryable"`
+    /// error-recovery pause, the pause's cause, such as `"non_retryable"`
     /// (the request needs a new credential or a configuration change) or
     /// `"refusal"`. `None` otherwise.
     #[pyo3(get)]
     pub failure_cause: Option<String>,
     /// The kind of the model-request error a `"Failed"` run failed on, when
-    /// it was classified: `"authentication"` (a lost login),
+    /// it was classified, such as `"authentication"` (a lost login),
     /// `"context_overflow"` (a request over the model's input limit),
     /// `"billing"`, and so on. `None` otherwise.
     #[pyo3(get)]

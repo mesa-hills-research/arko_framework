@@ -17,13 +17,13 @@ pub mod state;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EventLog {
     /// Every agent event (the default), including each streamed fragment
-    /// of response text and reasoning, one line each: a long response
+    /// of response text and reasoning, one line each. A long response
     /// writes thousands of lines.
     #[default]
     Full,
     /// Every event except the streamed fragments
     /// (`AssistantResponseChunk`, `ReasoningChunk`, and output-based tool
-    /// calling's `ToolParamName`, `ToolParamValueChunk`, `ToolParamEnd`):
+    /// calling's `ToolParamName`, `ToolParamValueChunk`, `ToolParamEnd`), including
     /// state changes, tool calls and results, usage, errors, retries and
     /// the rest. The finished responses are in the task files
     /// (`agents/<task id>/<version>.json`). Streamed reasoning a provider
@@ -69,7 +69,7 @@ fn is_urgent(event: &arko_agents::runtime::event::AgentEvent) -> bool {
     )
 }
 
-/// The default [`PersistenceConfig::event_flush_interval`]: one second.
+/// The default [`PersistenceConfig::event_flush_interval`] of one second.
 pub const DEFAULT_EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Which checkpoint files a run directory keeps. See
@@ -79,7 +79,7 @@ pub enum CheckpointRetention {
     /// Every checkpoint and task version is kept (the default).
     #[default]
     KeepAll,
-    /// Opt-in: only the newest this many checkpoint files are kept. After
+    /// When enabled, only the newest this many checkpoint files are kept. After
     /// each save, older ones are deleted (earlier processes' first, by
     /// modification time), then the task versions that neither a kept
     /// checkpoint nor a recorded result refers to.
@@ -93,7 +93,7 @@ pub struct PersistenceConfig {
     pub checkpoint_dir: PathBuf,
     /// Automatically checkpoint after each agent completion.
     pub auto_checkpoint: bool,
-    /// Which checkpoint files are kept: every one
+    /// Which checkpoint files are kept. Keeps every one
     /// ([`CheckpointRetention::KeepAll`], the default), or the newest few,
     /// with the task versions they refer to (set with
     /// [`keep_last_checkpoints`](Self::keep_last_checkpoints)).
@@ -105,14 +105,14 @@ pub struct PersistenceConfig {
     /// buffer before each checkpoint. Default
     /// [`DEFAULT_EVENT_FLUSH_INTERVAL`].
     pub event_flush_interval: Duration,
-    /// Whether running agents are saved as they run (default `true`): each
+    /// Whether running agents are saved as they run (`true` by default). Each
     /// running task in `agents/<task id>/live.json`, rewritten at its safe
     /// points (before its tool calls run, after their results, after each
     /// model turn), with the workflow's state in `live-checkpoint.json`
     /// (rewritten when a resume would read something new from it).
     /// `latest-checkpoint` names the newest checkpoint, live or versioned.
     /// A workflow that stops (a crash, a reboot) then resumes its running
-    /// agents where they were: see
+    /// agents where they were. See
     /// [`Workflow::interrupted_runs`](crate::Workflow::interrupted_runs)
     /// and [`Workflow::recover_agent`](crate::Workflow::recover_agent).
     /// Set with [`task_journal`](Self::task_journal).
@@ -136,19 +136,19 @@ pub struct PersistenceManager {
     events: Arc<EventWriter>,
     /// The run's images, saved once each. What it writes refers to them.
     images: Arc<images::ImageFiles>,
-    /// The saved versions of the recorded results' tasks, by task ID:
+    /// The saved versions of the recorded results' tasks, by task ID,
     /// written by this manager, or loaded on resume. Changed only with the
     /// write lock held, together with the results.
     saved_tasks: Arc<parking_lot::Mutex<HashMap<uuid::Uuid, SavedTask>>>,
     /// Checkpoint files this manager wrote, oldest first (for retention).
     written: Arc<parking_lot::Mutex<VecDeque<PathBuf>>>,
-    /// The task journal's state: the running agent runs and their live
+    /// The task journal's state holds the running agent runs and their live
     /// files ([`PersistenceConfig::task_journal`]).
     live: Arc<parking_lot::Mutex<LiveState>>,
     /// Writes the live checkpoint, one write at a time.
     live_checkpoints: Arc<LiveCheckpoints>,
     /// Numbers the checkpoints as their states are built (with the write
-    /// lock held): a higher number holds a newer state.
+    /// lock held). A higher number holds a newer state.
     builds: Arc<AtomicU64>,
     /// What `latest-checkpoint` names.
     latest: Arc<parking_lot::Mutex<Latest>>,
@@ -157,7 +157,7 @@ pub struct PersistenceManager {
     /// Makes task writes fail, as a full or read-only disk would.
     #[cfg(test)]
     pub(crate) fail_task_writes: Arc<AtomicBool>,
-    /// Set by [`simulate_crash`](Self::simulate_crash): nothing is written
+    /// Set by [`simulate_crash`](Self::simulate_crash), so nothing is written
     /// or deleted any more.
     #[cfg(test)]
     crashed: Arc<AtomicBool>,
@@ -241,7 +241,7 @@ struct LiveState {
     /// writing or deleting each takes.
     files: HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>,
     /// The runs whose live file the live checkpoint on disk refers to (or
-    /// the one being written will): their files are kept until a live
+    /// the one being written will). Their files are kept until a live
     /// checkpoint no longer does.
     referenced: HashSet<uuid::Uuid>,
 }
@@ -255,7 +255,7 @@ struct Latest {
     build: u64,
     /// The agent runs it records as running.
     running: HashSet<uuid::Uuid>,
-    /// When it is the live checkpoint: the fingerprint of the state it
+    /// When it is the live checkpoint, the fingerprint of the state it
     /// holds (see [`Built::fingerprint`]).
     live: Option<u64>,
     /// Its directory entry is flushed to disk.
@@ -272,7 +272,7 @@ struct Built {
     /// The agent runs whose live files it refers to.
     live_files: HashSet<uuid::Uuid>,
     /// Equal for two states that differ only where a resume can tell the
-    /// newer from the running tasks' live files: the cost ledger, as far as
+    /// newer from the running tasks' live files, including the cost ledger, as far as
     /// the running runs' usage goes (see `usage_charged`), and the time.
     fingerprint: u64,
 }
@@ -283,7 +283,7 @@ struct LiveRun {
     /// When it started, in the order of the journal's runs.
     started: u64,
     /// How many of its task's `usage_history` entries the budget was
-    /// charged for: the reports the workflow processed. A checkpoint
+    /// charged for, from the reports the workflow processed. A checkpoint
     /// records it with the ledger, so a resume charges the rest.
     usage_charged: usize,
     /// The latest snapshot of its task.
@@ -316,9 +316,9 @@ struct LiveCheckpoints {
 /// A recorded result's task, as checkpoints refer to it.
 #[derive(Debug, Clone, Default)]
 struct SavedTask {
-    /// Its last saved version: a file relative to the run directory.
+    /// Its last saved version, a file relative to the run directory.
     file: Option<String>,
-    /// Why its latest state (the recorded result's task) isn't saved: the
+    /// Why its latest state (the recorded result's task) isn't saved. The
     /// write failed. Checkpoints refer to `file` until a later one saves it.
     unsaved: Option<String>,
 }
@@ -354,7 +354,7 @@ impl PersistenceConfig {
         self
     }
 
-    /// Opt-in: pretty-print the files the task journal rewrites as agents
+    /// Opt in to pretty-printing the files the task journal rewrites as agents
     /// run (default compact JSON, which is smaller and quicker to write).
     /// See [`PersistenceConfig::pretty_json`].
     pub fn pretty_json(mut self, enabled: bool) -> Self {
@@ -362,7 +362,7 @@ impl PersistenceConfig {
         self
     }
 
-    /// Opt-in: keep only the newest `count` checkpoints
+    /// Opt in to keeping only the newest `count` checkpoints
     /// ([`CheckpointRetention::KeepLast`]), deleting older checkpoint files
     /// after each save, with the task versions no kept checkpoint refers
     /// to. By default every checkpoint and task version is kept. A `count`
@@ -535,7 +535,7 @@ impl PersistenceManager {
         self.durable_store.clone()
     }
 
-    /// The run's image files: what it saves refers to its images by name.
+    /// The run's image files. What it saves refers to its images by name.
     pub fn images(&self) -> &Arc<images::ImageFiles> {
         &self.images
     }
@@ -1916,7 +1916,7 @@ struct EventWriter {
     workflow_run_id: uuid::Uuid,
     policy: EventLog,
     interval: Duration,
-    /// The run's images: a line names an image, not hold it.
+    /// The run's images. A line names an image rather than holding it.
     images: Arc<images::ImageFiles>,
     pending: parking_lot::Mutex<PendingEvents>,
     /// The open file. Held while writing, so writes keep their order.

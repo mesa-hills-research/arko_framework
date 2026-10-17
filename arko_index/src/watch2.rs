@@ -1,8 +1,8 @@
-//! Scaling prototype of the watcher (Linux only): inotify events and metadata
+//! A Linux watcher using inotify events and metadata
 //! reconciliation decide *which* files to look at. Per-file records and an
 //! append-only journal make each commit proportional to the change, not the repo.
 //!
-//! Durability model (same guarantees as `watch.rs`, different storage):
+//! The durability model has the same guarantees as `watch.rs`, with different storage:
 //! * `watch2.snap` is a full checkpoint written atomically (tmp, fsync, rename, fsync dir).
 //!   It holds the file table (path -> metadata, content hash, record location) and the
 //!   undelivered/unacknowledged deltas, not the chunks.
@@ -17,15 +17,15 @@
 //!   **before** the delta is delivered. Every record carries a log sequence number.
 //!   Replay skips records already folded into the checkpoint and ignores a torn tail.
 //!   A delta is stored as the (old, new) record versions of the files it covers and
-//!   rendered from the store when delivered: the same per-file diff as before.
+//!   rendered from the store when delivered, with the same per-file diff as before.
 //! * Startup (and inotify queue overflow, and any directory-level event) runs a full
-//!   reconciliation: walk + lstat every file. A file is re-read and re-hashed only if
+//!   reconciliation walks and stats every file. A file is re-read and re-hashed only if
 //!   its (size, mtime, ctime, inode, device) differ from the record or the record is
 //!   "racy" (ctime within RACY_NS of when it was hashed, the racy-git rule), so
 //!   same-size, mtime-restoring edits are still found (they change ctime).
 //! * File events re-list only the affected directories (their direct files), walking
 //!   from the root so every file selection rule applies exactly as in a full walk.
-//! * Rule changes: a `CACHEDIR.TAG` event (also in an excluded, tagged directory, which
+//! * Rule changes. A `CACHEDIR.TAG` event (also in an excluded, tagged directory, which
 //!   keeps a watch for its tag only) and, when ignore files are honoured, a
 //!   `.gitignore`/`.ignore` event or a change of `.git/info/exclude` (each `.git/info`
 //!   directory gets a watch for that file only) run a full reconciliation.
@@ -413,7 +413,7 @@ struct Inotify {
     fd: i32,
     wd_dir: HashMap<i32, String>, // wd -> relative dir ("" = root)
     dir_wd: HashMap<String, i32>,
-    /// Watches kept for one file name only: excluded CACHEDIR.TAG directories
+    /// Watches kept for one file name only, for excluded CACHEDIR.TAG directories
     /// (`CACHEDIR.TAG`) and, when ignore files are honoured, `.git/info` (`exclude`).
     trigger_only: HashMap<i32, &'static [u8]>,
 }
@@ -574,7 +574,7 @@ pub struct Watcher2 {
     /// `report` changed since `report.json` was written.
     report_dirty: bool,
     /// The report's warnings for files whose parser failed (they were split as text),
-    /// by path: kept while the file is unchanged, in this process.
+    /// by path, kept while the file is unchanged in this process.
     parse_warnings: BTreeMap<String, String>,
     _lock: File,
     pub stats: BTreeMap<&'static str, f64>,

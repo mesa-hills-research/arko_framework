@@ -1,7 +1,7 @@
 //! How the managed driver answers an agent's tool-approval requests and
 //! error-recovery pauses, and how a paused agent is continued.
 //!
-//! Both defaults keep a workflow fully autonomous, for unattended runs:
+//! Both defaults keep a workflow fully autonomous for unattended runs.
 //! [`ApprovalPolicy::ApproveAll`] approves every tool call, and
 //! [`ErrorRecoveryPolicy::Automatic`] recovers from errors that may pass
 //! (outages, rate limits, plan usage limits) without an attempt limit. The
@@ -29,21 +29,21 @@ use uuid::Uuid;
 /// ([`HookContext::approval_reason`](crate::hooks::context::HookContext::approval_reason)).
 #[derive(Clone, Default)]
 pub enum ApprovalPolicy {
-    /// **The default: approve every call**, whatever the agent's
+    /// **Approve every call by default**, whatever the agent's
     /// configuration asks, so a workflow runs without human input. The first
     /// such call of each agent is logged as a warning, which says that the
     /// agent's other calls that need approval are approved without further
     /// warnings.
     #[default]
     ApproveAll,
-    /// Honor the agent's configuration: a call it marks for approval pauses
+    /// Honor the agent's configuration. A call it marks for approval pauses
     /// the agent, and the run call returns [`WorkflowError::AgentPaused`]
     /// with [`AgentPause::ToolApproval`]. Decide the calls and continue with
     /// [`Workflow::resume_agent`](crate::Workflow::resume_agent) and
     /// [`AgentResume::ToolApprovals`].
     ///
     /// An agent running inside another agent's tool call (a completion
-    /// verifier or a delegated run) can't pause: its `complete_task` is
+    /// verifier or a delegated run) can't pause. Its `complete_task` is
     /// approved, and any other call it needs approved stops it with a
     /// reason.
     ///
@@ -105,7 +105,7 @@ pub enum ToolApprovalOutcome {
 /// approval.
 ///
 /// The agent runtime first recovers on its own, as its `llm_error_policy`
-/// and `llm_retry_config` say: a failed request is retried with backoff (a
+/// and `llm_retry_config` say. A failed request is retried with backoff (a
 /// rate limit after the provider's delay) until its attempts or elapsed
 /// budget run out, and a request in flight is never cut off. Only then does
 /// the agent pause, with an
@@ -114,42 +114,42 @@ pub enum ToolApprovalOutcome {
 /// twice.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ErrorRecoveryPolicy {
-    /// **The default: recover automatically, without an attempt limit.**
+    /// **Recover automatically by default, without an attempt limit.**
     ///
-    /// - Retries that ran out (an outage, repeated rate limits): after a
-    ///   wait that grows from 30 seconds to 15 minutes while the pauses
-    ///   repeat without a model response in between (and at least the delay
-    ///   the provider asked for), the failed request is sent again
-    ///   unchanged, starting a new round of the agent's retries.
-    /// - A plan usage limit: the driver waits until it resets (plus 5
+    /// - After retries run out (an outage, repeated rate limits), the driver
+    ///   waits before sending the failed request again unchanged, starting a
+    ///   new round of the agent's retries. The wait grows from 30 seconds to
+    ///   15 minutes while pauses repeat without a model response in between,
+    ///   and is at least the delay the provider asked for.
+    /// - For a plan usage limit, the driver waits until it resets (plus 5
     ///   seconds, when the limit is reported again right after, at least the
     ///   growing wait above), or, when the provider didn't say when, for the
     ///   growing wait, and sends the request again unchanged.
     ///
     /// Each wait gets up to 30 seconds (at most a quarter of it) added at
     /// random, so agents sharing a plan don't all resend at once.
-    /// - Tool errors (under the agent's opt-in
-    ///   `ToolErrorPolicy::PauseAndAwaitApproval`): the agent continues.
+    /// - For tool errors (under the agent's opt-in
+    ///   `ToolErrorPolicy::PauseAndAwaitApproval`), the agent continues.
     ///   The calls' results report the errors.
-    /// - A refusal: the agent's refusal settings apply first (the opt-in
+    /// - For a refusal, the agent's refusal settings apply first (the opt-in
     ///   `refusal_fallback` model has already been tried when configured).
     ///   A refusal that stands fails the run with a clear reason, since the
     ///   same input would be refused again. A fallback request that fails
     ///   for another reason (a dropped connection, a server error) pauses
     ///   with that failure's cause and is recovered from as such.
     /// - Errors retrying can't fix (a request, credential or configuration
-    ///   error) and responses the runtime can't use: the run fails with a
+    ///   error) and responses the runtime can't use. The run fails with a
     ///   clear reason.
     /// - A pause by an opt-in monitor (the plan-usage threshold's `Pause`
     ///   action, the cache monitor's `pause_below`) stops for the
-    ///   application as configured: the agent pauses and the run call
+    ///   application as configured. The agent pauses and the run call
     ///   returns [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused).
     /// - A completion its verifier could not review, or an execution
     ///   middleware hook error (cause `Middleware`), pauses for the caller
     ///   too. The run call returns the pause (a verifier pause is reported as
     ///   [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed)).
     ///
-    /// Continuing adds nothing to the conversation: the model is never told
+    /// Continuing adds nothing to the conversation. The model is never told
     /// that a user approved.
     #[default]
     Automatic,
@@ -185,7 +185,7 @@ pub enum AgentPause {
         error: String,
         cause: ErrorRecoveryCause,
         /// The kind of the model-request error, when it was classified
-        /// (`TaskState::AwaitingErrorRecoveryApproval::error_kind`): for
+        /// (`TaskState::AwaitingErrorRecoveryApproval::error_kind`), for
         /// example [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication)
         /// for a lost login. `None` otherwise, and in a pause saved by an
         /// older version.
@@ -296,7 +296,7 @@ pub enum AgentResume {
     /// Decide the calls of an [`AgentPause::ToolApproval`]. A call without
     /// a decision is rejected.
     ToolApprovals(HashMap<Uuid, ToolApprovalDecision>),
-    /// Continue after an [`AgentPause::ErrorRecovery`]: without a note the
+    /// Continue after an [`AgentPause::ErrorRecovery`]. Without a note, the
     /// failed request is sent again unchanged. A note is added for the
     /// model first.
     ContinueAfterError { note: Option<String> },
@@ -309,7 +309,7 @@ pub enum AgentResume {
     /// pause, without a change, or for a Claude Code agent (Claude Code
     /// keeps its own conversation). When the runtime can't apply the
     /// changes, the host gets its error under the error recovery policy, as
-    /// another error at that pause: under `ReturnToCaller` (or for an
+    /// another error at that pause. Under `ReturnToCaller` (or for an
     /// `Unknown` pause) the run call returns the agent paused again. Under
     /// `Automatic` or `Limited` a refusal's run fails with that error.
     ResolveRefusal(Vec<RefusalResolution>),
@@ -361,7 +361,7 @@ impl RecoveryWaits {
             .min(self.max)
     }
 
-    /// `wait` plus its jitter: a `sample` share of the smaller of
+    /// `wait` plus its jitter, calculated as a `sample` share of the smaller of
     /// [`max_jitter`](Self::max_jitter) and a quarter of `wait`.
     pub fn with_jitter(&self, wait: Duration, sample: u64) -> Duration {
         let spread = self.max_jitter.min(wait / 4);

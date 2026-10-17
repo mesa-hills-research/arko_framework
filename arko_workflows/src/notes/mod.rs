@@ -1,4 +1,4 @@
-//! Operator notes: guidance for a workflow's agents, posted while the
+//! Operator notes guide a workflow's agents, posted while the
 //! workflow runs, without touching their configuration.
 //!
 //! [`Workflow::post_note`](crate::Workflow::post_note) (or a
@@ -14,14 +14,14 @@
 //! once.
 //!
 //! Each note is labelled with its source ([`NoteSource`]) and delivered in
-//! the user role as a refinement of the task: it doesn't change a role's
+//! the user role as a refinement of the task. It doesn't change a role's
 //! rules. The audience ([`NoteAudience`]) names agents by registration name.
 //! Completion verifiers' reviews, and the agents set with
 //! [`WorkflowBuilder::notes_by_name_only`](crate::WorkflowBuilder::notes_by_name_only),
 //! get a note only when it names them.
 //!
 //! Notes are kept in checkpoints, so they survive a resume, and each is
-//! logged once when it is posted. Agents can't post notes: the notes are
+//! logged once when it is posted. Agents can't post notes. The notes are
 //! written only through this API, and through the opt-in
 //! [control folder](control) the host enables.
 
@@ -41,7 +41,7 @@ use crate::error::WorkflowError;
 use crate::persistence::PersistenceManager;
 use arko_ai::image_store::ImageStore as _;
 
-/// The longest note accepted, in bytes of its trimmed text: 16 KiB. A note
+/// The longest note accepted is 16 KiB, in bytes of its trimmed text. A note
 /// that is really a document belongs in a file or a memory tier.
 pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 
@@ -51,7 +51,7 @@ pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 pub const PROMPT_MAX_NOTES: usize = 20;
 
 /// About this many bytes of notes are shown in a prompt or a context update,
-/// as [`PROMPT_MAX_NOTES`] says: no further note is added once it would pass
+/// as [`PROMPT_MAX_NOTES`] says. No further note is added once it would pass
 /// this. The first note is always shown in full.
 pub const PROMPT_MAX_BYTES: usize = 16 * 1024;
 
@@ -82,7 +82,7 @@ pub enum NoteKind {
     #[default]
     Standing,
     /// Delivered once to each run of its audience that has started when it
-    /// is posted: a running run at its next turn boundary, one that isn't
+    /// is posted, reaching a running run at its next turn boundary, one that isn't
     /// running when it is continued, resumed or recovered. Later runs don't
     /// get it.
     Once,
@@ -107,7 +107,7 @@ pub enum NoteSource {
 /// A note for a workflow's agents. `Note::new(text)` is a standing note
 /// from the operator to every agent.
 ///
-/// In JSON, only `text` is required: `{"text": "…", "audience": "all" |
+/// In JSON, only `text` is required. `{"text": "…", "audience": "all" |
 /// {"only": ["a"]} | {"except": ["b"]}, "kind": "standing" | "once",
 /// "source": "operator" | "host" | {"agent": "observer"}}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +127,7 @@ pub struct Note {
     /// shrinks one over a model's limits when it is given). With images,
     /// the text may be empty. During a turn, a Claude Code agent gets the
     /// note's text at once and its images with its next input. Once the
-    /// note is posted, the workflow keeps them apart from the notes:
+    /// note is posted, the workflow keeps them apart from the notes, and
     /// [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
@@ -181,11 +181,11 @@ impl Note {
     }
 }
 
-/// A note as posted: its identity, its place in the run's order, and when it
+/// A note as posted, with its identity, its place in the run's order, and when it
 /// was posted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostedNote {
-    /// Stable identity: assigned when posted, or the control folder entry's.
+    /// Stable identity assigned when posted, or taken from the control folder entry.
     pub id: Uuid,
     /// The note's number in the run, from 1, in the order notes were posted.
     pub seq: u64,
@@ -194,7 +194,7 @@ pub struct PostedNote {
     /// The note as posted, without its images (`note.images` is empty).
     pub note: Note,
     /// The note's images, kept apart from the notes, so that the notes stay
-    /// small however many images they carry: checkpoints and the event log
+    /// small however many images they carry. Checkpoints and the event log
     /// name them. [`Workflow::note_image`](crate::Workflow::note_image)
     /// reads one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,14 +207,14 @@ pub struct PostedNote {
 pub enum NoteImage {
     /// An image at a URL.
     Url(String),
-    /// An image the workflow keeps, by name: `<SHA-256 of its bytes>.<type>`.
+    /// An image the workflow keeps by name, `<SHA-256 of its bytes>.<type>`.
     /// A persisted run keeps it in a file of that name in its directory's
     /// `images` folder, written when the note is posted. A run that isn't
     /// persisted keeps it in memory.
     Stored { name: String, mime_type: String },
 }
 
-/// The notes as a checkpoint saves them:
+/// The notes as a checkpoint saves them in
 /// [`WorkflowState::notes`](crate::persistence::state::WorkflowState::notes).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotesSnapshot {
@@ -227,14 +227,14 @@ pub struct NotesSnapshot {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seen: BTreeMap<Uuid, u64>,
     /// Per agent run started while there were notes, the number of the
-    /// newest note when it started: the notes up to it reached it in its
+    /// newest note when it started. The notes up to it reached it in its
     /// initial prompt, if at all. Recovering the run reads what it was given
     /// since from its task.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub started: BTreeMap<Uuid, u64>,
     /// Per agent run the host skipped the one-time notes for
     /// ([`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes)),
-    /// the number of the newest note then: the one-time notes up to it
+    /// the number of the newest note then. The one-time notes up to it
     /// don't reach it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub skipped: BTreeMap<Uuid, u64>,
@@ -283,7 +283,7 @@ pub(crate) struct NoteBoard {
     /// The notes' images by name, in a run that isn't persisted (a
     /// persisted run's are in its image files).
     images: Mutex<HashMap<String, String>>,
-    /// The notes' images fitted for a model's limits, by name and limits:
+    /// The notes' images fitted for a model's limits, by name and limits,
     /// fitted once for the recipients that share them.
     fitted: Mutex<HashMap<(String, String), arko_ai::Image>>,
     /// Bumped when a note is posted, for the waits that end on one.
@@ -1067,7 +1067,7 @@ fn update(notes: &[&PostedNote], more: usize) -> String {
 ///
 /// Obtained from [`Workflow::notes_handle`](crate::Workflow::notes_handle).
 /// Clones post to the same run. It holds only a weak reference to the
-/// workflow: once the workflow is dropped, `post` returns an error and
+/// workflow. Once the workflow is dropped, `post` returns an error and
 /// `notes` returns none.
 #[derive(Clone)]
 pub struct NotesHandle {
@@ -1156,7 +1156,7 @@ pub(crate) struct WithNotes<S> {
     pub inner: S,
     pub context: Arc<SharedContext>,
     pub agent_name: String,
-    /// The run is a completion verifier's review: it gets only the notes
+    /// The run is a completion verifier's review. It gets only the notes
     /// that name it.
     pub review: bool,
 }

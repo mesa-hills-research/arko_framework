@@ -5,16 +5,16 @@
 //! **Hybrid** retrieval takes the best [`SearchRequest::candidates`] (default 50)
 //! chunks from each side and fuses the two rankings ([`Fusion`]):
 //!
-//! * [`Fusion::Rrf`] (default): reciprocal rank fusion. A chunk's score is the sum,
+//! * [`Fusion::Rrf`] (default) uses reciprocal rank fusion. A chunk's score is the sum,
 //!   over the lists that contain it, of `weight / (k + rank)`, with ranks from 1,
 //!   `k = 60` and both weights 1. Only ranks matter, so BM25 scores and cosine
 //!   similarities need no common scale, and a chunk both sides rank well comes first.
-//! * [`Fusion::Linear`]: each list's scores are min-max normalized to `[0, 1]` over its
+//! * [`Fusion::Linear`] min-max normalizes each list's scores to `[0, 1]` over its
 //!   candidates (all 1 when they are equal), a missing chunk counts 0, and the score
 //!   is `w · lexical + (1 − w) · dense`.
 //!
 //! Equal BM25 and fused scores are ordered by document id, which follows (path, start
-//! byte), and equal similarities by vector id: results are deterministic.
+//! byte), and equal similarities by vector id, so results are deterministic.
 use crate::{
     bench_v1::{Chunk, Error},
     dense::{DenseIndexInfo, Embedder, ModelDescriptor, embed_query},
@@ -61,7 +61,7 @@ impl std::str::FromStr for Mode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "lowercase")]
 pub enum Fusion {
-    /// Reciprocal rank fusion: `Σ weight / (k + rank)`.
+    /// Reciprocal rank fusion using `Σ weight / (k + rank)`.
     Rrf {
         k: f64,
         lexical_weight: f64,
@@ -191,12 +191,12 @@ pub struct SearchRequest {
     pub mode: Mode,
     /// Results returned (default 10).
     pub limit: usize,
-    /// Hybrid: chunks taken from each side before fusing (default 50, at least
+    /// For hybrid search, chunks taken from each side before fusing (default 50, at least
     /// `limit` are taken).
     pub candidates: usize,
     pub fusion: Fusion,
     pub filter: Filter,
-    /// Dense and hybrid: the query's embedding, when the caller already has it (from
+    /// For dense and hybrid search, the query's embedding when the caller already has it (from
     /// [`embed_query`] with the index's model). No embedder is needed then, and the
     /// search reports 0 query tokens.
     pub query_vector: Option<Vec<f32>>,
@@ -239,13 +239,13 @@ impl SearchRequest {
     }
 }
 
-/// One result: the chunk, its context header, and its score.
+/// One result with the chunk, its context header, and its score.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct SearchHit {
     #[serde(flatten)]
     pub chunk: Chunk,
-    /// [`Chunk::header`]: `path:start-end` and the scope.
+    /// [`Chunk::header`] with `path:start-end` and the scope.
     pub header: String,
     /// BM25 (lexical), cosine similarity (dense) or the fused score (hybrid).
     pub score: f64,

@@ -269,8 +269,8 @@ pub struct ResourceTracker {
     workspace: PathBuf,
     config: ContextFreshnessConfig,
     state: RwLock<FreshnessSnapshot>,
-    /// Actors whose task has stopped but can be continued: their reads are
-    /// kept, but no write notifies them. Not saved: after a resume no task
+    /// Actors whose task has stopped but can be continued. Their reads are
+    /// kept, but no write notifies them. Not saved, since after a resume no task
     /// runs, so every actor of the snapshot starts here.
     finished: RwLock<HashSet<ActorId>>,
 }
@@ -319,7 +319,7 @@ impl ResourceTracker {
     }
 
     /// [`resource_for_tool`](Self::resource_for_tool) for a call made by a
-    /// run working in `working_directory` (the task's working directory: the
+    /// run working in `working_directory` (the task's working directory, which the
     /// workflow's workspace, or the run's own, see
     /// [`RunOptions::workspace`](crate::workflow::RunOptions::workspace)). A
     /// path parameter's key is the path the built-in file tools
@@ -426,7 +426,7 @@ impl ResourceTracker {
     }
 
     /// Record a successful mutation and return the readers whose observed
-    /// context has just become stale and who are to be told: not actors
+    /// context has just become stale and who are to be told, excluding actors
     /// whose task has finished (their reads are kept for a continuation,
     /// which is told what changed, see [`resume_actor`](Self::resume_actor)).
     pub fn record_write(&self, actor: &ActorId, resource: ResourceId) -> Vec<ActorId> {

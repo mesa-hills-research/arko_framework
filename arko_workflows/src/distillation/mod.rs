@@ -698,7 +698,7 @@ impl DistillationConfig {
     /// registered under with
     /// [`WorkflowBuilder::agent`](crate::WorkflowBuilder::agent), not its
     /// `AgentConfig::name`. A distiller needs at least one target agent and
-    /// one target tool: `build` rejects one without.
+    /// one target tool. `build` rejects one without.
     pub fn target_agent(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self

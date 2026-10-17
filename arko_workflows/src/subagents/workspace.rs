@@ -1,4 +1,4 @@
-//! Isolated workspaces for subagents: [`WorkspaceProvider`], and
+//! Isolated workspaces for subagents through [`WorkspaceProvider`] and
 //! [`GitWorktreeProvider`], which gives each subagent a git worktree.
 
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ impl IsolatedWorkspace {
 }
 
 /// Creates and removes the isolated workspaces of subagents started with
-/// `start_agent`'s `isolated`: a git worktree ([`GitWorktreeProvider`]), a
+/// `start_agent`'s `isolated`, using a git worktree ([`GitWorktreeProvider`]), a
 /// copy, a container's mount. Set with
 /// [`SubagentsConfig::workspace_provider`](super::SubagentsConfig::workspace_provider).
 #[async_trait]
@@ -79,7 +79,7 @@ pub trait WorkspaceProvider: Send + Sync {
 }
 
 /// Gives each subagent a git worktree of the repository its caller works
-/// in: a checkout of the current commit (`HEAD`) at `<folder>/<id>`, on a
+/// in, with a checkout of the current commit (`HEAD`) at `<folder>/<id>`, on a
 /// new branch `<prefix><id>` (default prefix `arko/`), with the subagent
 /// working in the same subdirectory its caller works in. `<id>` is the
 /// subagent's short id (`r1`), with a suffix (`r1-2`) when an earlier

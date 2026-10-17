@@ -21,7 +21,7 @@ pub struct HookContext {
     pub effective_tool_result: Option<String>,
     pub agent_summary: Option<String>,
     /// At `PreToolExecution` and `PostToolExecution`, for a call that
-    /// awaited approval: why (the call ran because the approval policy or
+    /// awaited approval, with the reason (the call ran because the approval policy or
     /// its handler approved it).
     pub approval_reason: Option<arko_agents::ApprovalReason>,
     pub error_message: Option<String>,

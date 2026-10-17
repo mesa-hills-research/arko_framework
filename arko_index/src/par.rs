@@ -11,7 +11,7 @@ use std::{
     sync::{Condvar, Mutex, mpsc},
 };
 
-/// Worker count: `ARKO_INDEX_THREADS` if set (>= 1), else the CPUs this process may
+/// Worker count is `ARKO_INDEX_THREADS` if set (>= 1), else the CPUs this process may
 /// use (`available_parallelism` honours affinity masks and cgroup CPU quotas).
 pub fn threads() -> usize {
     std::env::var("ARKO_INDEX_THREADS")

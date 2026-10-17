@@ -1,4 +1,4 @@
-//! Tools for inter-agent communication: `send_message` and
+//! Tools for inter-agent communication, `send_message` and
 //! `list_recipients` (and `wait_for_message`, from [`wait`](super::wait)),
 //! and the start notices agents receive.
 
@@ -269,7 +269,7 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
 pub(crate) struct ActivityNotices {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
-    /// The run is a completion verifier's review: it isn't told to wrap up.
+    /// The run is a completion verifier's review. It isn't told to wrap up.
     pub review: bool,
 }
 
