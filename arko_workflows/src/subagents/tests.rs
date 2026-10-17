@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use super::*;
 use crate::persistence::PersistenceConfig;
 use crate::services::WorkflowServicesConfig;
-use crate::test_support::{ResponsesServer, Workspace, agent_config, tool_call_turn};
+use crate::test_support::{
+    ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+};
 use crate::workflow::result::AgentRunStatus;
 use crate::{Workflow, WorkflowBuilder};
 
@@ -1656,4 +1658,100 @@ async fn a_subagent_s_refresh_offers_the_tools_of_its_depth() {
     assert!(refresh.contains("\"stream\":false"), "{refresh}");
     assert!(!offered(own).contains(&"start_agent".to_string()));
     assert_eq!(offered(refresh), offered(own));
+}
+
+/// A cut back detaches only the subagents the lead started in the messages
+/// it removes. One started before a handover replaced the conversation
+/// isn't in them: it stays attached, and its answer to the lead's next
+/// message reaches the lead.
+#[tokio::test]
+async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {
+    const REPORT: &str = "HANDOVER-REPORT: r1 counts the files.";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let after_cut = Arc::new(AtomicUsize::new(0));
+    let server = ResponsesServer::start(move |_, body| {
+        let id = format!("{}_{}", role(body), calls.fetch_add(1, Ordering::SeqCst));
+        if role(body) == "r1" {
+            let summary = if body.contains("Count again.") {
+                "There are 4 files."
+            } else {
+                "There are 3 files."
+            };
+            return Some(complete_turn(&id, summary));
+        }
+        Some(
+            if body.contains("Your conversation is getting long") && !body.contains(REPORT) {
+                tool_call_turn(&id, "handover_report", json!({ "report": REPORT }))
+            } else if body.contains("Something else.") {
+                match after_cut.fetch_add(1, Ordering::SeqCst) {
+                    0 => tool_call_turn(
+                        &id,
+                        "message_agent",
+                        json!({ "to": "r1", "message": "Count again." }),
+                    ),
+                    1 => tool_call_turn(&id, "wait_for_agents", json!({ "runs": "r1" })),
+                    _ => complete_turn(&id, "lead done again"),
+                }
+            } else if body.contains("Second.") {
+                complete_turn(&id, "second done")
+            } else if body.contains(REPORT) {
+                complete_turn(&id, "lead done after the handover")
+            } else if turn(body) == 0 {
+                let (tool, arguments) = start("Count the files.");
+                tool_call_turn(&id, tool, arguments)
+            } else {
+                // The conversation grows over the handover's size.
+                tool_call_turn(&id, "list_agents", json!({}))
+                    .replace("\"input_tokens\":10", "\"input_tokens\":5000")
+            },
+        )
+    })
+    .await;
+    let workspace = Workspace::new();
+    let mut lead = agent_config("Lead");
+    lead.handover = Some(arko_agents::HandoverConfig::at_input_tokens(1_000));
+    let workflow = Workflow::builder()
+        .name("subagents-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", lead)
+        .agent("worker", agent_config("Worker"))
+        .workflow_services(
+            WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .subagents(SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "First.")).await.unwrap();
+    assert_eq!(first.task.handovers.len(), 1);
+    let second = within(workflow.continue_agent(&first, "Second."))
+        .await
+        .unwrap();
+    until(|| {
+        workflow
+            .subagents()
+            .first()
+            .is_some_and(|record| record.state == SubagentState::Finished)
+    })
+    .await;
+    let index = second
+        .task
+        .user_turns()
+        .iter()
+        .find(|turn| turn.text.starts_with("Second."))
+        .unwrap()
+        .index;
+    let again = within(workflow.continue_agent_with(
+        &second,
+        "Something else.",
+        crate::ContinueOptions::new().cut_back_to(index),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(again.summary, "lead done again");
+    assert!(!workflow.subagents()[0].detached);
+    let last = bodies_of(&server, "lead").last().unwrap().clone();
+    assert!(last.contains("There are 4 files."), "{last}");
 }

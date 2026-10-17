@@ -518,18 +518,19 @@ impl Board {
     }
 
     /// Run `task.id` was cut back (`ContinueOptions::cut_back_to`). The
-    /// subagents it started in the removed messages belong to a timeline the
-    /// conversation abandoned: they are detached, and their mail (given or
-    /// not, and any still to come) is withheld, kept in the records for the
-    /// host to show. The mail of the subagents it still started that the
-    /// removed messages held is given again.
-    pub(crate) fn cut_back(&self, task: &Task) {
+    /// subagents it started in the `removed` messages belong to a timeline
+    /// the conversation abandoned: they are detached, and their mail (given
+    /// or not, and any still to come) is withheld, kept in the records for
+    /// the host to show. Those it started in the messages it keeps, or in a
+    /// conversation a handover replaced, stay. The mail of the subagents it
+    /// still started that the removed messages held is given again.
+    pub(crate) fn cut_back(&self, task: &Task, removed: &[arko_ai::Message]) {
         let mut state = self.state.lock();
         let mut detached = Vec::new();
         for record in &mut state.runs {
             if record.caller_run_id == task.id
                 && !record.detached
-                && !holds_start(task, &record.handle)
+                && holds_start(removed, &record.handle)
             {
                 record.detached = true;
                 detached.push(record.run_id);
@@ -2304,13 +2305,13 @@ pub(crate) fn split_ids(text: &str) -> Vec<String> {
 /// Whether `task` holds `item`: in its conversation (a context update, a
 /// prompt or a tool result), in context it took and hasn't added, or given
 /// before its latest handover (its report covers it).
-/// Whether `task`'s conversation holds the result of the call that started
-/// subagent `handle` (`start_agent`'s "Started r1 (agent ..." or "Queued r1
+/// Whether `messages` hold the result of the call that started subagent
+/// `handle` (`start_agent`'s "Started r1 (agent ..." or "Queued r1
 /// (agent ...").
-fn holds_start(task: &Task, handle: &str) -> bool {
+fn holds_start(messages: &[arko_ai::Message], handle: &str) -> bool {
     let started = format!("Started {handle} (agent ");
     let queued = format!("Queued {handle} (agent ");
-    task.conversation.messages.iter().any(|message| {
+    messages.iter().any(|message| {
         message.content.iter().any(|content| match content {
             arko_ai::Content::ToolResult(result) => {
                 result.output.contains(&started) || result.output.contains(&queued)

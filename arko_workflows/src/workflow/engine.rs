@@ -3567,7 +3567,9 @@ impl WorkflowEngine {
             if index > 0 {
                 ctx.notes.cut_back(agent_name, &task, review);
             }
-            ctx.subagents.cut_back(&task);
+            let messages = &previous.task.conversation.messages;
+            ctx.subagents
+                .cut_back(&task, &messages[index.min(messages.len())..]);
         }
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
