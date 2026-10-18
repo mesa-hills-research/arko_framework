@@ -21,65 +21,63 @@ ignore.workspace = true
 # libraries keep tree-sitter's names (tree_sitter, tree_sitter_rust, ...). The port pins
 # the grammar versions; a grammar upgrade changes chunk boundaries and IDs. The
 # TypeScript, OCaml and XML crates re-export TSX, OCaml interfaces and DTD.
-# All from one pinned commit of https://github.com/mesa-hills-research/mesquite.
-mesquite = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_rust = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_python = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_typescript = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_javascript = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_go = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_java = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_c = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_cpp = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_astro = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_bash = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_c_sharp = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_cmake = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_css = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_cuda = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_dart = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_diff = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_elixir = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_elm = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_embedded_template = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_erlang = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_fortran = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_fsharp = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_glsl = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_graphql = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_haskell = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_hcl = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_html = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_json = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_julia = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_kotlin = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_lua = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_make = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_markdown = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_objc = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_ocaml = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_odin = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_perl = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_php = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_powershell = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_proto = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_r = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_ruby = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_scala = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_solidity = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_sql = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_svelte = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_swift = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_toml = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_verilog = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_xml = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_yaml = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
-mesquite_zig = { git = "https://github.com/mesa-hills-research/mesquite", rev = "fef5b10845abe8fb435b2c4192aec3920d3f1898" }
+mesquite = "0.25.10"
+mesquite_rust = "0.1.0"
+mesquite_python = "0.1.0"
+mesquite_typescript = "0.1.0"
+mesquite_javascript = "0.1.0"
+mesquite_go = "0.1.0"
+mesquite_java = "0.1.0"
+mesquite_c = "0.1.0"
+mesquite_cpp = "0.1.0"
+mesquite_astro = "0.1.0"
+mesquite_bash = "0.1.0"
+mesquite_c_sharp = "0.1.0"
+mesquite_cmake = "0.1.0"
+mesquite_css = "0.1.0"
+mesquite_cuda = "0.1.0"
+mesquite_dart = "0.1.0"
+mesquite_diff = "0.1.0"
+mesquite_elixir = "0.1.0"
+mesquite_elm = "0.1.0"
+mesquite_embedded_template = "0.1.0"
+mesquite_erlang = "0.1.0"
+mesquite_fortran = "0.1.0"
+mesquite_fsharp = "0.1.0"
+mesquite_glsl = "0.1.0"
+mesquite_graphql = "0.1.0"
+mesquite_haskell = "0.1.0"
+mesquite_hcl = "0.1.0"
+mesquite_html = "0.1.0"
+mesquite_json = "0.1.0"
+mesquite_julia = "0.1.0"
+mesquite_kotlin = "0.1.0"
+mesquite_lua = "0.1.0"
+mesquite_make = "0.1.0"
+mesquite_markdown = "0.1.0"
+mesquite_objc = "0.1.0"
+mesquite_ocaml = "0.1.0"
+mesquite_odin = "0.1.0"
+mesquite_perl = "0.1.0"
+mesquite_php = "0.1.0"
+mesquite_powershell = "0.1.0"
+mesquite_proto = "0.1.0"
+mesquite_r = "0.1.0"
+mesquite_ruby = "0.1.0"
+mesquite_scala = "0.1.0"
+mesquite_solidity = "0.1.0"
+mesquite_sql = "0.1.0"
+mesquite_svelte = "0.1.0"
+mesquite_swift = "0.1.0"
+mesquite_toml = "0.1.0"
+mesquite_verilog = "0.1.0"
+mesquite_xml = "0.1.0"
+mesquite_yaml = "0.1.0"
+mesquite_zig = "0.1.0"
 fs2 = "0.4"
 libc = "0.2"
-# Caprock: the vector store behind dense search (pure, safe Rust), from one pinned
-# commit of https://github.com/mesa-hills-research/caprock.
-caprock = { git = "https://github.com/mesa-hills-research/caprock", rev = "5ec18cc45672156ad7ff6ba1bbca6983cf3160a0" }
+# Caprock: the vector store behind dense search (pure, safe Rust).
+caprock = "0.1.0"
 
 # The `local-embed` feature: embedding models run on the CPU (`dense::local`), all pure
 # Rust. gemm multiplies the f32 matrices, rayon spreads the work over threads, tokenizers
