@@ -241,6 +241,8 @@ impl ImageRoom {
     }
 
     /// Takes room for one image of `bytes` bytes, or says what is full.
+    // Newer Rust renames `fetch_update` to `try_update`, which Rust 1.89 doesn't have.
+    #[allow(deprecated)]
     pub fn take(&self, bytes: usize) -> Result<(), Full> {
         use std::sync::atomic::Ordering::SeqCst;
         self.images
