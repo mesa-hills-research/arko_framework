@@ -455,6 +455,13 @@ pub(super) fn spawn(
         }
         startup.lpAttributeList = attributes.pointer();
         let input = writer(input_write)?;
+        // A pipe-mode child gets a console without a window. Otherwise, under
+        // a host with no console of its own (a windowed app), it would open a
+        // console window. A PTY child has the pseudoconsole.
+        let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+        if !terminal {
+            flags |= CREATE_NO_WINDOW;
+        }
         let mut info: PROCESS_INFORMATION = zeroed();
         checked(CreateProcessW(
             null(),
@@ -462,7 +469,7 @@ pub(super) fn spawn(
             null(),
             null(),
             i32::from(!terminal),
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            flags,
             environment.as_ptr().cast(),
             cwd.as_ptr(),
             &startup.StartupInfo,

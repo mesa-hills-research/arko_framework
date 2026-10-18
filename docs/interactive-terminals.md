@@ -432,7 +432,7 @@ them.
 | Default shell | `/bin/sh -c` | `cmd.exe /D /S /C` |
 | Enter for ordinary terminal input | `\n` | `\r` |
 | Cancellation | Owned process group | Job Object, assigned at process creation |
-| Pipe mode | Piped stdin, stdout, and stderr | Piped stdin, stdout, and stderr |
+| Pipe mode | Piped stdin, stdout, and stderr | Piped stdin, stdout, and stderr, in a console with no window |
 | Program input requests | Append-only local files | Same protocol |
 | Directory ownership | Standard-library exclusive file lock | Same API |
 

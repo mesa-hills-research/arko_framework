@@ -3,6 +3,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arko_ai::process::NoConsoleWindow;
 use rmcp::ServiceExt;
 use rmcp::service::{RoleClient, RunningService};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -205,7 +206,8 @@ impl McpManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .no_console_window();
         for (key, value) in &config.env {
             cmd.env(key, value);
         }

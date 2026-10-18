@@ -1,6 +1,7 @@
 use super::ToolError;
 use super::definition::ToolParameterDefinition;
 use super::definition::{ToolParameterType, integer_argument, parse_bool_text};
+use arko_ai::process::NoConsoleWindow;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -194,6 +195,8 @@ pub(crate) async fn execute_command_from_template(
     // A task stopped mid-call (its runtime aborted) doesn't leave the
     // command running.
     cmd.kill_on_drop(true);
+    // On Windows the command opens no console window.
+    cmd.no_console_window();
 
     let output = cmd
         .spawn()

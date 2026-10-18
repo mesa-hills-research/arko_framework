@@ -12,6 +12,8 @@
 
 pub mod agent_config;
 pub mod claude_code;
+#[cfg(all(test, windows))]
+mod console_probe;
 pub mod error;
 mod file_tree;
 pub mod handover;

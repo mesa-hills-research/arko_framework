@@ -19,6 +19,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arko_ai::process::NoConsoleWindow;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
@@ -274,7 +275,9 @@ impl StopAwareCommand {
     /// Runs the child to its end, stopping it as described above when
     /// `stop` fires, and returns its exit status and output. Its standard
     /// output and error are captured, and its standard input is null, so it
-    /// never reads the host's input.
+    /// never reads the host's input. On Windows it starts without a console
+    /// window ([`NoConsoleWindow`]), which replaces creation flags set on the
+    /// command.
     ///
     /// Once the child has ended after a stop, output still held open by a
     /// process it started (outside Unix, or one that left its group) is read
@@ -283,7 +286,8 @@ impl StopAwareCommand {
         self.command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .no_console_window();
         self.run(stop).await
     }
 
@@ -293,7 +297,10 @@ impl StopAwareCommand {
     ///
     /// On Unix a child that inherits a terminal as its standard input can't
     /// read it (see above). Give one that may read a null standard input
-    /// (`command_mut().stdin(Stdio::null())`), or a file.
+    /// (`command_mut().stdin(Stdio::null())`), or a file. A host without a
+    /// console (a windowed Windows app) calls
+    /// [`no_console_window`](NoConsoleWindow::no_console_window) on a
+    /// command whose console the user shouldn't see.
     pub async fn status(self, stop: &StopSignal) -> io::Result<(ExitStatus, Option<ChildStop>)> {
         let output = self.run(stop).await?;
         Ok((output.status, output.stopped))
@@ -579,6 +586,24 @@ mod tests {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg(script);
         command
+    }
+
+    /// On Windows a child run for its output gets a hidden console of its
+    /// own, so a host with no console doesn't open a console window for it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_output_children_get_a_hidden_console_of_their_own() {
+        let mut command = tokio::process::Command::new(crate::console_probe::python());
+        command.arg("-c").arg(crate::console_probe::code());
+        let output = StopAwareCommand::new(command)
+            .output(&StopSignal::never())
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "CONSOLE=own hidden"
+        );
     }
 
     #[cfg(unix)]

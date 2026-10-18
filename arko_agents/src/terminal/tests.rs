@@ -720,6 +720,28 @@ async fn pty_jobs_get_a_quiet_environment_unless_turned_off() {
     assert!(text.contains(&format!("ENV={host}")), "{text:?}");
 }
 
+/// A pipe job on Windows gets a hidden console of its own, so a host with no
+/// console (a windowed app) doesn't open a console window for it.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_pipe_jobs_get_a_hidden_console_of_their_own() {
+    let f = Fixture::new(|_| {});
+    let pipes = StartOptions {
+        terminal: false,
+        detect_prompts: false,
+        ..Default::default()
+    };
+    let job = f.python(&crate::console_probe::code(), pipes);
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert!(
+        done.output.text.contains("CONSOLE=own hidden"),
+        "{:?}",
+        done.output.text
+    );
+    f.manager.shutdown().await;
+}
+
 /// Output shown to the agent loses escape sequences only where they are
 /// stripped (Windows PTYs); the byte offsets always count the raw output.
 #[test]
