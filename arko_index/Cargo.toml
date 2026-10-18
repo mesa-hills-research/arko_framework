@@ -3,8 +3,14 @@ name = "arko_index"
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Deterministic tree-sitter source partitioning and durable incremental code search"
+description = "Splits source repositories into chunks along their syntax, searches them lexically, densely or both, and keeps them current with file watchers"
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["code-search", "search", "tree-sitter", "embeddings", "bm25"]
+categories = ["development-tools", "text-processing"]
+# Maintainer scripts that check chunking on whole corpora and regenerate the rules.
+exclude = ["scripts/", "tools/"]
 
 [dependencies]
 serde.workspace = true

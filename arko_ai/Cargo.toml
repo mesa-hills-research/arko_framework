@@ -3,8 +3,12 @@ name = "arko_ai"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "All-in-one Rust crate for interfacing with LLMs from various providers"
+description = "Clients for language models from OpenAI, Anthropic, Google Gemini, OpenRouter and Claude Code, with streaming, tool calls, usage and cost"
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["llm", "ai", "openai", "anthropic", "gemini"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 # TLS is rustls with the ring provider (already compiled for tokenizer

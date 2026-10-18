@@ -3,9 +3,12 @@ name = "arko_agents"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Rust crate for LLM Agents and Tools"
+description = "A runtime for tool-using language model agents, with built-in tools, MCP servers, skills, terminals and approvals"
 license.workspace = true
+repository.workspace = true
 readme = "README.md"
+keywords = ["llm", "ai", "agent", "tools", "mcp"]
+categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 arko_ai.workspace = true

@@ -14,12 +14,12 @@ arko_agents builds on arko_ai, and arko_workflows builds on both. arko_index sta
 
 ## Install
 
-The crates aren't on crates.io yet, so add the ones you need from this repository:
+Add the crates you need:
 
 ```toml
 [dependencies]
-arko_ai = { git = "https://github.com/mesa-hills-research/arko_framework" }
-arko_agents = { git = "https://github.com/mesa-hills-research/arko_framework" }
+arko_ai = "0.1.0"
+arko_agents = "0.1.0"
 ```
 
 Building needs Rust 1.89 or later and a C compiler. As a dependency, arko_index needs no C compiler.

@@ -19,11 +19,9 @@ and refusals, token usage and cost.
 
 ## Install
 
-The crates aren't on crates.io yet, so add arko_ai from this repository:
-
 ```toml
 [dependencies]
-arko_ai = { git = "https://github.com/mesa-hills-research/arko_framework" }
+arko_ai = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"    # for consuming response streams
 ```

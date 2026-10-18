@@ -40,11 +40,9 @@ describes the questions and the method.
 
 ## Install
 
-The crate isn't on crates.io yet, so add it from this repository:
-
 ```toml
 [dependencies]
-arko_index = { git = "https://github.com/mesa-hills-research/arko_framework" }
+arko_index = "0.3.0"
 ```
 
 The library needs no C compiler, because it parses with

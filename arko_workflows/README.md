@@ -16,13 +16,11 @@ and your code decides which agents run and in what order.
 
 ## Install
 
-The crates aren't on crates.io yet, so add them from this repository:
-
 ```toml
 [dependencies]
-arko_workflows = { git = "https://github.com/mesa-hills-research/arko_framework" }
-arko_agents = { git = "https://github.com/mesa-hills-research/arko_framework" }
-arko_ai = { git = "https://github.com/mesa-hills-research/arko_framework" }
+arko_workflows = "0.1.0"
+arko_agents = "0.1.0"
+arko_ai = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
