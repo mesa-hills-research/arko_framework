@@ -123,7 +123,7 @@ struct Handlers {
 /// The CLI runs in a process group of its own (a job object on Windows)
 /// with the programs it starts, such as a Bash call's commands. Closing or
 /// dropping the session stops them all, a command left running in the
-/// background included.
+/// background included. On Windows the CLI starts without a console window.
 pub struct ClaudeSession {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Child,
@@ -416,9 +416,12 @@ struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    /// The CLI starts a process group of its own.
+    /// The CLI starts a process group of its own, without a console window.
     fn configure(command: &mut Command) {
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+                | crate::process::CREATE_NO_WINDOW,
+        );
     }
 
     /// Puts the CLI in a new job object, before it has started any program.

@@ -22,6 +22,7 @@ pub mod message;
 pub mod model;
 mod notice;
 pub mod pricing;
+pub mod process;
 pub mod prompt_cache;
 pub mod providers;
 pub mod reasoning;
