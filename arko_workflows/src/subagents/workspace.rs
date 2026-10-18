@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use arko_ai::process::NoConsoleWindow;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -115,6 +116,7 @@ async fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
         .arg("-C")
         .arg(directory)
         .args(args)
+        .no_console_window()
         .output()
         .await
         .map_err(|error| format!("could not run git: {error}"))?;
