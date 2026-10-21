@@ -1469,16 +1469,22 @@ async fn a_jobs_call_and_label_are_listed() {
     f.manager.shutdown().await;
 }
 
-/// The jobs running when the last process stopped are listed once the
-/// directory is opened again, a moved call with its tool and a command saved
-/// before jobs recorded their label. Finished ones aren't.
+/// The jobs running in the background when the last process stopped are
+/// listed once the directory is opened again, a moved call with its tool and
+/// a command saved before jobs recorded their label. Finished ones aren't,
+/// and neither is a held (foreground) command, though it's interrupted too.
 #[tokio::test]
 async fn the_jobs_a_restart_interrupted_are_listed() {
     let root = std::env::temp_dir().join(format!("arko-terminal-interrupted-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let owner = Uuid::new_v4();
     let call_id = Uuid::new_v4();
-    let (call, old, done) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (call, old, done, held) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
     let record = |id: Uuid, state: &str, extra: serde_json::Value| {
         let mut record = json!({
             "job_id": id, "owner": owner, "revision": 1, "state": state, "input": null,
@@ -1507,6 +1513,11 @@ async fn the_jobs_a_restart_interrupted_are_listed() {
         done,
         "succeeded",
         json!({"label": "search", "call": {"tool_name": "search"}}),
+    );
+    record(
+        held,
+        "running",
+        json!({"held": true, "label": "cargo test"}),
     );
 
     let manager = TerminalManager::new(TerminalConfig::new(&root)).unwrap();
@@ -1538,10 +1549,12 @@ async fn the_jobs_a_restart_interrupted_are_listed() {
         ),
         (old, &JobKind::Command, None, "")
     );
-    assert_eq!(
-        manager.status(owner, call, None).unwrap().state,
-        JobState::Interrupted
-    );
+    for job in [call, held] {
+        assert_eq!(
+            manager.status(owner, job, None).unwrap().state,
+            JobState::Interrupted
+        );
+    }
     assert!(manager.jobs().is_empty());
     drop(manager);
     std::fs::remove_dir_all(root).unwrap();

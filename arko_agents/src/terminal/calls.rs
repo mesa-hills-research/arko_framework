@@ -448,10 +448,13 @@ impl TerminalManager {
         running
     }
 
-    /// The jobs that were running when the last process using this
-    /// directory stopped, which are now
+    /// The jobs that were running in the background when the last process
+    /// using this directory stopped, which are now
     /// [`Interrupted`](JobState::Interrupted) records. They never run again,
-    /// since their effects are unknown. A host can tell their owners.
+    /// since their effects are unknown. A host can tell their owners. Held
+    /// jobs (a host's foreground commands) are left out, like
+    /// [`jobs`](Self::jobs) leaves them out, since their calls never
+    /// returned and are recovered as calls.
     pub fn interrupted_at_open(&self) -> Vec<JobInfo> {
         self.interrupted.lock().unwrap().clone()
     }

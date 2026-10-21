@@ -515,11 +515,15 @@ impl TerminalManager {
                 ));
             }
             if record.state == JobState::Running {
-                interrupted.push(calls::info(
-                    &record,
-                    record.label.clone().unwrap_or_default(),
-                    std::time::Instant::now(),
-                ));
+                // A held job ran in the foreground, so its call is in doubt
+                // and recovered as a call, not told as a background job.
+                if !record.held {
+                    interrupted.push(calls::info(
+                        &record,
+                        record.label.clone().unwrap_or_default(),
+                        std::time::Instant::now(),
+                    ));
+                }
                 record.state = JobState::Interrupted;
                 record.input = None;
                 record.revision += 1;
