@@ -199,8 +199,9 @@ pub(super) async fn run_tool(
     let signals = CallSignals {
         stop: environment.stop.clone(),
         moved: MoveSignal::never(),
-        // Context that arrives from now on reaches the call.
-        context_arrived: environment.context.signal(),
+        // Context that arrives from now on reaches the call, and so does
+        // context taken earlier that the conversation doesn't hold yet.
+        context_arrived: environment.context.call_signal(),
     };
     #[cfg(any(unix, windows))]
     if run.background != ToolBackground::Never

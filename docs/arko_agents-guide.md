@@ -603,9 +603,10 @@ a note or a terminal update) at the next turn boundary, after the calls of the t
 that waits a long time (for other agents, for a message) would hold it up.
 `TaskContext::context_arrived` is a `ContextSignal`, with `has_arrived()` and
 `arrived().await`, that fires when context arrives for the task while the call runs. Such a
-tool returns early, and the model reads the context with the call's result. Context that
-arrived before the call started doesn't count. Both runtimes fire it, a Claude Code agent's
-calls of arko tools included.
+tool returns early, and the model reads the context with the call's result. Context the
+model's request already held doesn't count. Context taken after that request (while an
+earlier call of the turn ran, say) fires it as soon as the call starts. Both runtimes fire
+it, a Claude Code agent's calls of arko tools included.
 
 A host or a test that runs a tool itself makes the signal with `ContextSource::new()`, sets
 the field from its `signal()`, and fires it with `notify()`. `TaskContext::new` gives a

@@ -1507,6 +1507,9 @@ impl ClaudeCodeRun {
     /// come with the next input, and only the images wait.
     fn take_context(&mut self, with_images: bool) -> Option<(String, Vec<ContextImage>)> {
         if self.handover_due() || self.compaction.is_some() {
+            // It waits for a later input, and arko calls that start meanwhile
+            // count newer context only.
+            self.context_arrivals.caught_up();
             return None;
         }
         let mut update_ids = Vec::new();
@@ -1549,6 +1552,9 @@ impl ClaudeCodeRun {
         ids.append(&mut self.held_context_ids);
         ids.append(&mut update_ids);
         self.task.pending_context_injections.clear();
+        // Claude Code has it, so arko calls that start from now on count
+        // newer context.
+        self.context_arrivals.caught_up();
         let images = if hold_images {
             if arrived > 0 {
                 content.push_str(&match arrived {

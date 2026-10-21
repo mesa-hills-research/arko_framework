@@ -150,6 +150,52 @@ async fn context_taken_before_a_call_doesnt_end_its_wait() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// Context taken while an earlier call of the turn ran isn't in the
+/// conversation yet, so it ends a later call's wait at once.
+#[tokio::test]
+async fn context_taken_during_an_earlier_call_ends_a_later_wait() {
+    let workspace = workspace();
+    let gate = Slow::new("gate", ToolBackground::Never);
+    let mut registry = waits_for_context(Duration::from_secs(60));
+    registry.register(gate.clone());
+    let (mut agent, _events, commands) = agent(
+        config(ToolCallingMode::Native, &["gate", "waits_for_context"]),
+        registry,
+        &workspace,
+    );
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![
+            native_call("gate", "gate", serde_json::json!({})),
+            native_call("wait", "waits_for_context", serde_json::json!({})),
+        ]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    timeout(Duration::from_secs(10), gate.started.notified())
+        .await
+        .unwrap();
+    commands
+        .send(UserCommand::InjectContext {
+            content: "Sent during the first call.".into(),
+        })
+        .await
+        .unwrap();
+    // Taken while the first call runs.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.release.notify_one();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the wait ends at once")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result_for(&task.conversation, "wait")[0].output,
+        "context arrived"
+    );
+    assert!(texts(&task.conversation).contains("Sent during the first call."));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A tool that runs until the test releases it, or its stop signal fires.
 /// An `Own` one also returns once it is moved.
 #[derive(Debug)]

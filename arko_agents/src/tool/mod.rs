@@ -310,7 +310,8 @@ pub struct TaskContext<'a> {
     pub moved: MoveSignal,
     /// Fires when context (a note, a terminal update) arrives for the task
     /// while the call runs. A tool that waits can return early, so the model
-    /// reads it.
+    /// reads it. Context that arrived after the request the call came from
+    /// (while an earlier call of the turn ran, say) fires it at once.
     pub context_arrived: ContextSignal,
 }
 

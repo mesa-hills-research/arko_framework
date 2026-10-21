@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
 
@@ -134,8 +135,10 @@ impl fmt::Debug for MoveSource {
     }
 }
 
-/// Whether context arrived for a call's task since the signal was made,
-/// which the runtime does as the call starts. See
+/// Whether context arrived for a call's task that the model hasn't read.
+/// The runtime makes the signal as the call starts. It counts the context
+/// that arrives from then on, and any that arrived after the model's
+/// request the call came from. See
 /// [`TaskContext::context_arrived`](super::TaskContext::context_arrived).
 ///
 /// Clones share the same starting point. [`never`](Self::never) (also the
@@ -143,7 +146,7 @@ impl fmt::Debug for MoveSource {
 #[derive(Clone, Default)]
 pub struct ContextSignal {
     source: Option<watch::Receiver<u64>>,
-    /// The source's count when the signal was made.
+    /// The source's count the signal counts from.
     start: u64,
 }
 
@@ -189,17 +192,26 @@ impl fmt::Debug for ContextSignal {
 /// for a host that runs tools itself, and for tests. Clones notify the same
 /// signals.
 #[derive(Clone)]
-pub struct ContextSource(Arc<watch::Sender<u64>>);
+pub struct ContextSource {
+    arrivals: Arc<watch::Sender<u64>>,
+    /// The count of the context the model has been given, or that waits
+    /// for a later request. A call that starts counts from it, so context
+    /// taken after it fires the call's signal at once.
+    caught_up: Arc<AtomicU64>,
+}
 
 impl ContextSource {
     /// A source that has seen no context.
     pub fn new() -> Self {
-        Self(Arc::new(watch::Sender::new(0)))
+        Self {
+            arrivals: Arc::new(watch::Sender::new(0)),
+            caught_up: Arc::default(),
+        }
     }
 
     /// A signal that fires when context arrives from now on.
     pub fn signal(&self) -> ContextSignal {
-        let source = self.0.subscribe();
+        let source = self.arrivals.subscribe();
         let start = *source.borrow();
         ContextSignal {
             source: Some(source),
@@ -207,9 +219,28 @@ impl ContextSource {
         }
     }
 
+    /// A signal for a call starting now. Context taken since the model's
+    /// request (or Claude Code's latest hand-over) fires it at once, since
+    /// the model made the call without reading it.
+    pub(crate) fn call_signal(&self) -> ContextSignal {
+        ContextSignal {
+            source: Some(self.arrivals.subscribe()),
+            start: self.caught_up.load(Ordering::Acquire),
+        }
+    }
+
     /// Context arrived. Fires every signal made before now.
     pub fn notify(&self) {
-        self.0.send_modify(|count| *count = count.wrapping_add(1));
+        self.arrivals
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// The model is given all the context that arrived so far, or it waits
+    /// for a later request, so it no longer fires a
+    /// [`call_signal`](Self::call_signal).
+    pub(crate) fn caught_up(&self) {
+        self.caught_up
+            .store(*self.arrivals.borrow(), Ordering::Release);
     }
 }
 

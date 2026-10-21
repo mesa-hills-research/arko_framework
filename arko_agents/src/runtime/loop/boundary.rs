@@ -310,6 +310,10 @@ impl AgentLoop {
             return Ok(Flow::NextPass);
         }
         self.observe_committed_tool_context();
+        // The request holds the context taken so far, or that context waits
+        // for a later one (the fresh conversation of a handover, say). The
+        // calls of this turn count what arrives from now on.
+        self.context_arrivals.caught_up();
         Ok(Flow::Proceed)
     }
 
