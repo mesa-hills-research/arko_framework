@@ -325,8 +325,9 @@ impl TerminalManager {
 
     /// Sets after how long a running call of a
     /// [`Detach`](crate::tool::ToolBackground::Detach) tool moves to the
-    /// background by itself, or `None` (the default) for never. Calls
-    /// already running keep the time they started with.
+    /// background by itself, or `None` (the default) for never. A time too
+    /// long for the clock to count, such as [`Duration::MAX`], means never
+    /// too. Calls already running keep the time they started with.
     pub fn set_background_after(&self, after: Option<Duration>) {
         *self.background_after.lock().unwrap() = after.filter(|after| !after.is_zero());
     }

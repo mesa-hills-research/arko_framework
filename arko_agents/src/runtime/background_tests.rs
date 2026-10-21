@@ -498,6 +498,43 @@ async fn dropping_the_manager_stops_a_moved_call() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A `background_after` too long to count from a call's start means the
+/// call never moves by itself.
+#[tokio::test]
+async fn a_huge_background_after_never_moves_a_call() {
+    let workspace = workspace();
+    let jobs = jobs(&workspace);
+    jobs.set_background_after(Some(Duration::MAX));
+    let slow = Slow::new("slow", ToolBackground::Detach);
+    let mut registry = ToolRegistry::new();
+    registry.register(slow.clone());
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["slow"]),
+        registry,
+        &workspace,
+    );
+    agent.background_jobs = Some(jobs.clone());
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call("slow", "slow", serde_json::json!({}))]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    listed(&jobs).await;
+    slow.release.notify_one();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .expect("the run doesn't panic")
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(
+        result_for(&task.conversation, "slow")[0].output,
+        "slow done"
+    );
+    assert!(jobs.jobs().is_empty());
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// An `Own` tool sees the move and returns its own result. Its call becomes
 /// no job.
 #[tokio::test]

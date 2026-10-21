@@ -453,9 +453,11 @@ mod movable {
         });
         let adopted = Arc::new(AtomicBool::new(false));
         let mut call = execute(environment.clone(), run, signals, Some(adopted.clone()));
-        // Moves by itself after this long.
+        // Moves by itself after this long. A time too far off to count means
+        // never.
         let auto_after = jobs.background_after();
-        let mut moves_at = auto_after.map(|after| tokio::time::Instant::from_std(started) + after);
+        let mut moves_at =
+            auto_after.and_then(|after| tokio::time::Instant::from_std(started).checked_add(after));
         let mut held = Some(held);
         let mut following = true;
         loop {
