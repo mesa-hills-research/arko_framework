@@ -117,6 +117,7 @@ version = "0.1.0"
 dependencies = [
  "arko_ai",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "dotenv",

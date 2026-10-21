@@ -85,6 +85,64 @@ closes, so no job starts and none moves to the background (`release` fails), so
 closing are one step under the jobs' lock, so a job that moves to the
 background at the same moment is either listed or refused.
 
+`TerminalManager::jobs()` lists the same jobs as `JobInfo`, with what each runs
+(`JobKind::Command` or `JobKind::Call { tool_name }`) and the call that made it
+(`tool_call_id`, the call that started the command or the call that moved).
+`has_news(owner)` says whether an owner has an update that went to no runtime
+because none was bound, so a host can start a turn for it.
+
+`stop_for_user(owner, job_id)` stops a job for the host's user. Its update says
+the user stopped it (`error` is `stopped by the user`), and `subscribe_finished`
+doesn't report it, so it waits for the owner's next turn instead of waking an
+idle agent. `cancel` is the owner's own stop.
+
+## Moved tool calls
+
+The manager also runs tool calls that moved to the background. While a call of a
+tool that can move runs in the foreground, `hold_call(owner, tool_call_id,
+tool_name, label)` lists it. `foreground_calls()` lists the calls that can move,
+oldest first, and `watch_foreground_calls()` changes as that list does, for a
+host that shows which calls can move. `move_to_background(owner,
+Some(tool_call_id))` moves one call, and `None` moves all of an owner's calls.
+It returns how many moved, and a manager closed for its host's exit moves none.
+The `HeldCall` guard the call holds sees the move (`is_moved`, `moved().await`,
+`signal()`), and dropping it takes the call off the list.
+`set_background_after(Some(after))` sets after how long calls move by
+themselves, read with `background_after()`. The default is `None`, never.
+
+`adopt_call(owner, tool_call_id, tool_name, label, stop, call)` runs the rest of
+a moved call, a future of `CallOutput { text, is_error, images }`
+(`CallOutput::text`, `CallOutput::error`, `with_images`), as a job. The job is
+listed with the background jobs, `terminal_status` and `terminal_control wait`
+read it, and `terminal_input` is refused, since a call takes no input. When the
+call ends, its owner gets a note in place of the terminal update.
+
+```text
+Job 4d2c1a9b-… ended. It ran your index_create call, which moved to the background 4 min ago. Its result follows.
+
+Indexed 1,204 files in 3 indexes.
+```
+
+An error says `ended with an error` and `The error follows.` A result longer
+than `CALL_NOTE_CHARS` (30,000 characters) is cut to its first and last parts,
+with a line saying how much was left out, and the job's `output.log` holds all
+of it. Images the call returned are saved in the job's directory as
+`image-1.png` and so on, and the note says where they are. The job ends
+`succeeded`, or `failed` for an error or a call that panicked.
+
+Stopping the job (`terminal_control cancel`, `stop_for_user`, `shutdown`) fires
+`stop`, and the call has 3 seconds to return before its future is dropped. The
+job ends `cancelled`, and the note says who stopped it and gives what the call
+returned as it stopped, if it did. `stop_owner_watchers(owner)` stops an owner's
+moved calls for a host whose agent run ended (a worker that finished), since
+their notes would reach no one. The owner's commands keep running. Neither this
+nor `stop_for_user` is reported to `subscribe_finished`.
+
+A moved call's job is saved like any other, with its tool and call, and after a
+restart it is an interrupted record, never run again. `interrupted_at_open()`
+lists the jobs that were running when the last process using the directory
+stopped, so a host can tell their owners.
+
 ## Configuration
 
 `TerminalConfig::new(directory)` sets these defaults:

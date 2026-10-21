@@ -70,10 +70,11 @@ pub use task::{
 };
 pub use tool::{
     ContextSignal, ContextSource, ImageRoom, InterceptedResult, InterceptionFailurePolicy,
-    InterceptorConfig, TaskContext, Tool, ToolCallContext, ToolDefinition, ToolError,
-    ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome,
-    ToolImage, ToolImageSink, ToolOutput, ToolParameterDefinition, ToolParameterType, ToolRecovery,
-    ToolRegistry, ToolResultInterceptor, ToolTypeDetails, builtins,
+    InterceptorConfig, MoveSignal, MoveSource, TaskContext, Tool, ToolCallContext, ToolDefinition,
+    ToolError, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
+    ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput, ToolParameterDefinition,
+    ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor, ToolTypeDetails,
+    builtins,
 };
 
 pub use arko_ai::ModelCallUsage;

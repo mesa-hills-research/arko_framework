@@ -443,6 +443,9 @@ async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
             output_end: 0,
             log_truncated: false,
             held: false,
+            tool_call_id: None,
+            label: None,
+            call: None,
         },
     )
     .unwrap();
@@ -749,23 +752,23 @@ fn stripped_windows_keep_raw_offsets() {
     let raw = b"\x1b[32mgreen\x1b[0m done";
     assert_eq!(window_text(raw, true), "green done");
     assert_eq!(window_text(raw, false), String::from_utf8_lossy(raw));
-    let data = JobData {
-        record: Record {
-            job_id: Uuid::new_v4(),
-            owner: Uuid::new_v4(),
-            revision: 0,
-            state: JobState::Running,
-            input: None,
-            exit_code: None,
-            error: None,
-            terminal: true,
-            output_end: raw.len() as u64,
-            log_truncated: false,
-            held: false,
-        },
-        output: raw.iter().copied().collect(),
-        last_event: None,
-    };
+    let mut data = JobData::new(Record {
+        job_id: Uuid::new_v4(),
+        owner: Uuid::new_v4(),
+        revision: 0,
+        state: JobState::Running,
+        input: None,
+        exit_code: None,
+        error: None,
+        terminal: true,
+        output_end: raw.len() as u64,
+        log_truncated: false,
+        held: false,
+        tool_call_id: None,
+        label: None,
+        call: None,
+    });
+    data.output = raw.iter().copied().collect();
     let config = TerminalConfig::new(std::env::temp_dir());
     let snapshot = data.snapshot(&config, None, 2_000).unwrap();
     assert_eq!(
@@ -1091,4 +1094,516 @@ async fn a_job_can_have_its_own_shell_arguments() {
         .unwrap();
     let done = f.finished(job.job_id).await;
     assert_eq!(done.output.text.trim(), "own hello");
+}
+
+/// The note a runtime got, as its text.
+async fn note(receiver: &mut mpsc::Receiver<UserCommand>) -> String {
+    let UserCommand::InjectContext { content } = timeout(Duration::from_secs(10), receiver.recv())
+        .await
+        .expect("a note in time")
+        .unwrap()
+    else {
+        panic!("not a note")
+    };
+    content
+}
+
+/// A moved call whose end `gate` decides, with `output`.
+fn gated(
+    gate: tokio::sync::oneshot::Receiver<()>,
+    output: CallOutput,
+) -> futures::future::BoxFuture<'static, CallOutput> {
+    Box::pin(async move {
+        let _ = gate.await;
+        output
+    })
+}
+
+/// A moved call runs as a job. It is listed with its call, takes no input,
+/// and when it ends its owner gets a note with the result, which its log and
+/// status also hold.
+#[tokio::test]
+async fn a_moved_call_runs_as_a_job_and_its_result_goes_to_its_owner() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+    let call_id = Uuid::new_v4();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let job = f
+        .manager
+        .adopt_call(
+            f.owner,
+            call_id,
+            "index_create",
+            "index_create".into(),
+            crate::stop::StopSource::new(),
+            gated(gate, CallOutput::text("Indexed 120 files.")),
+        )
+        .unwrap();
+    assert_eq!(job.state, JobState::Running);
+    let jobs = f.manager.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        (jobs[0].owner, jobs[0].job_id, jobs[0].tool_call_id),
+        (f.owner, job.job_id, Some(call_id))
+    );
+    assert_eq!(
+        jobs[0].kind,
+        JobKind::Call {
+            tool_name: "index_create".into()
+        }
+    );
+    assert_eq!(jobs[0].label, "index_create");
+    assert_eq!(f.manager.background_jobs()[0].command, "index_create");
+    assert_eq!(listed(&f).await, [job.job_id]);
+    let input = f
+        .manager
+        .input(f.owner, job.job_id, job.revision, "y".into());
+    assert!(matches!(input.await, Err(TerminalError::Invalid(_))));
+
+    release.send(()).unwrap();
+    let note = note(&mut receiver).await;
+    assert_eq!(
+        note,
+        format!(
+            "Job {} ended. It ran your index_create call, which moved to the background 0 s ago. Its result follows.\n\nIndexed 120 files.",
+            job.job_id
+        )
+    );
+    let done = f.manager.status(f.owner, job.job_id, None).unwrap();
+    assert_eq!(done.state, JobState::Succeeded);
+    assert_eq!(done.output.text, "Indexed 120 files.");
+    assert_eq!(
+        std::fs::read_to_string(&done.log_path).unwrap(),
+        "Indexed 120 files."
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), finished.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        JobFinished {
+            owner: f.owner,
+            job_id: job.job_id,
+            state: JobState::Succeeded
+        }
+    );
+    assert!(f.manager.jobs().is_empty());
+    assert!(!f.manager.has_news(f.owner));
+    f.manager.forget(f.owner, job.job_id).unwrap();
+}
+
+/// A note waits for its owner's runtime (`has_news` says so meanwhile). An
+/// error says it is one, a long result is cut with the log holding all of
+/// it, and images are saved in the job's directory and named.
+#[tokio::test]
+async fn a_moved_calls_note_carries_errors_long_results_and_images() {
+    use base64::Engine as _;
+    let f = Fixture::new(|_| {});
+    let adopt = |name: &str, output: CallOutput| {
+        f.manager
+            .adopt_call(
+                f.owner,
+                Uuid::new_v4(),
+                name,
+                name.into(),
+                crate::stop::StopSource::new(),
+                Box::pin(async move { output }),
+            )
+            .unwrap()
+    };
+    let failed = adopt("search", CallOutput::error("The server went away."));
+    let long = "a".repeat(20_000) + &"b".repeat(20_000) + &"c".repeat(20_000);
+    let cut = adopt("dump", CallOutput::text(long.clone()));
+    let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG first");
+    let pictures = adopt(
+        "render",
+        CallOutput::text("Rendered.").with_images(vec![
+            crate::tool::ToolImage::base64("one", png.clone(), "image/png"),
+            crate::tool::ToolImage::base64("two", png, "image/jpeg"),
+        ]),
+    );
+    for job in [&failed, &cut, &pictures] {
+        f.finished(job.job_id).await;
+    }
+    assert!(f.manager.has_news(f.owner));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut notes = HashMap::new();
+    for _ in 0..3 {
+        let note = note(&mut receiver).await;
+        let id = note
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .trim_end_matches('.')
+            .parse::<Uuid>()
+            .unwrap();
+        notes.insert(id, note);
+    }
+    assert!(!f.manager.has_news(f.owner));
+
+    assert_eq!(
+        f.manager
+            .status(f.owner, failed.job_id, None)
+            .unwrap()
+            .state,
+        JobState::Failed
+    );
+    assert!(notes[&failed.job_id].starts_with(&format!(
+        "Job {} ended with an error. It ran your search call, which moved to the background",
+        failed.job_id
+    )));
+    assert!(notes[&failed.job_id].ends_with("The error follows.\n\nThe server went away."));
+
+    let note = &notes[&cut.job_id];
+    let log = f
+        .manager
+        .status(f.owner, cut.job_id, None)
+        .unwrap()
+        .log_path;
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), long);
+    let half = CALL_NOTE_CHARS / 2;
+    let body = note.split_once("\n\n").unwrap().1;
+    assert!(body.starts_with(&"a".repeat(half)), "the first part");
+    assert!(body.ends_with(&"c".repeat(half)), "the last part");
+    assert!(
+        body.contains(&format!(
+            "[{} characters in the middle are left out. {} holds all of it.]",
+            long.len() - CALL_NOTE_CHARS,
+            log.display()
+        )),
+        "{}",
+        &body[half - 10..half + 200]
+    );
+
+    let directory = f
+        .manager
+        .status(f.owner, pictures.job_id, None)
+        .unwrap()
+        .log_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let (first, second) = (directory.join("image-1.png"), directory.join("image-2.jpg"));
+    assert_eq!(std::fs::read(&first).unwrap(), b"\x89PNG first");
+    assert!(second.is_file());
+    assert!(notes[&pictures.job_id].ends_with(&format!(
+        "Its result follows.\n\nRendered.\n\nIt returned 2 images, which are at {} and {}.",
+        first.display(),
+        second.display()
+    )));
+}
+
+/// A stopped call's stop signal fires. A call that returns within the grace
+/// gives what it returned, and one that doesn't is dropped after it. Either
+/// way the job ends cancelled, and the note says the owner stopped it.
+#[tokio::test(start_paused = true)]
+async fn a_stopped_call_gets_its_grace_and_is_dropped_after_it() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let stop = crate::stop::StopSource::new();
+    let signal = stop.signal();
+    let winds_down = f
+        .manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "embed",
+            "embed".into(),
+            stop,
+            Box::pin(async move {
+                signal.stopping().await;
+                CallOutput::text(format!("Saved after: {}", signal.reason().unwrap()))
+            }),
+        )
+        .unwrap();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let guard = Dropped(dropped.clone());
+    let ignores = f
+        .manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "fetch",
+            "fetch".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<CallOutput>().await
+            }),
+        )
+        .unwrap();
+    f.manager.cancel(f.owner, winds_down.job_id).unwrap();
+    assert_eq!(
+        note(&mut receiver).await,
+        format!(
+            "Job {} (your embed call) was stopped before it ended, as you asked. It returned this as it stopped.\n\nSaved after: The job was stopped.",
+            winds_down.job_id
+        )
+    );
+    let started = tokio::time::Instant::now();
+    f.manager.cancel(f.owner, ignores.job_id).unwrap();
+    assert_eq!(
+        note(&mut receiver).await,
+        format!(
+            "Job {} (your fetch call) was stopped before it ended, as you asked, so that call has no result.",
+            ignores.job_id
+        )
+    );
+    assert!(started.elapsed() >= calls::CALL_STOP_GRACE);
+    assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    for job in [winds_down.job_id, ignores.job_id] {
+        assert_eq!(
+            f.manager.status(f.owner, job, None).unwrap().state,
+            JobState::Cancelled
+        );
+    }
+}
+
+/// The user's stop of a moved call or a command isn't reported as a
+/// finished job, so it wakes no one, and its update says the user stopped
+/// it.
+#[tokio::test]
+async fn the_users_stop_wakes_no_one() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+    let call = f
+        .manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "search",
+            "search".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap();
+    let command = f.python("import time; time.sleep(30)", Default::default());
+    f.manager.stop_for_user(f.owner, call.job_id).unwrap();
+    assert_eq!(
+        note(&mut receiver).await,
+        format!(
+            "The user stopped job {} (your search call) before it ended, so that call has no result.",
+            call.job_id
+        )
+    );
+    f.manager.stop_for_user(f.owner, command.job_id).unwrap();
+    let stopped = update(&mut receiver).await;
+    assert_eq!(stopped["state"], "cancelled");
+    assert_eq!(stopped["error"], "stopped by the user");
+    assert!(matches!(
+        finished.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        f.manager.stop_for_user(f.owner, command.job_id),
+        Err(TerminalError::Finished)
+    ));
+}
+
+/// When its owner's run ends, its moved calls stop and its commands go on.
+#[tokio::test]
+async fn an_owners_end_stops_its_moved_calls_but_not_its_commands() {
+    let f = Fixture::new(|_| {});
+    let mut finished = f.manager.subscribe_finished();
+    let call = f
+        .manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "search",
+            "search".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap();
+    let command = f.python("import time; time.sleep(30)", Default::default());
+    assert_eq!(f.manager.stop_owner_watchers(Uuid::new_v4()), 0);
+    assert_eq!(f.manager.stop_owner_watchers(f.owner), 1);
+    let stopped = f.finished(call.job_id).await;
+    assert_eq!(stopped.state, JobState::Cancelled);
+    assert_eq!(
+        stopped.error.as_deref(),
+        Some("stopped because its agent's run ended")
+    );
+    let running = f.manager.jobs();
+    assert_eq!(running.len(), 1);
+    assert_eq!(
+        (running[0].job_id, &running[0].kind),
+        (command.job_id, &JobKind::Command)
+    );
+    assert!(finished.try_recv().is_err());
+    f.manager.shutdown().await;
+}
+
+/// Jobs carry the call that started them.
+#[tokio::test]
+async fn a_jobs_call_and_label_are_listed() {
+    let f = Fixture::new(|_| {});
+    let call_id = Uuid::new_v4();
+    let mut context = f.context();
+    context.tool_call_id = Some(call_id);
+    let command = f.command("import time; time.sleep(30)");
+    let job = f
+        .manager
+        .start(&context, &command, Default::default())
+        .unwrap();
+    let jobs = f.manager.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        (jobs[0].job_id, jobs[0].tool_call_id, &jobs[0].kind),
+        (job.job_id, Some(call_id), &JobKind::Command)
+    );
+    assert_eq!(jobs[0].label, command);
+    f.manager.shutdown().await;
+}
+
+/// The jobs running when the last process stopped are listed once the
+/// directory is opened again, a moved call with its tool and a command saved
+/// before jobs recorded their label. Finished ones aren't.
+#[tokio::test]
+async fn the_jobs_a_restart_interrupted_are_listed() {
+    let root = std::env::temp_dir().join(format!("arko-terminal-interrupted-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let owner = Uuid::new_v4();
+    let call_id = Uuid::new_v4();
+    let (call, old, done) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let record = |id: Uuid, state: &str, extra: serde_json::Value| {
+        let mut record = json!({
+            "job_id": id, "owner": owner, "revision": 1, "state": state, "input": null,
+            "exit_code": null, "error": null, "terminal": false, "output_end": 0,
+            "log_truncated": false,
+        });
+        record
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        std::fs::create_dir(root.join(id.to_string())).unwrap();
+        std::fs::write(
+            root.join(id.to_string()).join("job.json"),
+            record.to_string(),
+        )
+        .unwrap();
+    };
+    record(
+        call,
+        "running",
+        json!({"tool_call_id": call_id, "label": "index_create", "call": {"tool_name": "index_create"}}),
+    );
+    // As earlier versions saved it, without a call or a label.
+    record(old, "running", json!({}));
+    record(
+        done,
+        "succeeded",
+        json!({"label": "search", "call": {"tool_name": "search"}}),
+    );
+
+    let manager = TerminalManager::new(TerminalConfig::new(&root)).unwrap();
+    let mut interrupted = manager.interrupted_at_open();
+    interrupted.sort_by_key(|job| job.job_id != call);
+    assert_eq!(interrupted.len(), 2, "{interrupted:?}");
+    assert_eq!(
+        (
+            interrupted[0].job_id,
+            &interrupted[0].kind,
+            interrupted[0].tool_call_id,
+            interrupted[0].label.as_str()
+        ),
+        (
+            call,
+            &JobKind::Call {
+                tool_name: "index_create".into()
+            },
+            Some(call_id),
+            "index_create"
+        )
+    );
+    assert_eq!(
+        (
+            interrupted[1].job_id,
+            &interrupted[1].kind,
+            interrupted[1].tool_call_id,
+            interrupted[1].label.as_str()
+        ),
+        (old, &JobKind::Command, None, "")
+    );
+    assert_eq!(
+        manager.status(owner, call, None).unwrap().state,
+        JobState::Interrupted
+    );
+    assert!(manager.jobs().is_empty());
+    drop(manager);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Calls in the foreground are listed until they move or end, and move
+/// once. A closed manager moves none.
+#[tokio::test]
+async fn foreground_calls_are_listed_until_they_move() {
+    let f = Fixture::new(|_| {});
+    let mut changes = f.manager.watch_foreground_calls();
+    changes.borrow_and_update();
+    let other = Uuid::new_v4();
+    let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let held_first = f
+        .manager
+        .hold_call(f.owner, first, "search", "search".into());
+    let held_second = f
+        .manager
+        .hold_call(f.owner, second, "index_create", "index_create".into());
+    let held_third = f.manager.hold_call(other, third, "search", "search".into());
+    assert!(changes.has_changed().unwrap());
+    let listed = f.manager.foreground_calls();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|call| (call.owner, call.tool_call_id, call.tool_name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (f.owner, first, "search"),
+            (f.owner, second, "index_create"),
+            (other, third, "search")
+        ]
+    );
+    assert_eq!(f.manager.move_to_background(f.owner, Some(second)), 1);
+    assert!(held_second.is_moved() && !held_first.is_moved());
+    timeout(Duration::from_secs(5), held_second.moved())
+        .await
+        .unwrap();
+    assert_eq!(f.manager.move_to_background(f.owner, Some(second)), 0);
+    assert_eq!(f.manager.move_to_background(f.owner, None), 1);
+    assert!(held_first.is_moved() && !held_third.is_moved());
+    assert_eq!(f.manager.foreground_calls().len(), 1);
+    drop(held_third);
+    assert!(f.manager.foreground_calls().is_empty());
+
+    let held = f
+        .manager
+        .hold_call(f.owner, first, "search", "search".into());
+    f.manager.close(&[]).unwrap();
+    assert_eq!(f.manager.move_to_background(f.owner, None), 0);
+    assert!(!held.is_moved());
+    assert!(
+        f.manager
+            .adopt_call(
+                f.owner,
+                first,
+                "search",
+                "search".into(),
+                crate::stop::StopSource::new(),
+                Box::pin(std::future::pending()),
+            )
+            .is_err()
+    );
 }

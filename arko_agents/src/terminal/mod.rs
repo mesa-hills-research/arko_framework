@@ -2,12 +2,16 @@
 //!
 //! Program declarations travel over a dedicated stream. Prompt rules report
 //! possible input only. Silence and descriptor writability are never detectors.
+mod calls;
 mod detection;
 mod guard;
 mod io;
 mod runner;
 mod tools;
 
+pub use calls::{
+    CALL_NOTE_CHARS, CallOutput, ForegroundCall, HeldCall, IN_THE_BACKGROUND, JobInfo, JobKind,
+};
 pub use detection::PromptRule;
 pub use guard::{CommandGuard, CommandRefusal, CommandRule, RuleAction, ShellDialect};
 pub use tools::TerminalTool;
@@ -280,6 +284,23 @@ struct Record {
     /// See [`StartOptions::held`]. False in records saved before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     held: bool,
+    /// The call that made the job (`None` outside a call, and in records
+    /// saved before it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<Uuid>,
+    /// What lists show (see [`JobInfo::label`]). `None` in records saved
+    /// before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    /// The moved call the job runs, for a job made from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call: Option<CallRecord>,
+}
+
+/// The moved call a job runs. See [`TerminalManager::adopt_call`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallRecord {
+    tool_name: String,
 }
 
 #[derive(Debug)]
@@ -287,8 +308,23 @@ struct JobData {
     record: Record,
     output: VecDeque<u8>,
     last_event: Option<TerminalSnapshot>,
+    /// Who stopped the job, once someone did.
+    stopped_by: Option<calls::StopCause>,
+    /// What a moved call's job tells its owner as it ends, in place of its
+    /// snapshot.
+    note: Option<String>,
 }
 impl JobData {
+    fn new(record: Record) -> Self {
+        Self {
+            record,
+            output: VecDeque::new(),
+            last_event: None,
+            stopped_by: None,
+            note: None,
+        }
+    }
+
     fn snapshot(
         &self,
         config: &TerminalConfig,
@@ -398,6 +434,15 @@ pub struct TerminalManager {
     allow_outside_workspace: std::sync::atomic::AtomicBool,
     /// Where jobs that finish in the background are reported.
     finished: tokio::sync::broadcast::Sender<JobFinished>,
+    /// The calls running in the foreground that can move to the
+    /// background, oldest first, and the last registration's number.
+    foreground: Mutex<(Vec<calls::Foreground>, u64)>,
+    /// Changes as `foreground` does.
+    foreground_changes: watch::Sender<u64>,
+    /// After how long calls move to the background by themselves.
+    background_after: Mutex<Option<Duration>>,
+    /// The jobs that were running when the last process stopped.
+    interrupted: Mutex<Vec<JobInfo>>,
     _directory_lock: Arc<std::fs::File>,
 }
 impl std::fmt::Debug for TerminalManager {
@@ -445,8 +490,13 @@ impl TerminalManager {
             runtimes: Mutex::new(HashMap::new()),
             closing: false.into(),
             finished: tokio::sync::broadcast::channel(64).0,
+            foreground: Mutex::default(),
+            foreground_changes: watch::Sender::new(0),
+            background_after: Mutex::default(),
+            interrupted: Mutex::default(),
             _directory_lock: Arc::new(lock),
         });
+        let mut interrupted = Vec::new();
         for entry in std::fs::read_dir(&manager.config.directory)? {
             let path = entry?.path().join("job.json");
             if !path.is_file() {
@@ -464,6 +514,11 @@ impl TerminalManager {
                 ));
             }
             if record.state == JobState::Running {
+                interrupted.push(calls::info(
+                    &record,
+                    record.label.clone().unwrap_or_default(),
+                    std::time::Instant::now(),
+                ));
                 record.state = JobState::Interrupted;
                 record.input = None;
                 record.revision += 1;
@@ -473,14 +528,11 @@ impl TerminalManager {
                 );
             }
             persist(&manager.config, &record)?;
-            let data = Arc::new(Mutex::new(JobData {
-                record,
-                output: VecDeque::new(),
-                last_event: None,
-            }));
+            let data = Arc::new(Mutex::new(JobData::new(record)));
             let id = data.lock().unwrap().record.job_id;
             manager.jobs.lock().unwrap().insert(id, completed_job(data));
         }
+        *manager.interrupted.lock().unwrap() = interrupted;
         Ok(manager)
     }
 
@@ -589,11 +641,15 @@ impl TerminalManager {
                         && let Ok(latest) =
                             data.snapshot(&manager.config, None, manager.config.excerpt_bytes)
                     {
-                        let content = format!(
-                            "Terminal update:\n{}",
-                            serde_json::to_string(&latest)
-                                .expect("terminal snapshot serialization")
-                        );
+                        // A moved call's job says how the call ended.
+                        let content = match &data.note {
+                            Some(note) => note.clone(),
+                            None => format!(
+                                "Terminal update:\n{}",
+                                serde_json::to_string(&latest)
+                                    .expect("terminal snapshot serialization")
+                            ),
+                        };
                         permit.send(UserCommand::InjectContext { content });
                         // Sent: a runtime the owner binds later (its next
                         // turn) doesn't get it again.
@@ -656,12 +712,11 @@ impl TerminalManager {
             output_end: 0,
             log_truncated: false,
             held: options.held,
+            tool_call_id: context.tool_call_id,
+            label: Some(options.label.clone().unwrap_or_else(|| command.to_string())),
+            call: None,
         };
-        let data = Arc::new(Mutex::new(JobData {
-            record,
-            output: VecDeque::new(),
-            last_event: None,
-        }));
+        let data = Arc::new(Mutex::new(JobData::new(record)));
         let mut log = std::fs::File::create(
             self.config
                 .directory
@@ -782,7 +837,14 @@ impl TerminalManager {
     }
 
     pub fn cancel(&self, owner: Uuid, id: Uuid) -> Result<()> {
-        self.owned(owner, id)?.cancel.send_replace(true);
+        let job = self.owned(owner, id)?;
+        {
+            let mut data = job.data.lock().unwrap();
+            if !data.record.state.is_terminal() {
+                data.stopped_by.get_or_insert(calls::StopCause::Owner);
+            }
+        }
+        job.cancel.send_replace(true);
         Ok(())
     }
 

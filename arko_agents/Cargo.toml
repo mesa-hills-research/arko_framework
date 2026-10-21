@@ -12,6 +12,7 @@ categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 arko_ai.workspace = true
+base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

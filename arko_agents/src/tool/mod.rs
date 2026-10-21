@@ -14,7 +14,7 @@ pub mod middleware;
 pub mod registry;
 pub mod types;
 
-pub use background::{ContextSignal, ContextSource};
+pub use background::{ContextSignal, ContextSource, MoveSignal, MoveSource};
 pub use definition::{ToolDefinition, ToolParameterDefinition, ToolParameterType};
 pub use error::ToolError;
 pub use interceptor::{

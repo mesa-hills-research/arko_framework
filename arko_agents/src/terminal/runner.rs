@@ -321,6 +321,11 @@ pub(super) async fn run(
         } else {
             stop.unwrap_or(JobState::Failed)
         };
+        let by_user =
+            stop == Some(JobState::Cancelled) && data.stopped_by == Some(calls::StopCause::User);
+        if by_user && failure.is_none() {
+            failure = Some("stopped by the user".into());
+        }
         data.record.exit_code = exit_code;
         data.record.error = failure;
         data.record.input = None;
@@ -335,11 +340,13 @@ pub(super) async fn run(
             .snapshot(&config, None, config.excerpt_bytes)
             .expect("valid output window");
         data.last_event = Some(snapshot.clone());
-        (data.record.owner, snapshot, data.record.held)
+        (data.record.owner, snapshot, data.record.held, by_user)
     };
     if let Some(manager) = manager.upgrade() {
-        let (owner, snapshot, held) = final_notice;
-        if !held {
+        let (owner, snapshot, held, by_user) = final_notice;
+        // The user's stop wakes no one. The job's update goes with the
+        // owner's next turn.
+        if !held && !by_user {
             let _ = manager.finished.send(JobFinished {
                 owner,
                 job_id: snapshot.job_id,
