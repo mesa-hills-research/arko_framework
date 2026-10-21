@@ -1309,3 +1309,40 @@ async fn a_runtime_that_binds_has_its_waiting_notes_at_once() {
     assert!(notes[1].starts_with("Monitor alert. "), "{}", notes[1]);
     assert!(!f.manager.has_news(f.owner));
 }
+
+/// `monitor_start` without `expires_minutes` lasts as long as the host's
+/// limits allow, and its description gives that time and the host's
+/// interval between notes.
+#[tokio::test]
+async fn the_tools_default_time_follows_the_hosts_limits() {
+    use crate::tool::Tool;
+    for (longest, interval, lasts, says) in [
+        (20, 60, " UTC (20 min). ", "at most once a minute"),
+        (60, 30, " UTC (1 h). ", "at most once each 30 s"),
+    ] {
+        let f = fixture(MonitorLimits {
+            longest: Duration::from_secs(60 * longest),
+            alert_interval: Duration::from_secs(interval),
+            ..quick()
+        });
+        let start = &MonitorTool::all(f.manager.clone())[0];
+        let definition = start.definition();
+        assert!(
+            definition.description.contains(says)
+                && definition
+                    .description
+                    .contains(&format!("({longest} at most)")),
+            "{}",
+            definition.description
+        );
+        let started = start
+            .execute(
+                &f.context(),
+                params(json!({"command": f.command("time.sleep(60)"), "pattern": "error"})),
+            )
+            .await
+            .unwrap();
+        assert!(started.contains(lasts), "{started}");
+        f.manager.shutdown().await;
+    }
+}

@@ -71,11 +71,15 @@ impl Tool for MonitorTool {
     fn definition(&self) -> ToolDefinition {
         let limits = self.manager.monitor_limits();
         let longest = limits.longest.as_secs() / 60;
+        let interval = match limits.alert_interval.as_secs() {
+            60 => "once a minute".to_string(),
+            _ => format!("once each {}", calls::describe(limits.alert_interval)),
+        };
         let (name, description, mut parameters) = match self.operation {
             Operation::Start => (
                 Self::NAMES[0],
                 format!(
-                    "Watches a command for you and alerts you while the monitor lasts, so you don't have to poll. Without every_seconds, the command runs until it exits or the monitor ends (a dev server, a build, `tail -F` on a log), and each output line that matches pattern is an alert. With every_seconds, the command is a check that runs again and again (`curl -sf localhost:3000/health`), and you're alerted when its result changes, not while it stays the same. Alerts reach you as notes while you work, and start a turn when you're idle. To save turns they come at most once a minute, with the lines since the last one. A monitor lasts expires_minutes ({longest} at most). Before it ends you're asked whether to keep it, and monitor_control rearm keeps it longer. terminal_status reads its whole output."
+                    "Watches a command for you and alerts you while the monitor lasts, so you don't have to poll. Without every_seconds, the command runs until it exits or the monitor ends (a dev server, a build, `tail -F` on a log), and each output line that matches pattern is an alert. With every_seconds, the command is a check that runs again and again (`curl -sf localhost:3000/health`), and you're alerted when its result changes, not while it stays the same. Alerts reach you as notes while you work, and start a turn when you're idle. To save turns they come at most {interval}, with the lines since the last one. A monitor lasts expires_minutes ({longest} at most). Before it ends you're asked whether to keep it, and monitor_control rearm keeps it longer. terminal_status reads its whole output."
                 ),
                 vec![
                     parameter(
@@ -204,9 +208,9 @@ impl Tool for MonitorTool {
                         MonitorOptions::lines(pattern.map(str::to_string))
                     }
                 };
-                if let Some(lasts) = minutes(&params, "expires_minutes", longest)? {
-                    options = options.with_expiry(lasts);
-                }
+                options = options.with_expiry(
+                    minutes(&params, "expires_minutes", longest)?.unwrap_or(limits.longest),
+                );
                 Ok(self
                     .manager
                     .start_monitor(context, command, options)
