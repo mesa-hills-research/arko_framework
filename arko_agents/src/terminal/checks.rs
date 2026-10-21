@@ -432,7 +432,7 @@ impl TerminalManager {
     ) -> Result<(Uuid, Option<CheckRun>)> {
         let limits = watching.limits.clone();
         let owner = context.task_id;
-        let (data, directory, receiver, cancellation, changed, completed, mut done) = {
+        let (data, directory, log, receiver, cancellation, changed, completed, mut done) = {
             let mut jobs = self.jobs.lock().unwrap();
             if self.closing.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(TerminalError::Invalid(
@@ -443,6 +443,9 @@ impl TerminalManager {
             let id = Uuid::new_v4();
             let directory = self.config.directory.join(id.to_string());
             std::fs::create_dir(&directory)?;
+            // Before the job is listed, so one whose log can't be made isn't
+            // left running with nothing to run it.
+            let log = std::fs::File::create(directory.join("output.log"))?;
             let record = Record {
                 job_id: id,
                 owner,
@@ -485,6 +488,7 @@ impl TerminalManager {
             (
                 data,
                 directory,
+                log,
                 receiver,
                 cancellation,
                 changed,
@@ -493,7 +497,6 @@ impl TerminalManager {
             )
         };
         let id = data.lock().unwrap().record.job_id;
-        let log = std::fs::File::create(directory.join("output.log"))?;
         let checker = checker(directory);
         let running = watching.running(id, label, owner);
         let (first, first_run) = oneshot::channel();
