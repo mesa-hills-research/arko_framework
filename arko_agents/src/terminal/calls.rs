@@ -45,6 +45,9 @@ pub enum JobKind {
     Command,
     /// A tool call that moved to the background.
     Call { tool_name: String },
+    /// A monitor, started by `monitor_start` or
+    /// [`TerminalManager::start_monitor`].
+    Monitor(MonitorInfo),
 }
 
 /// A job, as [`TerminalManager::jobs`] and
@@ -54,7 +57,7 @@ pub enum JobKind {
 pub struct JobInfo {
     pub owner: Uuid,
     pub job_id: Uuid,
-    /// The command, its [`StartOptions::label`], or a moved call's tool.
+    /// The command (a monitor's too), its label, or a moved call's tool.
     pub label: String,
     /// When the job started. A moved call's job starts as it moves. A job
     /// restored from an earlier process has the time it was read.
@@ -400,6 +403,7 @@ impl TerminalManager {
                 tool_name: tool_name.to_string(),
             }),
             stopped_by_close: false,
+            monitor: None,
         };
         persist(&self.config, &record)?;
         let data = Arc::new(Mutex::new(JobData::new(record)));
@@ -465,13 +469,14 @@ impl TerminalManager {
     }
 
     /// Whether `owner` has news it hasn't been given, a job's update (it
-    /// finished, it waits for input) that went to no runtime because none
-    /// was bound. A host can start a turn for it.
+    /// finished, it waits for input) or a monitor's news, that went to no
+    /// runtime because none was bound. A host can start a turn for it.
     pub fn has_news(&self, owner: Uuid) -> bool {
-        self.jobs.lock().unwrap().values().any(|job| {
-            let data = job.data.lock().unwrap();
-            data.record.owner == owner && !data.record.held && data.last_event.is_some()
-        })
+        self.has_monitor_news(owner)
+            || self.jobs.lock().unwrap().values().any(|job| {
+                let data = job.data.lock().unwrap();
+                data.record.owner == owner && !data.record.held && data.last_event.is_some()
+            })
     }
 
     /// Stops `owner`'s job `id` for the user. The job's update (the note of
@@ -483,12 +488,12 @@ impl TerminalManager {
         self.stop_job(owner, id, StopCause::User)
     }
 
-    /// Stops `owner`'s jobs that only report to it, its moved calls, because
-    /// its run ended (a worker finished, failed or was stopped) and their
-    /// notes would reach no one. Its commands keep running, since it may
-    /// have started a server for another agent. These stops aren't reported
-    /// to [`subscribe_finished`](Self::subscribe_finished). Returns how many
-    /// were stopped.
+    /// Stops `owner`'s jobs that only report to it, its moved calls and its
+    /// monitors, because its run ended (a worker finished, failed or was
+    /// stopped) and their notes would reach no one. Its commands keep
+    /// running, since it may have started a server for another agent. These
+    /// stops aren't reported to [`subscribe_finished`](Self::subscribe_finished)
+    /// and wake no one. Returns how many were stopped.
     pub fn stop_owner_watchers(&self, owner: Uuid) -> usize {
         let watchers: Vec<Uuid> = self
             .jobs
@@ -498,7 +503,7 @@ impl TerminalManager {
             .filter_map(|job| {
                 let data = job.data.lock().unwrap();
                 (data.record.owner == owner
-                    && data.record.call.is_some()
+                    && (data.record.call.is_some() || data.record.monitor.is_some())
                     && data.record.state == JobState::Running)
                     .then_some(data.record.job_id)
             })
@@ -531,11 +536,16 @@ pub(super) fn info(record: &Record, label: String, started: Instant) -> JobInfo 
         job_id: record.job_id,
         label,
         started,
-        kind: match &record.call {
-            Some(call) => JobKind::Call {
+        kind: match (&record.call, &record.monitor) {
+            (Some(call), _) => JobKind::Call {
                 tool_name: call.tool_name.clone(),
             },
-            None => JobKind::Command,
+            (None, Some(monitor)) => JobKind::Monitor(MonitorInfo {
+                trigger: monitor.trigger.clone(),
+                expires_at: monitor.expires_at,
+                alerts: monitor.alerts,
+            }),
+            (None, None) => JobKind::Command,
         },
         tool_call_id: record.tool_call_id,
     }

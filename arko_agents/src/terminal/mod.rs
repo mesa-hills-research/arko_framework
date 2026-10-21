@@ -6,6 +6,8 @@ mod calls;
 mod detection;
 mod guard;
 mod io;
+mod monitor;
+mod outbox;
 mod runner;
 mod tools;
 
@@ -15,6 +17,9 @@ pub use calls::{
 };
 pub use detection::PromptRule;
 pub use guard::{CommandGuard, CommandRefusal, CommandRule, RuleAction, ShellDialect};
+pub use monitor::{
+    AlertKind, JobAlert, MonitorInfo, MonitorLimits, MonitorOptions, MonitorStarted, MonitorTrigger,
+};
 pub use tools::TerminalTool;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -302,6 +307,9 @@ struct Record {
     /// before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stopped_by_close: bool,
+    /// What a monitor watches, for a job that is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    monitor: Option<monitor::MonitorRecord>,
 }
 
 /// The moved call a job runs. See [`TerminalManager::adopt_call`].
@@ -320,6 +328,8 @@ struct JobData {
     /// What a moved call's job tells its owner as it ends, in place of its
     /// snapshot.
     note: Option<String>,
+    /// A running monitor's timing.
+    monitor: Option<monitor::Arming>,
 }
 impl JobData {
     fn new(record: Record) -> Self {
@@ -329,6 +339,7 @@ impl JobData {
             last_event: None,
             stopped_by: None,
             note: None,
+            monitor: None,
         }
     }
 
@@ -450,6 +461,11 @@ pub struct TerminalManager {
     background_after: Mutex<Option<Duration>>,
     /// The jobs that were running when the last process stopped.
     interrupted: Mutex<Vec<JobInfo>>,
+    /// Each owner's monitor news.
+    outboxes: Mutex<HashMap<Uuid, outbox::Outbox>>,
+    /// Where news that should wake an idle owner is announced.
+    alerts: tokio::sync::broadcast::Sender<JobAlert>,
+    monitor_limits: Mutex<MonitorLimits>,
     _directory_lock: Arc<std::fs::File>,
 }
 impl std::fmt::Debug for TerminalManager {
@@ -501,6 +517,9 @@ impl TerminalManager {
             foreground_changes: watch::Sender::new(0),
             background_after: Mutex::default(),
             interrupted: Mutex::default(),
+            outboxes: Mutex::default(),
+            alerts: tokio::sync::broadcast::channel(64).0,
+            monitor_limits: Mutex::default(),
             _directory_lock: Arc::new(lock),
         });
         let mut interrupted = Vec::new();
@@ -622,6 +641,7 @@ impl TerminalManager {
         for snapshot in replay {
             self.deliver(owner, snapshot);
         }
+        self.flush_news(owner);
     }
 
     fn deliver(self: &Arc<Self>, owner: Uuid, snapshot: TerminalSnapshot) {
@@ -695,6 +715,17 @@ impl TerminalManager {
         command: &str,
         options: StartOptions,
     ) -> Result<TerminalSnapshot> {
+        self.start_job(context, command, options, None)
+    }
+
+    /// Starts a job, a monitor of its output lines with `monitor`.
+    fn start_job(
+        self: &Arc<Self>,
+        context: &TaskContext<'_>,
+        command: &str,
+        options: StartOptions,
+        monitor: Option<monitor::Watching>,
+    ) -> Result<TerminalSnapshot> {
         if command.is_empty()
             || command.len() > 65_536
             || options.timeout.is_some_and(|timeout| {
@@ -712,8 +743,12 @@ impl TerminalManager {
                 "terminal manager is shut down".into(),
             ));
         }
+        if let Some(watching) = &monitor {
+            monitor::check_room(&jobs, context.task_id, &watching.limits)?;
+        }
         let id = Uuid::new_v4();
         std::fs::create_dir(self.config.directory.join(id.to_string()))?;
+        let label = options.label.clone().unwrap_or_else(|| command.to_string());
         let record = Record {
             job_id: id,
             owner: context.task_id,
@@ -727,11 +762,15 @@ impl TerminalManager {
             log_truncated: false,
             held: options.held,
             tool_call_id: context.tool_call_id,
-            label: Some(options.label.clone().unwrap_or_else(|| command.to_string())),
+            label: Some(label.clone()),
             call: None,
             stopped_by_close: false,
+            monitor: monitor.as_ref().map(|watching| watching.record.clone()),
         };
-        let data = Arc::new(Mutex::new(JobData::new(record)));
+        let mut data = JobData::new(record);
+        data.monitor = monitor.as_ref().map(|watching| watching.arming.clone());
+        let data = Arc::new(Mutex::new(data));
+        let watch = monitor.map(|watching| watching.watch(id, label.clone(), context.task_id));
         let mut log = std::fs::File::create(
             self.config
                 .directory
@@ -785,7 +824,7 @@ impl TerminalManager {
             Arc::new(Job {
                 data: data.clone(),
                 working_directory: Some(context.current_working_directory.to_path_buf()),
-                command: options.label.clone().unwrap_or_else(|| command.to_string()),
+                command: label,
                 started: std::time::Instant::now(),
                 controls,
                 cancel,
@@ -809,6 +848,7 @@ impl TerminalManager {
                 receiver,
                 cancellation,
                 changed,
+                watch,
             )
             .await;
             drop(directory_lock);
@@ -1061,5 +1101,7 @@ fn persist(config: &TerminalConfig, record: &Record) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod monitor_tests;
 #[cfg(test)]
 mod tests;

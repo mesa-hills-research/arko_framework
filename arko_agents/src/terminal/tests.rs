@@ -3,13 +3,13 @@ use crate::tool::Tool;
 use serde_json::json;
 use tokio::time::timeout;
 
-struct Fixture {
-    root: PathBuf,
-    manager: Arc<TerminalManager>,
-    owner: Uuid,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
+    pub(super) manager: Arc<TerminalManager>,
+    pub(super) owner: Uuid,
 }
 impl Fixture {
-    fn new(configure: impl FnOnce(&mut TerminalConfig)) -> Self {
+    pub(super) fn new(configure: impl FnOnce(&mut TerminalConfig)) -> Self {
         let root = std::env::temp_dir().join(format!("arko-interactive-test-{}", Uuid::new_v4()));
         let mut config = TerminalConfig::new(root.join("jobs"));
         config.prompt_quiet_ms = 30;
@@ -20,10 +20,10 @@ impl Fixture {
             owner: Uuid::new_v4(),
         }
     }
-    fn context(&self) -> TaskContext<'_> {
+    pub(super) fn context(&self) -> TaskContext<'_> {
         TaskContext::new(self.owner, "tester", "test interactive jobs", &self.root)
     }
-    fn command(&self, code: &str) -> String {
+    pub(super) fn command(&self, code: &str) -> String {
         let path = self.root.join(format!("fixture-{}.py", Uuid::new_v4()));
         let code = format!(
             "{}\n{code}",
@@ -60,7 +60,7 @@ impl Fixture {
         };
         self.manager.input(owner, id, revision, text).await
     }
-    async fn until(
+    pub(super) async fn until(
         &self,
         id: Uuid,
         predicate: impl Fn(&TerminalSnapshot) -> bool,
@@ -92,7 +92,7 @@ impl Fixture {
             )
         })
     }
-    async fn finished(&self, id: Uuid) -> TerminalSnapshot {
+    pub(super) async fn finished(&self, id: Uuid) -> TerminalSnapshot {
         self.until(id, |s| s.state.is_terminal()).await
     }
 }
@@ -447,6 +447,7 @@ async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
             label: None,
             call: None,
             stopped_by_close: false,
+            monitor: None,
         },
     )
     .unwrap();
@@ -769,6 +770,7 @@ fn stripped_windows_keep_raw_offsets() {
         label: None,
         call: None,
         stopped_by_close: false,
+        monitor: None,
     });
     data.output = raw.iter().copied().collect();
     let config = TerminalConfig::new(std::env::temp_dir());
@@ -1099,7 +1101,7 @@ async fn a_job_can_have_its_own_shell_arguments() {
 }
 
 /// The note a runtime got, as its text.
-async fn note(receiver: &mut mpsc::Receiver<UserCommand>) -> String {
+pub(super) async fn note(receiver: &mut mpsc::Receiver<UserCommand>) -> String {
     let UserCommand::InjectContext { content } = timeout(Duration::from_secs(10), receiver.recv())
         .await
         .expect("a note in time")

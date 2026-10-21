@@ -1,0 +1,1058 @@
+//! Monitors, jobs that watch a command for their owner and alert it of the
+//! output lines that match a pattern. Its news goes to its owner's
+//! outbox, which sends one note at most each
+//! [`alert_interval`](MonitorLimits::alert_interval) for all of the owner's
+//! monitors.
+
+use super::outbox::{Header, News};
+use super::*;
+use std::time::SystemTime;
+use tokio::time::Instant;
+
+/// What a monitor watches. Made with [`MonitorOptions::lines`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MonitorTrigger {
+    /// The lines of the command's output that match `pattern`, a regular
+    /// expression, or every line with `None`. The command runs until it
+    /// exits or the monitor ends.
+    #[non_exhaustive]
+    Lines {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+    },
+}
+
+impl MonitorTrigger {
+    /// What the monitor watches, for a list (`lines that match error|warn`,
+    /// `every line`).
+    pub fn watching(&self) -> String {
+        match self {
+            Self::Lines {
+                pattern: Some(pattern),
+            } => format!("lines that match {pattern}"),
+            Self::Lines { pattern: None } => "every line".to_string(),
+        }
+    }
+
+    /// What the monitor watches, as its notes name it, with the pattern as
+    /// code.
+    pub(super) fn named(&self) -> String {
+        match self {
+            Self::Lines {
+                pattern: Some(pattern),
+            } => format!("lines that match `{pattern}`"),
+            Self::Lines { pattern: None } => "every line".to_string(),
+        }
+    }
+}
+
+/// What a monitor watches and for how long, for
+/// [`TerminalManager::start_monitor`]. Made with [`lines`](Self::lines).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MonitorOptions {
+    pub trigger: MonitorTrigger,
+    /// How long the monitor lasts, at most [`MonitorLimits::longest`]. 30
+    /// minutes by default.
+    pub expires_in: Duration,
+    /// What lists show instead of the command (default `None`, the
+    /// command).
+    pub label: Option<String>,
+}
+
+impl MonitorOptions {
+    /// A monitor of the command's output lines that match `pattern`, a
+    /// regular expression, or of every line with `None`.
+    pub fn lines(pattern: Option<String>) -> Self {
+        Self {
+            trigger: MonitorTrigger::Lines { pattern },
+            expires_in: MonitorLimits::default().longest,
+            label: None,
+        }
+    }
+
+    /// These options with the monitor lasting `expires_in`.
+    pub fn with_expiry(mut self, expires_in: Duration) -> Self {
+        self.expires_in = expires_in;
+        self
+    }
+
+    /// These options with `label` shown in lists instead of the command.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+/// A monitor, as [`JobKind::Monitor`] describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MonitorInfo {
+    pub trigger: MonitorTrigger,
+    /// When it ends, as last armed.
+    pub expires_at: SystemTime,
+    /// How many of its owner's notes carried its alerts.
+    pub alerts: u32,
+}
+
+/// News of a monitor that went to no runtime, because none was bound for
+/// its owner. A host can start a turn of its idle agent for it, and the
+/// runtime it binds gets the news. See
+/// [`TerminalManager::subscribe_alerts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JobAlert {
+    pub owner: Uuid,
+    /// The monitor whose news it is. With several, the first.
+    pub job_id: Uuid,
+    pub kind: AlertKind,
+}
+
+/// What a [`JobAlert`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AlertKind {
+    /// Output lines matched.
+    Lines,
+    /// The monitor ends soon, and its owner may keep it with a rearm.
+    EndsSoon,
+}
+
+/// The limits of monitors, set with
+/// [`TerminalManager::set_monitor_limits`]. `Default` gives the values
+/// below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MonitorLimits {
+    /// The running monitors one owner may have (5).
+    pub per_owner: usize,
+    /// The running monitors of all owners (20).
+    pub in_all: usize,
+    /// The longest a monitor lasts from its start or its latest rearm (30
+    /// minutes).
+    pub longest: Duration,
+    /// How long before its end a monitor warns its owner (5 minutes).
+    pub warning_before: Duration,
+    /// A monitor armed for less than this ends without a warning (10
+    /// minutes).
+    pub warned_from: Duration,
+    /// How long before an idle owner's prompt cache expires its early
+    /// warning comes (1 minute). See
+    /// [`TerminalManager::set_prompt_cache_expiry`].
+    pub cache_margin: Duration,
+    /// The least time between two of an owner's notes of monitor news, or
+    /// two alerts to wake it (1 minute).
+    pub alert_interval: Duration,
+    /// How long news waits for more once the outbox has been quiet for
+    /// `alert_interval` (2 seconds).
+    pub gather: Duration,
+    /// The lines of one monitor's news a note shows (20).
+    pub lines_per_note: usize,
+    /// The bytes of those lines (2,000).
+    pub bytes_per_note: usize,
+    /// The bytes of a line kept, the rest cut (500).
+    pub line_bytes: usize,
+    /// How long output can be quiet before a line without its end counts
+    /// as a line (2 seconds).
+    pub partial_line_after: Duration,
+    /// How long a line monitor's start waits for a command that exits at
+    /// once (1 second).
+    pub start_wait: Duration,
+    /// The longest pattern, in characters (1,000).
+    pub pattern_chars: usize,
+    /// The matching lines within `noisy_window` past which an alert
+    /// suggests a narrower pattern (200).
+    pub noisy_lines: usize,
+    /// See `noisy_lines` (5 minutes).
+    pub noisy_window: Duration,
+}
+
+impl Default for MonitorLimits {
+    fn default() -> Self {
+        Self {
+            per_owner: 5,
+            in_all: 20,
+            longest: Duration::from_secs(30 * 60),
+            warning_before: Duration::from_secs(5 * 60),
+            warned_from: Duration::from_secs(10 * 60),
+            cache_margin: Duration::from_secs(60),
+            alert_interval: Duration::from_secs(60),
+            gather: Duration::from_secs(2),
+            lines_per_note: 20,
+            bytes_per_note: 2_000,
+            line_bytes: 500,
+            partial_line_after: Duration::from_secs(2),
+            start_wait: Duration::from_secs(1),
+            pattern_chars: 1_000,
+            noisy_lines: 200,
+            noisy_window: Duration::from_secs(5 * 60),
+        }
+    }
+}
+
+impl MonitorLimits {
+    fn check(&self) -> Result<()> {
+        let durations = [
+            self.longest,
+            self.alert_interval,
+            self.partial_line_after,
+            self.noisy_window,
+        ];
+        if self.per_owner == 0
+            || self.in_all == 0
+            || durations.iter().any(|duration| {
+                duration.is_zero() || std::time::Instant::now().checked_add(*duration).is_none()
+            })
+            || self.lines_per_note == 0
+            || self.bytes_per_note == 0
+            || self.line_bytes == 0
+            || self.pattern_chars == 0
+            || [
+                self.warning_before,
+                self.warned_from,
+                self.cache_margin,
+                self.gather,
+                self.start_wait,
+            ]
+            .iter()
+            .any(|duration| std::time::Instant::now().checked_add(*duration).is_none())
+        {
+            return Err(TerminalError::Invalid("invalid monitor limits".into()));
+        }
+        Ok(())
+    }
+}
+
+/// A monitor that started, as [`TerminalManager::start_monitor`] returns
+/// it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct MonitorStarted {
+    pub job_id: Uuid,
+    pub expires_at: SystemTime,
+    /// What `monitor_start` returns. It says what the monitor watches until
+    /// when, with its output so far.
+    pub summary: String,
+}
+
+/// A monitor's saved state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct MonitorRecord {
+    pub(super) trigger: MonitorTrigger,
+    pub(super) expires_at: SystemTime,
+    #[serde(default)]
+    pub(super) alerts: u32,
+}
+
+/// A running monitor's timing, kept with its job's data.
+#[derive(Debug, Clone)]
+pub(super) struct Arming {
+    pub(super) expires: Instant,
+    /// It is ending (it expired, or it was stopped), so it can't be
+    /// rearmed.
+    pub(super) ending: bool,
+}
+
+/// What a running monitor is, for its actor.
+pub(super) struct Running {
+    pub(super) header: Header,
+    pub(super) owner: Uuid,
+    pub(super) limits: MonitorLimits,
+}
+
+impl Running {
+    /// When its next timed event is due, its end.
+    pub(super) fn next_event(&self, data: &Mutex<JobData>) -> Option<Instant> {
+        data.lock()
+            .unwrap()
+            .monitor
+            .as_ref()
+            .map(|arming| arming.expires)
+    }
+
+    /// Runs its timed event if it's due. Returns whether the monitor
+    /// expired, in which case it can no longer be rearmed.
+    pub(super) fn timed_event(&self, data: &Mutex<JobData>) -> bool {
+        let mut data = data.lock().unwrap();
+        let Some(arming) = data.monitor.as_mut() else {
+            return false;
+        };
+        if Instant::now() < arming.expires {
+            return false;
+        }
+        arming.ending = true;
+        true
+    }
+
+    /// Marks the monitor as ending, so it can't be rearmed.
+    pub(super) fn ending(&self, data: &Mutex<JobData>) {
+        if let Some(arming) = data.lock().unwrap().monitor.as_mut() {
+            arming.ending = true;
+        }
+    }
+
+    /// Queues `news` for the owner.
+    pub(super) fn tell(&self, manager: &Weak<TerminalManager>, news: News) {
+        if let Some(manager) = manager.upgrade() {
+            manager.queue_news(self.owner, self.header.clone(), news);
+        }
+    }
+}
+
+/// How a monitor ended, for its last news.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EndReason {
+    /// It lasted as long as it was armed for.
+    Expired,
+    /// Its command exited on its own.
+    Exited { code: Option<i32> },
+    /// Its owner stopped it.
+    StoppedByOwner,
+    /// The host's user stopped it.
+    StoppedByUser,
+    /// Its owner's run ended.
+    OwnerEnded,
+    /// It failed (its record couldn't be saved, its output couldn't be
+    /// read).
+    Failed { error: String },
+}
+
+/// How a monitor that ended in `state` ended, `stopped_by` whom, or `None`
+/// when its host's exit stopped it, which tells no one.
+pub(super) fn end_reason(
+    state: JobState,
+    expired: bool,
+    stopped_by: Option<calls::StopCause>,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+) -> Option<EndReason> {
+    Some(match state {
+        JobState::TimedOut if expired => EndReason::Expired,
+        JobState::Cancelled => match stopped_by {
+            Some(calls::StopCause::Owner) => EndReason::StoppedByOwner,
+            Some(calls::StopCause::User) => EndReason::StoppedByUser,
+            Some(calls::StopCause::OwnerEnded) => EndReason::OwnerEnded,
+            None => return None,
+        },
+        JobState::Succeeded => EndReason::Exited { code: exit_code },
+        JobState::Failed if error.is_none() => EndReason::Exited { code: exit_code },
+        _ => EndReason::Failed {
+            error: error.unwrap_or("it stopped unexpectedly").to_string(),
+        },
+    })
+}
+
+/// A line of a monitor's output, as matching reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Line {
+    /// Its text without escape sequences or other control characters, cut
+    /// to the limit with `…`.
+    pub(super) text: String,
+    /// Where it starts in the job's output.
+    pub(super) start: u64,
+}
+
+/// Splits a job's output into lines. Lines end at `\n` or `\r`, so each
+/// step of a progress bar is one. Blank lines are left out.
+#[derive(Debug)]
+pub(super) struct LineSplitter {
+    line_bytes: usize,
+    /// The raw bytes of the line so far, up to four times `line_bytes`, so
+    /// escape sequences are whole before they are taken out.
+    current: Vec<u8>,
+    /// The line had more bytes than `current` keeps.
+    overflow: bool,
+    /// Where the line starts in the output.
+    start: u64,
+    /// Where the output read so far ends.
+    end: u64,
+    /// When the line so far last grew, while it has no end.
+    last: Option<Instant>,
+}
+
+impl LineSplitter {
+    pub(super) fn new(line_bytes: usize) -> Self {
+        Self {
+            line_bytes,
+            current: Vec::new(),
+            overflow: false,
+            start: 0,
+            end: 0,
+            last: None,
+        }
+    }
+
+    /// The lines that `bytes`, the output at `offset`, ends.
+    pub(super) fn push(&mut self, bytes: &[u8], offset: u64, now: Instant) -> Vec<Line> {
+        let mut lines = Vec::new();
+        let mut from = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if matches!(byte, b'\n' | b'\r') {
+                self.keep(&bytes[from..index]);
+                lines.extend(self.end_line());
+                from = index + 1;
+                self.start = offset + from as u64;
+            }
+        }
+        self.keep(&bytes[from..]);
+        self.end = offset + bytes.len() as u64;
+        self.last = (!self.current.is_empty() || self.overflow).then_some(now);
+        lines
+    }
+
+    fn keep(&mut self, bytes: &[u8]) {
+        let room = (self.line_bytes * 4).saturating_sub(self.current.len());
+        self.current
+            .extend_from_slice(&bytes[..bytes.len().min(room)]);
+        if bytes.len() > room {
+            self.overflow = true;
+        }
+    }
+
+    fn end_line(&mut self) -> Option<Line> {
+        let raw = std::mem::take(&mut self.current);
+        let overflow = std::mem::take(&mut self.overflow);
+        self.last = None;
+        line_text(&raw, overflow, self.line_bytes).map(|text| Line {
+            text,
+            start: self.start,
+        })
+    }
+
+    /// When the line so far counts as a line without its end, once output
+    /// has been quiet for `after`.
+    pub(super) fn partial_due(&self, after: Duration) -> Option<Instant> {
+        self.last.map(|last| last + after)
+    }
+
+    /// The line so far, as a line. What comes next starts a new one.
+    pub(super) fn flush(&mut self) -> Option<Line> {
+        let line = self.end_line();
+        self.start = self.end;
+        line
+    }
+}
+
+/// The text of a line's raw bytes, or `None` for a blank line.
+fn line_text(raw: &[u8], overflow: bool, line_bytes: usize) -> Option<String> {
+    let text = detection::strip_escapes(&String::from_utf8_lossy(raw));
+    let text: String = text
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .collect();
+    let text = text.trim_end();
+    if text.trim_start().is_empty() {
+        return None;
+    }
+    let mut cut = text.len().min(line_bytes);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut line = text[..cut].to_string();
+    if overflow || cut < text.len() {
+        line.push('…');
+    }
+    Some(line)
+}
+
+/// Compiles a monitor's pattern, with a size limit so a pattern can't take
+/// much memory. The `regex` crate matches in linear time.
+pub(super) fn compile(pattern: &str) -> std::result::Result<regex::Regex, String> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// Which lines alert, and whether they come too often.
+#[derive(Debug)]
+pub(super) struct Matcher {
+    regex: Option<regex::Regex>,
+    /// When the latest matching lines came, at most `noisy_lines + 1`.
+    recent: VecDeque<Instant>,
+    noisy_lines: usize,
+    noisy_window: Duration,
+}
+
+impl Matcher {
+    pub(super) fn new(regex: Option<regex::Regex>, limits: &MonitorLimits) -> Self {
+        Self {
+            regex,
+            recent: VecDeque::new(),
+            noisy_lines: limits.noisy_lines,
+            noisy_window: limits.noisy_window,
+        }
+    }
+
+    /// Whether `line` alerts.
+    pub(super) fn matches(&mut self, line: &str, now: Instant) -> bool {
+        let matched = self.regex.as_ref().is_none_or(|regex| regex.is_match(line));
+        if matched {
+            self.recent.push_back(now);
+            if self.recent.len() > self.noisy_lines + 1 {
+                self.recent.pop_front();
+            }
+        }
+        matched
+    }
+
+    /// Whether more than `noisy_lines` matched within `noisy_window`.
+    pub(super) fn is_noisy(&self, now: Instant) -> bool {
+        self.recent.len() > self.noisy_lines
+            && self
+                .recent
+                .front()
+                .is_some_and(|first| now.saturating_duration_since(*first) <= self.noisy_window)
+    }
+}
+
+/// Watches a line monitor's output, in its job's actor.
+pub(super) struct LineWatch {
+    pub(super) running: Running,
+    splitter: LineSplitter,
+    matcher: Matcher,
+}
+
+impl LineWatch {
+    pub(super) fn new(running: Running, regex: Option<regex::Regex>) -> Self {
+        Self {
+            splitter: LineSplitter::new(running.limits.line_bytes),
+            matcher: Matcher::new(regex, &running.limits),
+            running,
+        }
+    }
+
+    /// Reads `bytes`, the output at `offset`, and tells the owner of the
+    /// lines that match.
+    pub(super) fn output(&mut self, manager: &Weak<TerminalManager>, bytes: &[u8], offset: u64) {
+        let now = Instant::now();
+        let lines = self.splitter.push(bytes, offset, now);
+        self.matched(manager, lines, now);
+    }
+
+    /// When a line without its end counts as a line.
+    pub(super) fn partial_due(&self) -> Option<Instant> {
+        self.splitter
+            .partial_due(self.running.limits.partial_line_after)
+    }
+
+    /// Counts the line so far as a line.
+    pub(super) fn flush(&mut self, manager: &Weak<TerminalManager>) {
+        let now = Instant::now();
+        let lines = self.splitter.flush().into_iter().collect();
+        self.matched(manager, lines, now);
+    }
+
+    fn matched(&mut self, manager: &Weak<TerminalManager>, lines: Vec<Line>, now: Instant) {
+        let matched: Vec<Line> = lines
+            .into_iter()
+            .filter(|line| self.matcher.matches(&line.text, now))
+            .collect();
+        if !matched.is_empty() {
+            let noisy = self.matcher.is_noisy(now);
+            self.running.tell(
+                manager,
+                News::Lines {
+                    lines: matched,
+                    noisy,
+                    at: SystemTime::now(),
+                },
+            );
+        }
+    }
+}
+
+/// `17:42 UTC`.
+pub(super) fn clock(at: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at)
+        .format("%H:%M UTC")
+        .to_string()
+}
+
+/// `17:41:05 UTC`.
+pub(super) fn clock_seconds(at: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at)
+        .format("%H:%M:%S UTC")
+        .to_string()
+}
+
+/// `22 min`, rounded to the nearest minute, or `less than a minute`.
+pub(super) fn minutes_left(left: Duration) -> String {
+    let seconds = left.as_secs();
+    if seconds < 60 {
+        "less than a minute".to_string()
+    } else {
+        format!("{} min", (seconds + 30) / 60)
+    }
+}
+
+/// A line monitor about to start, for [`TerminalManager::start_job`].
+pub(super) struct Watching {
+    pub(super) record: MonitorRecord,
+    pub(super) arming: Arming,
+    regex: Option<regex::Regex>,
+    pub(super) limits: MonitorLimits,
+}
+
+impl Watching {
+    /// What watches job `id`'s output, which `owner` started.
+    pub(super) fn watch(self, id: Uuid, command: String, owner: Uuid) -> LineWatch {
+        LineWatch::new(
+            Running {
+                header: Header {
+                    job_id: id,
+                    command,
+                    trigger: self.record.trigger,
+                },
+                owner,
+                limits: self.limits,
+            },
+            self.regex,
+        )
+    }
+}
+
+/// Refuses another monitor when `owner`, or all owners, have as many
+/// running as `limits` allow.
+pub(super) fn check_room(
+    jobs: &HashMap<Uuid, Arc<Job>>,
+    owner: Uuid,
+    limits: &MonitorLimits,
+) -> Result<()> {
+    let (mut owners, mut all) = (0, 0);
+    for job in jobs.values() {
+        let data = job.data.lock().unwrap();
+        if data.record.monitor.is_some() && data.record.state == JobState::Running {
+            all += 1;
+            if data.record.owner == owner {
+                owners += 1;
+            }
+        }
+    }
+    if owners >= limits.per_owner {
+        return Err(TerminalError::Invalid(format!(
+            "you have {owners} monitors running, the most an agent may have. Stop one with monitor_control stop, or let one end"
+        )));
+    }
+    if all >= limits.in_all {
+        return Err(TerminalError::Invalid(format!(
+            "{all} monitors are running in this session, the most it may have. Stop one of yours with monitor_control stop, or let one end"
+        )));
+    }
+    Ok(())
+}
+
+/// The last lines of a job's output, for the note of a command that
+/// exited, at most 10 lines and 1,000 bytes.
+pub(super) fn last_lines(output: &VecDeque<u8>, line_bytes: usize) -> Vec<String> {
+    const LINES: usize = 10;
+    const BYTES: usize = 1_000;
+    let tail: Vec<u8> = output
+        .iter()
+        .skip(output.len().saturating_sub(BYTES * 4))
+        .copied()
+        .collect();
+    let mut splitter = LineSplitter::new(line_bytes);
+    let now = Instant::now();
+    let mut lines: Vec<String> = splitter
+        .push(&tail, 0, now)
+        .into_iter()
+        .chain(splitter.flush())
+        .map(|line| line.text)
+        .collect();
+    let mut bytes = 0;
+    let mut keep = 0;
+    for line in lines.iter().rev().take(LINES) {
+        if bytes + line.len() > BYTES && keep > 0 {
+            break;
+        }
+        bytes += line.len();
+        keep += 1;
+    }
+    lines.drain(..lines.len() - keep);
+    lines
+}
+
+impl TerminalManager {
+    /// Sets the limits of monitors, which apply to monitors that start from
+    /// now on. `TerminalError::Invalid` for limits that can't work (none
+    /// allowed, zero intervals, times too long to count).
+    pub fn set_monitor_limits(&self, limits: MonitorLimits) -> Result<()> {
+        limits.check()?;
+        *self.monitor_limits.lock().unwrap() = limits;
+        Ok(())
+    }
+
+    /// The limits of monitors, as last set.
+    pub fn monitor_limits(&self) -> MonitorLimits {
+        self.monitor_limits.lock().unwrap().clone()
+    }
+
+    /// The news of monitors that went to no runtime from now on, because
+    /// none was bound for its owner, when it should wake the owner. A host
+    /// can start a turn of the owner's idle agent for it, and the runtime it
+    /// binds gets the news. At most one alert goes to an owner each
+    /// [`alert_interval`](MonitorLimits::alert_interval), whatever number
+    /// of monitors it has. A monitor that ends because its command exited
+    /// is reported to [`subscribe_finished`](Self::subscribe_finished)
+    /// instead. The other ends (it expired, its owner or the user stopped
+    /// it) wake no one, and their news goes to the owner's next runtime.
+    pub fn subscribe_alerts(&self) -> tokio::sync::broadcast::Receiver<JobAlert> {
+        self.alerts.subscribe()
+    }
+
+    /// Starts a monitor of `command`, run in the context's working
+    /// directory for the context's task, its owner. Its alerts reach the
+    /// owner's runtime as notes, gathered in the owner's outbox, which sends
+    /// one note at most each
+    /// [`alert_interval`](MonitorLimits::alert_interval). The monitor is a
+    /// job, so `terminal_status` reads its output, and it is listed with
+    /// [`JobKind::Monitor`]. It ends when `options.expires_in` has passed,
+    /// stopping its command, or when the command exits.
+    ///
+    /// A monitor of lines runs its command in a terminal (a PTY), so
+    /// programs print each line as it comes. Its start waits up to
+    /// [`start_wait`](MonitorLimits::start_wait) for a command that exits at
+    /// once. The command guard checks the command, and the
+    /// [limits](Self::set_monitor_limits) bound the options and the number
+    /// of monitors.
+    pub async fn start_monitor(
+        self: &Arc<Self>,
+        context: &TaskContext<'_>,
+        command: &str,
+        options: MonitorOptions,
+    ) -> Result<MonitorStarted> {
+        let limits = self.monitor_limits();
+        let regex = validate(
+            command,
+            &options,
+            &limits,
+            ShellDialect::from_shell(&self.config.shell),
+        )?;
+        let label = options.label.clone().unwrap_or_else(|| command.to_string());
+        let expires_at = SystemTime::now() + options.expires_in;
+        let watching = Watching {
+            record: MonitorRecord {
+                trigger: options.trigger.clone(),
+                expires_at,
+                alerts: 0,
+            },
+            arming: Arming {
+                expires: Instant::now() + options.expires_in,
+                ending: false,
+            },
+            regex,
+            limits: limits.clone(),
+        };
+        let started = self.start_job(
+            context,
+            command,
+            StartOptions {
+                terminal: true,
+                detect_prompts: false,
+                label: Some(label.clone()),
+                ..StartOptions::default()
+            },
+            Some(watching),
+        )?;
+        let id = started.job_id;
+        let done = self
+            .jobs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|job| job.done.clone());
+        if let Some(mut done) = done {
+            let _ = tokio::time::timeout(limits.start_wait, done.wait_for(|done| *done)).await;
+        }
+        let snapshot = self.status(context.task_id, id, None)?;
+        let summary = if snapshot.state.is_terminal() {
+            // The start says it ended, so its note would only repeat it.
+            self.drop_news(context.task_id, id);
+            let how = match snapshot.exit_code {
+                Some(code) => format!("exited with code {code}"),
+                None => "ended without an exit code".to_string(),
+            };
+            format!(
+                "Monitor {id} ended at once, because its command `{label}` {how}. {}",
+                output_so_far(&snapshot, "Its output follows.", "It printed nothing.")
+            )
+        } else {
+            format!(
+                "{} {}",
+                started_sentence(id, &label, &options.trigger, expires_at, options.expires_in),
+                output_so_far(
+                    &snapshot,
+                    "Its output so far follows.",
+                    "It has printed nothing yet."
+                )
+            )
+        };
+        Ok(MonitorStarted {
+            job_id: id,
+            expires_at,
+            summary,
+        })
+    }
+}
+
+/// `follows`, then a job's output, or `none` without any.
+fn output_so_far(snapshot: &TerminalSnapshot, follows: &str, none: &str) -> String {
+    let text = snapshot.output.text.trim_end();
+    if text.is_empty() {
+        none.to_string()
+    } else {
+        format!("{follows}\n{text}")
+    }
+}
+
+/// Checks a monitor's command and options against `limits`, and compiles
+/// its pattern.
+pub(super) fn validate(
+    command: &str,
+    options: &MonitorOptions,
+    limits: &MonitorLimits,
+    dialect: ShellDialect,
+) -> Result<Option<regex::Regex>> {
+    if command.trim().is_empty() || command.len() > 65_536 {
+        return Err(TerminalError::Invalid(
+            "the command is empty or longer than 65,536 bytes".into(),
+        ));
+    }
+    if dialect == ShellDialect::Cmd && command.contains(['\n', '\r']) {
+        return Err(TerminalError::Invalid(
+            "cmd.exe runs one line, so give the command on one line".into(),
+        ));
+    }
+    if options.expires_in.is_zero() || options.expires_in > limits.longest {
+        return Err(TerminalError::Invalid(format!(
+            "a monitor's time must be more than zero and at most {}",
+            calls::describe(limits.longest)
+        )));
+    }
+    match &options.trigger {
+        MonitorTrigger::Lines { pattern: None } => Ok(None),
+        MonitorTrigger::Lines {
+            pattern: Some(pattern),
+        } => {
+            let length = pattern.chars().count();
+            if length == 0 || length > limits.pattern_chars {
+                return Err(TerminalError::Invalid(format!(
+                    "the pattern has {length} characters, and it may have 1 to {}",
+                    limits.pattern_chars
+                )));
+            }
+            compile(pattern).map(Some).map_err(|error| {
+                TerminalError::Invalid(format!(
+                    "the pattern isn't a regular expression this monitor can use ({error})"
+                ))
+            })
+        }
+    }
+}
+
+/// The first sentence of `monitor_start`'s result, up to what it says of
+/// the output.
+pub(super) fn started_sentence(
+    id: Uuid,
+    command: &str,
+    trigger: &MonitorTrigger,
+    expires_at: SystemTime,
+    lasts: Duration,
+) -> String {
+    let watches = match trigger {
+        MonitorTrigger::Lines {
+            pattern: Some(pattern),
+        } => format!("alerts you of lines that match `{pattern}`"),
+        MonitorTrigger::Lines { pattern: None } => "alerts you of every line".to_string(),
+    };
+    format!(
+        "Monitor {id} started. It runs `{command}` {watches}, until {} ({}).",
+        clock(expires_at),
+        calls::describe(lasts)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(lines: Vec<Line>) -> Vec<String> {
+        lines.into_iter().map(|line| line.text).collect()
+    }
+
+    /// Lines end at `\n` or `\r`, so each step of a progress bar is a line,
+    /// `\r\n` makes no blank line, and escape sequences and control
+    /// characters are taken out before matching. Each line knows where it
+    /// starts in the output.
+    #[test]
+    fn the_splitter_ends_lines_at_either_newline_and_strips_escapes() {
+        let now = Instant::now();
+        let mut splitter = LineSplitter::new(500);
+        let lines = splitter.push(
+            b"one\r\ntwo\n\x1b[31mred\x1b[0m\x07\n 10%\r 50%\rdone",
+            0,
+            now,
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.text.as_str(), line.start))
+                .collect::<Vec<_>>(),
+            [
+                ("one", 0),
+                ("two", 5),
+                ("red", 9),
+                (" 10%", 23),
+                (" 50%", 28)
+            ]
+        );
+        // The rest waits for its end, which may come in a later read.
+        assert_eq!(
+            texts(splitter.push(b"!\n\n", 37, now)),
+            ["done!".to_string()]
+        );
+        assert_eq!(splitter.partial_due(Duration::from_secs(2)), None);
+        assert_eq!(splitter.push(b"next", 40, now)[..], []);
+        assert_eq!(splitter.start, 40);
+    }
+
+    /// A line without its end counts as a line once output has been quiet
+    /// for a while, and what follows starts a new line.
+    #[test]
+    fn a_partial_line_counts_once_output_is_quiet() {
+        let start = Instant::now();
+        let mut splitter = LineSplitter::new(500);
+        assert!(splitter.push(b"Password: ", 0, start).is_empty());
+        let after = Duration::from_secs(2);
+        assert_eq!(splitter.partial_due(after), Some(start + after));
+        // More output puts it off.
+        let later = start + Duration::from_secs(1);
+        assert!(splitter.push(b"(again) ", 10, later).is_empty());
+        assert_eq!(splitter.partial_due(after), Some(later + after));
+        let line = splitter.flush().unwrap();
+        assert_eq!((line.text.as_str(), line.start), ("Password: (again)", 0));
+        assert_eq!(splitter.partial_due(after), None);
+        let lines = splitter.push(b"ok\n", 18, later);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.text.as_str(), line.start))
+                .collect::<Vec<_>>(),
+            [("ok", 18)]
+        );
+        assert_eq!(splitter.flush(), None);
+    }
+
+    /// A long line is cut at the limit, on a character boundary, with `…`,
+    /// and the splitter keeps only a few times the limit while it waits for
+    /// the line's end.
+    #[test]
+    fn a_long_line_is_cut() {
+        let now = Instant::now();
+        let mut splitter = LineSplitter::new(10);
+        let mut long = "é".repeat(30).into_bytes();
+        long.push(b'\n');
+        let lines = texts(splitter.push(&long, 0, now));
+        assert_eq!(lines, [format!("{}…", "é".repeat(5))]);
+        assert!(splitter.push(&[b'x'; 1000], 61, now).is_empty());
+        assert_eq!(splitter.current.len(), 40);
+        assert_eq!(
+            texts(splitter.push(b"\n", 1061, now)),
+            [format!("{}…", "x".repeat(10))]
+        );
+        assert_eq!(
+            texts(splitter.push(b"0123456789\n", 1062, now)),
+            ["0123456789"]
+        );
+    }
+
+    /// Without a pattern every line matches. A model's pattern compiles
+    /// with a size limit, and an invalid one says why.
+    #[test]
+    fn patterns_match_lines_and_count_noisy_runs() {
+        let limits = MonitorLimits {
+            noisy_lines: 3,
+            noisy_window: Duration::from_secs(60),
+            ..MonitorLimits::default()
+        };
+        let now = Instant::now();
+        let mut every = Matcher::new(None, &limits);
+        assert!(every.matches("anything", now));
+        let mut errors = Matcher::new(Some(compile("(?i)error|warn").unwrap()), &limits);
+        assert!(errors.matches("[ERROR] Failed to compile", now));
+        assert!(!errors.matches("compiled in 2 s", now));
+        assert!(!errors.is_noisy(now));
+        for _ in 0..3 {
+            errors.matches("warn: deprecated", now);
+        }
+        assert!(errors.is_noisy(now));
+        assert!(!errors.is_noisy(now + Duration::from_secs(61)));
+        assert!(compile("(unclosed").unwrap_err().contains("unclosed"));
+        assert!(compile("a{1000}{1000}").is_err());
+    }
+
+    /// The command, the expiry and the pattern are checked against the
+    /// limits.
+    #[test]
+    fn options_are_checked_against_the_limits() {
+        let limits = MonitorLimits::default();
+        let check = |command: &str, options: MonitorOptions| {
+            validate(command, &options, &limits, ShellDialect::Posix).map(|regex| regex.is_some())
+        };
+        assert!(!check("npm run dev", MonitorOptions::lines(None)).unwrap());
+        assert!(check("npm run dev", MonitorOptions::lines(Some("error".into()))).unwrap());
+        assert!(check(" ", MonitorOptions::lines(None)).is_err());
+        assert!(check("x", MonitorOptions::lines(Some(String::new()))).is_err());
+        assert!(check("x", MonitorOptions::lines(Some("a".repeat(1001)))).is_err());
+        let invalid = check("x", MonitorOptions::lines(Some("(".into()))).unwrap_err();
+        assert!(
+            invalid
+                .to_string()
+                .starts_with("the pattern isn't a regular expression this monitor can use ("),
+            "{invalid}"
+        );
+        let lines = MonitorOptions::lines(None);
+        assert!(check("x", lines.clone().with_expiry(Duration::ZERO)).is_err());
+        assert!(check("x", lines.clone().with_expiry(Duration::from_secs(1801))).is_err());
+        assert!(check("x", lines.clone().with_expiry(Duration::from_secs(60))).is_ok());
+        // cmd.exe takes one line.
+        assert!(
+            validate("a\nb", &lines, &limits, ShellDialect::Cmd).is_err()
+                && validate("a\nb", &lines, &limits, ShellDialect::Posix).is_ok()
+        );
+    }
+
+    #[test]
+    fn times_read_as_clocks_and_minutes() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(17 * 3600 + 41 * 60 + 5);
+        assert_eq!(clock(at), "17:41 UTC");
+        assert_eq!(clock_seconds(at), "17:41:05 UTC");
+        assert_eq!(minutes_left(Duration::from_secs(59)), "less than a minute");
+        assert_eq!(minutes_left(Duration::from_secs(299)), "5 min");
+        assert_eq!(minutes_left(Duration::from_secs(22 * 60 + 10)), "22 min");
+    }
+
+    /// The trigger is saved by kind, and records saved without its
+    /// optional parts read as their defaults.
+    #[test]
+    fn triggers_are_saved_by_kind() {
+        assert_eq!(
+            serde_json::to_value(MonitorTrigger::Lines {
+                pattern: Some("error".into())
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "lines", "pattern": "error"})
+        );
+        assert_eq!(
+            MonitorTrigger::Lines {
+                pattern: Some("error|warn".into())
+            }
+            .watching(),
+            "lines that match error|warn"
+        );
+    }
+}

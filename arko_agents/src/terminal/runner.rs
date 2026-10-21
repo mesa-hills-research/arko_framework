@@ -173,6 +173,7 @@ pub(super) async fn run(
     mut controls: mpsc::Receiver<Control>,
     mut cancellation: watch::Receiver<bool>,
     changed: watch::Sender<u64>,
+    mut monitor: Option<monitor::LineWatch>,
 ) {
     let (sender, mut incoming) = mpsc::channel(32);
     let (mut readers, requests_task) = readers(&mut process, sender);
@@ -186,6 +187,8 @@ pub(super) async fn run(
     let mut stop = None;
     let mut exit_code = None;
     let mut failure = None;
+    // A monitor that lasted as long as it was armed for.
+    let mut expired = false;
     while stop.is_none() {
         let wait_deadline = async {
             match deadline {
@@ -193,6 +196,12 @@ pub(super) async fn run(
                 None => std::future::pending().await,
             }
         };
+        let monitor_event = until(
+            monitor
+                .as_ref()
+                .and_then(|watch| watch.running.next_event(&data)),
+        );
+        let partial_line = until(monitor.as_ref().and_then(|watch| watch.partial_due()));
         tokio::select! {
             _ = cancellation.changed() => { stop = Some(JobState::Cancelled); }
             _ = wait_deadline => { stop = Some(JobState::TimedOut); }
@@ -205,8 +214,13 @@ pub(super) async fn run(
             item = incoming.recv(), if !incoming.is_closed() || !incoming.is_empty() => {
                 match item {
                     Some(ReadEvent::Output(bytes)) => {
-                        let result = output(&mut data.lock().unwrap(), &bytes, log, &mut logged, &config);
+                        let (offset, result) = {
+                            let mut data = data.lock().unwrap();
+                            let offset = data.record.output_end;
+                            (offset, output(&mut data, &bytes, log, &mut logged, &config))
+                        };
                         if let Err(error) = result { failure = Some(error.to_string()); stop = Some(JobState::Failed); }
+                        if let Some(watch) = &mut monitor { watch.output(&manager, &bytes, offset); }
                         last_output = Instant::now(); check_prompt = options.detect_prompts;
                     }
                     Some(ReadEvent::Declaration(bytes)) => {
@@ -251,6 +265,15 @@ pub(super) async fn run(
                     changed.send_replace(data.lock().unwrap().record.revision);
                 }
             }
+            () = monitor_event => {
+                if monitor.as_ref().is_some_and(|watch| watch.running.timed_event(&data)) {
+                    expired = true;
+                    stop = Some(JobState::TimedOut);
+                }
+            }
+            () = partial_line => {
+                if let Some(watch) = &mut monitor { watch.flush(&manager); }
+            }
             control = controls.recv() => {
                 match control {
                     Some(Control::Input { revision, text, response }) => {
@@ -291,6 +314,9 @@ pub(super) async fn run(
             }
         }
     }
+    if let Some(watch) = &monitor {
+        watch.running.ending(&data);
+    }
     requests_task.abort();
     let _ = requests_task.await;
     process.group.kill();
@@ -298,11 +324,18 @@ pub(super) async fn run(
     // Drain final bytes after process exit, but descendants cannot hold us open.
     let drain = async {
         while let Some(item) = incoming.recv().await {
-            if let ReadEvent::Output(bytes) = item
-                && let Err(error) =
-                    output(&mut data.lock().unwrap(), &bytes, log, &mut logged, &config)
-            {
-                failure = Some(error.to_string());
+            if let ReadEvent::Output(bytes) = item {
+                let (offset, result) = {
+                    let mut data = data.lock().unwrap();
+                    let offset = data.record.output_end;
+                    (offset, output(&mut data, &bytes, log, &mut logged, &config))
+                };
+                if let Err(error) = result {
+                    failure = Some(error.to_string());
+                }
+                if let Some(watch) = &mut monitor {
+                    watch.output(&manager, &bytes, offset);
+                }
             }
         }
     };
@@ -314,6 +347,9 @@ pub(super) async fn run(
     }
     readers.abort_all();
     while readers.join_next().await.is_some() {}
+    if let Some(watch) = &mut monitor {
+        watch.flush(&manager);
+    }
     let final_notice = {
         let mut data = data.lock().unwrap();
         data.record.state = if failure.is_some() && stop == Some(JobState::Succeeded) {
@@ -325,6 +361,24 @@ pub(super) async fn run(
             stop == Some(JobState::Cancelled) && data.stopped_by == Some(calls::StopCause::User);
         if by_user && failure.is_none() {
             failure = Some("stopped by the user".into());
+        }
+        let ending = monitor.as_ref().map(|_| {
+            monitor::end_reason(
+                data.record.state,
+                expired,
+                data.stopped_by,
+                exit_code,
+                failure.as_deref(),
+            )
+        });
+        if monitor.is_some() && failure.is_none() {
+            failure = match data.stopped_by {
+                _ if expired => Some("expired".into()),
+                Some(calls::StopCause::OwnerEnded) => {
+                    Some("stopped because its agent's run ended".into())
+                }
+                _ => None,
+            };
         }
         data.record.exit_code = exit_code;
         data.record.error = failure;
@@ -339,21 +393,73 @@ pub(super) async fn run(
         let snapshot = data
             .snapshot(&config, None, config.excerpt_bytes)
             .expect("valid output window");
-        data.last_event = Some(snapshot.clone());
-        (data.record.owner, snapshot, data.record.held, by_user)
-    };
-    if let Some(manager) = manager.upgrade() {
-        let (owner, snapshot, held, by_user) = final_notice;
-        // The user's stop wakes no one. The job's update goes with the
-        // owner's next turn.
-        if !held && !by_user {
-            let _ = manager.finished.send(JobFinished {
-                owner,
-                job_id: snapshot.job_id,
-                state: snapshot.state,
-            });
+        // A monitor tells its owner how it ended with its news.
+        let last_lines = match &ending {
+            Some(Some(monitor::EndReason::Exited { .. })) => monitor
+                .as_ref()
+                .map(|watch| monitor::last_lines(&data.output, watch.running.limits.line_bytes))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if ending.is_none() {
+            data.last_event = Some(snapshot.clone());
         }
-        manager.deliver(owner, snapshot);
+        (
+            data.record.owner,
+            snapshot,
+            data.record.held,
+            by_user,
+            ending,
+            last_lines,
+        )
+    };
+    let (owner, snapshot, held, by_user, ending, last_lines) = final_notice;
+    match (ending, &monitor) {
+        (Some(ending), Some(watch)) => {
+            // Only a command that exited by itself wakes its owner, as
+            // other jobs that finish do.
+            if let Some(manager) = manager.upgrade()
+                && matches!(ending, Some(monitor::EndReason::Exited { .. }))
+            {
+                let _ = manager.finished.send(JobFinished {
+                    owner,
+                    job_id: snapshot.job_id,
+                    state: snapshot.state,
+                });
+            }
+            if let Some(reason) = ending {
+                watch.running.tell(
+                    &manager,
+                    outbox::News::Ended {
+                        reason,
+                        at: std::time::SystemTime::now(),
+                        last_lines,
+                    },
+                );
+            }
+        }
+        _ => {
+            if let Some(manager) = manager.upgrade() {
+                // The user's stop wakes no one. The job's update goes with
+                // the owner's next turn.
+                if !held && !by_user {
+                    let _ = manager.finished.send(JobFinished {
+                        owner,
+                        job_id: snapshot.job_id,
+                        state: snapshot.state,
+                    });
+                }
+                manager.deliver(owner, snapshot);
+            }
+        }
     }
     changed.send_replace(data.lock().unwrap().record.revision);
+}
+
+/// Resolves at `deadline`, or never without one.
+async fn until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
