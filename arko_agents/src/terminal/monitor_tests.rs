@@ -903,7 +903,7 @@ async fn an_idle_agents_warning_comes_before_its_cache_expires() {
     assert_eq!(alerts.recv().await.unwrap().job_id, later);
 }
 
-/// A line monitor's command warns, plans its warning again when its
+/// A line monitor's command warns, plans its warning again when its idle
 /// owner's prompt cache changes, takes a rearm, and is stopped at its end.
 #[tokio::test]
 async fn a_line_monitor_warns_and_takes_a_rearm() {
@@ -913,8 +913,7 @@ async fn a_line_monitor_warns_and_takes_a_rearm() {
         cache_margin: Duration::from_millis(500),
         ..quick()
     });
-    let (sender, mut receiver) = mpsc::channel(8);
-    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut alerts = f.manager.subscribe_alerts();
     let start = std::time::Instant::now();
     let id = monitor(
         &f,
@@ -928,12 +927,19 @@ async fn a_line_monitor_warns_and_takes_a_rearm() {
         f.owner,
         Some(SystemTime::now() + Duration::from_millis(1500)),
     );
-    let warning = note(&mut receiver).await;
+    let alert = timeout(Duration::from_secs(10), alerts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((alert.job_id, alert.kind), (id, AlertKind::EndsSoon));
     assert!(
         start.elapsed() < Duration::from_millis(2800),
         "{:?}",
         start.elapsed()
     );
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let warning = note(&mut receiver).await;
     assert!(
         warning.starts_with(&format!(
             "Monitor {id} (`dev server`) ends in less than a minute, at "
@@ -1442,4 +1448,41 @@ async fn a_jobs_update_is_an_alert_unless_the_user_stopped_it() {
     f.manager.stop_for_user(f.owner, stopped).unwrap();
     ended(&f, stopped).await;
     assert!(f.manager.has_news(f.owner) && !f.manager.has_alerts(f.owner));
+}
+
+/// While the owner's runtime is bound and open (its agent works through a
+/// long call), the warning keeps its usual time, whatever the cache. Once
+/// the agent is idle, the host's next word on the cache brings it early.
+#[tokio::test(start_paused = true)]
+async fn a_busy_agents_warning_keeps_its_usual_time() {
+    let f = Fixture::new(|_| {});
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    f.manager
+        .set_prompt_cache_expiry(f.owner, Some(SystemTime::now() + minutes(5)));
+    let start = Instant::now();
+    steady_check(&f, &f.context(), minutes(30)).await;
+    let warning = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(25) + Duration::from_secs(2));
+    assert!(warning.contains(" ends in 5 min, at "), "{warning}");
+
+    // Idle, the next report of the cache brings a new monitor's warning
+    // before it expires.
+    let other = TaskContext::new(Uuid::new_v4(), "other", "test monitors", &f.root);
+    let (sender, receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(other.task_id, sender.downgrade());
+    let mut alerts = f.manager.subscribe_alerts();
+    steady_check(&f, &other, minutes(30)).await;
+    f.manager
+        .set_prompt_cache_expiry(other.task_id, Some(SystemTime::now() + minutes(5)));
+    tokio::time::sleep(minutes(5)).await;
+    assert!(alerts.try_recv().is_err(), "nothing while it works");
+    drop((sender, receiver));
+    let idle = Instant::now();
+    f.manager
+        .set_prompt_cache_expiry(other.task_id, Some(SystemTime::now() + minutes(5)));
+    let alert = alerts.recv().await.unwrap();
+    assert_eq!(alert.kind, AlertKind::EndsSoon);
+    assert_eq!(idle.elapsed(), minutes(4) + Duration::from_secs(2));
 }

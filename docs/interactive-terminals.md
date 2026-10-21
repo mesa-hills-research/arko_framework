@@ -252,7 +252,9 @@ A host can tell the manager two things that shape the warnings.
   expires (its latest model request, or a refresh, plus the cache's lifetime). A
   warning that would come after that comes a minute before it instead and says
   how long is left, so the turn it starts reads the conversation from the cache.
-  Monitors plan their warnings again each time the host says.
+  While a runtime bound for the owner is open (the agent works), the warning
+  keeps its usual time, since the agent reads it only after its call. Monitors
+  plan their warnings again each time the host says, and as a runtime binds.
 - `set_user_active_at(at)` says when the user last wrote. Once the user hasn't
   written for `set_warning_wakes_within` (2 hours by default,
   `DEFAULT_WARNINGS_WAKE_WITHIN`, `None` for always), warnings no longer wake an

@@ -644,6 +644,8 @@ impl TerminalManager {
                 },
             );
         }
+        // Its monitors' warnings keep their usual time while it works.
+        self.monitor_timing_changed();
         let replay = self
             .jobs
             .lock()

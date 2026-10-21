@@ -49,6 +49,9 @@ pub(super) struct WakeInputs {
     pub(super) cache: Option<Instant>,
     /// When its user counts as away from, so warnings no longer wake it.
     pub(super) away_from: Option<Instant>,
+    /// A live runtime is bound for it: its agent works, and reads its
+    /// monitors' news as it does.
+    pub(super) busy: bool,
 }
 
 /// When a monitor armed for `lasts`, until `expires`, warns its owner, or
@@ -95,11 +98,14 @@ impl Arming {
         if self.warned {
             return None;
         }
+        // A busy agent reads the warning only after its call, when the time
+        // left before the cache expires says nothing, so it comes at its
+        // usual time. The host's next word on the cache plans it again.
         warning_due(
             self.expires,
             self.lasts,
             limits,
-            inputs.cache,
+            inputs.cache.filter(|_| !inputs.busy),
             inputs.away_from,
             Instant::now(),
         )
@@ -113,9 +119,11 @@ impl TerminalManager {
     /// monitor ends that would come after the cache expires then comes
     /// [`cache_margin`](MonitorLimits::cache_margin) before it instead, and
     /// says how long the monitor has left, so a turn it starts for an idle
-    /// agent reads the conversation from the cache. A host calls this as
-    /// the agent's requests start. Monitors already running plan their
-    /// warnings again.
+    /// agent reads the conversation from the cache. While a runtime bound
+    /// for the owner is open (its agent works), warnings keep their usual
+    /// time instead, since the agent reads them only after its call. A host
+    /// calls this as the agent's requests start and as its turns end.
+    /// Monitors already running plan their warnings again.
     pub fn set_prompt_cache_expiry(&self, owner: Uuid, expires_at: Option<SystemTime>) {
         {
             let mut rules = self.wake_rules.lock().unwrap();
@@ -158,8 +166,16 @@ impl TerminalManager {
 
     /// What decides `owner`'s warnings now.
     pub(super) fn wake_inputs(&self, owner: Uuid) -> WakeInputs {
+        let busy = self
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .and_then(|binding| binding.sender.upgrade())
+            .is_some_and(|sender| !sender.is_closed());
         let rules = self.wake_rules.lock().unwrap();
         WakeInputs {
+            busy,
             cache: rules.caches.get(&owner).copied(),
             away_from: rules
                 .warnings_wake_within
@@ -179,7 +195,7 @@ impl TerminalManager {
     }
 
     /// Tells the monitors' actors to plan their timed events again.
-    fn monitor_timing_changed(&self) {
+    pub(super) fn monitor_timing_changed(&self) {
         self.monitor_timing
             .send_modify(|count| *count = count.wrapping_add(1));
     }
