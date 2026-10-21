@@ -2,7 +2,9 @@
 
 It answers `initialize`, `tools/list` and `tools/call` with newline-delimited
 JSON-RPC, writes a line to stderr at start, and exits with status 7 when a
-call asks it to (`echo` with text "exit").
+call asks it to (`echo` with text "exit"). A call with text "hang" gets no
+answer until the client cancels it (`notifications/cancelled`), and a call
+with text "cancelled" answers with the IDs of the requests it cancelled.
 """
 import json
 import sys
@@ -114,9 +116,18 @@ def tool_result(text):
     return {"content": [{"type": "text", "text": "echo: " + text}]}
 
 
+hanging = set()
+cancelled = []
+
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if method == "notifications/cancelled":
+        request_id = message["params"]["requestId"]
+        if request_id in hanging:
+            hanging.discard(request_id)
+            cancelled.append(request_id)
+        continue
     if "id" not in message:
         continue
     if method == "initialize":
@@ -136,6 +147,12 @@ for line in sys.stdin:
             sys.stderr.write("stub server: asked to exit\n")
             sys.stderr.flush()
             sys.exit(7)
+        if text == "hang":
+            hanging.add(message["id"])
+            continue
+        if text == "cancelled":
+            reply(message["id"], {"content": [{"type": "text", "text": json.dumps(cancelled)}]})
+            continue
         reply(message["id"], tool_result(text))
     else:
         sys.stdout.write(

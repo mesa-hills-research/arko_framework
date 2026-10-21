@@ -2,8 +2,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use rmcp::model::{CallToolRequestParams, RawContent, ResourceContents};
-use rmcp::service::{Peer, RoleClient};
+use rmcp::model::{
+    CallToolRequest, CallToolRequestParams, CancelledNotification, CancelledNotificationParam,
+    ClientRequest, RawContent, RequestId, ResourceContents, ServerResult,
+};
+use rmcp::service::{Peer, PeerRequestOptions, RoleClient, ServiceError};
 
 use crate::tool::{
     TaskContext, Tool, ToolDefinition, ToolError, ToolImage, ToolOutput, ToolParameterDefinition,
@@ -177,12 +180,29 @@ impl Tool for McpTool {
         let call_params =
             CallToolRequestParams::new(self.remote_tool_name.clone()).with_arguments(arguments);
 
-        let result = self.peer.call_tool(call_params).await.map_err(|e| {
+        let failed = |e: ServiceError| {
             ToolError::ExecutionFailed(format!(
                 "MCP tool '{}' on server '{}' call failed: {}",
                 self.remote_tool_name, self.server_name, e
             ))
-        })?;
+        };
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(call_params));
+        let handle = self
+            .peer
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .map_err(failed)?;
+        let mut cancel = CancelOnDrop {
+            peer: self.peer.clone(),
+            request: Some(handle.id.clone()),
+        };
+        let response = handle.await_response().await;
+        // Answered, or the server is gone: there's nothing to cancel.
+        cancel.request = None;
+        let result = match response.map_err(failed)? {
+            ServerResult::CallToolResult(result) => result,
+            _ => return Err(failed(ServiceError::UnexpectedResponse)),
+        };
 
         let mut output = ToolOutput::default();
         let mut push = |text: &str| {
@@ -263,6 +283,34 @@ impl Tool for McpTool {
         }
 
         Ok(output)
+    }
+}
+
+/// Cancels a request on the server (MCP's `notifications/cancelled`) when
+/// the call awaiting it is dropped first: it was stopped, ran past its time
+/// limit, or its task was cancelled. The server can then stop working on
+/// it, and a server that handles one request at a time takes the next.
+struct CancelOnDrop {
+    peer: Peer<RoleClient>,
+    request: Option<RequestId>,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let peer = self.peer.clone();
+        runtime.spawn(async move {
+            let notification = CancelledNotification::new(CancelledNotificationParam {
+                request_id,
+                reason: Some("The call was stopped.".into()),
+            });
+            let _ = peer.send_notification(notification.into()).await;
+        });
     }
 }
 

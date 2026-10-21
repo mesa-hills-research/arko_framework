@@ -953,7 +953,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `McpManager::from_config` | Spawns each server, completes the MCP handshake and lists its tools. On a failure it stops the servers already started and returns `ArkoAgentsError::Runtime`. | `arko_agents/src/mcp/manager.rs` | [MCP servers](arko_agents-guide.md#mcp-servers) |
 | `McpManager::{register_tools, tool_names, tools}` | Registers the tools. The names to add to `available_tool_names`. The tools. | `arko_agents/src/mcp/manager.rs` | [Skills, MCP and terminals (arko_agents)](#skills-mcp-and-terminals-arko_agents) |
 | `McpManager::shutdown` | Closes each connection, gives each server 3 seconds to exit, then kills it. | `arko_agents/src/mcp/manager.rs` | [MCP servers](arko_agents-guide.md#mcp-servers) |
-| `mcp::McpTool`, `McpTool::{new, server_name, remote_tool_name}` | An MCP server's tool as a `Tool` named `mcp__<server>__<tool>`. Image blocks and embedded image resources become result images. Embedded text is included, and unsupported media gets a text description. | `arko_agents/src/mcp/tool.rs` | [MCP servers](arko_agents-guide.md#mcp-servers) |
+| `mcp::McpTool`, `McpTool::{new, server_name, remote_tool_name}` | An MCP server's tool as a `Tool` named `mcp__<server>__<tool>`. Image blocks and embedded image resources become result images. Embedded text is included, and unsupported media gets a text description. A call dropped before the server answers cancels its request (`notifications/cancelled`). | `arko_agents/src/mcp/tool.rs` | [MCP servers](arko_agents-guide.md#mcp-servers) |
 
 #### Map of interactive terminals (arko_agents)
 

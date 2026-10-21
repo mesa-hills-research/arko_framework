@@ -215,3 +215,51 @@ async fn mcp_images_preserve_error_results_and_structured_text_fallback() {
     );
     manager.shutdown().await;
 }
+
+/// A call dropped before its response (stopped, or past its time limit)
+/// cancels its request on the server, which can then take the next one.
+#[tokio::test]
+async fn a_dropped_call_cancels_its_request_on_the_server() {
+    let manager = McpManager::from_config(&stub_config()).await.unwrap();
+    let echo = manager
+        .tools()
+        .iter()
+        .find(|tool| tool.remote_tool_name() == "echo")
+        .unwrap()
+        .clone();
+    let workspace = std::env::temp_dir();
+    let context = TaskContext::new(uuid::Uuid::new_v4(), "tester", "test", &workspace);
+    let call = |text: &str| HashMap::from([("text".to_string(), json!(text))]);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            echo.execute(&context, call("hang"))
+        )
+        .await
+        .is_err(),
+        "the server doesn't answer it"
+    );
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let cancelled = echo.execute(&context, call("cancelled")).await.unwrap();
+            if cancelled != "[]" {
+                return cancelled;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the server is told");
+    let ids: Vec<serde_json::Value> = serde_json::from_str(&cancelled).unwrap();
+    assert_eq!(ids.len(), 1, "{cancelled}");
+    // A call that's answered cancels nothing.
+    assert_eq!(
+        echo.execute(&context, call("hello")).await.unwrap(),
+        "echo: hello"
+    );
+    assert_eq!(
+        echo.execute(&context, call("cancelled")).await.unwrap(),
+        cancelled
+    );
+    manager.shutdown().await;
+}

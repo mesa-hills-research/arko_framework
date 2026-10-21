@@ -720,7 +720,9 @@ discovers its tools, named `mcp__<server>__<tool>`:
 ```
 
 An MCP tool is parallel-safe only when its server marks it `readOnlyHint: true`. Its
-calls otherwise run one at a time. `register_tools` adds them to a registry and
+calls otherwise run one at a time. A call that ends before the server answers (it was
+stopped, ran past its time limit, or its task was cancelled) cancels its request with
+MCP's `notifications/cancelled`, so the server can stop working on it. `register_tools` adds them to a registry and
 `tool_names` returns the names to add to
 `available_tool_names`. `shutdown` closes each connection and gives the server three
 seconds to exit before killing it, and dropping the manager kills the servers. MCP tools
