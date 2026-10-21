@@ -752,21 +752,24 @@ fn save_images(directory: &Path, images: &[ToolImage]) -> Option<String> {
             }
         }
     }
-    let mut sentence = match places.len() {
-        0 => String::new(),
-        1 if images.len() == 1 => format!("It returned an image, which is at {}.", places[0]),
-        _ => format!(
-            "It returned {} images, which are at {}.",
-            images.len(),
+    let returned = match images.len() {
+        1 => "It returned an image".to_string(),
+        count => format!("It returned {count} images"),
+    };
+    let unsaved = match unsaved {
+        1 => "one couldn't be saved".to_string(),
+        count => format!("{count} couldn't be saved"),
+    };
+    Some(match places.len() {
+        0 => format!("{returned}, which couldn't be saved."),
+        1 if images.len() == 1 => format!("{returned}, which is at {}.", places[0]),
+        saved if saved == images.len() => format!("{returned}, which are at {}.", list(&places)),
+        1 => format!("{returned}. One is at {}, and {unsaved}.", places[0]),
+        saved => format!(
+            "{returned}. {saved} are at {}, and {unsaved}.",
             list(&places)
         ),
-    };
-    match unsaved {
-        0 => {}
-        1 => sentence.push_str(" One image couldn't be saved."),
-        count => sentence.push_str(&format!(" {count} images couldn't be saved.")),
-    }
-    Some(sentence.trim_start().to_string())
+    })
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -800,7 +803,11 @@ fn call_note(
     log_path: &Path,
     log_truncated: bool,
 ) -> String {
-    let ago = describe(since_move);
+    let ago = if since_move < Duration::from_secs(60) {
+        "less than a minute".to_string()
+    } else {
+        describe(since_move)
+    };
     let call = format!("your {tool_name} call");
     let stopped = |returned: bool| {
         let end = if returned {
@@ -903,7 +910,7 @@ pub(crate) fn moved_result(
     };
     let limit = match limit {
         Some(limit) => format!(
-            " It goes on running until it ends or reaches its time limit of {}.",
+            " It goes on running until it ends or reaches its time limit, {} from its start.",
             describe_words(limit)
         ),
         None => " It goes on running.".to_string(),
@@ -929,4 +936,100 @@ fn describe_words(duration: Duration) -> String {
         seconds => (seconds, "second"),
     };
     format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sentence on a moved call's images counts the saved ones and the
+    /// others apart.
+    #[test]
+    fn the_image_sentence_counts_saved_and_unsaved_images() {
+        use base64::Engine as _;
+        let directory = std::env::temp_dir().join(format!("arko-call-images-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let good = || {
+            ToolImage::base64(
+                "good",
+                base64::engine::general_purpose::STANDARD.encode(b"\x89PNG"),
+                "image/png",
+            )
+        };
+        let bad = || ToolImage::base64("bad", "%%% not base64 %%%".into(), "image/png");
+        let at = |index: usize| {
+            directory
+                .join(format!("image-{index}.png"))
+                .display()
+                .to_string()
+        };
+        let sentence = |images: &[ToolImage]| save_images(&directory, images).unwrap();
+        assert_eq!(
+            sentence(&[good()]),
+            format!("It returned an image, which is at {}.", at(1))
+        );
+        assert_eq!(
+            sentence(&[good(), good()]),
+            format!(
+                "It returned 2 images, which are at {} and {}.",
+                at(1),
+                at(2)
+            )
+        );
+        assert_eq!(
+            sentence(&[good(), bad()]),
+            format!(
+                "It returned 2 images. One is at {}, and one couldn't be saved.",
+                at(1)
+            )
+        );
+        assert_eq!(
+            sentence(&[good(), good(), bad(), bad()]),
+            format!(
+                "It returned 4 images. 2 are at {} and {}, and 2 couldn't be saved.",
+                at(1),
+                at(2)
+            )
+        );
+        assert_eq!(
+            sentence(&[bad()]),
+            "It returned an image, which couldn't be saved."
+        );
+        assert_eq!(
+            sentence(&[bad(), bad()]),
+            "It returned 2 images, which couldn't be saved."
+        );
+        assert_eq!(save_images(&directory, &[]), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A note says when the call moved, without "0 s ago" for a call that
+    /// ended soon after.
+    #[test]
+    fn a_note_says_when_the_call_moved() {
+        let id = Uuid::new_v4();
+        let ending = Ending::Returned {
+            output: CallOutput::text("found"),
+            stopped: false,
+        };
+        let note = |since: Duration| {
+            call_note(
+                id,
+                "search",
+                &ending,
+                None,
+                since,
+                "found",
+                Path::new("log"),
+                false,
+            )
+        };
+        assert_eq!(
+            note(Duration::from_secs(5)),
+            format!(
+                "Job {id} ended. It ran your search call, which moved to the background less than a minute ago. Its result follows.\n\nfound"
+            )
+        );
+        assert!(note(Duration::from_secs(240)).contains("moved to the background 4 min ago."));
+    }
 }

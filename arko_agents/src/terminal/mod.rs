@@ -654,9 +654,10 @@ impl TerminalManager {
                         && let Ok(latest) =
                             data.snapshot(&manager.config, None, manager.config.excerpt_bytes)
                     {
-                        // A moved call's job says how the call ended.
-                        let content = match &data.note {
-                            Some(note) => note.clone(),
+                        // A moved call's job says how the call ended. Sent
+                        // once, so it isn't kept.
+                        let content = match data.note.take() {
+                            Some(note) => note,
                             None => format!(
                                 "Terminal update:\n{}",
                                 serde_json::to_string(&latest)

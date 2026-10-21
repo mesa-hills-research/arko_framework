@@ -464,7 +464,7 @@ async fn a_moved_call_answers_at_once_and_its_result_comes_as_a_note() {
     assert_eq!(job, running[0].job_id);
     assert!(
         moved.output.contains(
-            "\nThe user moved this call to the background. It goes on running until it ends or reaches its time limit of 20 minutes. Its result reaches you as a note when it ends."
+            "\nThe user moved this call to the background. It goes on running until it ends or reaches its time limit, 20 minutes from its start. Its result reaches you as a note when it ends."
         ),
         "{}",
         moved.output
@@ -475,7 +475,7 @@ async fn a_moved_call_answers_at_once_and_its_result_comes_as_a_note() {
         "context arrived"
     );
     assert!(texts(&task.conversation).contains(&format!(
-        "Job {job} ended. It ran your slow call, which moved to the background 0 s ago. Its result follows.\n\nslow done"
+        "Job {job} ended. It ran your slow call, which moved to the background less than a minute ago. Its result follows.\n\nslow done"
     )));
     // The call's events have the moved result.
     let mut seen = Vec::new();
@@ -879,7 +879,7 @@ async fn a_long_call_moves_by_itself_and_keeps_its_time_limit() {
     let moved = &result_for(&task.conversation, "slow")[0].output;
     assert!(
         moved.contains(
-            "\nIt ran longer than 10 seconds, so it moved to the background. It goes on running until it ends or reaches its time limit of 1 minute."
+            "\nIt ran longer than 10 seconds, so it moved to the background. It goes on running until it ends or reaches its time limit, 1 minute from its start."
         ),
         "{moved}"
     );

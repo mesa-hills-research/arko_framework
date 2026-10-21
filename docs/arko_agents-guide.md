@@ -638,7 +638,7 @@ A `Detach` call that moves gets this result, and is settled with it:
 
 ```text
 in the background as job 4d2c1a9b-…, 95.3 s
-The user moved this call to the background. It goes on running until it ends or reaches its time limit of 20 minutes. Its result reaches you as a note when it ends. terminal_status shows whether it still runs, and terminal_control waits for it or stops it.
+The user moved this call to the background. It goes on running until it ends or reaches its time limit, 20 minutes from its start. Its result reaches you as a note when it ends. terminal_status shows whether it still runs, and terminal_control waits for it or stops it.
 ```
 
 The last sentence is there when the agent is offered `terminal_status` and

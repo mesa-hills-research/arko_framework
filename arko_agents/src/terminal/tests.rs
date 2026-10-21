@@ -1169,10 +1169,18 @@ async fn a_moved_call_runs_as_a_job_and_its_result_goes_to_its_owner() {
     assert_eq!(
         note,
         format!(
-            "Job {} ended. It ran your index_create call, which moved to the background 0 s ago. Its result follows.\n\nIndexed 120 files.",
+            "Job {} ended. It ran your index_create call, which moved to the background less than a minute ago. Its result follows.\n\nIndexed 120 files.",
             job.job_id
         )
     );
+    // Sent, so the manager doesn't keep it.
+    let kept = f.manager.jobs.lock().unwrap()[&job.job_id]
+        .data
+        .lock()
+        .unwrap()
+        .note
+        .is_some();
+    assert!(!kept);
     let done = f.manager.status(f.owner, job.job_id, None).unwrap();
     assert_eq!(done.state, JobState::Succeeded);
     assert_eq!(done.output.text, "Indexed 120 files.");
