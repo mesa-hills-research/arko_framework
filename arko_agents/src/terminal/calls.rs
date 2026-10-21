@@ -470,12 +470,38 @@ impl TerminalManager {
 
     /// Whether `owner` has news it hasn't been given, a job's update (it
     /// finished, it waits for input) or a monitor's news, that went to no
-    /// runtime because none was bound. A host can start a turn for it.
+    /// runtime because none was bound. It counts all of it, also the news
+    /// that waits for the owner's next turn and should wake no one (the
+    /// user stopped a job, a monitor expired). For whether to start a turn
+    /// of an idle agent, see [`has_alerts`](Self::has_alerts).
     pub fn has_news(&self, owner: Uuid) -> bool {
         self.has_monitor_news(owner)
             || self.jobs.lock().unwrap().values().any(|job| {
                 let data = job.data.lock().unwrap();
                 data.record.owner == owner && !data.record.held && data.last_event.is_some()
+            })
+    }
+
+    /// Whether `owner` has news it hasn't been given that should wake its
+    /// idle agent, so a host can start a turn for it. That's a job's
+    /// update (it finished, it waits for input), unless the user stopped
+    /// the job or the owner's run ended, and a monitor's alert, its
+    /// warning before it ends while the user counts as active (see
+    /// [`set_warning_wakes_within`](Self::set_warning_wakes_within)), or its
+    /// command exiting by itself. News that should wake no one (a stop, an
+    /// expiry) waits for the owner's next turn and counts in
+    /// [`has_news`](Self::has_news) only.
+    pub fn has_alerts(&self, owner: Uuid) -> bool {
+        self.has_monitor_alerts(owner)
+            || self.jobs.lock().unwrap().values().any(|job| {
+                let data = job.data.lock().unwrap();
+                data.record.owner == owner
+                    && !data.record.held
+                    && data.last_event.is_some()
+                    && !matches!(
+                        data.stopped_by,
+                        Some(StopCause::User | StopCause::OwnerEnded)
+                    )
             })
     }
 

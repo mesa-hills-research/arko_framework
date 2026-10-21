@@ -1368,3 +1368,78 @@ async fn an_owners_end_quiets_its_monitors_waiting_news() {
     tokio::time::sleep(Duration::from_secs(120)).await;
     assert!(alerts.try_recv().is_err(), "no one is woken");
 }
+
+/// `has_alerts` counts the news that should wake an idle agent, and
+/// `has_news` all of it: an alert does, and so does a warning while the
+/// user counts as active or a command that exited by itself. A stop, an
+/// expiry and a warning while the user is away go with the next turn.
+#[tokio::test(start_paused = true)]
+async fn has_alerts_counts_the_news_that_should_wake_the_agent() {
+    let f = Fixture::new(|_| {});
+    let news = |owner: Uuid, news: News| {
+        f.manager.queue_news(owner, header(Uuid::new_v4()), news);
+        owner
+    };
+    let ended = |reason: EndReason| News::Ended {
+        reason,
+        at: SystemTime::now(),
+        last_lines: Vec::new(),
+    };
+    let warning = || News::EndsSoon {
+        ends_at: SystemTime::now(),
+        longest: Duration::from_secs(1800),
+    };
+    let alerted = news(Uuid::new_v4(), matched("error"));
+    let exited = news(Uuid::new_v4(), ended(EndReason::Exited { code: Some(1) }));
+    let stopped = news(Uuid::new_v4(), ended(EndReason::StoppedByUser));
+    let expired = news(Uuid::new_v4(), ended(EndReason::Expired));
+    let warned = news(Uuid::new_v4(), warning());
+    for owner in [alerted, exited, warned] {
+        assert!(f.manager.has_alerts(owner) && f.manager.has_news(owner));
+    }
+    for owner in [stopped, expired] {
+        assert!(!f.manager.has_alerts(owner) && f.manager.has_news(owner));
+    }
+    // A warning while the user is away.
+    f.manager.set_warning_wakes_within(Some(Duration::ZERO));
+    assert!(!f.manager.has_alerts(warned) && f.manager.has_news(warned));
+    // Announced, an alert still counts until a runtime takes it.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(f.manager.has_alerts(alerted));
+    let nothing = Uuid::new_v4();
+    assert!(!f.manager.has_alerts(nothing) && !f.manager.has_news(nothing));
+}
+
+/// A job's update wakes the agent, unless the user stopped the job.
+#[tokio::test]
+async fn a_jobs_update_is_an_alert_unless_the_user_stopped_it() {
+    let f = Fixture::new(|_| {});
+    let done = f
+        .manager
+        .start(
+            &f.context(),
+            &f.command("print('done', flush=True)"),
+            Default::default(),
+        )
+        .unwrap()
+        .job_id;
+    f.finished(done).await;
+    assert!(f.manager.has_alerts(f.owner));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    note(&mut receiver).await;
+    drop((sender, receiver));
+    assert!(!f.manager.has_alerts(f.owner));
+    let stopped = f
+        .manager
+        .start(
+            &f.context(),
+            &f.command("time.sleep(60)"),
+            Default::default(),
+        )
+        .unwrap()
+        .job_id;
+    f.manager.stop_for_user(f.owner, stopped).unwrap();
+    ended(&f, stopped).await;
+    assert!(f.manager.has_news(f.owner) && !f.manager.has_alerts(f.owner));
+}

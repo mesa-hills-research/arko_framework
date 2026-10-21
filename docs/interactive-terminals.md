@@ -91,8 +91,13 @@ background at the same moment is either listed or refused.
 `TerminalManager::jobs()` lists the same jobs as `JobInfo`, with what each runs
 (`JobKind::Command` or `JobKind::Call { tool_name }`) and the call that made it
 (`tool_call_id`, the call that started the command or the call that moved).
-`has_news(owner)` says whether an owner has an update that went to no runtime
-because none was bound, so a host can start a turn for it.
+`has_news(owner)` says whether an owner has an update or a monitor's news that
+went to no runtime because none was bound, also news that waits for its next
+turn and should wake no one. `has_alerts(owner)` counts only the news that
+should wake an idle agent, so a host can start a turn for it. That's a job's
+update (unless the user stopped the job or the owner's run ended), and a
+monitor's alert, its warning while the user counts as active, or its command
+exiting by itself.
 
 `stop_for_user(owner, job_id)` stops a job for the host's user. Its update says
 the user stopped it (`error` is `stopped by the user`), and `subscribe_finished`
@@ -214,8 +219,9 @@ minutes adds "A narrower pattern saves turns."
 The notes go to the owner's bound runtime as `InjectContext`, as terminal
 updates do, so they end a `wait_for_agents` or `wait_for_message` through
 `TaskContext::context_arrived`. With no runtime bound (the agent is idle), the
-news waits for the owner's next runtime, `has_news(owner)` says so, and news
-that should wake the owner is announced once on `subscribe_alerts()`, as a
+news waits for the owner's next runtime, `has_news(owner)` says so (and
+`has_alerts(owner)` for news that should wake it), and news that should wake
+the owner is announced once on `subscribe_alerts()`, as a
 `JobAlert { owner, job_id, kind }`. At most one alert goes to an owner a minute.
 A host starts a turn of the idle agent for it, and the runtime that turn binds
 gets the news at once.

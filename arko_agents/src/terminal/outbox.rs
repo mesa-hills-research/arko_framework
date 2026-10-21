@@ -118,6 +118,20 @@ pub(super) struct Part {
 }
 
 impl Part {
+    /// Whether the part should wake an idle owner, told of or not: an
+    /// alert, a warning while the user counts as active (not `away`), or a
+    /// command that exited by itself.
+    fn wakes_idle(&self, away: bool) -> bool {
+        !self.quiet
+            && (self.lines.is_some()
+                || self.check.is_some()
+                || (self.ends_soon.is_some() && !away)
+                || self
+                    .ended
+                    .as_ref()
+                    .is_some_and(|ended| matches!(ended.reason, EndReason::Exited { .. })))
+    }
+
     /// Whether the part carries an alert, which its monitor's count of
     /// alerts counts.
     fn alerts(&self) -> bool {
@@ -592,6 +606,17 @@ impl TerminalManager {
         if let Some(outbox) = self.outboxes.lock().unwrap().get_mut(&owner) {
             outbox.forget_warning(id);
         }
+    }
+
+    /// Whether `owner` has monitor news it hasn't been sent that should
+    /// wake it (see [`TerminalManager::has_alerts`]).
+    pub(super) fn has_monitor_alerts(&self, owner: Uuid) -> bool {
+        let away = self.user_away();
+        self.outboxes
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .is_some_and(|outbox| outbox.parts.iter().any(|part| part.wakes_idle(away)))
     }
 
     /// Whether `owner` has monitor news it hasn't been sent.
