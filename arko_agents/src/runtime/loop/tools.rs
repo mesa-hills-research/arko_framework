@@ -68,7 +68,7 @@ impl AgentLoop {
             ))),
             context: self.context_arrivals.clone(),
             #[cfg(any(unix, windows))]
-            jobs: self.background_jobs.clone(),
+            jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
         })
     }

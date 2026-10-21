@@ -442,6 +442,62 @@ async fn a_moved_call_outlives_its_turn_and_stops_with_its_job() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A moved call doesn't keep its manager alive. Dropping the host's last
+/// handle stops the call, as it stops the manager's other jobs, and frees
+/// the manager's directory.
+#[tokio::test]
+async fn dropping_the_manager_stops_a_moved_call() {
+    let workspace = workspace();
+    let directory = workspace.join(".jobs");
+    let jobs = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let slow = Slow::new("slow", ToolBackground::Detach);
+    let mut registry = ToolRegistry::new();
+    registry.register(slow.clone());
+    let mut config = config(ToolCallingMode::Native, &["slow"]);
+    config.tool_config.tool_timeout_seconds = None;
+    let (mut agent, _events, _commands) = agent(config, registry, &workspace);
+    agent.background_jobs = Some(jobs.clone());
+    let task_id = agent.task.id;
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call("slow", "slow", serde_json::json!({}))]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    listed(&jobs).await;
+    assert_eq!(jobs.move_to_background(task_id, None), 1);
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let job = job_of(&result_for(&task.conversation, "slow")[0].output);
+    drop(task);
+    let manager = Arc::downgrade(&jobs);
+    drop(jobs);
+    assert!(manager.upgrade().is_none(), "the moved call holds it");
+    let state = || -> String {
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join(job.to_string()).join("job.json")).unwrap(),
+        )
+        .unwrap();
+        record["state"].as_str().unwrap().to_string()
+    };
+    timeout(Duration::from_secs(10), async {
+        while state() == "running" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the call's job ends");
+    assert_eq!(state(), "cancelled");
+    assert_eq!(
+        slow.stopped.lock().unwrap().as_deref(),
+        Some("The job was stopped.")
+    );
+    TerminalManager::new(TerminalConfig::new(&directory)).expect("the directory is free");
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// An `Own` tool sees the move and returns its own result. Its call becomes
 /// no job.
 #[tokio::test]

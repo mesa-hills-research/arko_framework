@@ -1772,7 +1772,7 @@ impl ClaudeCodeRun {
                 image_room: None,
                 context: self.context_arrivals.clone(),
                 #[cfg(any(unix, windows))]
-                jobs: self.background_jobs.clone(),
+                jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
             }),
             config: self.task.agent_config.clone(),

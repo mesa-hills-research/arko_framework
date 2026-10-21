@@ -42,8 +42,11 @@ pub(super) struct RunEnvironment {
     pub context: ContextSource,
     /// The terminal manager calls move to the background with. See
     /// [`AgentRuntime::with_background_jobs`](super::AgentRuntime::with_background_jobs).
+    /// A moved call's future owns the environment, so the manager is held
+    /// weakly. Dropping the host's handles still drops it, which stops the
+    /// call.
     #[cfg(any(unix, windows))]
-    pub jobs: Option<Arc<crate::terminal::TerminalManager>>,
+    pub jobs: Option<std::sync::Weak<crate::terminal::TerminalManager>>,
     /// The agent is offered `terminal_status` and `terminal_control`, which
     /// a moved call's result names.
     pub terminal_tools: bool,
@@ -201,7 +204,7 @@ pub(super) async fn run_tool(
     };
     #[cfg(any(unix, windows))]
     if run.background != ToolBackground::Never
-        && let Some(jobs) = environment.jobs.clone()
+        && let Some(jobs) = environment.jobs.as_ref().and_then(std::sync::Weak::upgrade)
     {
         return Ok(movable::run(environment, run, signals, jobs).await);
     }
