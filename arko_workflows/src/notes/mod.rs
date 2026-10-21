@@ -1209,6 +1209,15 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             .then(|| format!("message:{id}"))
     }
 
+    /// The workflow's context notices (`workflow-context`, such as context
+    /// freshness notices) don't end a call's wait. They reach the agent at
+    /// its next turn boundary.
+    fn wakes_calls(&self, content: &str) -> bool {
+        !crate::messaging::is_context_notice(content)
+            && !content.starts_with(crate::freshness::CHANGED_NOTICE_HEAD)
+            && self.inner.wakes_calls(content)
+    }
+
     fn hold_request(&self, task_id: Uuid) -> Option<String> {
         self.inner.hold_request(task_id)
     }

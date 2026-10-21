@@ -265,6 +265,11 @@ mod actor_resource_map {
     }
 }
 
+/// The first line of the notice a continued run gets about what changed
+/// since it read it ([`ResourceTracker::changed_notice`]).
+pub(crate) const CHANGED_NOTICE_HEAD: &str =
+    "Changed since you last read them (another agent wrote them after your read):";
+
 pub struct ResourceTracker {
     workspace: PathBuf,
     config: ContextFreshnessConfig,
@@ -540,7 +545,7 @@ impl ResourceTracker {
             .collect::<Vec<_>>()
             .join("\n");
         Some(format!(
-            "Changed since you last read them (another agent wrote them after your read):\n{lines}\nRe-read any of these before you edit it or rely on its content."
+            "{CHANGED_NOTICE_HEAD}\n{lines}\nRe-read any of these before you edit it or rely on its content."
         ))
     }
 

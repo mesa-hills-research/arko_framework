@@ -196,6 +196,77 @@ async fn context_taken_during_an_earlier_call_ends_a_later_wait() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A turn context source that keeps the injected content starting with
+/// `later:` from ending a call's wait.
+struct Later;
+
+impl crate::runtime::TurnContextSource for Later {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        None
+    }
+
+    fn wakes_calls(&self, content: &str) -> bool {
+        !content.starts_with("later:")
+    }
+}
+
+/// Context the host's turn context source says doesn't wake calls leaves a
+/// wait running, and still reaches the model at the next turn boundary.
+/// Other context ends the wait.
+#[tokio::test]
+async fn context_that_doesnt_wake_calls_waits_for_the_boundary() {
+    let workspace = workspace();
+    let (mut agent, mut events, commands) = agent(
+        config(ToolCallingMode::Native, &["waits_for_context"]),
+        waits_for_context(Duration::from_millis(500)),
+        &workspace,
+    );
+    agent.turn_context = Some(Arc::new(Later));
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "quiet",
+            "waits_for_context",
+            serde_json::json!({}),
+        )]),
+        turn(vec![native_call(
+            "woken",
+            "waits_for_context",
+            serde_json::json!({}),
+        )]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    for content in ["later: a notice for the boundary", "An update."] {
+        wait_for(&mut events, &mut seen, |event| {
+            matches!(event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "waits_for_context")
+                .then_some(())
+        })
+        .await;
+        commands
+            .send(UserCommand::InjectContext {
+                content: content.into(),
+            })
+            .await
+            .unwrap();
+    }
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result_for(&task.conversation, "quiet")[0].output,
+        "no context"
+    );
+    assert_eq!(
+        result_for(&task.conversation, "woken")[0].output,
+        "context arrived"
+    );
+    assert!(texts(&task.conversation).contains("later: a notice for the boundary"));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A tool that runs until the test releases it, or its stop signal fires.
 /// An `Own` one also returns once it is moved.
 #[derive(Debug)]

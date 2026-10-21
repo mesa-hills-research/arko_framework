@@ -980,6 +980,55 @@ async fn lead_and_worker_wait_for_each_other(auto_approve: bool) {
     assert!(workflow.context().messages.pending("worker").is_empty());
 }
 
+/// A context notice (`MessageBus::inject_task`, as context freshness sends
+/// one) doesn't end a wait. It reaches the agent at its next turn boundary.
+#[tokio::test]
+async fn a_context_notice_doesnt_end_a_wait() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        Some(if tool_results(body).is_empty() {
+            tool_call_turn(
+                "lead0",
+                WAIT_FOR_MESSAGE_TOOL_NAME,
+                json!({"timeout_seconds": 1}),
+            )
+        } else {
+            complete_turn("lead1", "done")
+        })
+    })
+    .await;
+    let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
+        .build()
+        .unwrap();
+    let lead = workflow
+        .spawn_agent("lead", "Lead the work.")
+        .await
+        .unwrap();
+    let run_id = lead.run().agent_run_id;
+    until_status(&workflow, "lead", WAITING).await;
+    assert!(
+        workflow
+            .context()
+            .messages
+            .inject_task(run_id, "Context freshness notice: notes.md changed.".into())
+            .await
+    );
+    let result = tokio::time::timeout(Duration::from_secs(10), lead.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    let bodies = server.bodies();
+    assert_eq!(
+        tool_results(&bodies[1]),
+        [(
+            WAIT_FOR_MESSAGE_TOOL_NAME.to_string(),
+            "No messages after 1 s.".to_string()
+        )]
+    );
+    assert!(user_text(&bodies[1]).contains("Context freshness notice: notes.md changed."));
+}
+
 /// Cancelling the workflow while an agent waits (with an hour's limit) ends
 /// the run at once, cancelled.
 #[tokio::test]

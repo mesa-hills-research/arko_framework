@@ -304,7 +304,8 @@ and what its context contains.
 
 Freshness tracking records versioned reads and writes of files, directory trees,
 memory tiers, and workflow-defined resources. When a write succeeds, active agents
-that read the resource earlier receive a notice that it changed. A stale writer
+that read the resource earlier receive a notice that it changed, at their next turn
+boundary (a wait goes on). A stale writer
 can also be blocked until it reads the resource again:
 
 ```rust
@@ -491,7 +492,8 @@ as ``Message from `lead` waiting.`` or `No messages after 270 s.` The model may 
 is `waiting (awaiting_message)`. Cancelling the workflow, or the workflow
 stopping the agent, ends the wait at once. So does context that arrives for the agent (a
 note, a terminal update), which then comes with the wait's result, and a host moving the
-wait to the background.
+wait to the background. A context freshness notice doesn't end it, and comes at the next
+turn boundary.
 
 A wait lasts up to about 4.5 minutes by default. Each wake-up is a cheap turn that keeps
 the provider's prompt cache warm, so a long wait is simply several short waits. The

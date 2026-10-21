@@ -324,6 +324,18 @@ pub(crate) fn injection(message: &AgentMessage) -> String {
     )
 }
 
+/// Whether `content`, an injected context payload, is the injection of a
+/// context notice [`MessageBus::inject_task`] queued.
+pub(crate) fn is_context_notice(content: &str) -> bool {
+    content
+        .strip_prefix("Message ")
+        .and_then(|rest| rest.split_once(' '))
+        .is_some_and(|(id, rest)| {
+            Uuid::parse_str(id).is_ok()
+                && rest.starts_with(&format!("from agent '{WORKFLOW_CONTEXT_SENDER}':\n"))
+        })
+}
+
 /// Whether `content`, an injected context payload, is message `id`'s
 /// [`injection`].
 pub(crate) fn is_injection_of(content: &str, id: Uuid) -> bool {

@@ -83,6 +83,17 @@ pub trait TurnContextSource: Send + Sync {
         None
     }
 
+    /// Whether `content`, a payload the host sent with
+    /// [`InjectContext`](crate::runtime::command::UserCommand::InjectContext),
+    /// fires the [`context_arrived`](crate::tool::TaskContext::context_arrived)
+    /// signal of the task's calls, so a call that waits returns for the
+    /// model to read it. `true` (the default) for all content. Content that
+    /// doesn't fire it still reaches the model at the next turn boundary, as
+    /// a workflow's context notices do.
+    fn wakes_calls(&self, _content: &str) -> bool {
+        true
+    }
+
     /// Whether to hold the task's next model request, and why. With
     /// `Some(reason)` the request isn't made and the task pauses for
     /// error-recovery approval with

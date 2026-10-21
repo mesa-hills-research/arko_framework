@@ -606,7 +606,8 @@ that waits a long time (for other agents, for a message) would hold it up.
 tool returns early, and the model reads the context with the call's result. Context the
 model's request already held doesn't count. Context taken after that request (while an
 earlier call of the turn ran, say) fires it as soon as the call starts. Both runtimes fire
-it, a Claude Code agent's calls of arko tools included.
+it, a Claude Code agent's calls of arko tools included. Context the host's turn context
+source keeps for the boundary (`TurnContextSource::wakes_calls`) doesn't fire it.
 
 A host or a test that runs a tool itself makes the signal with `ContextSource::new()`, sets
 the field from its `signal()`, and fires it with `notify()`. `TaskContext::new` gives a
@@ -843,7 +844,9 @@ Besides answers to the waiting states, a running task accepts:
   (by default `turn_context` with no ids), and `identify` gives an id for each queued
   `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
-  read. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  read. `wakes_calls` says whether a queued `InjectContext` fires the running calls'
+  `TaskContext::context_arrived` (by default it does). A workflow's context notices
+  don't, so they wait for the turn boundary. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying

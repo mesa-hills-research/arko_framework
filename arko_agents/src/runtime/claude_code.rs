@@ -1290,7 +1290,7 @@ impl ClaudeCodeRun {
                 return Ok(false);
             };
             match (self.task.current_state.clone(), command) {
-                (_, UserCommand::InjectContext { content }) => self.queue_context(content),
+                (_, UserCommand::InjectContext { content }) => self.queue_context(content, true),
                 (_, UserCommand::HostDeciding) => {}
                 (_, UserCommand::RequestHandover) => self.note_handover_request().await?,
                 (_, UserCommand::CancelTask) => {
@@ -1397,7 +1397,7 @@ impl ClaudeCodeRun {
     async fn take_waiting_commands(&mut self) -> Result<bool, ArkoAgentsError> {
         while let Ok(command) = self.commands.try_recv() {
             match command {
-                UserCommand::InjectContext { content } => self.queue_context(content),
+                UserCommand::InjectContext { content } => self.queue_context(content, true),
                 UserCommand::RequestHandover => self.note_handover_request().await?,
                 UserCommand::HostDeciding => {}
                 UserCommand::CancelTask => {
@@ -1418,12 +1418,22 @@ impl ClaudeCodeRun {
         Ok(true)
     }
 
-    fn queue_context(&mut self, content: String) {
+    /// Keeps `content` for the agent until it is handed over. Context the
+    /// host sent (`from_host`) fires the arko calls' signal only when its
+    /// turn context source says so.
+    fn queue_context(&mut self, content: String, from_host: bool) {
         if !content.trim().is_empty() {
+            let wakes = !from_host
+                || self
+                    .turn_context
+                    .as_ref()
+                    .is_none_or(|source| source.wakes_calls(&content));
             self.task.pending_context_injections.push(content);
             // An arko call that waits can end, so the agent reads it with
             // that call's result.
-            self.context_arrivals.notify();
+            if wakes {
+                self.context_arrivals.notify();
+            }
         }
     }
 
@@ -1523,7 +1533,7 @@ impl ClaudeCodeRun {
                 update_ids = update.ids;
             }
             arrived = update.images.len();
-            self.queue_context(update.content);
+            self.queue_context(update.content, false);
             self.task.pending_context_images.extend(update.images);
         }
         if self.task.pending_context_injections.is_empty()
@@ -2114,7 +2124,7 @@ impl ClaudeCodeRun {
             };
         };
         match command {
-            Some(UserCommand::InjectContext { content }) => self.queue_context(content),
+            Some(UserCommand::InjectContext { content }) => self.queue_context(content, true),
             Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
             Some(UserCommand::HostDeciding) => {
                 if let Some(approval) = &mut self.approval {
@@ -4214,7 +4224,7 @@ impl ClaudeCodeRun {
             tokio::select! {
                 biased;
                 command = self.commands.recv() => match command {
-                    Some(UserCommand::InjectContext { content }) => self.queue_context(content),
+                    Some(UserCommand::InjectContext { content }) => self.queue_context(content, true),
                     Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
                     Some(UserCommand::CancelTask) => {
                         self.set_state(TaskState::Cancelled {
@@ -4411,7 +4421,7 @@ impl ClaudeCodeRun {
             .as_ref()
             .and_then(|hook| hook.on_compaction(&self.task))
         {
-            self.queue_context(context);
+            self.queue_context(context, false);
         }
         log::info!(
             "Task {}: Claude Code compacted the conversation ({input_tokens} input tokens before, {} after). The task's record keeps the full conversation.",

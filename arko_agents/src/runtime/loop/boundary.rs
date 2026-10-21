@@ -11,9 +11,16 @@ impl AgentLoop {
     /// the calls running ([`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived)).
     pub(super) fn queue_context_injection(&mut self, content: String) {
         if !content.trim().is_empty() {
+            // A call that waits can end, so the model reads it, unless the
+            // host says this content waits for the turn boundary.
+            let wakes = self
+                .turn_context
+                .as_ref()
+                .is_none_or(|source| source.wakes_calls(&content));
             self.task.pending_context_injections.push(content);
-            // A call that waits can end, so the model reads it.
-            self.context_arrivals.notify();
+            if wakes {
+                self.context_arrivals.notify();
+            }
         }
     }
 
