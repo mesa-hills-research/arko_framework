@@ -100,6 +100,27 @@ impl AsyncWrite for Replies {
     }
 }
 
+/// Spawns one run of a monitor's check with pipes. Its runs share the
+/// job's request and reply files, made by the first.
+pub(super) fn spawn_check(
+    config: &TerminalConfig,
+    command: &str,
+    cwd: &Path,
+    directory: &Path,
+) -> io::Result<ChildProcess> {
+    let paths = ControlPaths {
+        requests: directory.join("requests.ndjson"),
+        replies: directory.join("replies.ndjson"),
+    };
+    for path in [&paths.requests, &paths.replies] {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+    }
+    platform::spawn(config, command, cwd, false, &paths)
+}
+
 pub(super) fn spawn(
     config: &TerminalConfig,
     command: &str,

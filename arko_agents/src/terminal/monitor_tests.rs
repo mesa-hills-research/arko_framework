@@ -519,3 +519,201 @@ async fn monitors_stopped_by_a_restart_are_listed_and_never_run_again() {
     );
     assert!(manager.jobs().is_empty());
 }
+
+/// A checker that gives `script`'s results in turn, each taking its time
+/// (or the run's limit, as a time-out), then successes. It counts the most
+/// runs at once.
+fn scripted(
+    script: Vec<(bool, &'static str, Duration)>,
+) -> (checks::Checker, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let base = (SystemTime::now(), Instant::now());
+    let queue = Arc::new(Mutex::new(VecDeque::from(script)));
+    let (running, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let checker: checks::Checker = Arc::new({
+        let most = most.clone();
+        move |limit| {
+            let (queue, running, most) = (queue.clone(), running.clone(), most.clone());
+            Box::pin(async move {
+                most.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                let at = base.0 + (Instant::now() - base.1);
+                let (success, output, took) = queue.lock().unwrap().pop_front().unwrap_or((
+                    true,
+                    "ok",
+                    Duration::from_millis(100),
+                ));
+                tokio::time::sleep(took.min(limit)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                let timed_out = (took > limit).then_some(limit);
+                checks::CheckRun {
+                    success: success && timed_out.is_none(),
+                    exit_code: timed_out.is_none().then_some(if success { 0 } else { 1 }),
+                    timed_out,
+                    error: None,
+                    output: output.as_bytes().to_vec(),
+                    more: 0,
+                    took: took.min(limit),
+                    at,
+                }
+            })
+        }
+    });
+    (checker, most)
+}
+
+/// A check runs every interval, never two runs at once, a run that runs
+/// over its interval is stopped and counts as a failure, and each run is in
+/// the job's output. Its owner hears of a change, not of a steady result,
+/// and of several changes within an interval as one alert with their count.
+#[tokio::test(start_paused = true)]
+async fn a_check_alerts_when_its_result_changes() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let quick = Duration::from_millis(100);
+    let (checker, most) = scripted(vec![
+        (false, "down", quick),
+        (false, "down", quick),
+        (true, "ok", quick),
+        (true, "ok", quick),
+        (false, "down", Duration::from_secs(15)),
+        (true, "ok", quick),
+        (false, "down", quick),
+        (true, "ok", quick),
+    ]);
+    let options = MonitorOptions::check(10, CheckChange::Change).with_label("health");
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let start = Instant::now();
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "health".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    let first = first.expect("the first result");
+    assert_eq!(
+        (first.success, first.output.as_slice()),
+        (false, &b"down"[..])
+    );
+
+    let mut next = async || {
+        note_within(&mut receiver, Duration::from_secs(3600))
+            .await
+            .expect("a note")
+    };
+    let text = next().await;
+    assert_eq!(start.elapsed(), Duration::from_millis(22_100));
+    assert!(
+        text.starts_with(&format!(
+            "Monitor alert. The check of job {id} (`health`, every 10 s) started succeeding at "
+        )) && text.contains(" UTC, after failing for 20 s. Its output follows.\n  ok\n"),
+        "{text}"
+    );
+    // The slow run at 40 s is the next change, and three more come before
+    // the interval since the last note has passed.
+    let text = next().await;
+    assert_eq!(start.elapsed(), Duration::from_millis(82_100));
+    assert!(
+        text.contains(" changed 4 times since the last alert, and now succeeds (since "),
+        "{text}"
+    );
+    assert_eq!(
+        note_within(&mut receiver, Duration::from_secs(300)).await,
+        None,
+        "a steady result alerts no one"
+    );
+    assert_eq!(most.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let history = f.manager.status(f.owner, id, Some(0)).unwrap().output.text;
+    assert!(
+        history.contains(" UTC] exit 1, 0.1 s\ndown\n")
+            && history.contains(" UTC] timed out after 10 s\ndown\n")
+            && history.contains(" UTC] exit 0, 0.1 s\nok\n"),
+        "{history}"
+    );
+}
+
+/// A real check, run with the configured shell, gives its first result in
+/// the start's result, and its change of result reaches the owner. A check
+/// that runs over its interval is stopped. A check that can't run at all
+/// is an error, and so is a command the guard refuses.
+#[tokio::test]
+async fn a_check_runs_its_command_again_and_again() {
+    let f = fixture(MonitorLimits {
+        shortest_check: Duration::from_secs(1),
+        ..quick()
+    });
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let flag = f.root.join("ready");
+    let code = format!(
+        "print('checked', flush=True)\nsys.exit(0 if os.path.exists({:?}) else 7)",
+        flag.display().to_string()
+    );
+    let started = monitor(
+        &f,
+        &code,
+        MonitorOptions::check(1, CheckChange::Success).with_label("ready check"),
+    )
+    .await;
+    let id = started.job_id;
+    assert!(
+        started.summary.starts_with(&format!(
+            "Monitor {id} started. It runs `ready check` every 1 s and alerts you when it starts succeeding, until "
+        )) && started.summary.contains(" UTC (30 min). Its first check failed with exit code 7 in ")
+            && started.summary.ends_with(" s. Its output follows.\n  checked"),
+        "{}",
+        started.summary
+    );
+    std::fs::write(&flag, "").unwrap();
+    let text = note(&mut receiver).await;
+    assert!(
+        text.starts_with(&format!(
+            "Monitor alert. The check of job {id} (`ready check`, every 1 s) started succeeding at "
+        )) && text.contains(" Its output follows.\n  checked\n"),
+        "{text}"
+    );
+    let snapshot = f.manager.status(f.owner, id, None).unwrap();
+    assert!(!snapshot.terminal);
+    f.manager.cancel(f.owner, id).unwrap();
+    assert_eq!(ended(&f, id).await.state, JobState::Cancelled);
+
+    let slow = monitor(
+        &f,
+        "time.sleep(30)",
+        MonitorOptions::check(1, CheckChange::Change).with_label("slow"),
+    )
+    .await;
+    assert!(
+        slow.summary
+            .ends_with("Its first check timed out after 1 s, with no output."),
+        "{}",
+        slow.summary
+    );
+    f.manager.cancel(f.owner, slow.job_id).unwrap();
+
+    let refused = f
+        .manager
+        .start_monitor(
+            &f.context(),
+            "rm -rf /",
+            MonitorOptions::check(1, CheckChange::Change),
+        )
+        .await;
+    assert!(matches!(refused, Err(TerminalError::Refused(_))));
+
+    let broken = Fixture::new(|config| config.shell = f.root.join("no-such-shell"));
+    broken.manager.set_monitor_limits(quick()).unwrap();
+    let error = broken
+        .manager
+        .start_monitor(
+            &broken.context(),
+            "true",
+            MonitorOptions::check(10, CheckChange::Change),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("could not run the check: "),
+        "{error}"
+    );
+    assert!(broken.manager.jobs().is_empty());
+}

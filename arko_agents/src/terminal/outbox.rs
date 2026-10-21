@@ -5,8 +5,8 @@
 //! once with a [`JobAlert`], and the runtime it binds next gets the news.
 
 use super::monitor::{
-    AlertKind, EndReason, JobAlert, Line, MonitorLimits, MonitorTrigger, clock, clock_seconds,
-    minutes_left,
+    AlertKind, CheckChange, EndReason, JobAlert, Line, MonitorLimits, MonitorTrigger, clock,
+    clock_seconds, minutes_left,
 };
 use super::*;
 use std::time::SystemTime;
@@ -20,6 +20,17 @@ pub(super) struct Header {
     pub(super) trigger: MonitorTrigger,
 }
 
+/// A check's result, as its news gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckResult {
+    pub(super) success: bool,
+    /// What failed, as a sentence says it after "It" (`exited with code
+    /// 7`), for a failure.
+    pub(super) failure: Option<String>,
+    pub(super) output: String,
+    pub(super) at: SystemTime,
+}
+
 /// A monitor's news.
 #[derive(Debug, Clone)]
 pub(super) enum News {
@@ -29,6 +40,14 @@ pub(super) enum News {
         /// More lines matched lately than the limits call noisy.
         noisy: bool,
         at: SystemTime,
+    },
+    /// A check's result changed.
+    Check {
+        result: CheckResult,
+        /// The change is one the monitor alerts of.
+        alerts: bool,
+        /// How long the result before lasted.
+        previous_for: Duration,
     },
     /// The monitor ended.
     Ended {
@@ -52,6 +71,20 @@ struct Lines {
     rest_from: Option<u64>,
 }
 
+/// The changes of a check since its owner's last note. The first is one
+/// the monitor alerts of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Check {
+    changes: u32,
+    latest: CheckResult,
+    /// The lines of the latest result's output a note shows.
+    shown: Vec<String>,
+    /// It has more output than that.
+    cut: bool,
+    /// How long the result before the first change lasted.
+    previous_for: Duration,
+}
+
 /// How a monitor ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ended {
@@ -66,6 +99,7 @@ pub(super) struct Part {
     header: Header,
     lines: Option<Lines>,
     noisy: bool,
+    check: Option<Check>,
     ended: Option<Ended>,
     /// What of it should wake the owner, until it is announced.
     wakes: Option<AlertKind>,
@@ -75,7 +109,7 @@ impl Part {
     /// Whether the part carries an alert, which its monitor's count of
     /// alerts counts.
     fn alerts(&self) -> bool {
-        self.lines.is_some()
+        self.lines.is_some() || self.check.is_some()
     }
 }
 
@@ -98,6 +132,16 @@ impl Outbox {
 
     /// Adds `news` of `header`'s monitor.
     pub(super) fn add(&mut self, header: Header, news: News, limits: &MonitorLimits, now: Instant) {
+        // A change the monitor doesn't alert of only updates an alert that
+        // hasn't gone.
+        if let News::Check { alerts: false, .. } = news
+            && !self
+                .parts
+                .iter()
+                .any(|part| part.header.job_id == header.job_id && part.check.is_some())
+        {
+            return;
+        }
         let index = match self
             .parts
             .iter()
@@ -109,6 +153,7 @@ impl Outbox {
                     header,
                     lines: None,
                     noisy: false,
+                    check: None,
                     ended: None,
                     wakes: None,
                 });
@@ -139,6 +184,33 @@ impl Outbox {
                 }
                 part.noisy |= noisy;
                 part.wakes = Some(AlertKind::Lines);
+            }
+            News::Check {
+                result,
+                alerts,
+                previous_for,
+            } => {
+                let (shown, cut) = shown_lines(&result.output, limits);
+                match &mut part.check {
+                    Some(pending) => {
+                        pending.changes += 1;
+                        pending.latest = result;
+                        pending.shown = shown;
+                        pending.cut = cut;
+                    }
+                    None => {
+                        part.check = Some(Check {
+                            changes: 1,
+                            latest: result,
+                            shown,
+                            cut,
+                            previous_for,
+                        });
+                    }
+                }
+                if alerts {
+                    part.wakes = Some(AlertKind::Check);
+                }
             }
             News::Ended {
                 reason,
@@ -268,10 +340,99 @@ fn part_text(part: &Part, expires_at: SystemTime, alerts: u32, now: SystemTime) 
         }
         paragraphs.push(text);
     }
+    if let Some(check) = &part.check {
+        let mut text = check_text(header, check);
+        if part.ended.is_none() {
+            text.push_str(&format!(
+                "\nIt ends in {}.",
+                minutes_left(expires_at.duration_since(now).unwrap_or_default())
+            ));
+        }
+        paragraphs.push(text);
+    }
     if let Some(ended) = &part.ended {
         paragraphs.push(ended_text(header, ended, alerts));
     }
     paragraphs.join("\n\n")
+}
+
+/// The lines of a check's output a note shows, and whether there's more.
+fn shown_lines(output: &str, limits: &MonitorLimits) -> (Vec<String>, bool) {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut shown = Vec::new();
+    let mut bytes = 0;
+    let mut cut = false;
+    for line in &lines {
+        if shown.len() == limits.lines_per_note
+            || (bytes + line.len() > limits.bytes_per_note && !shown.is_empty())
+        {
+            cut = true;
+            break;
+        }
+        let mut end = line.len().min(limits.bytes_per_note);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        cut |= end < line.len();
+        bytes += end;
+        shown.push(line[..end].to_string());
+    }
+    (shown, cut)
+}
+
+/// What a note says of a check's changes.
+fn check_text(header: &Header, check: &Check) -> String {
+    let id = header.job_id;
+    let command = &header.command;
+    let every = header.trigger.named();
+    let latest = &check.latest;
+    let at = clock_seconds(latest.at);
+    let output = matches!(
+        header.trigger,
+        MonitorTrigger::Check {
+            when: CheckChange::Output,
+            ..
+        }
+    );
+    let before = calls::describe(check.previous_for);
+    let mut text = match (check.changes, output, latest.success) {
+        (1, true, _) => format!(
+            "Monitor alert. The output of the check of job {id} (`{command}`, {every}) changed at {at}, after staying the same for {before}."
+        ),
+        (1, false, true) => format!(
+            "Monitor alert. The check of job {id} (`{command}`, {every}) started succeeding at {at}, after failing for {before}."
+        ),
+        (1, false, false) => format!(
+            "Monitor alert. The check of job {id} (`{command}`, {every}) started failing at {at}, after succeeding for {before}."
+        ),
+        (changes, true, _) => format!(
+            "Monitor alert. The output of the check of job {id} (`{command}`, {every}) changed {changes} times since the last alert, most recently at {at}."
+        ),
+        (changes, false, success) => format!(
+            "Monitor alert. The check of job {id} (`{command}`, {every}) changed {changes} times since the last alert, and now {} (since {at}).",
+            if success { "succeeds" } else { "fails" }
+        ),
+    };
+    if let Some(failure) = &latest.failure {
+        text.push_str(&format!(" It {failure}."));
+    }
+    if check.shown.is_empty() {
+        text.push_str(" It printed nothing.");
+    } else {
+        text.push_str(" Its output follows.");
+        for line in &check.shown {
+            text.push_str("\n  ");
+            text.push_str(line);
+        }
+        if check.cut {
+            text.push_str("\nterminal_status shows the rest of it.");
+        }
+    }
+    text
 }
 
 /// `It alerted 4 times.`
@@ -289,6 +450,10 @@ fn ended_text(header: &Header, ended: &Ended, alerts: u32) -> String {
     let command = &header.command;
     let at = clock(ended.at);
     match &ended.reason {
+        EndReason::Expired if matches!(header.trigger, MonitorTrigger::Check { .. }) => format!(
+            "Monitor {id} (`{command}`) ended at {at}, and its checks stopped. {}",
+            alerted(alerts)
+        ),
         EndReason::Expired => format!(
             "Monitor {id} (`{command}`) ended at {at} and its command was stopped. {}",
             alerted(alerts)
@@ -666,6 +831,104 @@ mod tests {
                     "\n1 more line is in its output. terminal_status with after_output 207 reads it.\nA pattern saves turns.\n"
                 ),
             "{text}"
+        );
+    }
+
+    fn check_header(id: Uuid, when: CheckChange) -> Header {
+        Header {
+            job_id: id,
+            command: "curl -sf localhost:3000/health".into(),
+            trigger: MonitorTrigger::Check {
+                every_seconds: 15,
+                when,
+            },
+        }
+    }
+
+    fn checked(success: bool, output: &str, seconds: u64, alerts: bool) -> News {
+        News::Check {
+            result: CheckResult {
+                success,
+                failure: (!success).then(|| "exited with code 7".to_string()),
+                output: output.into(),
+                at: at(seconds),
+            },
+            alerts,
+            previous_for: Duration::from_secs(180),
+        }
+    }
+
+    /// A check's note says how its result changed and gives its output. A
+    /// check that changed several times since the last alert says how
+    /// often, and how it is now. A change it doesn't alert of goes only with
+    /// an alert.
+    #[test]
+    fn a_note_says_how_a_check_changed() {
+        let limits = MonitorLimits::default();
+        let id = Uuid::new_v4();
+        let now = Instant::now();
+        let monitors = HashMap::from([(id, (at(10 * 3600 + 70 * 60 + 30), 1))]);
+        let header = check_header(id, CheckChange::Success);
+        let mut outbox = Outbox::default();
+        outbox.add(header.clone(), checked(false, "", 10, false), &limits, now);
+        assert!(outbox.is_empty(), "a change it doesn't alert of, alone");
+        let ok = 10 * 3600 + 44 * 60 + 30;
+        outbox.add(
+            header.clone(),
+            checked(true, "{\"status\":\"ok\"}\n", ok, true),
+            &limits,
+            now,
+        );
+        assert_eq!(
+            note(&outbox.take(now), &monitors, at(ok)),
+            format!(
+                "Monitor alert. The check of job {id} (`curl -sf localhost:3000/health`, every 15 s) started succeeding at 10:44:30 UTC, after failing for 3 min. Its output follows.\n  {{\"status\":\"ok\"}}\nIt ends in 26 min."
+            )
+        );
+
+        // Flapping: the alert, then changes it doesn't alert of.
+        outbox.add(header.clone(), checked(true, "", ok, true), &limits, now);
+        outbox.add(
+            header.clone(),
+            checked(false, "", ok + 15, false),
+            &limits,
+            now,
+        );
+        outbox.add(
+            header.clone(),
+            checked(true, "", ok + 30, true),
+            &limits,
+            now,
+        );
+        outbox.add(
+            header,
+            checked(false, "refused", ok + 45, false),
+            &limits,
+            now,
+        );
+        assert_eq!(
+            note(&outbox.take(now), &monitors, at(ok)),
+            format!(
+                "Monitor alert. The check of job {id} (`curl -sf localhost:3000/health`, every 15 s) changed 4 times since the last alert, and now fails (since 10:45:15 UTC). It exited with code 7. Its output follows.\n  refused\nIt ends in 26 min."
+            )
+        );
+
+        // Its output, which runs over the limit.
+        let limits = MonitorLimits {
+            lines_per_note: 1,
+            ..MonitorLimits::default()
+        };
+        outbox.add(
+            check_header(id, CheckChange::Output),
+            checked(true, "v2\nmore", ok, true),
+            &limits,
+            now,
+        );
+        assert_eq!(
+            note(&outbox.take(now), &monitors, at(ok)),
+            format!(
+                "Monitor alert. The output of the check of job {id} (`curl -sf localhost:3000/health`, every 15 s) changed at 10:44:30 UTC, after staying the same for 3 min. Its output follows.\n  v2\nterminal_status shows the rest of it.\nIt ends in 26 min."
+            )
         );
     }
 

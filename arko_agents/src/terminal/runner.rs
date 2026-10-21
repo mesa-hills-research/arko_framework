@@ -67,7 +67,7 @@ fn readers(
     (readers, requests_task)
 }
 
-fn output(
+pub(super) fn output(
     data: &mut JobData,
     bytes: &[u8],
     log: &mut std::fs::File,

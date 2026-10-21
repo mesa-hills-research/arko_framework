@@ -1,5 +1,6 @@
-//! Monitors, jobs that watch a command for their owner and alert it of the
-//! output lines that match a pattern. Its news goes to its owner's
+//! Monitors, jobs that watch a command for their owner and alert it. A
+//! monitor alerts of the output lines that match a pattern, or of a check,
+//! run again and again, whose result changes. Its news goes to its owner's
 //! outbox, which sends one note at most each
 //! [`alert_interval`](MonitorLimits::alert_interval) for all of the owner's
 //! monitors.
@@ -9,7 +10,8 @@ use super::*;
 use std::time::SystemTime;
 use tokio::time::Instant;
 
-/// What a monitor watches. Made with [`MonitorOptions::lines`].
+/// What a monitor watches. Made with [`MonitorOptions::lines`] or
+/// [`MonitorOptions::check`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -22,17 +24,26 @@ pub enum MonitorTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pattern: Option<String>,
     },
+    /// The command, run as a check every `every_seconds`, and an alert when
+    /// its result changes as `when` says.
+    #[non_exhaustive]
+    Check {
+        every_seconds: u64,
+        #[serde(default)]
+        when: CheckChange,
+    },
 }
 
 impl MonitorTrigger {
     /// What the monitor watches, for a list (`lines that match error|warn`,
-    /// `every line`).
+    /// `every line`, `a check every 15 s`).
     pub fn watching(&self) -> String {
         match self {
             Self::Lines {
                 pattern: Some(pattern),
             } => format!("lines that match {pattern}"),
             Self::Lines { pattern: None } => "every line".to_string(),
+            Self::Check { every_seconds, .. } => format!("a check every {every_seconds} s"),
         }
     }
 
@@ -44,12 +55,55 @@ impl MonitorTrigger {
                 pattern: Some(pattern),
             } => format!("lines that match `{pattern}`"),
             Self::Lines { pattern: None } => "every line".to_string(),
+            Self::Check { every_seconds, .. } => format!("every {every_seconds} s"),
+        }
+    }
+}
+
+/// Which change of a check's result alerts its owner. See
+/// [`MonitorTrigger::Check`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckChange {
+    /// It starts succeeding (its command exits with code 0).
+    Success,
+    /// It starts failing.
+    Failure,
+    /// It starts succeeding or failing, which is the default.
+    #[default]
+    Change,
+    /// Its output changes.
+    Output,
+}
+
+impl CheckChange {
+    /// The change named as `monitor_start` takes it (`success`, `failure`,
+    /// `change` or `output`).
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "success" => Some(Self::Success),
+            "failure" => Some(Self::Failure),
+            "change" => Some(Self::Change),
+            "output" => Some(Self::Output),
+            _ => None,
+        }
+    }
+
+    /// `when it starts succeeding`, as the start's result says it.
+    fn alerts_you(self) -> &'static str {
+        match self {
+            Self::Success => "when it starts succeeding",
+            Self::Failure => "when it starts failing",
+            Self::Change => "when it starts succeeding or failing",
+            Self::Output => "when its output changes",
         }
     }
 }
 
 /// What a monitor watches and for how long, for
-/// [`TerminalManager::start_monitor`]. Made with [`lines`](Self::lines).
+/// [`TerminalManager::start_monitor`]. Made with [`lines`](Self::lines) or
+/// [`check`](Self::check).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MonitorOptions {
@@ -70,6 +124,18 @@ impl MonitorOptions {
             trigger: MonitorTrigger::Lines { pattern },
             expires_in: MonitorLimits::default().longest,
             label: None,
+        }
+    }
+
+    /// A monitor that runs the command as a check every `every_seconds`
+    /// and alerts when its result changes as `when` says.
+    pub fn check(every_seconds: u64, when: CheckChange) -> Self {
+        Self {
+            trigger: MonitorTrigger::Check {
+                every_seconds,
+                when,
+            },
+            ..Self::lines(None)
         }
     }
 
@@ -116,6 +182,8 @@ pub struct JobAlert {
 pub enum AlertKind {
     /// Output lines matched.
     Lines,
+    /// A check's result changed.
+    Check,
     /// The monitor ends soon, and its owner may keep it with a rearm.
     EndsSoon,
 }
@@ -160,6 +228,17 @@ pub struct MonitorLimits {
     /// How long a line monitor's start waits for a command that exits at
     /// once (1 second).
     pub start_wait: Duration,
+    /// The shortest interval of a check (10 seconds).
+    pub shortest_check: Duration,
+    /// The longest interval of a check (600 seconds).
+    pub longest_check: Duration,
+    /// The longest one run of a check may take (60 seconds). A run also
+    /// ends at its interval. One that runs over counts as a failure.
+    pub check_run_limit: Duration,
+    /// The bytes of a check's output compared and kept per run (4,096).
+    pub check_output_bytes: usize,
+    /// How long a check's start waits for its first result (10 seconds).
+    pub first_check_wait: Duration,
     /// The longest pattern, in characters (1,000).
     pub pattern_chars: usize,
     /// The matching lines within `noisy_window` past which an alert
@@ -185,6 +264,11 @@ impl Default for MonitorLimits {
             line_bytes: 500,
             partial_line_after: Duration::from_secs(2),
             start_wait: Duration::from_secs(1),
+            shortest_check: Duration::from_secs(10),
+            longest_check: Duration::from_secs(600),
+            check_run_limit: Duration::from_secs(60),
+            check_output_bytes: 4_096,
+            first_check_wait: Duration::from_secs(10),
             pattern_chars: 1_000,
             noisy_lines: 200,
             noisy_window: Duration::from_secs(5 * 60),
@@ -198,6 +282,9 @@ impl MonitorLimits {
             self.longest,
             self.alert_interval,
             self.partial_line_after,
+            self.shortest_check,
+            self.longest_check,
+            self.check_run_limit,
             self.noisy_window,
         ];
         if self.per_owner == 0
@@ -205,9 +292,11 @@ impl MonitorLimits {
             || durations.iter().any(|duration| {
                 duration.is_zero() || std::time::Instant::now().checked_add(*duration).is_none()
             })
+            || self.shortest_check > self.longest_check
             || self.lines_per_note == 0
             || self.bytes_per_note == 0
             || self.line_bytes == 0
+            || self.check_output_bytes == 0
             || self.pattern_chars == 0
             || [
                 self.warning_before,
@@ -215,6 +304,7 @@ impl MonitorLimits {
                 self.cache_margin,
                 self.gather,
                 self.start_wait,
+                self.first_check_wait,
             ]
             .iter()
             .any(|duration| std::time::Instant::now().checked_add(*duration).is_none())
@@ -233,7 +323,7 @@ pub struct MonitorStarted {
     pub job_id: Uuid,
     pub expires_at: SystemTime,
     /// What `monitor_start` returns. It says what the monitor watches until
-    /// when, with its output so far.
+    /// when, with its output so far, or the result of its first check.
     pub summary: String,
 }
 
@@ -598,20 +688,44 @@ pub(super) struct Watching {
 }
 
 impl Watching {
+    /// A monitor of `options`, armed from now, with its pattern compiled.
+    pub(super) fn new(
+        options: &MonitorOptions,
+        regex: Option<regex::Regex>,
+        limits: &MonitorLimits,
+    ) -> Self {
+        Self {
+            record: MonitorRecord {
+                trigger: options.trigger.clone(),
+                expires_at: SystemTime::now() + options.expires_in,
+                alerts: 0,
+            },
+            arming: Arming {
+                expires: Instant::now() + options.expires_in,
+                ending: false,
+            },
+            regex,
+            limits: limits.clone(),
+        }
+    }
+
+    /// The monitor of job `id`, which `owner` started.
+    pub(super) fn running(&self, id: Uuid, command: String, owner: Uuid) -> Running {
+        Running {
+            header: Header {
+                job_id: id,
+                command,
+                trigger: self.record.trigger.clone(),
+            },
+            owner,
+            limits: self.limits.clone(),
+        }
+    }
+
     /// What watches job `id`'s output, which `owner` started.
     pub(super) fn watch(self, id: Uuid, command: String, owner: Uuid) -> LineWatch {
-        LineWatch::new(
-            Running {
-                header: Header {
-                    job_id: id,
-                    command,
-                    trigger: self.record.trigger,
-                },
-                owner,
-                limits: self.limits,
-            },
-            self.regex,
-        )
+        let running = self.running(id, command, owner);
+        LineWatch::new(running, self.regex)
     }
 }
 
@@ -709,16 +823,23 @@ impl TerminalManager {
     /// owner's runtime as notes, gathered in the owner's outbox, which sends
     /// one note at most each
     /// [`alert_interval`](MonitorLimits::alert_interval). The monitor is a
-    /// job, so `terminal_status` reads its output, and it is listed with
+    /// job, so `terminal_status` reads its output (a check's runs, each
+    /// with its time and how it ended), and it is listed with
     /// [`JobKind::Monitor`]. It ends when `options.expires_in` has passed,
     /// stopping its command, or when the command exits.
     ///
     /// A monitor of lines runs its command in a terminal (a PTY), so
     /// programs print each line as it comes. Its start waits up to
     /// [`start_wait`](MonitorLimits::start_wait) for a command that exits at
-    /// once. The command guard checks the command, and the
-    /// [limits](Self::set_monitor_limits) bound the options and the number
-    /// of monitors.
+    /// once. A check runs its command with pipes and closed input, never
+    /// two runs at once, each stopped (with the processes it started) after
+    /// its interval or [`check_run_limit`](MonitorLimits::check_run_limit),
+    /// whichever is shorter. Its start runs the first check and waits up to
+    /// [`first_check_wait`](MonitorLimits::first_check_wait) for it, so the
+    /// result says where changes count from. A first check that can't run
+    /// at all is an error. The command guard checks the command once, and
+    /// the [limits](Self::set_monitor_limits) bound the options and the
+    /// number of monitors.
     pub async fn start_monitor(
         self: &Arc<Self>,
         context: &TaskContext<'_>,
@@ -733,20 +854,37 @@ impl TerminalManager {
             ShellDialect::from_shell(&self.config.shell),
         )?;
         let label = options.label.clone().unwrap_or_else(|| command.to_string());
-        let expires_at = SystemTime::now() + options.expires_in;
-        let watching = Watching {
-            record: MonitorRecord {
-                trigger: options.trigger.clone(),
+        let watching = Watching::new(&options, regex, &limits);
+        let expires_at = watching.record.expires_at;
+        if let MonitorTrigger::Check { .. } = options.trigger {
+            self.check_command(command, context.current_working_directory)?;
+            let config = self.config.clone();
+            let (command, cwd) = (
+                command.to_string(),
+                context.current_working_directory.to_path_buf(),
+            );
+            let keep = limits.check_output_bytes;
+            let (id, first) = self
+                .start_check(context, label.clone(), watching, move |directory| {
+                    checks::command_checker(config, command, cwd, directory, keep)
+                })
+                .await?;
+            let first = match first {
+                Some(run) => run.first_sentence(&limits),
+                None => {
+                    "Its first check is still running, and changes are judged against its result."
+                        .to_string()
+                }
+            };
+            return Ok(MonitorStarted {
+                job_id: id,
                 expires_at,
-                alerts: 0,
-            },
-            arming: Arming {
-                expires: Instant::now() + options.expires_in,
-                ending: false,
-            },
-            regex,
-            limits: limits.clone(),
-        };
+                summary: format!(
+                    "{} {first}",
+                    started_sentence(id, &label, &options.trigger, expires_at, options.expires_in)
+                ),
+            });
+        }
         let started = self.start_job(
             context,
             command,
@@ -851,11 +989,22 @@ pub(super) fn validate(
                 ))
             })
         }
+        MonitorTrigger::Check { every_seconds, .. } => {
+            let every = Duration::from_secs(*every_seconds);
+            if every < limits.shortest_check || every > limits.longest_check {
+                return Err(TerminalError::Invalid(format!(
+                    "a check runs every {} to {} seconds",
+                    limits.shortest_check.as_secs(),
+                    limits.longest_check.as_secs()
+                )));
+            }
+            Ok(None)
+        }
     }
 }
 
 /// The first sentence of `monitor_start`'s result, up to what it says of
-/// the output.
+/// the output or first check.
 pub(super) fn started_sentence(
     id: Uuid,
     command: &str,
@@ -868,6 +1017,13 @@ pub(super) fn started_sentence(
             pattern: Some(pattern),
         } => format!("alerts you of lines that match `{pattern}`"),
         MonitorTrigger::Lines { pattern: None } => "alerts you of every line".to_string(),
+        MonitorTrigger::Check {
+            every_seconds,
+            when,
+        } => format!(
+            "every {every_seconds} s and alerts you {}",
+            when.alerts_you()
+        ),
     };
     format!(
         "Monitor {id} started. It runs `{command}` {watches}, until {} ({}).",
@@ -995,8 +1151,8 @@ mod tests {
         assert!(compile("a{1000}{1000}").is_err());
     }
 
-    /// The command, the expiry and the pattern are checked against the
-    /// limits.
+    /// The command, the expiry, the pattern and the check's interval are
+    /// checked against the limits.
     #[test]
     fn options_are_checked_against_the_limits() {
         let limits = MonitorLimits::default();
@@ -1015,6 +1171,9 @@ mod tests {
                 .starts_with("the pattern isn't a regular expression this monitor can use ("),
             "{invalid}"
         );
+        assert!(check("x", MonitorOptions::check(10, CheckChange::Change)).is_ok());
+        assert!(check("x", MonitorOptions::check(9, CheckChange::Change)).is_err());
+        assert!(check("x", MonitorOptions::check(601, CheckChange::Change)).is_err());
         let lines = MonitorOptions::lines(None);
         assert!(check("x", lines.clone().with_expiry(Duration::ZERO)).is_err());
         assert!(check("x", lines.clone().with_expiry(Duration::from_secs(1801))).is_err());
@@ -1046,6 +1205,16 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"kind": "lines", "pattern": "error"})
+        );
+        assert_eq!(
+            serde_json::from_value::<MonitorTrigger>(
+                serde_json::json!({"kind": "check", "every_seconds": 15})
+            )
+            .unwrap(),
+            MonitorTrigger::Check {
+                every_seconds: 15,
+                when: CheckChange::Change
+            }
         );
         assert_eq!(
             MonitorTrigger::Lines {

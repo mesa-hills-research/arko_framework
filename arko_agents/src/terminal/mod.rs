@@ -3,6 +3,7 @@
 //! Program declarations travel over a dedicated stream. Prompt rules report
 //! possible input only. Silence and descriptor writability are never detectors.
 mod calls;
+mod checks;
 mod detection;
 mod guard;
 mod io;
@@ -18,7 +19,8 @@ pub use calls::{
 pub use detection::PromptRule;
 pub use guard::{CommandGuard, CommandRefusal, CommandRule, RuleAction, ShellDialect};
 pub use monitor::{
-    AlertKind, JobAlert, MonitorInfo, MonitorLimits, MonitorOptions, MonitorStarted, MonitorTrigger,
+    AlertKind, CheckChange, JobAlert, MonitorInfo, MonitorLimits, MonitorOptions, MonitorStarted,
+    MonitorTrigger,
 };
 pub use tools::TerminalTool;
 
