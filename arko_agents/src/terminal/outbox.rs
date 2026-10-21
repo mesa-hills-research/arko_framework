@@ -354,10 +354,12 @@ pub(super) fn note(
     parts
         .iter()
         .map(|part| {
+            // A job forgotten before its note went has no count.
             let (expires_at, alerts) = monitors
                 .get(&part.header.job_id)
-                .copied()
-                .unwrap_or((now, 0));
+                .map_or((now, None), |(expires_at, alerts)| {
+                    (*expires_at, Some(*alerts))
+                });
             part_text(part, expires_at, alerts, now)
         })
         .collect::<Vec<_>>()
@@ -365,7 +367,7 @@ pub(super) fn note(
 }
 
 /// The text of one monitor's part of a note.
-fn part_text(part: &Part, expires_at: SystemTime, alerts: u32, now: SystemTime) -> String {
+fn part_text(part: &Part, expires_at: SystemTime, alerts: Option<u32>, now: SystemTime) -> String {
     let header = &part.header;
     let id = header.job_id;
     let command = &header.command;
@@ -511,27 +513,29 @@ fn check_text(header: &Header, check: &Check) -> String {
     text
 }
 
-/// `It alerted 4 times.`
-fn alerted(alerts: u32) -> String {
+/// ` It alerted 4 times.`, or nothing when the count isn't known (the job
+/// was forgotten).
+fn alerted(alerts: Option<u32>) -> String {
     match alerts {
-        0 => "It didn't alert.".to_string(),
-        1 => "It alerted once.".to_string(),
-        count => format!("It alerted {count} times."),
+        None => String::new(),
+        Some(0) => " It didn't alert.".to_string(),
+        Some(1) => " It alerted once.".to_string(),
+        Some(count) => format!(" It alerted {count} times."),
     }
 }
 
 /// What a note says of a monitor that ended.
-fn ended_text(header: &Header, ended: &Ended, alerts: u32) -> String {
+fn ended_text(header: &Header, ended: &Ended, alerts: Option<u32>) -> String {
     let id = header.job_id;
     let command = &header.command;
     let at = clock(ended.at);
     match &ended.reason {
         EndReason::Expired if matches!(header.trigger, MonitorTrigger::Check { .. }) => format!(
-            "Monitor {id} (`{command}`) ended at {at}, and its checks stopped. {}",
+            "Monitor {id} (`{command}`) ended at {at}, and its checks stopped.{}",
             alerted(alerts)
         ),
         EndReason::Expired => format!(
-            "Monitor {id} (`{command}`) ended at {at} and its command was stopped. {}",
+            "Monitor {id} (`{command}`) ended at {at} and its command was stopped.{}",
             alerted(alerts)
         ),
         EndReason::Exited { code } => {
@@ -554,7 +558,7 @@ fn ended_text(header: &Header, ended: &Ended, alerts: u32) -> String {
         }
         EndReason::StoppedByOwner => {
             format!(
-                "Monitor {id} (`{command}`) stopped, as you asked. {}",
+                "Monitor {id} (`{command}`) stopped, as you asked.{}",
                 alerted(alerts)
             )
         }
@@ -1105,6 +1109,11 @@ mod tests {
         let text = note(&outbox.take(now), &HashMap::new(), at(11 * 3600 + 42 * 60));
         assert!(
             !text.contains("rearm") && text.contains("ended at 11:42 UTC"),
+            "{text}"
+        );
+        // Its job was forgotten, so its count of alerts isn't known.
+        assert!(
+            text.ends_with("ended at 11:42 UTC and its command was stopped."),
             "{text}"
         );
     }
