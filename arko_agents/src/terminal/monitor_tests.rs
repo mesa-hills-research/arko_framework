@@ -1219,10 +1219,10 @@ async fn a_runtime_offered_the_monitor_tools_gets_their_notes() {
         .unwrap();
 }
 
-/// A monitor that ended and was forgotten keeps its record forgotten when
-/// its news goes later.
+/// A monitor that ended and was forgotten keeps its record forgotten, and
+/// its news that hadn't gone goes with it.
 #[tokio::test]
-async fn news_of_a_forgotten_monitor_leaves_its_record_alone() {
+async fn news_of_a_forgotten_monitor_goes_with_it() {
     let f = fixture(quick());
     let id = monitor(
         &f,
@@ -1234,10 +1234,14 @@ async fn news_of_a_forgotten_monitor_leaves_its_record_alone() {
     let done = ended(&f, id).await;
     assert!(f.manager.has_news(f.owner));
     f.manager.forget(f.owner, id).unwrap();
+    assert!(!f.manager.has_news(f.owner));
     let (sender, mut receiver) = mpsc::channel(8);
     f.manager.bind_runtime(f.owner, sender.downgrade());
-    let text = note(&mut receiver).await;
-    assert!(text.contains("\n  error at exit\n"), "{text}");
+    assert!(
+        timeout(Duration::from_millis(500), receiver.recv())
+            .await
+            .is_err()
+    );
     let directory = done.log_path.parent().unwrap().to_path_buf();
     assert!(!directory.join("job.json").exists());
     assert!(directory.join("finished.json").exists());
@@ -1513,4 +1517,62 @@ async fn a_check_stopped_during_its_start_says_so() {
         "{}",
         started.summary
     );
+}
+
+/// An owner's outbox goes once it has sent everything, the news of a job
+/// that's forgotten goes with it, and an owner whose run ended keeps no
+/// cache time.
+#[tokio::test(start_paused = true)]
+async fn outboxes_and_cache_times_go_when_they_are_done() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    f.manager
+        .queue_news(f.owner, header(Uuid::new_v4()), matched("error"));
+    next_note(&mut receiver).await;
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(!f.manager.outboxes.lock().unwrap().contains_key(&f.owner));
+
+    // News of a job that's forgotten before it went.
+    let other = Uuid::new_v4();
+    let job = f
+        .manager
+        .adopt_call(
+            other,
+            Uuid::new_v4(),
+            "search",
+            "search".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(async { CallOutput::text("found") }),
+        )
+        .unwrap()
+        .job_id;
+    ended_paused_of(&f, other, job).await;
+    f.manager.queue_news(other, header(job), matched("error"));
+    f.manager.forget(other, job).unwrap();
+    assert!(!f.manager.has_monitor_news(other));
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(!f.manager.outboxes.lock().unwrap().contains_key(&other));
+
+    f.manager
+        .set_prompt_cache_expiry(other, Some(SystemTime::now() + Duration::from_secs(300)));
+    assert!(f.manager.wake_inputs(other).cache.is_some());
+    f.manager.stop_owner_watchers(other);
+    assert!(f.manager.wake_inputs(other).cache.is_none());
+}
+
+/// Waits in paused time for `owner`'s job `id` to end.
+async fn ended_paused_of(f: &Fixture, owner: Uuid, id: Uuid) {
+    for _ in 0..100 {
+        if f.manager
+            .status(owner, id, None)
+            .unwrap()
+            .state
+            .is_terminal()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("job {id} didn't end");
 }

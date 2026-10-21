@@ -1045,6 +1045,8 @@ impl TerminalManager {
         let directory = self.config.directory.join(id.to_string());
         std::fs::rename(directory.join("job.json"), directory.join("finished.json"))?;
         self.jobs.lock().unwrap().remove(&id);
+        // A monitor's news that hadn't gone goes with it.
+        self.drop_news(owner, id);
         Ok(())
     }
 

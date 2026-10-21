@@ -534,6 +534,8 @@ impl TerminalManager {
                     .then_some(data.record.job_id)
             })
             .collect();
+        // Its cache no longer matters to anyone.
+        self.set_prompt_cache_expiry(owner, None);
         watchers
             .into_iter()
             .filter(|id| self.stop_job(owner, *id, StopCause::OwnerEnded).is_ok())

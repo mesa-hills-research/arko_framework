@@ -285,6 +285,11 @@ impl Outbox {
         })
     }
 
+    /// When the interval since the owner was last sent news or woken ends.
+    fn quiet_from(&self, limits: &MonitorLimits) -> Option<Instant> {
+        self.last_went.map(|went| went + limits.alert_interval)
+    }
+
     /// Forgets monitor `id`'s warning, for a monitor that was rearmed.
     fn forget_warning(&mut self, id: Uuid) {
         for part in &mut self.parts {
@@ -598,10 +603,28 @@ impl TerminalManager {
     }
 
     /// Forgets the news of `owner`'s monitor `id`, which its owner has
-    /// been told some other way.
+    /// been told some other way, or whose job was forgotten.
     pub(super) fn drop_news(&self, owner: Uuid, id: Uuid) {
         if let Some(outbox) = self.outboxes.lock().unwrap().get_mut(&owner) {
             outbox.forget(id);
+        }
+        self.drop_empty_outbox(owner);
+    }
+
+    /// Removes `owner`'s outbox when it holds nothing, no task drives it,
+    /// and its interval has passed (else the next news wouldn't wait for
+    /// it).
+    fn drop_empty_outbox(&self, owner: Uuid) {
+        let limits = self.monitor_limits();
+        let mut outboxes = self.outboxes.lock().unwrap();
+        if outboxes.get(&owner).is_some_and(|outbox| {
+            outbox.is_empty()
+                && !outbox.driving
+                && outbox
+                    .quiet_from(&limits)
+                    .is_none_or(|quiet| quiet <= Instant::now())
+        }) {
+            outboxes.remove(&owner);
         }
     }
 
@@ -705,6 +728,7 @@ impl TerminalManager {
             if let Some(content) = self.take_note(owner) {
                 permit.send(UserCommand::InjectContext { content });
             }
+            self.drop_empty_outbox(owner);
             return;
         }
         let manager = Arc::downgrade(self);
@@ -717,7 +741,8 @@ impl TerminalManager {
 /// Sends `owner`'s news when it's due, until it has none left.
 async fn drive_outbox(manager: Weak<TerminalManager>, owner: Uuid) {
     loop {
-        let due = {
+        // When to look again, or `None` to send the news now.
+        let wait = {
             let Some(manager) = manager.upgrade() else {
                 return;
             };
@@ -726,16 +751,28 @@ async fn drive_outbox(manager: Weak<TerminalManager>, owner: Uuid) {
             let Some(outbox) = outboxes.get_mut(&owner) else {
                 return;
             };
+            let now = Instant::now();
             match outbox.due(&limits) {
-                Some(due) => due,
+                Some(due) if due > now => Some(due),
+                Some(_) => None,
+                // Emptied. It goes once its interval has passed, so owners
+                // that are gone keep none, and news that comes before that
+                // still waits for the interval.
+                None if outbox.is_empty() => match outbox.quiet_from(&limits) {
+                    Some(quiet) if quiet > now => Some(quiet),
+                    _ => {
+                        outboxes.remove(&owner);
+                        return;
+                    }
+                },
                 None => {
                     outbox.driving = false;
                     return;
                 }
             }
         };
-        if due > Instant::now() {
-            sleep_until(due).await;
+        if let Some(wait) = wait {
+            sleep_until(wait).await;
             continue;
         }
         if !send_news(&manager, owner).await
