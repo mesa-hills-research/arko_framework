@@ -1357,3 +1357,194 @@ fn base64(bytes: &[u8]) -> String {
     }
     text
 }
+
+/// A Windows workspace right under a drive's root.
+fn windows_top_level() -> Host {
+    host(
+        PathStyle {
+            windows: true,
+            ignore_case: true,
+        },
+        r"D:\RoboEnv",
+        r"C:\Users\luke",
+        &[r"C:\Users\luke\AppData\Local\Temp"],
+        &[
+            ("USERPROFILE", r"C:\Users\luke"),
+            ("TEMP", r"C:\Users\luke\AppData\Local\Temp"),
+        ],
+    )
+}
+
+/// A workspace right under a drive's root, such as `D:\RoboEnv`, holds its
+/// files like any other: commands write, move and delete inside it, while
+/// other top-level directories and the drive's root stay protected.
+#[test]
+fn a_workspace_at_the_top_of_a_drive_holds_its_files() {
+    let host = windows_top_level();
+    expect(
+        &host,
+        ShellDialect::PowerShell,
+        &[
+            (
+                Allowed,
+                r"Set-Content -Path 'D:\RoboEnv\guardtest.tmp' -Value 'x'",
+            ),
+            (
+                Allowed,
+                r"Set-Content -Path '.scratch\trademark\raw\tmview_index.html' -Value $r.Content -Encoding utf8",
+            ),
+            (
+                Allowed,
+                r"$r.Content | Out-File -Encoding utf8 D:\RoboEnv\.scratch\trademark\raw\tmview_index.html",
+            ),
+            (
+                Allowed,
+                r"python -I .scratch\trademark\scripts\tmview_run.py > .scratch\trademark\raw\tmview_studios_out.txt 2>&1",
+            ),
+            (
+                Allowed,
+                r"Move-Item 'Moonkite Studios Crescent Logo.png' 'assets\brand\moonkite-logo.png'",
+            ),
+            (Allowed, r"Remove-Item -Recurse -Force D:\RoboEnv\build"),
+            (Outside, r"Remove-Item -Recurse -Force D:\Other\build"),
+            (Protected, r"Remove-Item -Recurse -Force D:\Other"),
+            (Protected, r"Remove-Item -Recurse -Force D:\"),
+        ],
+    );
+    expect(
+        &host,
+        ShellDialect::Cmd,
+        &[
+            (Allowed, r"del D:\RoboEnv\out\old.txt"),
+            (Allowed, r"rd /s /q build"),
+            (Outside, r"del D:\Other\old.txt"),
+        ],
+    );
+}
+
+/// PowerShell's provider drives that aren't files (Env:, Variable:,
+/// Function:, Alias:) aren't paths in the working directory. The registry
+/// and the certificate store are outside it.
+#[test]
+fn powershell_provider_drives() {
+    expect(
+        &windows_top_level(),
+        ShellDialect::PowerShell,
+        &[
+            (Allowed, r"Remove-Item Env:\SSL_CERT_FILE"),
+            (
+                Allowed,
+                r"Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue",
+            ),
+            (Allowed, r"Remove-Item env:\GH_TOKEN"),
+            (Allowed, r"Set-Content Env:\MODE -Value x"),
+            (Allowed, r"Remove-Item Variable:\old"),
+            (Allowed, r"Remove-Item Function:\prompt"),
+            (Allowed, r"Remove-Item Alias:\ls"),
+            (Outside, r"Remove-Item HKCU:\Software\Example -Recurse"),
+            (Outside, r"Remove-Item -Path HKLM:\SOFTWARE\Example"),
+            (
+                Outside,
+                r"Remove-Item Registry::HKEY_CURRENT_USER\Software\Example",
+            ),
+            (Outside, r"Remove-Item Cert:\CurrentUser\My\ABC123"),
+            (Allowed, r"Remove-Item Temp:\arko-build.log"),
+            (
+                Allowed,
+                r"Remove-Item Microsoft.PowerShell.Core\FileSystem::D:\RoboEnv\out.txt",
+            ),
+            (Outside, r"Remove-Item FileSystem::D:\Other\out.txt"),
+        ],
+    );
+}
+
+/// A top-level workspace on Linux holds its files too, while a system
+/// directory as the workspace still grants nothing.
+#[test]
+fn top_level_workspaces_and_system_directories() {
+    let linux_style = PathStyle {
+        windows: false,
+        ignore_case: false,
+    };
+    expect(
+        &host(linux_style, "/data", "/home/luke", &["/tmp"], &[]),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "rm -rf build && rm -f /data/out/old.log"),
+            (Allowed, "mv a.txt b.txt"),
+            (Outside, "rm -rf /srv/build"),
+            (Protected, "rm -rf /srv"),
+        ],
+    );
+    let windows_style = PathStyle {
+        windows: true,
+        ignore_case: true,
+    };
+    expect(
+        &host(
+            windows_style,
+            r"C:\Windows",
+            r"C:\Users\luke",
+            &[r"C:\Users\luke\AppData\Local\Temp"],
+            &[],
+        ),
+        ShellDialect::PowerShell,
+        &[(Protected, r"Remove-Item -Recurse C:\Windows\Temp\x")],
+    );
+}
+
+/// After `cd` into a drive that isn't the filesystem, relative paths aren't
+/// known, so destructive commands on them need permission.
+#[test]
+fn powershell_cd_into_a_provider_drive() {
+    expect(
+        &windows_top_level(),
+        ShellDialect::PowerShell,
+        &[
+            (Outside, r"cd HKCU:\Software; Remove-Item Example -Recurse"),
+            (Outside, r"Set-Location Env:; Remove-Item GH_TOKEN"),
+            (
+                Allowed,
+                r"cd FileSystem::D:\RoboEnv\out; Remove-Item old.txt",
+            ),
+            (Allowed, r"cd D:\RoboEnv\out; Remove-Item old.txt"),
+        ],
+    );
+}
+
+#[test]
+fn powershell_provider_paths_parse() {
+    let temp = Some(r"C:\Temp");
+    let parse = |text: &str| powershell_provider(text, temp);
+    assert_eq!(parse(r"C:\work\x.txt"), None);
+    assert_eq!(parse(r"x.txt"), None);
+    assert_eq!(parse(r"..\x.txt"), None);
+    assert_eq!(parse(r"Env:\PATH"), Some(ProviderPath::NotFile));
+    assert_eq!(parse(r"ENV:PATH"), Some(ProviderPath::NotFile));
+    assert_eq!(parse(r"variable:x"), Some(ProviderPath::NotFile));
+    assert_eq!(parse(r"HKLM:\SOFTWARE"), Some(ProviderPath::Elsewhere));
+    assert_eq!(parse(r"Cert:\CurrentUser"), Some(ProviderPath::Elsewhere));
+    assert_eq!(parse(r"MyDrive:\x"), Some(ProviderPath::Elsewhere));
+    assert_eq!(
+        parse(r"Temp:\a\b.log"),
+        Some(ProviderPath::File(r"C:\Temp\a\b.log".to_string()))
+    );
+    assert_eq!(
+        powershell_provider("Temp:/a.log", Some("/tmp")),
+        Some(ProviderPath::File("/tmp/a.log".to_string()))
+    );
+    assert_eq!(
+        powershell_provider(r"Temp:\a", None),
+        Some(ProviderPath::Elsewhere)
+    );
+    assert_eq!(
+        parse(r"Microsoft.PowerShell.Core\FileSystem::C:\x"),
+        Some(ProviderPath::File(r"C:\x".to_string()))
+    );
+    assert_eq!(
+        parse(r"Registry::HKEY_CURRENT_USER\Software"),
+        Some(ProviderPath::Elsewhere)
+    );
+    assert_eq!(parse(r"Environment::PATH"), Some(ProviderPath::NotFile));
+    assert_eq!(parse(r"C:\a\b::c"), None);
+}

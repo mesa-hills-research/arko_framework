@@ -196,6 +196,10 @@ path and why, so the agent can correct the command.
 | Other paths, such as `~/Documents` or a sibling repository | Refused | `allow_outside_workspace: true`, or the path (and what is below it) in `allowed_paths` |
 | Protected paths, such as the filesystem root, drive roots and network-share roots, the home directory, its parents and other users' home directories, top-level directories (`/usr`, `/opt`, `D:\data`), system directories (`/etc`, `/var`, `/System`, `C:\Windows`, `C:\Program Files`), mounted volumes (`/Volumes/*`, `/mnt/*`, `/media/*`), and devices | Refused | Only `dangerously_allow_all_commands: true`, which turns the guard off |
 
+A working directory right under a root, such as `D:\RoboEnv` or `/data`, holds its
+files like any other working directory. One that is itself a protected place, such
+as the home directory or `C:\Windows`, allows nothing inside it.
+
 The guard reads the command in the shell's language, chosen from `shell`
 (`ShellDialect::from_shell`, for POSIX shells, `cmd.exe`, or PowerShell). It follows
 what the shell will do rather than matching command names:
@@ -226,6 +230,12 @@ what the shell will do rather than matching command names:
   the listing in a subshell or `{ … }` group), and checks `sh -c`, `bash -c`,
   `eval`, `watch`, `su -c`, `script -c`, `flock … -c`, `cmd /c`, and
   `powershell -Command` and `-EncodedCommand` text as commands.
+- In PowerShell, a path on a drive that holds no files (`Env:`, `Variable:`,
+  `Function:`, `Alias:`) isn't checked, so `Remove-Item Env:\GH_TOKEN` runs. The
+  registry and the certificate store (`HKCU:`, `HKLM:`, `Registry::…`, `Cert:`) and
+  drives a session defines count as outside the working directory. `Temp:` is the
+  temporary directory, and a `FileSystem::` path is the path it names. After a
+  `cd` into a drive that holds no files, relative paths count as outside.
 - `$(pwd)` is the working directory and `$(mktemp)` a new temporary path. A path
   it can't know in advance (other `$(…)` output, or a variable a sourced script
   may set) counts as outside the working directory. If that value could be empty

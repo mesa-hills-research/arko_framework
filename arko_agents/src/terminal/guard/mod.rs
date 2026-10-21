@@ -184,9 +184,15 @@ impl Host {
             allowed,
             env,
         };
+        // A workspace that is itself a protected place (a root, the home
+        // directory, a system directory) grants nothing. One right under the
+        // root, such as `D:\RoboEnv` or `/data`, is fine. The rule that keeps
+        // top-level directories from being deleted guards the directory
+        // itself, not what's inside it, so it doesn't count here. Speculative
+        // paths skip it the same way.
         host.workspace_usable = host.workspace.as_ref().is_some_and(|workspace| {
             !matches!(
-                host.classify_path(workspace, Op::Delete, false),
+                host.classify_path(workspace, Op::Delete, true),
                 Class::Protected(_)
             )
         });
@@ -1030,9 +1036,21 @@ impl Analysis<'_> {
     // ------------------------------------------------------------ targets
 
     fn target(&mut self, dialect: ShellDialect, scope: &Scope, word: &Word, op: Op, program: &str) {
-        let resolved = self.resolve(dialect, scope, word);
+        let mut resolved = self.resolve(dialect, scope, word);
         if resolved.aborts || resolved.text.is_empty() {
             return;
+        }
+        if dialect == ShellDialect::PowerShell {
+            match powershell_provider(&resolved.text, self.temp_text().as_deref()) {
+                None => {}
+                Some(ProviderPath::File(path)) => resolved.text = path,
+                Some(ProviderPath::NotFile) => return,
+                Some(ProviderPath::Elsewhere) => {
+                    let text = resolved.text.clone();
+                    self.record(&Located::unknown(), op, program, &text, None);
+                    return;
+                }
+            }
         }
         let note = if !resolved.empty_vars.is_empty() {
             Some(format!(
@@ -1052,6 +1070,14 @@ impl Analysis<'_> {
         for place in self.host.locate(&resolved.text, scope.cwd.as_ref()) {
             self.record(&place, op, program, &resolved.text, note.clone());
         }
+    }
+
+    /// The temporary directory, for PowerShell's `Temp:` drive.
+    fn temp_text(&self) -> Option<String> {
+        self.host
+            .temp
+            .first()
+            .map(|temp| temp.display(self.host.style))
     }
 
     fn record(&mut self, place: &Located, op: Op, program: &str, text: &str, note: Option<String>) {
@@ -1455,6 +1481,16 @@ impl Analysis<'_> {
                         && resolved.text.ends_with(':'))
                 {
                     None
+                } else if dialect == ShellDialect::PowerShell {
+                    // `cd Env:` or `cd HKCU:\Software` leaves the filesystem,
+                    // so later relative paths aren't known.
+                    match powershell_provider(&resolved.text, self.temp_text().as_deref()) {
+                        None => AbsPath::parse(self.host.style, &resolved.text, scope.cwd.as_ref()),
+                        Some(ProviderPath::File(path)) => {
+                            AbsPath::parse(self.host.style, &path, scope.cwd.as_ref())
+                        }
+                        Some(ProviderPath::NotFile | ProviderPath::Elsewhere) => None,
+                    }
                 } else {
                     AbsPath::parse(self.host.style, &resolved.text, scope.cwd.as_ref())
                 }
@@ -2641,6 +2677,76 @@ struct PowerShellArguments<'w> {
     paths: Vec<&'w Word>,
     named: Vec<&'w Word>,
     positional: Vec<&'w Word>,
+}
+
+/// What a PowerShell path that names a provider or a drive of more than one
+/// letter points to.
+#[derive(Debug, PartialEq)]
+enum ProviderPath {
+    /// A file path, as the text to check.
+    File(String),
+    /// Not a file, such as an environment variable, a variable, a function
+    /// or an alias (`Env:\X`, `Variable:\X`, `Function:\X`, `Alias:\X`).
+    NotFile,
+    /// Outside the working directory by nature, such as the registry, the
+    /// certificate store, WS-Management, or a drive the session defines,
+    /// whose place isn't known.
+    Elsewhere,
+}
+
+/// What `text` names in PowerShell when it starts with a provider
+/// (`Registry::HKEY_CURRENT_USER\…`, `Microsoft.PowerShell.Core\FileSystem::C:\…`)
+/// or a drive whose name is longer than one letter (`Env:`, `HKCU:`,
+/// `Cert:`, `Temp:`). `None` for an ordinary path. `temp` is the temporary
+/// directory, where PowerShell's `Temp:` drive points.
+fn powershell_provider(text: &str, temp: Option<&str>) -> Option<ProviderPath> {
+    let is_name = |name: &str| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some((qualifier, rest)) = text.split_once("::") {
+        let provider = match qualifier.rsplit_once('\\') {
+            // A module-qualified provider, as Get-Item shows it.
+            Some((module, provider))
+                if module
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') =>
+            {
+                provider
+            }
+            Some(_) => return None,
+            None => qualifier,
+        };
+        if !is_name(provider) {
+            return None;
+        }
+        return Some(match provider.to_ascii_lowercase().as_str() {
+            "filesystem" => ProviderPath::File(rest.to_string()),
+            "environment" | "variable" | "function" | "alias" => ProviderPath::NotFile,
+            _ => ProviderPath::Elsewhere,
+        });
+    }
+    let (drive, rest) = text.split_once(':')?;
+    if drive.len() < 2 || !is_name(drive) || !drive.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(match drive.to_ascii_lowercase().as_str() {
+        "env" | "variable" | "function" | "alias" => ProviderPath::NotFile,
+        "temp" => match temp {
+            Some(temp) => {
+                let rest = rest.trim_start_matches(['\\', '/']);
+                let separator = if temp.ends_with(['\\', '/']) {
+                    ""
+                } else if temp.starts_with('/') {
+                    "/"
+                } else {
+                    "\\"
+                };
+                ProviderPath::File(format!("{temp}{separator}{rest}"))
+            }
+            None => ProviderPath::Elsewhere,
+        },
+        _ => ProviderPath::Elsewhere,
+    })
 }
 
 fn powershell_arguments(rest: &[Word]) -> PowerShellArguments<'_> {
