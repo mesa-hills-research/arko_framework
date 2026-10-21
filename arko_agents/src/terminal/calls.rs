@@ -297,8 +297,10 @@ impl TerminalManager {
     }
 
     /// Moves `owner`'s call `tool_call_id` to the background, or all of
-    /// `owner`'s calls that can move with `None`. Returns how many moved. A
-    /// manager [closed](Self::close) for its host's exit moves none.
+    /// `owner`'s calls that can move with `None`. Returns how many were told
+    /// to move. A call that ends just then keeps its own result, so the
+    /// count can include a call that didn't move. A manager
+    /// [closed](Self::close) for its host's exit moves none.
     pub fn move_to_background(&self, owner: Uuid, tool_call_id: Option<Uuid>) -> usize {
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return 0;
@@ -341,13 +343,12 @@ impl TerminalManager {
     /// Runs the rest of `owner`'s call `tool_call_id`, which moved to the
     /// background, as a job, and returns the job's first snapshot. `stop`
     /// fires when the job is stopped (by its owner, the user, its owner's
-    /// run ending, or the host's exit), and the future is dropped
-    /// [3 seconds](CALL_STOP_GRACE) later if it hasn't ended. When the call
-    /// ends its result goes to `owner` as a note, and its log holds all of
-    /// it. Its images are saved in the job's directory, and the note names
-    /// them. The job is listed with the [background jobs](Self::background_jobs)
-    /// meanwhile, `terminal_status` reads its state, and the result once it
-    /// ended.
+    /// run ending, or the host's exit), and the future is dropped 3 seconds
+    /// later if it hasn't ended. When the call ends its result goes to
+    /// `owner` as a note, and its log holds all of it. Its images are saved
+    /// in the job's directory, and the note names them. The job is listed
+    /// with the [background jobs](Self::background_jobs) meanwhile,
+    /// `terminal_status` reads its state, and the result once it ended.
     pub fn adopt_call(
         self: &Arc<Self>,
         owner: Uuid,
