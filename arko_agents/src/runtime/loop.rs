@@ -185,6 +185,9 @@ pub struct AgentLoop {
     /// that a call the runtime waits for winds down. See
     /// [`TaskContext::stop`](crate::tool::TaskContext::stop).
     calls_stop: crate::stop::StopSource,
+    /// Notified as context arrives, for the calls running. See
+    /// [`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived).
+    context_arrivals: crate::tool::ContextSource,
     /// The plan-usage SlowDown's delay was checked against the prompt-cache
     /// lifetime (once per run).
     slow_down_cache_checked: bool,
@@ -290,6 +293,7 @@ impl AgentLoop {
             host_stop: crate::stop::StopSignal::never(),
             image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
+            context_arrivals: crate::tool::ContextSource::new(),
             slow_down_cache_checked: false,
             handover_skip_warned: false,
             tool_context_cursor: 0,
@@ -512,6 +516,10 @@ mod network_tests;
 #[cfg(test)]
 #[path = "parallel_tests.rs"]
 mod parallel_tests;
+
+#[cfg(test)]
+#[path = "background_tests.rs"]
+mod background_tests;
 
 #[cfg(test)]
 #[path = "command_wait_tests.rs"]

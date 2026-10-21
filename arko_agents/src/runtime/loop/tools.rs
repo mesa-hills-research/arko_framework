@@ -66,6 +66,7 @@ impl AgentLoop {
                 &self.task.conversation.model,
                 &self.task.conversation.messages,
             ))),
+            context: self.context_arrivals.clone(),
         })
     }
 

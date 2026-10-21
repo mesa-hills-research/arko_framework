@@ -4000,3 +4000,81 @@ async fn a_compaction_is_not_the_final_reply() {
         }
     );
 }
+
+/// A tool that says it started, then waits until context arrives for its
+/// task.
+#[derive(Debug, Default)]
+struct WaitsForContext {
+    started: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for WaitsForContext {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "waits_for_context".into(),
+            description: "Waits for context".into(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        self.started.notify_one();
+        match tokio::time::timeout(Duration::from_secs(20), context.context_arrived.arrived()).await
+        {
+            Ok(()) => Ok("context arrived".into()),
+            Err(_) => Ok("no context".into()),
+        }
+    }
+}
+
+/// Context sent while an arko tool call waits ends the wait, and goes to the
+/// agent with that call's result.
+#[tokio::test]
+async fn context_sent_while_an_arko_call_waits_ends_the_wait() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["waits_for_context"]),
+        "Wait for news.".into(),
+        fake.workspace(),
+        None,
+    );
+    let tool = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    tokio::time::timeout(Duration::from_secs(20), tool.started.notified())
+        .await
+        .expect("the call runs");
+    run.commands
+        .send(UserCommand::InjectContext {
+            content: "The build finished.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    assert_eq!(posts[0]["output"], "context arrived");
+    let context = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("The build finished."), "{context}");
+}

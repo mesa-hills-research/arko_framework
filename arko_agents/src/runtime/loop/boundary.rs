@@ -7,10 +7,13 @@ use super::*;
 impl AgentLoop {
     /// Keeps context taken from the command channel with the task
     /// ([`Task::pending_context_injections`]) until it is added to the
-    /// conversation, so a task that stops first never loses it.
+    /// conversation, so a task that stops first never loses it, and tells
+    /// the calls running ([`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived)).
     pub(super) fn queue_context_injection(&mut self, content: String) {
         if !content.trim().is_empty() {
             self.task.pending_context_injections.push(content);
+            // A call that waits can end, so the model reads it.
+            self.context_arrivals.notify();
         }
     }
 

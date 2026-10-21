@@ -69,11 +69,11 @@ pub use task::{
     RunningToolCall, Task, TaskParent, TaskState, UserTurn, UserTurnKind,
 };
 pub use tool::{
-    ImageRoom, InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
-    ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
-    ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput,
-    ToolParameterDefinition, ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor,
-    ToolTypeDetails, builtins,
+    ContextSignal, ContextSource, ImageRoom, InterceptedResult, InterceptionFailurePolicy,
+    InterceptorConfig, TaskContext, Tool, ToolCallContext, ToolDefinition, ToolError,
+    ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome,
+    ToolImage, ToolImageSink, ToolOutput, ToolParameterDefinition, ToolParameterType, ToolRecovery,
+    ToolRegistry, ToolResultInterceptor, ToolTypeDetails, builtins,
 };
 
 pub use arko_ai::ModelCallUsage;

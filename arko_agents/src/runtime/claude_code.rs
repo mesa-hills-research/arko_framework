@@ -732,6 +732,9 @@ pub(super) struct ClaudeCodeRun {
     /// Fired when the host stops the session, so that a running arko tool
     /// call winds down. See [`TaskContext::stop`](crate::tool::TaskContext::stop).
     calls_stop: crate::stop::StopSource,
+    /// Notified as context arrives, for the arko tool calls running. See
+    /// [`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived).
+    context_arrivals: crate::tool::ContextSource,
 }
 
 impl ClaudeCodeRun {
@@ -821,6 +824,7 @@ impl ClaudeCodeRun {
             host_stop: crate::stop::StopSignal::never(),
             image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
+            context_arrivals: crate::tool::ContextSource::new(),
         }
     }
 
@@ -1395,6 +1399,9 @@ impl ClaudeCodeRun {
     fn queue_context(&mut self, content: String) {
         if !content.trim().is_empty() {
             self.task.pending_context_injections.push(content);
+            // An arko call that waits can end, so the agent reads it with
+            // that call's result.
+            self.context_arrivals.notify();
         }
     }
 
@@ -1741,6 +1748,7 @@ impl ClaudeCodeRun {
                 image_sink: self.image_sink.clone(),
                 // Claude Code holds the conversation and keeps its own count.
                 image_room: None,
+                context: self.context_arrivals.clone(),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),

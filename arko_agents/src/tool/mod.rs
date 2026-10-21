@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 
+pub mod background;
 pub mod builtins;
 pub mod command_builder;
 pub mod definition;
@@ -13,6 +14,7 @@ pub mod middleware;
 pub mod registry;
 pub mod types;
 
+pub use background::{ContextSignal, ContextSource};
 pub use definition::{ToolDefinition, ToolParameterDefinition, ToolParameterType};
 pub use error::ToolError;
 pub use interceptor::{
@@ -267,10 +269,11 @@ impl ImageRoom {
 ///
 /// A host that builds one itself (to call a tool outside a runtime, or in a
 /// test) uses [`TaskContext::new`], which leaves the call fields unset and
-/// the [stop signal](Self::stop) one that never fires. The fields stay
-/// public to set afterwards. The struct is `#[non_exhaustive]`, so fields
-/// can be added without breaking callers. Outside this crate it can't be
-/// built with a struct literal.
+/// the [stop](Self::stop) and [context](Self::context_arrived) signals
+/// ones that never fire. The
+/// fields stay public to set afterwards. The struct is `#[non_exhaustive]`,
+/// so fields can be added without breaking callers. Outside this crate it
+/// can't be built with a struct literal.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TaskContext<'a> {
@@ -299,12 +302,16 @@ pub struct TaskContext<'a> {
     /// soon as `CancelTask` or `SuspendTask` arrives whatever it does, so
     /// it sees the signal only for a host's graceful stop.
     pub stop: crate::stop::StopSignal,
+    /// Fires when context (a note, a terminal update) arrives for the task
+    /// while the call runs. A tool that waits can return early, so the model
+    /// reads it.
+    pub context_arrived: ContextSignal,
 }
 
 impl<'a> TaskContext<'a> {
     /// The context of a task outside a call, with no call ID, not recovering, and
-    /// a stop signal that never fires. Set the public fields to change
-    /// them, or [`with_stop`](Self::with_stop).
+    /// stop and context signals that never fire. Set the public fields
+    /// to change them, or [`with_stop`](Self::with_stop).
     pub fn new(
         task_id: uuid::Uuid,
         agent_name: &'a str,
@@ -319,6 +326,7 @@ impl<'a> TaskContext<'a> {
             tool_call_id: None,
             recovering: false,
             stop: crate::stop::StopSignal::never(),
+            context_arrived: ContextSignal::never(),
         }
     }
 

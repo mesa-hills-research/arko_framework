@@ -4,9 +4,10 @@
 //! loop watches its command channel.
 
 use crate::tool::{
-    InterceptedResult, InterceptionFailurePolicy, TaskContext, Tool, ToolCallContext, ToolError,
-    ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome,
-    ToolImageSink, ToolOutput, ToolResultInterceptor,
+    ContextSignal, ContextSource, InterceptedResult, InterceptionFailurePolicy, TaskContext, Tool,
+    ToolCallContext, ToolError, ToolExecutionContext, ToolExecutionDecision,
+    ToolExecutionMiddleware, ToolExecutionOutcome, ToolImageSink, ToolOutput,
+    ToolResultInterceptor,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -31,11 +32,15 @@ pub(super) struct RunEnvironment {
     /// How many more images the conversation takes before a request would
     /// hold more than the model's provider takes, or `None` for no count.
     pub image_room: Option<Arc<crate::tool::ImageRoom>>,
+    /// Notified as context arrives for the task. Each call gets a signal
+    /// made as it starts. See [`TaskContext::context_arrived`].
+    pub context: ContextSource,
 }
 
 impl RunEnvironment {
-    /// What the tool (or the interceptor) of `run` sees of the task.
-    fn task_context(&self, run: &ToolRun) -> TaskContext<'_> {
+    /// What the tool (or the interceptor) of `run` sees of the task, with
+    /// the call's signal of arriving context.
+    fn task_context(&self, run: &ToolRun, context_arrived: &ContextSignal) -> TaskContext<'_> {
         TaskContext {
             task_id: self.task_id,
             agent_name: &self.agent_name,
@@ -44,6 +49,7 @@ impl RunEnvironment {
             tool_call_id: Some(run.tool_call_id),
             recovering: run.recovering,
             stop: self.stop.clone(),
+            context_arrived: context_arrived.clone(),
         }
     }
 
@@ -217,7 +223,9 @@ pub(super) async fn run_tool(
                     },
                 }
             }
-            let context = environment.task_context(&run);
+            // Context that arrives from now on reaches the call.
+            let context_arrived = environment.context.signal();
+            let context = environment.task_context(&run, &context_arrived);
             let execution_future = run.tool.execute_with_output(&context, run.params.clone());
             // Dropping the call at the limit stops it: a command it started
             // is killed with it.
@@ -325,7 +333,7 @@ async fn intercept(
 ) -> (String, bool) {
     let (tool_name, params) = (run.tool_name.as_str(), &run.params);
     let max_attempts = interception.policy.max_attempts();
-    let context = environment.task_context(run);
+    let context = environment.task_context(run, &ContextSignal::never());
     let mut last_error = None;
     for attempt in 1..=max_attempts {
         match interception
