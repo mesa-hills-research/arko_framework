@@ -1078,6 +1078,18 @@ async fn the_monitor_tools_start_list_rearm_and_stop_monitors() {
         format!("Stopped monitor {id}.")
     );
     assert_eq!(ended(&f, id).await.state, JobState::Cancelled);
+    let again = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "stop", "job_id": id.to_string()})),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        again
+            .to_string()
+            .ends_with(&format!("monitor {id} has ended already"))
+    );
     let after = control
         .execute(
             &f.context(),

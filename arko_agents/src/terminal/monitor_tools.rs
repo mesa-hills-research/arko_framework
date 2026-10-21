@@ -241,20 +241,24 @@ impl Tool for MonitorTool {
                         ))
                     }
                     "stop" => {
-                        let monitor = self
-                            .manager
-                            .owned(context.task_id, id)
-                            .map_err(tool_error)?
-                            .data
-                            .lock()
-                            .unwrap()
-                            .record
-                            .monitor
-                            .is_some();
+                        let (monitor, ended) = {
+                            let job = self
+                                .manager
+                                .owned(context.task_id, id)
+                                .map_err(tool_error)?;
+                            let data = job.data.lock().unwrap();
+                            (
+                                data.record.monitor.is_some(),
+                                data.record.state.is_terminal(),
+                            )
+                        };
                         if !monitor {
                             return Err(tool_error(format!(
                                 "job {id} isn't a monitor. terminal_control cancel stops other jobs"
                             )));
+                        }
+                        if ended {
+                            return Err(tool_error(format!("monitor {id} has ended already")));
                         }
                         self.manager
                             .cancel(context.task_id, id)
