@@ -12,7 +12,7 @@ repository = "https://github.com/mesa-hills-research/arko_framework"
 # `name.workspace = true` and may add features; features are additive.
 [workspace.dependencies]
 arko_ai = { version = "0.1.0", path = "arko_ai" }
-arko_agents = { version = "0.1.0", path = "arko_agents" }
+arko_agents = { version = "0.1.2", path = "arko_agents" }
 async-trait = "0.1.79"
 chrono = { version = "0.4.38", features = ["serde"] }
 futures = "0.3.30"
