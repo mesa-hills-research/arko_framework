@@ -767,3 +767,90 @@ fn command_template_tools_can_move_and_built_ins_cant() {
         }
     }
 }
+
+/// A tool that leaves work on another task, which watches the call's stop
+/// signal, and waits.
+#[derive(Debug, Default)]
+struct LeavesWork {
+    started: Notify,
+    /// Why the left work was told to stop, once it was.
+    stopped: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl Tool for LeavesWork {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "leaves_work".into(),
+            ..Slow::new("leaves_work", ToolBackground::Detach).definition()
+        }
+    }
+
+    fn background_mode(&self) -> ToolBackground {
+        ToolBackground::Detach
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        let (stop, stopped) = (context.stop.clone(), self.stopped.clone());
+        tokio::spawn(async move {
+            stop.stopping().await;
+            *stopped.lock().unwrap() = stop.reason();
+        });
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// Cancelling a task drops a movable call running in the foreground, and its
+/// stop signal still fires, so work it left elsewhere stops too.
+#[tokio::test]
+async fn a_cancelled_movable_call_still_sees_its_stop() {
+    let workspace = workspace();
+    let jobs = jobs(&workspace);
+    let tool = Arc::new(LeavesWork::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let (mut agent, _events, commands) = agent(
+        config(ToolCallingMode::Native, &["leaves_work"]),
+        registry,
+        &workspace,
+    );
+    agent.background_jobs = Some(jobs.clone());
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![native_call(
+            "work",
+            "leaves_work",
+            serde_json::json!({}),
+        )]));
+    let run = tokio::spawn(agent.run());
+    timeout(Duration::from_secs(10), tool.started.notified())
+        .await
+        .unwrap();
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    timeout(Duration::from_secs(10), async {
+        while tool.stopped.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the left work hears of the stop");
+    assert_eq!(
+        tool.stopped.lock().unwrap().as_deref(),
+        Some("Task cancelled.")
+    );
+    assert!(jobs.foreground_calls().is_empty() && jobs.jobs().is_empty());
+    std::fs::remove_dir_all(workspace).unwrap();
+}

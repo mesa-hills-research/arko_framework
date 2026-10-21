@@ -431,6 +431,23 @@ mod movable {
         // no longer stops it.
         let stop = StopSource::new();
         let turn_stop = std::mem::replace(&mut signals.stop, stop.signal());
+        // Forwards the turn's stop until the call moves or ends. A task of
+        // its own, since a stop that drops the call (an interruptible call
+        // cancelled) drops this future before it runs again, and work the
+        // call left on another thread still has to hear of it.
+        let (forwarding, forwarded) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn({
+            let (turn_stop, stop) = (turn_stop.clone(), stop.clone());
+            async move {
+                tokio::select! {
+                    biased;
+                    () = turn_stop.stopping() => {
+                        stop.stop(turn_stop.reason().unwrap_or_default());
+                    }
+                    _ = forwarded => {}
+                }
+            }
+        });
         let adopted = Arc::new(AtomicBool::new(false));
         let mut call = execute(environment.clone(), run, signals, Some(adopted.clone()));
         // Moves by itself after this long.
@@ -468,6 +485,8 @@ mod movable {
             match jobs.reserve_call(owner, id, &tool_name, tool_name.clone()) {
                 Ok(slot) => {
                     adopted.store(true, Ordering::Release);
+                    // From now on only the job's stop stops it.
+                    drop(forwarding);
                     let name = tool_name.clone();
                     let job = slot.run(
                         stop,
