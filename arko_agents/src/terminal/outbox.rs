@@ -641,14 +641,30 @@ impl TerminalManager {
     }
 
     /// Sends `owner`'s news to the runtime bound now, if there is one, for
-    /// a runtime that just bound.
+    /// a runtime that just bound. When its channel has room the news goes
+    /// at once, so the runtime has it before its first request.
     pub(super) fn flush_news(self: &Arc<Self>, owner: Uuid) {
-        if self.has_monitor_news(owner) {
-            let manager = Arc::downgrade(self);
-            tokio::spawn(async move {
-                send_news(&manager, owner).await;
-            });
+        if !self.has_monitor_news(owner) {
+            return;
         }
+        let sender = self
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .and_then(|binding| binding.sender.upgrade());
+        if let Some(sender) = sender
+            && let Ok(permit) = sender.try_reserve()
+        {
+            if let Some(content) = self.take_note(owner) {
+                permit.send(UserCommand::InjectContext { content });
+            }
+            return;
+        }
+        let manager = Arc::downgrade(self);
+        tokio::spawn(async move {
+            send_news(&manager, owner).await;
+        });
     }
 }
 

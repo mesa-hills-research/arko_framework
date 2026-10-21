@@ -673,6 +673,13 @@ impl TerminalManager {
         if !binding.pending.lock().unwrap().insert(id) {
             return;
         }
+        // At once when the channel has room, so a runtime that just bound
+        // has it before its first request.
+        if let Ok(permit) = sender.try_reserve() {
+            self.send_update(owner, id, &binding, |command| permit.send(command));
+            binding.pending.lock().unwrap().remove(&id);
+            return;
+        }
         let manager = Arc::downgrade(self);
         // One pending delivery per job. Reserve channel capacity before reading
         // its latest event, so backpressure coalesces superseded questions.
@@ -680,37 +687,49 @@ impl TerminalManager {
             let permit = sender.reserve_owned().await;
             let mut pending = binding.pending.lock().unwrap();
             if let (Ok(permit), Some(manager)) = (permit, manager.upgrade()) {
-                let current_binding = manager.runtimes.lock().unwrap().get(&owner).cloned();
-                let current = current_binding
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(&current.pending, &binding.pending));
-                if current && let Ok(job) = manager.owned(owner, id) {
-                    let mut data = job.data.lock().unwrap();
-                    // A held job's events wait for its release.
-                    if data.last_event.is_some()
-                        && !data.record.held
-                        && let Ok(latest) =
-                            data.snapshot(&manager.config, None, manager.config.excerpt_bytes)
-                    {
-                        // A moved call's job says how the call ended. Sent
-                        // once, so it isn't kept.
-                        let content = match data.note.take() {
-                            Some(note) => note,
-                            None => format!(
-                                "Terminal update:\n{}",
-                                serde_json::to_string(&latest)
-                                    .expect("terminal snapshot serialization")
-                            ),
-                        };
-                        permit.send(UserCommand::InjectContext { content });
-                        // Sent: a runtime the owner binds later (its next
-                        // turn) doesn't get it again.
-                        data.last_event = None;
-                    }
-                }
+                manager.send_update(owner, id, &binding, |command| {
+                    permit.send(command);
+                });
             }
             pending.remove(&id);
         });
+    }
+
+    /// Sends job `id`'s latest event to `owner`'s runtime with `send`, if
+    /// `binding` is still the owner's and the event hasn't gone.
+    fn send_update(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+        binding: &RuntimeBinding,
+        send: impl FnOnce(UserCommand),
+    ) {
+        let current_binding = self.runtimes.lock().unwrap().get(&owner).cloned();
+        let current = current_binding
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.pending, &binding.pending));
+        if current && let Ok(job) = self.owned(owner, id) {
+            let mut data = job.data.lock().unwrap();
+            // A held job's events wait for its release.
+            if data.last_event.is_some()
+                && !data.record.held
+                && let Ok(latest) = data.snapshot(&self.config, None, self.config.excerpt_bytes)
+            {
+                // A moved call's job says how the call ended. Sent once, so
+                // it isn't kept.
+                let content = match data.note.take() {
+                    Some(note) => note,
+                    None => format!(
+                        "Terminal update:\n{}",
+                        serde_json::to_string(&latest).expect("terminal snapshot serialization")
+                    ),
+                };
+                send(UserCommand::InjectContext { content });
+                // Sent: a runtime the owner binds later (its next turn)
+                // doesn't get it again.
+                data.last_event = None;
+            }
+        }
     }
 
     fn owned(&self, owner: Uuid, id: Uuid) -> Result<Arc<Job>> {

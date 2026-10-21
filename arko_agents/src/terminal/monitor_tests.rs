@@ -1279,3 +1279,33 @@ async fn a_monitor_outlasts_the_default_time_limit() {
     );
     f.manager.cancel(f.owner, id).unwrap();
 }
+
+/// A runtime that binds has the notes that waited for it in its channel at
+/// once, a job's update and its owner's monitor news, so they join its
+/// first request.
+#[tokio::test]
+async fn a_runtime_that_binds_has_its_waiting_notes_at_once() {
+    let f = Fixture::new(|_| {});
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            &f.command("print('done', flush=True)"),
+            Default::default(),
+        )
+        .unwrap()
+        .job_id;
+    f.finished(job).await;
+    f.manager
+        .queue_news(f.owner, header(Uuid::new_v4()), matched("error one"));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut notes = Vec::new();
+    while let Ok(UserCommand::InjectContext { content }) = receiver.try_recv() {
+        notes.push(content);
+    }
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].starts_with("Terminal update:\n"), "{}", notes[0]);
+    assert!(notes[1].starts_with("Monitor alert. "), "{}", notes[1]);
+    assert!(!f.manager.has_news(f.owner));
+}
