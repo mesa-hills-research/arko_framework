@@ -1346,3 +1346,25 @@ async fn the_tools_default_time_follows_the_hosts_limits() {
         f.manager.shutdown().await;
     }
 }
+
+/// When a worker's run ends while its monitor's lines wait for the
+/// interval, stopping the monitor wakes no one, and neither do those lines.
+#[tokio::test(start_paused = true)]
+async fn an_owners_end_quiets_its_monitors_waiting_news() {
+    let f = Fixture::new(|_| {});
+    let mut alerts = f.manager.subscribe_alerts();
+    let id = Uuid::new_v4();
+    f.manager
+        .queue_news(f.owner, header(id), matched("error one"));
+    f.manager.queue_news(
+        f.owner,
+        header(id),
+        News::Ended {
+            reason: EndReason::OwnerEnded,
+            at: SystemTime::now(),
+            last_lines: Vec::new(),
+        },
+    );
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(alerts.try_recv().is_err(), "no one is woken");
+}

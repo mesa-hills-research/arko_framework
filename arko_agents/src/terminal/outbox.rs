@@ -111,6 +111,10 @@ pub(super) struct Part {
     ended: Option<Ended>,
     /// What of it should wake the owner, until it is announced.
     wakes: Option<AlertKind>,
+    /// The monitor was stopped in a way that wakes no one (the user's stop,
+    /// its owner's, or the end of its owner's run), so none of its news
+    /// does.
+    quiet: bool,
 }
 
 impl Part {
@@ -165,6 +169,7 @@ impl Outbox {
                     ends_soon: None,
                     ended: None,
                     wakes: None,
+                    quiet: false,
                 });
                 self.parts.len() - 1
             }
@@ -230,7 +235,19 @@ impl Outbox {
                 at,
                 last_lines,
             } => {
+                // The warning is moot, and a stop that wakes no one wakes
+                // no one through the news before it either.
                 part.ends_soon = None;
+                if part.wakes == Some(AlertKind::EndsSoon) {
+                    part.wakes = None;
+                }
+                if matches!(
+                    reason,
+                    EndReason::StoppedByUser | EndReason::StoppedByOwner | EndReason::OwnerEnded
+                ) {
+                    part.quiet = true;
+                    part.wakes = None;
+                }
                 part.ended = Some(Ended {
                     reason,
                     at,
@@ -1065,6 +1082,44 @@ mod tests {
             !text.contains("rearm") && text.contains("ended at 11:42 UTC"),
             "{text}"
         );
+    }
+
+    /// A stop that wakes no one (the user's, the owner's, or the end of the
+    /// owner's run) takes the wake of the news that waited before it, and
+    /// any end takes a warning's. An expiry keeps an alert's wake.
+    #[test]
+    fn a_stop_that_wakes_no_one_quiets_the_news_before_it() {
+        let limits = MonitorLimits::default();
+        let now = Instant::now();
+        let id = Uuid::new_v4();
+        let ended = |reason| News::Ended {
+            reason,
+            at: at(0),
+            last_lines: Vec::new(),
+        };
+        let warning = || News::EndsSoon {
+            ends_at: at(0),
+            longest: Duration::from_secs(1800),
+        };
+        for reason in [
+            EndReason::StoppedByUser,
+            EndReason::StoppedByOwner,
+            EndReason::OwnerEnded,
+        ] {
+            let mut outbox = Outbox::default();
+            outbox.add(header(id, None), lines(&["boom"], 0), &limits, now);
+            outbox.add(header(id, None), ended(reason.clone()), &limits, now);
+            assert_eq!(outbox.announce(now, false), None, "{reason:?}");
+            assert!(!outbox.is_empty(), "the news waits for the next turn");
+        }
+        let mut outbox = Outbox::default();
+        outbox.add(header(id, None), warning(), &limits, now);
+        outbox.add(header(id, None), ended(EndReason::Expired), &limits, now);
+        assert_eq!(outbox.announce(now, false), None);
+        let mut outbox = Outbox::default();
+        outbox.add(header(id, None), lines(&["boom"], 0), &limits, now);
+        outbox.add(header(id, None), ended(EndReason::Expired), &limits, now);
+        assert_eq!(outbox.announce(now, false), Some((id, AlertKind::Lines)));
     }
 
     /// A monitor's end says how it ended, after the news that came before
