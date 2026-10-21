@@ -668,7 +668,7 @@ async fn a_handover_then_a_suspension_mid_stream_then_a_resume() {
 /// sent before and after it: the call runs to its end (its stop signal
 /// fires), the cancellation then ends the task and the call after it is
 /// answered as not run; the context taken before the cancellation is kept,
-/// and the context sent after it is never taken.
+/// and so is the context sent after it, taken as the run ends.
 #[tokio::test(start_paused = true)]
 async fn a_cancellation_waits_for_a_call_that_is_not_interruptible() {
     let mut golden = Golden::start("a_cancellation_waits_for_a_call_that_is_not_interruptible");

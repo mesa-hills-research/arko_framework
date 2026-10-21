@@ -424,6 +424,7 @@ impl AgentLoop {
     /// The end of the run, however the loop stopped: context taken is
     /// kept, the task reported, and `TaskStreamEnd` sent.
     async fn finish(mut self) -> Result<Task, ArkoAgentsError> {
+        self.take_last_context().await;
         // Whatever stopped the loop, context it took is not lost.
         self.keep_taken_context()?;
         // Reported if the host still listens.
@@ -448,6 +449,25 @@ impl AgentLoop {
             self.task.current_state
         );
         Ok(self.task)
+    }
+
+    /// Takes the context sent after the loop's last read of its channel
+    /// (a moved call's result in a note, say), which dropping the channel
+    /// would lose though its sender counts it delivered. The channel is
+    /// closed first, so anything sent later fails to send, and the sender
+    /// keeps it (a terminal note waits for the owner's next runtime).
+    async fn take_last_context(&mut self) {
+        self.command_receiver.close();
+        // `None` once the channel is empty and no sender holds a permit.
+        while let Some(command) = self.command_receiver.recv().await {
+            match command {
+                UserCommand::InjectContext { content } => self.queue_context_injection(content),
+                other => log::debug!(
+                    "Task {}: command {other:?} came after the run ended. Ignored.",
+                    self.task.id
+                ),
+            }
+        }
     }
 
     /// Whether the last `TaskStateChanged` reported the task's current

@@ -1064,3 +1064,74 @@ async fn a_cancelled_movable_call_still_sees_its_stop() {
     assert!(jobs.foreground_calls().is_empty() && jobs.jobs().is_empty());
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A moved call's note that reaches the task's channel after the loop's
+/// last read of it, as the run ends, stays with the task. Dropping the
+/// channel would lose it, though the manager counts it delivered.
+#[tokio::test]
+async fn a_note_sent_as_the_run_ends_stays_with_the_task() {
+    let workspace = workspace();
+    let jobs = jobs(&workspace);
+    let (mut agent, _events, commands) = agent(
+        config(ToolCallingMode::Native, &[]),
+        ToolRegistry::new(),
+        &workspace,
+    );
+    agent.background_jobs = Some(jobs.clone());
+    agent.bind_tools(&commands);
+    let owner = agent.task.id;
+    agent.task.set_state(TaskState::Completed {
+        summary: "done".into(),
+    });
+    let job = jobs
+        .adopt_call(
+            owner,
+            Uuid::new_v4(),
+            "slow",
+            "slow".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(async { crate::terminal::CallOutput::text("slow done") }),
+        )
+        .unwrap()
+        .job_id;
+    // Ended, and its note sent into the channel.
+    timeout(Duration::from_secs(10), async {
+        while !jobs.status(owner, job, None).unwrap().state.is_terminal() || jobs.has_news(owner) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let task = agent.finish().await.unwrap();
+    assert!(
+        task.pending_context_injections
+            .iter()
+            .any(|content| content.starts_with(&format!("Job {job} ended."))
+                && content.ends_with("slow done")),
+        "{:?}",
+        task.pending_context_injections
+    );
+    // A note sent once the run ended waits for the owner's next runtime.
+    let late = jobs
+        .adopt_call(
+            owner,
+            Uuid::new_v4(),
+            "slow",
+            "slow".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(async { crate::terminal::CallOutput::text("later") }),
+        )
+        .unwrap()
+        .job_id;
+    timeout(Duration::from_secs(10), async {
+        while !jobs.status(owner, late, None).unwrap().state.is_terminal() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(jobs.has_news(owner));
+    drop(commands);
+    std::fs::remove_dir_all(workspace).unwrap();
+}

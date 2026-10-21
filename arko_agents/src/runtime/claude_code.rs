@@ -989,6 +989,7 @@ impl ClaudeCodeRun {
             self.set_state(TaskState::InProgress).await?;
         }
         let result = self.drive().await;
+        self.take_last_context().await;
         self.report(false).await;
         let _ = self.emit(AgentEvent::TaskStreamEnd).await;
         result?;
@@ -1416,6 +1417,25 @@ impl ClaudeCodeRun {
             }
         }
         Ok(true)
+    }
+
+    /// Takes the context sent after the run's last read of its channel (a
+    /// moved call's result in a note, say), which dropping the channel
+    /// would lose though its sender counts it delivered. It waits with the
+    /// task for its next run. The channel is closed first, so anything sent
+    /// later fails to send, and the sender keeps it.
+    async fn take_last_context(&mut self) {
+        self.commands.close();
+        // `None` once the channel is empty and no sender holds a permit.
+        while let Some(command) = self.commands.recv().await {
+            match command {
+                UserCommand::InjectContext { content } => self.queue_context(content, true),
+                other => log::debug!(
+                    "Task {}: command {other:?} came after the run ended. Ignored.",
+                    self.task.id
+                ),
+            }
+        }
     }
 
     /// Keeps `content` for the agent until it is handed over. Context the
