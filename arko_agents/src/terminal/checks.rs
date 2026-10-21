@@ -316,13 +316,18 @@ pub(super) async fn run(
         let idle = current.is_none();
         let check = async {
             match current.as_mut() {
-                // A checker that overstays its limit counts as timed out.
-                Some((run, _)) => tokio::time::timeout(limit + Duration::from_secs(5), run)
-                    .await
-                    .unwrap_or_else(|_| CheckRun {
-                        timed_out: Some(limit),
-                        ..CheckRun::failed_to_run("")
-                    }),
+                // A checker that overstays its limit counts as timed out,
+                // counted from the run's start.
+                Some((run, started)) => {
+                    tokio::time::timeout_at(*started + limit + Duration::from_secs(5), run)
+                        .await
+                        .unwrap_or_else(|_| CheckRun {
+                            timed_out: Some(limit),
+                            error: None,
+                            took: started.elapsed(),
+                            ..CheckRun::failed_to_run("")
+                        })
+                }
                 None => std::future::pending().await,
             }
         };

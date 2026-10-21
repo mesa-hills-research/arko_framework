@@ -1236,3 +1236,31 @@ async fn news_of_a_forgotten_monitor_leaves_its_record_alone() {
     assert!(!directory.join("job.json").exists());
     assert!(directory.join("finished.json").exists());
 }
+
+/// A check run that never returns counts as timed out a few seconds past
+/// its limit, counted from its start, however often its monitor plans its
+/// timed events again meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_check_that_never_returns_times_out_once() {
+    let f = Fixture::new(|_| {});
+    let options = MonitorOptions::check(10, CheckChange::Change).with_label("stuck");
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let checker: checks::Checker = Arc::new(|_| Box::pin(std::future::pending()));
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "stuck".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(first.is_none(), "still running after the wait");
+    let history = || f.manager.status(f.owner, id, Some(0)).unwrap().output.text;
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        f.manager
+            .set_prompt_cache_expiry(f.owner, Some(SystemTime::now()));
+    }
+    assert!(
+        history().contains("] timed out after 10 s\n"),
+        "{}",
+        history()
+    );
+}
