@@ -224,7 +224,11 @@ news waits for the owner's next runtime, `has_news(owner)` says so (and
 the owner is announced once on `subscribe_alerts()`, as a
 `JobAlert { owner, job_id, kind }`. At most one alert goes to an owner a minute.
 A host starts a turn of the idle agent for it, and the runtime that turn binds
-gets the news at once.
+gets the news at once. A note that reached the runtime during the agent's last
+request waits in the task (`Task::pending_context_injections`) for its next
+turn, and announces nothing. `terminal::note_wakes(note)` says what such a note
+should wake the agent for (an alert, or a warning before its monitor ends), so
+the host can start that turn itself.
 
 | News | While the agent works | When it's idle |
 | --- | --- | --- |

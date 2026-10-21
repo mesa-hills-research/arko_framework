@@ -577,6 +577,40 @@ fn ended_text(header: &Header, ended: &Ended, alerts: Option<u32>) -> String {
     }
 }
 
+/// How an alert's paragraph in a note begins.
+const ALERT_START: &str = "Monitor alert. ";
+
+/// How a check's alert begins, after [`ALERT_START`].
+const CHECK_ALERT_START: &str = "Monitor alert. The ";
+
+/// How a warning's paragraph in a note ends.
+const WARNING_END: &str = "If you no longer need it, let it end.";
+
+/// What a note of the terminal manager's (the content of the
+/// `InjectContext` a runtime got) should wake its owner's idle agent for,
+/// if anything. A monitor's alert gives [`AlertKind::Lines`] or
+/// [`AlertKind::Check`], and its warning before it ends
+/// [`AlertKind::EndsSoon`]. Other notes (a monitor's end, a job's update)
+/// give `None`. A host that finds such a note still waiting in a task after
+/// its turn ended (it came during the agent's last request) can start a
+/// turn for it, as the manager would have woken the agent for it then. A
+/// warning should wake the agent only while its user counts as active.
+pub fn note_wakes(note: &str) -> Option<AlertKind> {
+    let mut wakes = None;
+    for line in note.lines() {
+        if line.starts_with(CHECK_ALERT_START) {
+            return Some(AlertKind::Check);
+        }
+        if line.starts_with(ALERT_START) {
+            return Some(AlertKind::Lines);
+        }
+        if line.starts_with("Monitor ") && line.ends_with(WARNING_END) {
+            wakes = Some(AlertKind::EndsSoon);
+        }
+    }
+    wakes
+}
+
 /// `line` or `lines`.
 fn plural(count: u64, word: &str) -> String {
     if count == 1 {
@@ -1153,6 +1187,82 @@ mod tests {
             text.ends_with("ended at 11:42 UTC and its command was stopped."),
             "{text}"
         );
+    }
+
+    /// A note's alerts and warning are told from its other news, as a host
+    /// reads them in a task.
+    #[test]
+    fn a_note_says_what_it_wakes_for() {
+        let limits = MonitorLimits::default();
+        let now = Instant::now();
+        let id = Uuid::new_v4();
+        let monitors = HashMap::from([(id, (at(11 * 3600), 1))]);
+        let text = |news: Vec<(Header, News)>| {
+            let mut outbox = Outbox::default();
+            for (header, news) in news {
+                outbox.add(header, news, &limits, now);
+            }
+            note(&outbox.take(now), &monitors, at(10 * 3600))
+        };
+        let ended = |reason| News::Ended {
+            reason,
+            at: at(0),
+            last_lines: Vec::new(),
+        };
+        let warning = News::EndsSoon {
+            ends_at: at(11 * 3600),
+            longest: Duration::from_secs(1800),
+        };
+        let checked = News::Check {
+            result: CheckResult {
+                success: true,
+                failure: None,
+                output: String::new(),
+                at: at(0),
+            },
+            alerts: true,
+            previous_for: Duration::from_secs(60),
+        };
+        let lines_header = header(id, Some("error"));
+        let check_header = Header {
+            trigger: MonitorTrigger::Check {
+                every_seconds: 15,
+                when: CheckChange::Change,
+            },
+            ..header(id, None)
+        };
+        assert_eq!(
+            note_wakes(&text(vec![(lines_header.clone(), lines(&["error"], 0))])),
+            Some(AlertKind::Lines)
+        );
+        assert_eq!(
+            note_wakes(&text(vec![(check_header, checked)])),
+            Some(AlertKind::Check)
+        );
+        assert_eq!(
+            note_wakes(&text(vec![(lines_header.clone(), warning)])),
+            Some(AlertKind::EndsSoon)
+        );
+        // An alert beside another monitor's end.
+        let other = header(Uuid::new_v4(), None);
+        assert_eq!(
+            note_wakes(&text(vec![
+                (other.clone(), ended(EndReason::Expired)),
+                (lines_header.clone(), lines(&["error"], 0)),
+            ])),
+            Some(AlertKind::Lines)
+        );
+        for reason in [
+            EndReason::Expired,
+            EndReason::StoppedByUser,
+            EndReason::Exited { code: Some(1) },
+        ] {
+            assert_eq!(
+                note_wakes(&text(vec![(other.clone(), ended(reason))])),
+                None
+            );
+        }
+        assert_eq!(note_wakes("Terminal update:\n{}"), None);
     }
 
     /// A stop that wakes no one (the user's, the owner's, or the end of the

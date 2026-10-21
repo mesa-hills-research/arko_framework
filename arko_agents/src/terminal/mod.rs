@@ -25,6 +25,7 @@ pub use monitor::{
     MonitorTrigger,
 };
 pub use monitor_tools::MonitorTool;
+pub use outbox::note_wakes;
 pub use tools::TerminalTool;
 pub use warnings::DEFAULT_WARNINGS_WAKE_WITHIN;
 
