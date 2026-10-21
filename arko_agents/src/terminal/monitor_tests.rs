@@ -1264,3 +1264,18 @@ async fn a_check_that_never_returns_times_out_once() {
         history()
     );
 }
+
+/// The terminal's default time limit doesn't end a monitor of lines, whose
+/// end is its only limit.
+#[tokio::test]
+async fn a_monitor_outlasts_the_default_time_limit() {
+    let f = Fixture::new(|config| config.default_timeout = Some(Duration::from_millis(500)));
+    f.manager.set_monitor_limits(quick()).unwrap();
+    let id = monitor(&f, "time.sleep(60)", lines("error")).await.job_id;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    f.manager.cancel(f.owner, id).unwrap();
+}

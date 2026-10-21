@@ -177,7 +177,11 @@ pub(super) async fn run(
 ) {
     let (sender, mut incoming) = mpsc::channel(32);
     let (mut readers, requests_task) = readers(&mut process, sender);
-    let timeout = options.timeout.or(config.default_timeout);
+    // A monitor's end is its only time limit.
+    let timeout = match monitor {
+        Some(_) => options.timeout,
+        None => options.timeout.or(config.default_timeout),
+    };
     let deadline = timeout.and_then(|value| Instant::now().checked_add(value));
     let mut last_output = Instant::now();
     let mut check_prompt = false;
