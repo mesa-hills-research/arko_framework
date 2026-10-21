@@ -654,7 +654,7 @@ impl Matcher {
         let matched = self.regex.as_ref().is_none_or(|regex| regex.is_match(line));
         if matched {
             self.recent.push_back(now);
-            if self.recent.len() > self.noisy_lines + 1 {
+            if self.recent.len() > self.noisy_lines.saturating_add(1) {
                 self.recent.pop_front();
             }
         }
@@ -1230,6 +1230,15 @@ mod tests {
         }
         assert!(errors.is_noisy(now));
         assert!(!errors.is_noisy(now + Duration::from_secs(61)));
+        // A host that turns the hint off.
+        let mut never = Matcher::new(
+            None,
+            &MonitorLimits {
+                noisy_lines: usize::MAX,
+                ..MonitorLimits::default()
+            },
+        );
+        assert!(never.matches("line", now) && !never.is_noisy(now));
         assert!(compile("(unclosed").unwrap_err().contains("unclosed"));
         assert!(compile("a{1000}{1000}").is_err());
     }
