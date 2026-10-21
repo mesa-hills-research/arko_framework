@@ -764,7 +764,8 @@ interceptor in it and reports no failures itself.)
 ### Interactive terminals
 
 The opt-in `terminal` module provides PTY and pipe terminal tools that run commands in the
-background and notify the agent of input requests and completion. See
+background and notify the agent of input requests and completion, and monitors that alert
+the agent of output lines that match a pattern or of a check whose result changes. See
 [interactive terminals](interactive-terminals.md).
 
 ## Running tasks

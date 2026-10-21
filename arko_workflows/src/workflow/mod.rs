@@ -1960,9 +1960,10 @@ impl WorkflowBuilder {
     /// (`TerminalManager::move_to_background`). A moved call's result reaches
     /// its agent as a note when it ends, and `wait_for_agents` and
     /// `wait_for_message` simply end when moved. When a subagent's run ends
-    /// (it finished, failed or was stopped), its moved calls stop, since
-    /// their notes would reach no one. Its commands keep running. Pass the
-    /// manager whose terminal tools the agents use, if they have them. See
+    /// (it finished, failed or was stopped), its moved calls and monitors
+    /// stop, since their notes would reach no one. Its commands keep
+    /// running. Pass the manager whose terminal tools the agents use, if
+    /// they have them. See
     /// [`AgentRuntime::with_background_jobs`](arko_agents::AgentRuntime::with_background_jobs).
     #[cfg(any(unix, windows))]
     pub fn background_jobs(mut self, jobs: Arc<arko_agents::terminal::TerminalManager>) -> Self {

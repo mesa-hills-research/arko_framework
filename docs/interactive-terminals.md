@@ -4,13 +4,15 @@
 Windows 10 1809 / Windows Server 2019 or later. A command starts as a background
 job and the tool call returns immediately. The job can accept input while it runs,
 and the host delivers input requests and completion notices to the owning agent
-through the agent runtime's context channel.
+through the agent runtime's context channel. A [monitor](#monitors) watches a
+command's output, or a check run again and again, and alerts its agent of what
+matters.
 
 ## Registering the tools
 
-Share one `TerminalManager` across the four tools. The manager's directory must
-belong to this host, because the manager takes an exclusive lock on it and keeps each
-job's artifacts in a per-job subdirectory.
+Share one `TerminalManager` across the terminal and monitor tools. The manager's
+directory must belong to this host, because the manager takes an exclusive lock on
+it and keeps each job's artifacts in a per-job subdirectory.
 
 ```rust,ignore
 use arko_agents::terminal::{TerminalConfig, TerminalManager, TerminalTool};
@@ -19,7 +21,8 @@ use arko_agents::ToolRegistry;
 let manager = TerminalManager::new(TerminalConfig::new(workspace.join(".terminal-jobs")))?;
 let mut registry = ToolRegistry::new();
 manager.register_tools(&mut registry);
-// For a plain AgentRuntime, add TerminalTool::NAMES to the agent's available tools.
+// For a plain AgentRuntime, add TerminalTool::NAMES (and MonitorTool::NAMES for
+// monitors) to the agent's available tools.
 ```
 
 With `arko_workflows`, add the tools to the selected agent:
@@ -151,6 +154,144 @@ lists the jobs that were running in the background when the last process using
 the directory stopped, or that its `shutdown` (or dropping the manager) stopped,
 so a host can tell their owners. Each open lists a job once, and held jobs are
 left out.
+
+## Monitors
+
+A monitor watches a command for its agent and alerts it, so the agent doesn't
+poll. It is a job of the manager, listed with `JobKind::Monitor(MonitorInfo {
+trigger, expires_at, alerts })`, and `terminal_status` reads its output.
+
+- `MonitorOptions::lines(pattern)` runs the command in a terminal (a PTY) until
+  it exits or the monitor ends, and each output line that matches `pattern`, a
+  regular expression, is an alert. With `None` every line is. Lines end at `\n`
+  or `\r`, so each step of a progress bar is one. They are matched without their
+  escape sequences, cut at 500 bytes, and a line without its end counts once
+  output has been quiet for 2 seconds. Patterns compile with a size limit, and
+  the `regex` crate matches in linear time.
+- `MonitorOptions::check(every_seconds, when)` runs the command as a check every
+  10 to 600 seconds, with pipes and closed input. Runs never overlap. A run is
+  stopped, with the processes it started, at its interval or after 60 seconds,
+  whichever comes first, and one that runs over counts as a failure. The owner is
+  alerted when the result changes as `CheckChange` says (`Success` when it starts
+  succeeding, `Failure` when it starts failing, `Change` for either, `Output` when
+  the first 4 KB of its output change), never while it stays the same. Each run
+  adds a line such as `[10:44:30 UTC] exit 0, 0.1 s` and its output to the job's
+  output.
+
+`start_monitor(context, command, options)` starts one for the context's task,
+after the command guard checks the command. `with_expiry` sets how long it lasts
+(30 minutes by default and at most) and `with_label` what lists show instead of
+the command. It returns `MonitorStarted { job_id, expires_at, summary }`, where
+`summary` is what the `monitor_start` tool returns. A monitor of lines waits a
+second for a command that exits at once, and a check runs its first check before
+it returns (waiting up to 10 seconds), so the start gives the state that changes
+count from.
+
+```text
+Monitor 9a1b6c2e-… started. It runs `curl -sf localhost:3000/health` every 15 s and alerts you when it starts succeeding, until 11:42 UTC (30 min). Its first check failed with exit code 7 in 0.1 s, with no output.
+```
+
+### The outbox
+
+Each owner has one outbox for all its monitors. News that comes after a quiet
+minute waits 2 seconds for more, then goes, and the owner gets at most one note a
+minute, however many monitors it has. Each monitor's part of a note shows up to
+20 lines and 2,000 bytes, counts the rest, and says where its output has them.
+
+```text
+Monitor alert. Job 7f3e9c1a-… (`npm run dev`, lines that match `error|warn`) printed 15 matching lines since 10:41:05 UTC.
+  [ERROR] Failed to compile src/app.tsx
+  [ERROR] Cannot find module './util'
+  warn: 2 deprecations
+12 more matching lines are in its output. terminal_status with after_output 18234 reads them.
+It ends in 22 min.
+```
+
+A check that changed several times since its last alert is one alert that says
+how often and how it is now. A monitor that matched more than 200 lines in 5
+minutes adds "A narrower pattern saves turns."
+
+The notes go to the owner's bound runtime as `InjectContext`, as terminal
+updates do, so they end a `wait_for_agents` or `wait_for_message` through
+`TaskContext::context_arrived`. With no runtime bound (the agent is idle), the
+news waits for the owner's next runtime, `has_news(owner)` says so, and news
+that should wake the owner is announced once on `subscribe_alerts()`, as a
+`JobAlert { owner, job_id, kind }`. At most one alert goes to an owner a minute.
+A host starts a turn of the idle agent for it, and the runtime that turn binds
+gets the news at once.
+
+| News | While the agent works | When it's idle |
+| --- | --- | --- |
+| Matching lines, a check's change | A note | `JobAlert` (`AlertKind::Lines`, `Check`) |
+| The warning before the end | A note | `JobAlert` (`AlertKind::EndsSoon`), while the user counts as active |
+| The command exited by itself | A note | `subscribe_finished`, as for other jobs |
+| It expired, or its owner or the user stopped it | A note | With the next turn, no alert |
+
+### Ending and rearming
+
+A monitor ends when its time is up, which stops its command (its job ends
+`timed_out` with the error `expired`), when its command exits, or when it is
+stopped (`cancel`, `stop_for_user`, `stop_owner_watchers`, `shutdown`). A monitor
+armed for at least 10 minutes warns its owner 5 minutes before its end, and
+`rearm(owner, job_id, lasts)` keeps it for up to 30 minutes from now and arms the
+warning again.
+
+```text
+Monitor 7f3e9c1a-… (`npm run dev`) ends in 5 min, at 11:42 UTC. monitor_control rearm keeps it going for up to 30 min from now. If you no longer need it, let it end.
+```
+
+A host can tell the manager two things that shape the warnings.
+
+- `set_prompt_cache_expiry(owner, Some(at))` says when the agent's prompt cache
+  expires (its latest model request, or a refresh, plus the cache's lifetime). A
+  warning that would come after that comes a minute before it instead and says
+  how long is left, so the turn it starts reads the conversation from the cache.
+  Monitors plan their warnings again each time the host says.
+- `set_user_active_at(at)` says when the user last wrote. Once the user hasn't
+  written for `set_warning_wakes_within` (2 hours by default,
+  `DEFAULT_WARNINGS_WAKE_WITHIN`, `None` for always), warnings no longer wake an
+  idle agent and go with its next turn. Until a host says, the user counts as
+  having written when the manager was made.
+
+`set_monitor_limits(MonitorLimits)` changes the limits for monitors started from
+then on.
+
+| Limit (`MonitorLimits`) | Default |
+| --- | --- |
+| Running monitors per owner, and of all owners (`per_owner`, `in_all`) | 5 and 20 |
+| How long a monitor lasts at most (`longest`) | 30 minutes |
+| Warning (`warning_before`, for monitors armed for at least `warned_from`) | 5 minutes before the end, from 10 minutes |
+| Early warning before the prompt cache expires (`cache_margin`) | 1 minute |
+| Least time between notes or alerts, and the wait for more (`alert_interval`, `gather`) | 1 minute and 2 seconds |
+| Lines and bytes of a monitor's news per note (`lines_per_note`, `bytes_per_note`) | 20 and 2,000 |
+| Bytes kept of a line, and the quiet before a partial line counts (`line_bytes`, `partial_line_after`) | 500 bytes and 2 seconds |
+| A line monitor's wait for a command that exits at once (`start_wait`) | 1 second |
+| A check's interval, its runs, its output compared, its first result (`shortest_check`, `longest_check`, `check_run_limit`, `check_output_bytes`, `first_check_wait`) | 10 to 600 seconds, 60 seconds, 4,096 bytes, 10 seconds |
+| A pattern's length (`pattern_chars`) | 1,000 characters |
+| Matching lines that make a pattern noisy (`noisy_lines`, `noisy_window`) | 200 in 5 minutes |
+
+A monitor is saved like any other job, with what it watches, its end and its
+count of alerts. After a restart a monitor that was running is an interrupted
+record, listed by `interrupted_at_open()`, and it never starts again, since its
+command may start a server or have other effects. `stop_owner_watchers(owner)`
+stops an owner's monitors with its moved calls. On Windows a monitor's command
+must be one line, as `cmd.exe` takes one.
+
+### The monitor tools
+
+`MonitorTool::all(manager)` gives the agent `monitor_start` and
+`monitor_control` (`MonitorTool::NAMES`), which `register_tools` registers with
+the terminal tools. As with those, an agent is offered them only when its
+allowlist names them.
+
+| Tool | Behavior |
+| --- | --- |
+| `monitor_start` | Watch `command`'s lines that match `pattern`, or with `every_seconds` run it as a check and alert as `alert_when` says (`success`, `failure`, `change` or `output`), for `expires_minutes` (1 to 30). Returns what the monitor watches until when, with its output so far or its first check's result. |
+| `monitor_control` | `list` the agent's monitors (with `job_id`, `command`, `watching`, `alerts` and `ends_in_minutes`), `rearm` one for `minutes` from now (30 by default), or `stop` one. |
+
+A Claude Code agent's monitors run in the runtime's manager like the native
+loop's. Their notes reach it with its next tool call's result (the
+`PostToolUse` hook) or at the end of its turn.
 
 ## Configuration
 
@@ -541,7 +682,9 @@ The integration tests run real shell and Python processes. They cover both
 transports, several prompt styles, request and reply IDs, repeated and withdrawn
 questions, stale and duplicate input, bounded and non-UTF-8 output, ownership,
 backpressure, cancellation and deadlines, process-group cleanup, restart records,
-and automatic runtime binding. CI runs them on Linux, macOS, and Windows.
+and automatic runtime binding, and monitors' alerts, checks, warnings and ends.
+CI runs them on Linux, macOS, and Windows. The monitors' timing tests run on
+tokio's paused clock.
 
 ```sh
 cargo test -p arko_agents --lib terminal:: --locked

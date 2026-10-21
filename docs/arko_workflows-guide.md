@@ -815,8 +815,8 @@ background, after what it collected.
 `WorkflowBuilder::background_jobs(manager)` lets every agent's long tool calls move to the
 background as jobs of an arko_agents terminal manager, which the host moves them with (see
 [Moving calls to the background](arko_agents-guide.md#moving-calls-to-the-background)).
-When a subagent's run ends, its moved calls stop, since their notes would reach no one.
-Commands it started keep running.
+When a subagent's run ends, its moved calls and monitors stop, since their notes would reach
+no one. Commands it started keep running.
 
 A subagent's `ask_user` goes to its lead as a message, and the lead's reply is the
 answer. See [background subagents](../arko_workflows/INDEX.md#background-subagents) for the tools,

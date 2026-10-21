@@ -10,8 +10,8 @@ updates, cancellation and suspension.
   `list_files`), for talking to the user (`ask_user`, `message_user`) and for finishing
   (`complete_task`)
 - Custom tools, MCP servers and skills
-- Interactive terminals in a PTY or with pipes, with background jobs, input requests and a
-  guard against destructive commands
+- Interactive terminals in a PTY or with pipes, with background jobs, input requests,
+  monitors that alert the agent, and a guard against destructive commands
 - Native tool calls, or tool calls written in the model's output for models without them
 - Approvals, workspace path rules, tool time limits and limits on tool result size
 - Recovery from failed model calls, refusals and requests over the model's input limit
@@ -126,7 +126,7 @@ cargo run -p arko_agents --example arko_agents_cli -- \
   approvals, running tasks, snapshots and recovery, monitoring, Claude Code models,
   conversation handover and refusals.
 - [Interactive terminals](../docs/interactive-terminals.md) describes the terminal tools, their
-  background jobs and the command guard.
+  background jobs, monitors and the command guard.
 - [Context management](../docs/context-efficiency.md) describes file-tree change notices,
   tool-result distillation and background shell jobs.
 - The [reference map](../docs/reference-map.md#arko_agents) lists every public type with its
