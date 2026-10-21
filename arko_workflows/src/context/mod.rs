@@ -43,6 +43,10 @@ pub struct SharedContext {
     pub(crate) handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
     /// Receives the images tool calls return (`WorkflowBuilder::tool_image_sink`).
     pub(crate) tool_image_sink: Option<Arc<dyn arko_agents::ToolImageSink>>,
+    /// The terminal manager calls move to the background with
+    /// (`WorkflowBuilder::background_jobs`).
+    #[cfg(any(unix, windows))]
+    pub(crate) background_jobs: Option<Arc<arko_agents::terminal::TerminalManager>>,
     /// Failure policy used when composing interceptors for agent runs.
     pub interception_failure_policy: InterceptionFailurePolicy,
     pub completion_verifiers: Vec<crate::verification::CompletionVerifierConfig>,

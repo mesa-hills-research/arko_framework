@@ -1028,6 +1028,12 @@ impl Board {
         self.bump();
         self.emit(&record, event);
         self.posted(ctx, &item);
+        // Its moved calls' notes would reach no one. Its commands go on (a
+        // server it started for its lead, say).
+        #[cfg(any(unix, windows))]
+        if let Some(jobs) = &ctx.background_jobs {
+            jobs.stop_owner_watchers(run_id);
+        }
         if !workflow_stopped {
             self.start_queued(ctx);
         }

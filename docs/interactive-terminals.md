@@ -141,7 +141,9 @@ call has 3 seconds to return before its future is dropped. The job ends
 `cancelled`, and the note says who stopped it and gives what the call returned
 as it stopped, if it did. `stop_owner_watchers(owner)` stops an owner's moved
 calls for a host whose agent run ended (a worker that finished), since their
-notes would reach no one. The owner's commands keep running. Neither this nor
+notes would reach no one. The owner's commands keep running. A workflow given
+the manager (`WorkflowBuilder::background_jobs`) does this for its subagents.
+Neither this nor
 `stop_for_user` is reported to `subscribe_finished`.
 
 A moved call's job is saved like any other, with its tool and call, and after a

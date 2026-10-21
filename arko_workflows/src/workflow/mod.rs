@@ -1589,6 +1589,8 @@ pub struct WorkflowBuilder {
     agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
     handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
     tool_image_sink: Option<Arc<dyn arko_agents::ToolImageSink>>,
+    #[cfg(any(unix, windows))]
+    background_jobs: Option<Arc<arko_agents::terminal::TerminalManager>>,
     completion_verifiers: Vec<CompletionVerifierConfig>,
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
@@ -1639,6 +1641,8 @@ impl WorkflowBuilder {
             agent_interceptors: HashMap::new(),
             handover_thresholds: HashMap::new(),
             tool_image_sink: None,
+            #[cfg(any(unix, windows))]
+            background_jobs: None,
             completion_verifiers: Vec::new(),
             distillation_configs: Vec::new(),
             services_config: None,
@@ -1948,6 +1952,21 @@ impl WorkflowBuilder {
     /// bytes. See [`ToolImageSink`](arko_agents::ToolImageSink).
     pub fn tool_image_sink(mut self, sink: Arc<dyn arko_agents::ToolImageSink>) -> Self {
         self.tool_image_sink = Some(sink);
+        self
+    }
+
+    /// Lets every agent's long tool calls move to the background as jobs of
+    /// `jobs`, which lists them while they run so the host can move them
+    /// (`TerminalManager::move_to_background`). A moved call's result reaches
+    /// its agent as a note when it ends, and `wait_for_agents` and
+    /// `wait_for_message` simply end when moved. When a subagent's run ends
+    /// (it finished, failed or was stopped), its moved calls stop, since
+    /// their notes would reach no one. Its commands keep running. Pass the
+    /// manager whose terminal tools the agents use, if they have them. See
+    /// [`AgentRuntime::with_background_jobs`](arko_agents::AgentRuntime::with_background_jobs).
+    #[cfg(any(unix, windows))]
+    pub fn background_jobs(mut self, jobs: Arc<arko_agents::terminal::TerminalManager>) -> Self {
+        self.background_jobs = Some(jobs);
         self
     }
 
@@ -2716,6 +2735,8 @@ impl WorkflowBuilder {
             agent_interceptors: self.agent_interceptors,
             handover_thresholds: self.handover_thresholds,
             tool_image_sink: self.tool_image_sink,
+            #[cfg(any(unix, windows))]
+            background_jobs: self.background_jobs,
             interception_failure_policy: self.interception_failure_policy.unwrap_or_default(),
             completion_verifiers: self.completion_verifiers,
             verification_attempts: parking_lot::Mutex::new(HashMap::new()),
@@ -3216,6 +3237,10 @@ mod run_stop_tests;
 #[cfg(test)]
 #[path = "user_image_tests.rs"]
 mod user_image_tests;
+
+#[cfg(all(test, any(unix, windows)))]
+#[path = "background_tests.rs"]
+mod background_tests;
 
 #[cfg(test)]
 #[path = "reconfigure_tests.rs"]

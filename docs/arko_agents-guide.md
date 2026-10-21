@@ -624,7 +624,8 @@ while it runs. A tool says how its calls move with `Tool::background_mode`.
 
 Moving needs a terminal manager, which runs the moved calls as its jobs and delivers their
 notes (see [interactive terminals](interactive-terminals.md#moved-tool-calls)). Give it to the
-runtime with `AgentRuntime::with_background_jobs(manager)`. Then, while a call of a tool that
+runtime with `AgentRuntime::with_background_jobs(manager)`, or to a workflow's agents with
+arko_workflows' `WorkflowBuilder::background_jobs(manager)`. Then, while a call of a tool that
 can move runs, the manager lists it (`foreground_calls`), and the host moves it with
 `move_to_background(task_id, Some(tool_call_id))`, or every call of a task with `None`. A
 call is listed once the execution middleware lets it run, so a call that waits for an

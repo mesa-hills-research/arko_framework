@@ -32,7 +32,8 @@ These defaults change what an agent sees of its tool results, in arko's own runt
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
 - No call moves to the background unless the runtime has a terminal manager
-  (`AgentRuntime::with_background_jobs`) and the host moves it. Calls move by themselves only after the manager's
+  (`AgentRuntime::with_background_jobs`, `WorkflowBuilder::background_jobs`) and the
+  host moves it. Calls move by themselves only after the manager's
   `set_background_after`, `None` by default. A moved call keeps its host time limit. See
   [Moving calls to the background](arko_agents-guide.md#moving-calls-to-the-background).
 

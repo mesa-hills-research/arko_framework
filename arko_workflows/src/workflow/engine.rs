@@ -3061,6 +3061,10 @@ impl WorkflowEngine {
         if let Some(sink) = &ctx.tool_image_sink {
             runtime = runtime.with_tool_image_sink(sink.clone());
         }
+        #[cfg(any(unix, windows))]
+        if let Some(jobs) = &ctx.background_jobs {
+            runtime = runtime.with_background_jobs(jobs.clone());
+        }
         // Saved as it runs, with the usage it has been charged for so far.
         let journal = self
             .persistence
