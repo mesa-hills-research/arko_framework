@@ -1200,3 +1200,27 @@ async fn a_runtime_offered_the_monitor_tools_gets_their_notes() {
         .unwrap()
         .unwrap();
 }
+
+/// A monitor that ended and was forgotten keeps its record forgotten when
+/// its news goes later.
+#[tokio::test]
+async fn news_of_a_forgotten_monitor_leaves_its_record_alone() {
+    let f = fixture(quick());
+    let id = monitor(
+        &f,
+        "time.sleep(0.3)\nprint('error at exit', flush=True)",
+        lines("error"),
+    )
+    .await
+    .job_id;
+    let done = ended(&f, id).await;
+    assert!(f.manager.has_news(f.owner));
+    f.manager.forget(f.owner, id).unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let text = note(&mut receiver).await;
+    assert!(text.contains("\n  error at exit\n"), "{text}");
+    let directory = done.log_path.parent().unwrap().to_path_buf();
+    assert!(!directory.join("job.json").exists());
+    assert!(directory.join("finished.json").exists());
+}

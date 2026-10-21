@@ -611,7 +611,9 @@ impl TerminalManager {
                 monitor.alerts += 1;
             }
             monitors.insert(id, (monitor.expires_at, monitor.alerts));
+            // An ended job's record is final, and may be forgotten.
             if part.alerts()
+                && data.record.state == JobState::Running
                 && let Err(error) = persist(&self.config, &data.record)
             {
                 log::warn!("Terminal job {id}: could not save its count of alerts: {error}");
