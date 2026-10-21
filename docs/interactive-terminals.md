@@ -100,22 +100,27 @@ idle agent. `cancel` is the owner's own stop.
 
 The manager also runs tool calls that moved to the background. While a call of a
 tool that can move runs in the foreground, `hold_call(owner, tool_call_id,
-tool_name, label)` lists it. `foreground_calls()` lists the calls that can move,
-oldest first, and `watch_foreground_calls()` changes as that list does, for a
-host that shows which calls can move. `move_to_background(owner,
-Some(tool_call_id))` moves one call, and `None` moves all of an owner's calls.
-It returns how many moved, and a manager closed for its host's exit moves none.
-The `HeldCall` guard the call holds sees the move (`is_moved`, `moved().await`,
-`signal()`), and dropping it takes the call off the list.
-`set_background_after(Some(after))` sets after how long calls move by
-themselves, read with `background_after()`. The default is `None`, never.
+tool_name, label)` lists it. A runtime given the manager
+(`AgentRuntime::with_background_jobs`) does this for the calls of tools whose
+`Tool::background_mode` isn't `Never`, once the execution middleware lets them
+run. `foreground_calls()` lists the calls that can move, oldest first, and
+`watch_foreground_calls()` changes as that list does, for a host that shows
+which calls can move. `move_to_background(owner, Some(tool_call_id))` moves one
+call, and `None` moves all of an owner's calls. It returns how many moved, and a
+manager closed for its host's exit moves none. The `HeldCall` guard the call
+holds sees the move (`is_moved`, `moved().await`, `signal()`), and dropping it
+takes the call off the list. `set_background_after(Some(after))` makes the calls
+of `Detach` tools move by themselves after running that long, read with
+`background_after()`. The default is `None`, never.
 
 `adopt_call(owner, tool_call_id, tool_name, label, stop, call)` runs the rest of
 a moved call, a future of `CallOutput { text, is_error, images }`
-(`CallOutput::text`, `CallOutput::error`, `with_images`), as a job. The job is
-listed with the background jobs, `terminal_status` and `terminal_control wait`
-read it, and `terminal_input` is refused, since a call takes no input. When the
-call ends, its owner gets a note in place of the terminal update.
+(`CallOutput::text`, `CallOutput::error`, `with_images`), as a job. The runtimes
+call it for a `Detach` call that moved, and answer the call with the job's ID.
+The job is listed with the background jobs, `terminal_status` and
+`terminal_control wait` read it, and `terminal_input` is refused, since a call
+takes no input. When the call ends, its owner gets a note in place of the
+terminal update.
 
 ```text
 Job 4d2c1a9b-… ended. It ran your index_create call, which moved to the background 4 min ago. Its result follows.
@@ -131,12 +136,13 @@ of it. Images the call returned are saved in the job's directory as
 `succeeded`, or `failed` for an error or a call that panicked.
 
 Stopping the job (`terminal_control cancel`, `stop_for_user`, `shutdown`) fires
-`stop`, and the call has 3 seconds to return before its future is dropped. The
-job ends `cancelled`, and the note says who stopped it and gives what the call
-returned as it stopped, if it did. `stop_owner_watchers(owner)` stops an owner's
-moved calls for a host whose agent run ended (a worker that finished), since
-their notes would reach no one. The owner's commands keep running. Neither this
-nor `stop_for_user` is reported to `subscribe_finished`.
+`stop`, which the runtime gives the call as its `TaskContext::stop`, and the
+call has 3 seconds to return before its future is dropped. The job ends
+`cancelled`, and the note says who stopped it and gives what the call returned
+as it stopped, if it did. `stop_owner_watchers(owner)` stops an owner's moved
+calls for a host whose agent run ended (a worker that finished), since their
+notes would reach no one. The owner's commands keep running. Neither this nor
+`stop_for_user` is reported to `subscribe_finished`.
 
 A moved call's job is saved like any other, with its tool and call, and after a
 restart it is an interrupted record, never run again. `interrupted_at_open()`

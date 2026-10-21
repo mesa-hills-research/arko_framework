@@ -344,6 +344,19 @@ impl AgentLoop {
                 )
                 .await
             }
+            // An ordinary result for now, which names the job. The call is
+            // settled with it, and its result comes as a note.
+            RunOutcome::Moved { text } => {
+                self.finish_native_result(
+                    call,
+                    tool_call_id,
+                    crate::tool::ToolOutput::text(text.clone()),
+                    text,
+                    false,
+                    message_to_agent,
+                )
+                .await
+            }
         }
     }
 

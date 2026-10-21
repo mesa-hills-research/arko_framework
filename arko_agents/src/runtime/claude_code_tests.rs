@@ -4078,3 +4078,107 @@ async fn context_sent_while_an_arko_call_waits_ends_the_wait() {
         .unwrap();
     assert!(context.contains("The build finished."), "{context}");
 }
+
+/// An arko tool that runs until the test releases it.
+#[derive(Debug, Default)]
+struct Slow {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for Slow {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "slow".into(),
+            description: "Runs until released".into(),
+            ..WaitsForContext::default().definition()
+        }
+    }
+
+    fn background_mode(&self) -> crate::tool::ToolBackground {
+        crate::tool::ToolBackground::Detach
+    }
+
+    async fn execute(
+        &self,
+        _: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok("slow done".into())
+    }
+}
+
+/// A Claude Code agent's arko call that moves answers Claude Code's MCP
+/// request at once with the moved result, and its real result reaches the
+/// agent as a note with the next call's result.
+#[tokio::test]
+async fn a_moved_arko_call_answers_claude_code_at_once() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__slow", "input": {}},
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["slow", "waits_for_context"]),
+        "Index the repository.".into(),
+        fake.workspace(),
+        None,
+    );
+    let task_id = task.id;
+    let jobs = crate::terminal::TerminalManager::new(crate::terminal::TerminalConfig::new(
+        fake.dir.join("jobs"),
+    ))
+    .unwrap();
+    let slow = Arc::new(Slow::default());
+    let waits = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(slow.clone());
+    registry.register(waits.clone());
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_background_jobs(jobs.clone())
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    tokio::time::timeout(Duration::from_secs(20), slow.started.notified())
+        .await
+        .expect("the call runs");
+    let calls = jobs.foreground_calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| (call.owner, call.tool_name.as_str()))
+            .collect::<Vec<_>>(),
+        [(task_id, "slow")]
+    );
+    assert_eq!(jobs.move_to_background(task_id, None), 1);
+    tokio::time::timeout(Duration::from_secs(20), waits.started.notified())
+        .await
+        .expect("Claude Code went on");
+    let job = jobs.jobs()[0].job_id;
+    slow.release.notify_one();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    let moved = posts[0]["output"].as_str().unwrap();
+    assert!(
+        moved.starts_with(&format!("{}{job}, ", crate::terminal::IN_THE_BACKGROUND)),
+        "{moved}"
+    );
+    assert_eq!(posts[0]["is_error"], false);
+    assert_eq!(posts[1]["output"], "context arrived");
+    let context = posts[1]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains(&format!(
+            "Job {job} ended. It ran your slow call, which moved to the background"
+        )) && context.contains("slow done"),
+        "{context}"
+    );
+}

@@ -757,6 +757,18 @@ impl AgentLoop {
                 )
                 .await
             }
+            // An ordinary result for now, which names the job.
+            RunOutcome::Moved { text } => {
+                self.finish_text_result(
+                    tool_name,
+                    tool_call_id,
+                    crate::tool::ToolOutput::text(text.clone()),
+                    text,
+                    false,
+                    message_to_agent_on_approval,
+                )
+                .await
+            }
         }
     }
 

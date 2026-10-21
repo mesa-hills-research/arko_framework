@@ -31,6 +31,10 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   set this way is a chat, and one that merely lists no tools keeps the workflow's tools.
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
+- No call moves to the background unless the runtime has a terminal manager
+  (`AgentRuntime::with_background_jobs`) and the host moves it. Calls move by themselves only after the manager's
+  `set_background_after`, `None` by default. A moved call keeps its host time limit. See
+  [Moving calls to the background](arko_agents-guide.md#moving-calls-to-the-background).
 
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
 installs an ordered list. The list fails over only when the backend refuses an account (a usage limit, or

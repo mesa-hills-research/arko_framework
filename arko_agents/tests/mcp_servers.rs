@@ -29,7 +29,8 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
     names.sort();
     assert_eq!(names, ["mcp__stub__echo", "mcp__stub__write_note"]);
 
-    // Only the tool the server marks read-only is parallel-safe.
+    // Only the tool the server marks read-only is parallel-safe. Every call
+    // can move to the background, its job awaiting the response.
     for tool in manager.tools() {
         assert_eq!(
             tool.definition().parallel_safe,
@@ -37,6 +38,7 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
             "{}",
             tool.remote_tool_name()
         );
+        assert_eq!(tool.background_mode(), arko_agents::ToolBackground::Detach);
     }
     let echo = manager
         .tools()

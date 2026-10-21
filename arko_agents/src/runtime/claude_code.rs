@@ -403,6 +403,7 @@ impl ToolHost {
             parallel_safe: false,
             interception: self.interception_for(name, tool.as_ref()),
             interruptible: tool.interruptible(),
+            background: tool.background_mode(),
             params,
             custom_output,
             tool,
@@ -482,6 +483,16 @@ impl ToolHost {
                     cc::ToolOutput::error(text),
                 )
             }
+            // Claude Code gets the job's ID now, and the result comes as a
+            // note when the job ends.
+            RunOutcome::Moved { text } => (
+                CallOutcome::Finished {
+                    raw: text.clone(),
+                    effective: text.clone(),
+                    intercepted: false,
+                },
+                served_output(text, Vec::new()),
+            ),
         }
     }
 }
@@ -735,6 +746,10 @@ pub(super) struct ClaudeCodeRun {
     /// Notified as context arrives, for the arko tool calls running. See
     /// [`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived).
     context_arrivals: crate::tool::ContextSource,
+    /// The terminal manager arko tool calls move to the background with.
+    /// See [`AgentRuntime::with_background_jobs`](super::AgentRuntime::with_background_jobs).
+    #[cfg(any(unix, windows))]
+    pub(super) background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
 }
 
 impl ClaudeCodeRun {
@@ -825,6 +840,8 @@ impl ClaudeCodeRun {
             image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
             context_arrivals: crate::tool::ContextSource::new(),
+            #[cfg(any(unix, windows))]
+            background_jobs: None,
         }
     }
 
@@ -834,6 +851,11 @@ impl ClaudeCodeRun {
             if let Some(tool) = self.registry.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
             }
+        }
+        // Its background jobs' notes go there too.
+        #[cfg(any(unix, windows))]
+        if let Some(jobs) = &self.background_jobs {
+            jobs.bind_runtime(self.task.id, sender.downgrade());
         }
     }
 
@@ -1749,6 +1771,9 @@ impl ClaudeCodeRun {
                 // Claude Code holds the conversation and keeps its own count.
                 image_room: None,
                 context: self.context_arrivals.clone(),
+                #[cfg(any(unix, windows))]
+                jobs: self.background_jobs.clone(),
+                terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),

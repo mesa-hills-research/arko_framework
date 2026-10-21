@@ -147,6 +147,12 @@ impl Tool for McpTool {
         self.definition.clone()
     }
 
+    /// A request to the server, whose response a job can go on awaiting
+    /// when the call moves to the background.
+    fn background_mode(&self) -> crate::tool::ToolBackground {
+        crate::tool::ToolBackground::Detach
+    }
+
     async fn execute(
         &self,
         context: &TaskContext<'_>,

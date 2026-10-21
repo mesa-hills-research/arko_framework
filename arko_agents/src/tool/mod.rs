@@ -14,7 +14,7 @@ pub mod middleware;
 pub mod registry;
 pub mod types;
 
-pub use background::{ContextSignal, ContextSource, MoveSignal, MoveSource};
+pub use background::{ContextSignal, ContextSource, MoveSignal, MoveSource, ToolBackground};
 pub use definition::{ToolDefinition, ToolParameterDefinition, ToolParameterType};
 pub use error::ToolError;
 pub use interceptor::{
@@ -269,8 +269,8 @@ impl ImageRoom {
 ///
 /// A host that builds one itself (to call a tool outside a runtime, or in a
 /// test) uses [`TaskContext::new`], which leaves the call fields unset and
-/// the [stop](Self::stop) and [context](Self::context_arrived) signals
-/// ones that never fire. The
+/// the [stop](Self::stop), [move](Self::moved) and
+/// [context](Self::context_arrived) signals ones that never fire. The
 /// fields stay public to set afterwards. The struct is `#[non_exhaustive]`,
 /// so fields can be added without breaking callers. Outside this crate it
 /// can't be built with a struct literal.
@@ -302,6 +302,12 @@ pub struct TaskContext<'a> {
     /// soon as `CancelTask` or `SuspendTask` arrives whatever it does, so
     /// it sees the signal only for a host's graceful stop.
     pub stop: crate::stop::StopSignal,
+    /// Fires when the host moves this call to the background. Only the calls
+    /// of a tool whose [`background_mode`](Tool::background_mode) is
+    /// [`Own`](ToolBackground::Own) see it fire. Such a tool returns soon
+    /// after, with a result that says what happened (the job its work goes
+    /// on in, a wait that ended).
+    pub moved: MoveSignal,
     /// Fires when context (a note, a terminal update) arrives for the task
     /// while the call runs. A tool that waits can return early, so the model
     /// reads it.
@@ -310,7 +316,7 @@ pub struct TaskContext<'a> {
 
 impl<'a> TaskContext<'a> {
     /// The context of a task outside a call, with no call ID, not recovering, and
-    /// stop and context signals that never fire. Set the public fields
+    /// stop, move and context signals that never fire. Set the public fields
     /// to change them, or [`with_stop`](Self::with_stop).
     pub fn new(
         task_id: uuid::Uuid,
@@ -326,6 +332,7 @@ impl<'a> TaskContext<'a> {
             tool_call_id: None,
             recovering: false,
             stop: crate::stop::StopSignal::never(),
+            moved: MoveSignal::never(),
             context_arrived: ContextSignal::never(),
         }
     }
@@ -402,6 +409,22 @@ pub trait Tool: Debug + Send + Sync {
         ToolRecovery::InDoubt
     }
 
+    /// How a running call of this tool can move to the background, when its
+    /// runtime has a terminal manager for background jobs
+    /// ([`AgentRuntime::with_background_jobs`](crate::runtime::AgentRuntime::with_background_jobs)).
+    /// Defaults to [`ToolBackground::Never`].
+    /// [`Detach`](ToolBackground::Detach) suits a call that just awaits its
+    /// result, such as an MCP request or a command. The runtime moves its
+    /// future to a job, which goes on after the turn and sends the result as
+    /// a note. Its host time limit still counts from the call's start, and
+    /// its [`TaskContext::stop`] then fires when the job is stopped instead
+    /// of when the turn is. [`Own`](ToolBackground::Own) suits a tool that
+    /// moves its work itself, or a wait that can simply end. It watches
+    /// [`TaskContext::moved`].
+    fn background_mode(&self) -> ToolBackground {
+        ToolBackground::Never
+    }
+
     /// Discard delivery baselines when a task starts or resumes in a runtime.
     fn reset_context(&self, _task_id: uuid::Uuid) {}
 
@@ -474,6 +497,11 @@ impl EndUserTool {
 impl Tool for EndUserTool {
     fn definition(&self) -> ToolDefinition {
         self.definition.clone()
+    }
+
+    /// A command, which goes on as a background job when the call moves.
+    fn background_mode(&self) -> ToolBackground {
+        ToolBackground::Detach
     }
 
     async fn execute(

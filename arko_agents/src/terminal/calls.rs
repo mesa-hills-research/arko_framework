@@ -874,3 +874,51 @@ fn cut(body: &str, log_path: &Path, log_truncated: bool) -> String {
         &body[tail_start..]
     )
 }
+
+/// The result a call gets as it moves to the background, by the user or
+/// (`after`) because it ran longer than that. `elapsed` is how long it ran,
+/// `limit` its host time limit, and `terminal_tools` whether the agent has
+/// `terminal_status` and `terminal_control`.
+pub(crate) fn moved_result(
+    job: &TerminalSnapshot,
+    elapsed: Duration,
+    after: Option<Duration>,
+    limit: Option<Duration>,
+    terminal_tools: bool,
+) -> String {
+    let why = match after {
+        Some(after) => format!(
+            "It ran longer than {}, so it moved to the background.",
+            describe_words(after)
+        ),
+        None => "The user moved this call to the background.".to_string(),
+    };
+    let limit = match limit {
+        Some(limit) => format!(
+            " It goes on running until it ends or reaches its time limit of {}.",
+            describe_words(limit)
+        ),
+        None => " It goes on running.".to_string(),
+    };
+    let tools = if terminal_tools {
+        " terminal_status shows whether it still runs, and terminal_control waits for it or stops it."
+    } else {
+        ""
+    };
+    format!(
+        "{IN_THE_BACKGROUND}{}, {:.1} s\n{why}{limit} Its result reaches you as a note when it ends.{tools}",
+        job.job_id,
+        elapsed.as_secs_f64()
+    )
+}
+
+/// `10 minutes`, `1 hour`, `90 seconds`.
+fn describe_words(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (count, unit) = match seconds {
+        seconds if seconds >= 3600 && seconds % 3600 == 0 => (seconds / 3600, "hour"),
+        seconds if seconds >= 60 && seconds % 60 == 0 => (seconds / 60, "minute"),
+        seconds => (seconds, "second"),
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
+}

@@ -9,6 +9,7 @@ mod io;
 mod runner;
 mod tools;
 
+pub(crate) use calls::moved_result;
 pub use calls::{
     CALL_NOTE_CHARS, CallOutput, ForegroundCall, HeldCall, IN_THE_BACKGROUND, JobInfo, JobKind,
 };

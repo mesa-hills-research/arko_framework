@@ -112,6 +112,8 @@ pub struct AgentRuntime {
     task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
     stop_signal: StopSignal,
     image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
+    #[cfg(any(unix, windows))]
+    background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
 }
 
 impl AgentRuntime {
@@ -126,6 +128,8 @@ impl AgentRuntime {
             task_snapshots: None,
             stop_signal: StopSignal::never(),
             image_sink: None,
+            #[cfg(any(unix, windows))]
+            background_jobs: None,
         }
     }
 
@@ -134,6 +138,26 @@ impl AgentRuntime {
     /// [`ToolImageSink`](crate::tool::ToolImageSink).
     pub fn with_tool_image_sink(mut self, sink: Arc<dyn crate::tool::ToolImageSink>) -> Self {
         self.image_sink = Some(sink);
+        self
+    }
+
+    /// Lets the tool calls of the tasks this runtime runs move to the
+    /// background as jobs of `jobs`. While a call of a tool whose
+    /// [`background_mode`](crate::tool::Tool::background_mode) isn't `Never`
+    /// runs, `jobs` lists it
+    /// ([`foreground_calls`](crate::terminal::TerminalManager::foreground_calls)),
+    /// and the host moves it with
+    /// [`move_to_background`](crate::terminal::TerminalManager::move_to_background).
+    /// A [`Detach`](crate::tool::ToolBackground::Detach) call then goes on as
+    /// a job, the model gets the job's ID as the call's result, and the
+    /// result reaches the task as a note when it ends. An
+    /// [`Own`](crate::tool::ToolBackground::Own) tool sees
+    /// [`TaskContext::moved`](crate::tool::TaskContext::moved) fire. The
+    /// tasks are bound to `jobs` for the notes. A Claude Code agent's arko
+    /// tool calls move the same way.
+    #[cfg(any(unix, windows))]
+    pub fn with_background_jobs(mut self, jobs: Arc<crate::terminal::TerminalManager>) -> Self {
+        self.background_jobs = Some(jobs);
         self
     }
 
@@ -300,6 +324,10 @@ impl AgentRuntime {
             run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
             run.host_stop = self.stop_signal.clone();
             run.image_sink = self.image_sink.clone();
+            #[cfg(any(unix, windows))]
+            {
+                run.background_jobs = self.background_jobs.clone();
+            }
             run.bind_tools(&command_sender);
             let join_handle = tokio::spawn(async move { run.run().await });
             return (event_receiver, command_sender, join_handle);
@@ -323,6 +351,10 @@ impl AgentRuntime {
         agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
         agent_loop.host_stop = self.stop_signal.clone();
         agent_loop.image_sink = self.image_sink.clone();
+        #[cfg(any(unix, windows))]
+        {
+            agent_loop.background_jobs = self.background_jobs.clone();
+        }
         agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });

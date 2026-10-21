@@ -611,6 +611,60 @@ A host or a test that runs a tool itself makes the signal with `ContextSource::n
 the field from its `signal()`, and fires it with `notify()`. `TaskContext::new` gives a
 signal that never fires.
 
+### Moving calls to the background
+
+A call that runs long can move to the background, so the agent goes on with other work
+while it runs. A tool says how its calls move with `Tool::background_mode`.
+
+| `ToolBackground` | What a move does | For |
+|---|---|---|
+| `Never` (the default) | Nothing. The call can't move. | Quick calls, and calls whose result has to come in the turn |
+| `Detach` | The runtime moves the call's future to a background job, answers the call with the job's ID, and sends the real result as a note when the job ends | Calls that just await their result. `McpTool` and command-template tools are `Detach`. |
+| `Own` | `TaskContext::moved` fires, and the tool returns soon after with a result that says what happened | A tool that moves its own work (a command it runs as a terminal job), or a wait that can simply end |
+
+Moving needs a terminal manager, which runs the moved calls as its jobs and delivers their
+notes (see [interactive terminals](interactive-terminals.md#moved-tool-calls)). Give it to the
+runtime with `AgentRuntime::with_background_jobs(manager)`. Then, while a call of a tool that
+can move runs, the manager lists it (`foreground_calls`), and the host moves it with
+`move_to_background(task_id, Some(tool_call_id))`, or every call of a task with `None`. A
+call is listed once the execution middleware lets it run, so a call that waits for an
+approval or a middleware's decision isn't. `set_background_after(Some(after))` makes calls of
+`Detach` tools move by themselves after running that long (`None`, never, by default).
+
+A `Detach` call that moves gets this result, and is settled with it:
+
+```text
+in the background as job 4d2c1a9b-…, 95.3 s
+The user moved this call to the background. It goes on running until it ends or reaches its time limit of 20 minutes. Its result reaches you as a note when it ends. terminal_status shows whether it still runs, and terminal_control waits for it or stops it.
+```
+
+The last sentence is there when the agent is offered `terminal_status` and
+`terminal_control`. A call that moved by itself says "It ran longer than 10 minutes, so it
+moved to the background." instead of the user. The first line starts with
+`terminal::IN_THE_BACKGROUND`, which a host can match to show such a result. The middleware's
+`after` and the result interceptor run on the real result in the background, and the note
+carries what they give.
+
+A moved call keeps its host time limit, counted from its start. Its `TaskContext::stop`
+follows the turn's stop until it moves, and the job's afterwards, so cancelling or
+suspending the task no longer stops it, and stopping the job (`terminal_control cancel`,
+the manager's `stop_for_user` or `shutdown`) does. It then has 3 seconds to return before
+its future is dropped. A call that ends as it is moved keeps its result, and a call whose
+turn is already being stopped doesn't move.
+
+An `Own` tool sees `TaskContext::moved` fire, a `MoveSignal` with `is_moved()` and
+`moved().await`. A wait ends, and a tool that runs a command as a held terminal job releases
+it (`TerminalManager::release`) and returns its job's ID. Only an `Own` tool's calls see the
+signal fire, and the runtime doesn't move them by themselves.
+
+Both runtimes move calls the same way. A Claude Code agent's arko tool calls answer Claude
+Code's request at once with the moved result, and the note reaches the agent with its next
+call's result or at the end of its turn. Claude Code's own tools (`Bash`, `Read`) can't move.
+
+A host or a test that runs a tool itself makes the signal with `MoveSource::new()`, sets
+`TaskContext::moved` from its `signal()`, and fires it with `fire()`. `TaskContext::new`
+gives one that never fires.
+
 ### Result interception and execution middleware
 
 The last two `run_task` arguments wrap tool execution:

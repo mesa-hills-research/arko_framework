@@ -67,6 +67,9 @@ impl AgentLoop {
                 &self.task.conversation.messages,
             ))),
             context: self.context_arrivals.clone(),
+            #[cfg(any(unix, windows))]
+            jobs: self.background_jobs.clone(),
+            terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
         })
     }
 
@@ -136,6 +139,7 @@ impl AgentLoop {
             parallel_safe: self.runs_in_parallel(&tool.definition()),
             interception: self.interception_for(tool_name, tool.as_ref()),
             interruptible: tool.interruptible(),
+            background: tool.background_mode(),
             tool,
             params,
             custom_output,

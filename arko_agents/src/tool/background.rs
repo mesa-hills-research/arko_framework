@@ -1,9 +1,15 @@
 //! Moving running tool calls to the background, and telling a running call
 //! that context arrived for its task.
 //!
-//! A [`MoveSignal`] fires when a call's host moves it to the background.
-//! The [`TerminalManager`](crate::terminal::TerminalManager) lists the calls
-//! running in the foreground that can move, and moves them.
+//! A tool says how its calls move with [`Tool::background_mode`](super::Tool::background_mode).
+//! A call that can move is listed while it runs in the foreground, and its
+//! host can move it, which the runtime does through a
+//! [`TerminalManager`](crate::terminal::TerminalManager) set with
+//! [`AgentRuntime::with_background_jobs`](crate::runtime::AgentRuntime::with_background_jobs).
+//! A [`Detach`](ToolBackground::Detach) call goes on as one of the manager's
+//! jobs, and its result reaches the agent as a note when it ends. An
+//! [`Own`](ToolBackground::Own) tool sees [`TaskContext::moved`](super::TaskContext::moved)
+//! fire and moves itself.
 //!
 //! [`TaskContext::context_arrived`](super::TaskContext::context_arrived)
 //! tells a call that waits (for other agents, for a message) that a note, a
@@ -15,8 +21,30 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-/// Whether a running call was moved to the background. See
-/// [`HeldCall::signal`](crate::terminal::HeldCall::signal).
+/// How a running call of a tool can move to the background. See
+/// [`Tool::background_mode`](super::Tool::background_mode).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolBackground {
+    /// It can't, which is the default. The call is quick, or its result has
+    /// to come in the turn.
+    #[default]
+    Never,
+    /// The runtime moves it. The call goes on as a job of the host's
+    /// terminal manager, the model gets the job's ID as the call's result,
+    /// and the real result comes as a note when the job ends. For a call
+    /// that just awaits its result (a remote request, a command), whose
+    /// future can go on anywhere.
+    Detach,
+    /// The tool moves itself. It watches [`TaskContext::moved`](super::TaskContext::moved)
+    /// and returns soon after it fires, with a result that says what
+    /// happened (the job its command goes on in, a wait that ended).
+    Own,
+}
+
+/// Whether a running call was moved to the background, for an
+/// [`Own`](ToolBackground::Own) tool to watch. See
+/// [`TaskContext::moved`](super::TaskContext::moved).
 ///
 /// Clones observe the same move. [`never`](Self::never) (also the
 /// `Default`) never fires. Once fired, it stays fired.

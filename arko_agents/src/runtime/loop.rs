@@ -188,6 +188,10 @@ pub struct AgentLoop {
     /// Notified as context arrives, for the calls running. See
     /// [`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived).
     context_arrivals: crate::tool::ContextSource,
+    /// The terminal manager calls move to the background with. See
+    /// [`AgentRuntime::with_background_jobs`](super::AgentRuntime::with_background_jobs).
+    #[cfg(any(unix, windows))]
+    pub(super) background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
     /// The plan-usage SlowDown's delay was checked against the prompt-cache
     /// lifetime (once per run).
     slow_down_cache_checked: bool,
@@ -294,6 +298,8 @@ impl AgentLoop {
             image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
             context_arrivals: crate::tool::ContextSource::new(),
+            #[cfg(any(unix, windows))]
+            background_jobs: None,
             slow_down_cache_checked: false,
             handover_skip_warned: false,
             tool_context_cursor: 0,
@@ -307,12 +313,17 @@ impl AgentLoop {
     }
 
     /// Binds the task's tools to its command channel
-    /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)).
+    /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)), and its
+    /// background jobs, whose notes go there.
     pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
         for name in self.tool_registry.list_tool_names() {
             if let Some(tool) = self.tool_registry.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
             }
+        }
+        #[cfg(any(unix, windows))]
+        if let Some(jobs) = &self.background_jobs {
+            jobs.bind_runtime(self.task.id, sender.downgrade());
         }
     }
 
