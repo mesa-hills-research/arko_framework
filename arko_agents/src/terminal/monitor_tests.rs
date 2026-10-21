@@ -712,7 +712,7 @@ async fn a_check_runs_its_command_again_and_again() {
         .await
         .unwrap_err();
     assert!(
-        error.to_string().starts_with("could not run the check: "),
+        error.to_string().starts_with("could not run the check ("),
         "{error}"
     );
     assert!(broken.manager.jobs().is_empty());

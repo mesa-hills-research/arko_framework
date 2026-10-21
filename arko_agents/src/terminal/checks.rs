@@ -274,8 +274,8 @@ impl CheckState {
     }
 }
 
-/// Runs a check monitor's job: its checks, never two at once, each at most
-/// its interval or the limit, and its end.
+/// Runs a check monitor's job, its checks (never two at once, each at most
+/// its interval or the limit) and its end.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
     manager: Weak<TerminalManager>,
@@ -526,7 +526,7 @@ impl TerminalManager {
         {
             let _ = done.wait_for(|done| *done).await;
             return Err(TerminalError::Invalid(format!(
-                "could not run the check: {error}"
+                "could not run the check ({error})"
             )));
         }
         Ok((id, first))

@@ -383,8 +383,8 @@ impl Running {
             .unwrap_or_default()
     }
 
-    /// Runs its timed event if it's due: warns its owner that it ends soon,
-    /// or ends it. Returns whether the monitor expired, in which case it can
+    /// Runs its timed event if it's due, which warns its owner that it ends
+    /// soon or ends it. Returns whether the monitor expired, in which case it can
     /// no longer be rearmed.
     pub(super) fn timed_event(
         &self,

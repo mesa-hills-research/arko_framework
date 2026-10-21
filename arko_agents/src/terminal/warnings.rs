@@ -49,7 +49,7 @@ pub(super) struct WakeInputs {
     pub(super) cache: Option<Instant>,
     /// When its user counts as away from, so warnings no longer wake it.
     pub(super) away_from: Option<Instant>,
-    /// A live runtime is bound for it: its agent works, and reads its
+    /// A live runtime is bound for it, so its agent works and reads its
     /// monitors' news as it does.
     pub(super) busy: bool,
 }
@@ -113,9 +113,9 @@ impl Arming {
 }
 
 impl TerminalManager {
-    /// Tells the monitors when `owner`'s prompt cache expires: its latest
-    /// model request, or the latest refresh of its cache, plus the cache's
-    /// lifetime. `None` when the host doesn't know. A warning before a
+    /// Tells the monitors when `owner`'s prompt cache expires, which is its
+    /// latest model request (or the latest refresh of its cache) plus the
+    /// cache's lifetime. `None` when the host doesn't know. A warning before a
     /// monitor ends that would come after the cache expires then comes
     /// [`cache_margin`](MonitorLimits::cache_margin) before it instead, and
     /// says how long the monitor has left, so a turn it starts for an idle

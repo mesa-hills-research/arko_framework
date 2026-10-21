@@ -118,9 +118,9 @@ pub(super) struct Part {
 }
 
 impl Part {
-    /// Whether the part should wake an idle owner, told of or not: an
-    /// alert, a warning while the user counts as active (not `away`), or a
-    /// command that exited by itself.
+    /// Whether the part should wake an idle owner, told of or not. An alert
+    /// does, and so do a warning while the user counts as active (not
+    /// `away`) and a command that exited by itself.
     fn wakes_idle(&self, away: bool) -> bool {
         !self.quiet
             && (self.lines.is_some()
