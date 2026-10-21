@@ -308,7 +308,7 @@ fn image_output(path: &str, mime_type: &str, bytes: &[u8]) -> ToolOutput {
         ));
     }
     ToolOutput {
-        text: format!("{path} is an image ({mime_type}, {size}), shown below."),
+        text: format!("{path} is an image ({mime_type}, {size})."),
         images: vec![ToolImage {
             description: format!("{path}, {size}"),
             image: arko_ai::Image::from_bytes(bytes, mime_type),
@@ -423,8 +423,11 @@ mod tests {
                 arko_ai::Image::from_bytes(bytes, mime_type)
             );
             assert!(output.images[0].description.contains(name));
-            assert!(output.text.contains(name));
-            assert!(output.text.contains(mime_type));
+            // The image follows the line, which says only what it is.
+            assert_eq!(
+                output.text,
+                format!("{name} is an image ({mime_type}, 1 KB).")
+            );
             assert_eq!(
                 ReadFileTool
                     .execute(&context, params(json!({"path": name})))
