@@ -4236,3 +4236,64 @@ async fn a_moved_arko_call_answers_claude_code_at_once() {
         "{context}"
     );
 }
+
+/// A monitor a Claude Code agent starts through arko's tool host alerts it
+/// as moved calls send notes: its alert ends the agent's wait, and goes to
+/// the CLI with that call's PostToolUse hook.
+#[tokio::test]
+async fn a_monitor_started_in_claude_code_alerts_the_agent() {
+    let python = std::env::var("ARKO_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let command =
+        format!("{python} -c \"print('server ready', flush=True); import time; time.sleep(30)\"");
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__monitor_start", "input": {"command": command, "pattern": "ready"}},
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["monitor_start", "waits_for_context"]),
+        "Start the dev server.".into(),
+        fake.workspace(),
+        None,
+    );
+    let jobs = crate::terminal::TerminalManager::new(crate::terminal::TerminalConfig::new(
+        fake.dir.join("jobs"),
+    ))
+    .unwrap();
+    jobs.set_monitor_limits(crate::terminal::MonitorLimits {
+        gather: Duration::from_millis(100),
+        start_wait: Duration::ZERO,
+        ..crate::terminal::MonitorLimits::default()
+    })
+    .unwrap();
+    let waits = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    jobs.register_tools(&mut registry);
+    registry.register(waits.clone());
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_background_jobs(jobs.clone())
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    let started = posts[0]["output"].as_str().unwrap();
+    assert!(started.starts_with("Monitor "), "{started}");
+    let id = started.split(' ').nth(1).unwrap();
+    assert_eq!(posts[1]["output"], "context arrived");
+    let context = posts[1]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains(&format!(
+            "Monitor alert. Job {id} (`{command}`, lines that match `ready`) printed 1 matching line since "
+        )) && context.contains("\n  server ready\n"),
+        "{context}"
+    );
+    jobs.shutdown().await;
+}
