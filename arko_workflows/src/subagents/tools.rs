@@ -385,6 +385,12 @@ impl Tool for WaitForAgentsTool {
         ToolRecovery::Rerun
     }
 
+    /// Moving the wait to the background ends it, since reports and
+    /// messages reach the agent as notes anyway.
+    fn background_mode(&self) -> arko_agents::ToolBackground {
+        arko_agents::ToolBackground::Own
+    }
+
     fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message) {
         self.limits.observe_context(task_id, message);
     }
@@ -435,7 +441,11 @@ impl Tool for WaitForAgentsTool {
                 ids(&params, "runs"),
                 flag(&params, "all")?,
                 wait,
-                &context.stop,
+                &super::board::WaitSignals {
+                    stop: &context.stop,
+                    moved: &context.moved,
+                    context_arrived: &context.context_arrived,
+                },
             )
             .await
             .map_err(failed)

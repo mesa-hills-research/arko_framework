@@ -1425,7 +1425,8 @@ impl Board {
     }
 
     /// Waits for mail for run `me`, as `wait_for_agents` does: returns the
-    /// tool's result.
+    /// tool's result. The call's `signals` end it early when it is stopped,
+    /// moved to the background, or context arrives for it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn wait(
         &self,
@@ -1435,8 +1436,13 @@ impl Board {
         runs: Option<Vec<String>>,
         all: bool,
         timeout: Duration,
-        stop: &arko_agents::stop::StopSignal,
+        signals: &WaitSignals<'_>,
     ) -> Result<String, String> {
+        let WaitSignals {
+            stop,
+            moved,
+            context_arrived,
+        } = signals;
         // The runs waited for, by id.
         let wanted = match &runs {
             None => None,
@@ -1540,11 +1546,19 @@ impl Board {
                     &still,
                 ));
             }
+            if moved.is_moved() {
+                return Ok(with_collected(WAIT_MOVED, &collected, &still));
+            }
+            if context_arrived.has_arrived() {
+                return Ok(with_collected(CONTEXT_ARRIVED, &collected, &still));
+            }
             tokio::select! {
                 biased;
                 _ = ctx.run_control.stopped() => {}
                 _ = stop.stopping() => {}
                 _ = stopping.changed() => {}
+                () = moved.moved() => {}
+                () = context_arrived.arrived() => {}
                 _ = version.changed() => {}
                 _ = notes.changed() => {}
                 _ = tokio::time::sleep_until(deadline) => {
@@ -2409,6 +2423,22 @@ fn subagent_prompt(
     }
     text
 }
+
+/// What ends `wait_for_agents` early, from its call's
+/// [`TaskContext`](arko_agents::TaskContext): a stop, a move to the
+/// background, and context arriving.
+pub(crate) struct WaitSignals<'a> {
+    pub(crate) stop: &'a arko_agents::stop::StopSignal,
+    pub(crate) moved: &'a arko_agents::MoveSignal,
+    pub(crate) context_arrived: &'a arko_agents::ContextSignal,
+}
+
+/// How a wait that the user moved to the background ends.
+pub(crate) const WAIT_MOVED: &str = "The user ended this wait so you can go on with other work. Reports and messages from your agent runs reach you as notes as they come.";
+
+/// How a wait ends when context (a note, a terminal update) arrives for it.
+pub(crate) const CONTEXT_ARRIVED: &str =
+    "An update for you arrived while you waited. It follows. Wait again if you still need to.";
 
 /// A wait's result: the items that came, whole, and the runs still active.
 fn wait_result(items: &[MailItem], still: &[String]) -> String {

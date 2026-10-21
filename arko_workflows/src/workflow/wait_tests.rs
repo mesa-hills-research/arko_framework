@@ -752,8 +752,10 @@ async fn a_wrap_up_ends_a_long_wait_through_the_stop_signal() {
     );
 }
 
-/// Only agent messages the conversation lacks end a wait: not one it holds
-/// already (still queued until the run completes), nor context notices.
+/// Only agent messages the conversation lacks end a wait as messages: not one
+/// it holds already (still queued until the run completes), nor context
+/// notices, which end it through its context signal once the runtime has
+/// them.
 #[tokio::test]
 async fn only_undelivered_agent_messages_end_a_wait() {
     let workspace = Workspace::new();
@@ -1020,4 +1022,63 @@ async fn a_cancel_during_a_long_wait_ends_the_run_at_once() {
         .unwrap();
     assert_eq!(recorded.status, AgentRunStatus::Cancelled);
     let _ = tokio::time::timeout(Duration::from_secs(5), worker.wait()).await;
+}
+
+/// A wait with `task_context`, bounded.
+async fn wait_with(tool: &dyn Tool, task_context: &TaskContext<'_>) -> String {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tool.execute(task_context, HashMap::new()),
+    )
+    .await
+    .expect("the wait ends")
+    .unwrap()
+}
+
+/// Moving the wait to the background ends it, and so does context that
+/// arrives for the run. A message that arrives as context is still named.
+#[tokio::test]
+async fn a_move_or_arriving_context_ends_a_wait() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace, &["lead", "worker"])
+        .wait_for_message_timeout(Duration::from_secs(3_600))
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    let lead = run(&workflow, "lead");
+    let tool = tool(&workflow, "lead", WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
+    assert_eq!(tool.background_mode(), arko_agents::ToolBackground::Own);
+    let moves = arko_agents::MoveSource::new();
+    let mut task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
+    task_context.moved = moves.signal();
+    let (result, ()) = tokio::join!(wait_with(tool.as_ref(), &task_context), async {
+        until_status(&workflow, "lead", WAITING).await;
+        moves.fire();
+    });
+    assert_eq!(
+        result,
+        "The user ended this wait so you can go on with other work. Messages from other agents reach you as notes as they come."
+    );
+
+    let arrivals = arko_agents::ContextSource::new();
+    let mut task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
+    task_context.context_arrived = arrivals.signal();
+    let (result, ()) = tokio::join!(wait_with(tool.as_ref(), &task_context), async {
+        until_status(&workflow, "lead", WAITING).await;
+        arrivals.notify();
+    });
+    assert_eq!(
+        result,
+        "An update for you arrived while you waited. It follows. Wait again if you still need to."
+    );
+
+    let worker = run(&workflow, "worker");
+    let mut task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
+    task_context.context_arrived = arrivals.signal();
+    let (result, ()) = tokio::join!(wait_with(tool.as_ref(), &task_context), async {
+        until_status(&workflow, "lead", WAITING).await;
+        send(&workflow, &worker, "worker", "lead", "Found it.").await;
+        arrivals.notify();
+    });
+    assert_eq!(result, "Message from `worker` waiting.");
 }

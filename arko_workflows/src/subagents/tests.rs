@@ -1755,3 +1755,82 @@ async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {
     let last = bodies_of(&server, "lead").last().unwrap().clone();
     assert!(last.contains("There are 4 files."), "{last}");
 }
+
+/// Moving `wait_for_agents` to the background ends it, and so does context
+/// that arrives for the run, each after the reports it collected.
+#[tokio::test]
+async fn a_wait_ends_when_moved_or_when_context_arrives() {
+    // r1 works until the server is dropped, and r2 finishes at once.
+    let server = ResponsesServer::start(|_, body| match role(body).as_str() {
+        "r2" => Some(tool_call_turn(
+            "r2_0",
+            "complete_task",
+            json!({ "summary": "r2 found it" }),
+        )),
+        _ => None,
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    for task in ["Search slowly.", "Search quickly."] {
+        ctx.subagents
+            .start(
+                ctx,
+                lead,
+                "lead",
+                0,
+                &workspace.0,
+                "worker",
+                task,
+                None,
+                false,
+                None,
+                std::collections::BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+    until(|| {
+        workflow
+            .subagents()
+            .iter()
+            .any(|run| run.handle == "r2" && run.state == SubagentState::Finished)
+    })
+    .await;
+    let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
+    assert_eq!(tool.background_mode(), arko_agents::ToolBackground::Own);
+    let all = HashMap::from([("all".to_string(), json!(true))]);
+
+    let moves = arko_agents::MoveSource::new();
+    let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    task_context.moved = moves.signal();
+    let (result, ()) = tokio::join!(tool.execute(&task_context, all.clone()), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        moves.fire();
+    });
+    let result = result.unwrap();
+    assert!(result.contains("r2 found it"), "{result}");
+    assert!(
+        result.ends_with(&format!("Still running: r1.\n\n{}", board::WAIT_MOVED)),
+        "{result}"
+    );
+
+    let arrivals = arko_agents::ContextSource::new();
+    let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    task_context.context_arrived = arrivals.signal();
+    let (result, ()) = within(async {
+        tokio::join!(tool.execute(&task_context, all), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            arrivals.notify();
+        })
+    })
+    .await;
+    assert_eq!(
+        result.unwrap(),
+        format!("{} Still running: r1.", board::CONTEXT_ARRIVED)
+    );
+}

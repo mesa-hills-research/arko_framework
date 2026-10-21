@@ -489,7 +489,9 @@ agent it works with starts or finishes, or at its time limit, with a short resul
 as ``Message from `lead` waiting.`` or `No messages after 270 s.` The model may pass
 `timeout_seconds` to wait less than the limit, never more. Meanwhile the agent's status
 is `waiting (awaiting_message)`. Cancelling the workflow, or the workflow
-stopping the agent, ends the wait at once.
+stopping the agent, ends the wait at once. So does context that arrives for the agent (a
+note, a terminal update), which then comes with the wait's result, and a host moving the
+wait to the background.
 
 A wait lasts up to about 4.5 minutes by default. Each wake-up is a cheap turn that keeps
 the provider's prompt cache warm, so a long wait is simply several short waits. The
@@ -788,7 +790,9 @@ let workflow = Workflow::builder()
 The lead gets `start_agent`, `message_agent`, `wait_for_agents`, `list_agents` and
 `stop_agent`. A subagent gets `message_agent` and `wait_for_agents` to talk with its
 lead, and with the lead's other runs when the lead names them as peers.
-`wait_for_agents` returns the reports and messages themselves.
+`wait_for_agents` returns the reports and messages themselves. Like `wait_for_message`, it
+also ends when other context arrives for the agent, or when the host moves it to the
+background, after what it collected.
 
 - A report, failure, stop or message reaches a running agent at its
   next turn boundary. A message to a subagent that finished continues its run, with

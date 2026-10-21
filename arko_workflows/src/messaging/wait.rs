@@ -28,6 +28,9 @@ use crate::messaging::registry::{Activity, AgentRegistry, AgentStatus};
 
 pub const WAIT_FOR_MESSAGE_TOOL_NAME: &str = "wait_for_message";
 
+/// How a wait that the user moved to the background ends.
+const WAIT_MOVED: &str = "The user ended this wait so you can go on with other work. Messages from other agents reach you as notes as they come.";
+
 /// The time limit for a 5-minute prompt cache (Anthropic's default, and
 /// OpenAI's as reported), and when the lifetime is unknown or caching is
 /// off, 4 minutes 30 seconds.
@@ -302,6 +305,12 @@ impl Tool for WaitForMessageTool {
         false
     }
 
+    /// Moving the wait to the background ends it, since messages reach the
+    /// agent with its next turns anyway.
+    fn background_mode(&self) -> arko_agents::ToolBackground {
+        arko_agents::ToolBackground::Own
+    }
+
     fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message) {
         self.context
             .messages
@@ -357,6 +366,14 @@ impl Tool for WaitForMessageTool {
                 if !changes.is_empty() {
                     return Ok(changes.join(" "));
                 }
+                if task_context.moved.is_moved() {
+                    return Ok(WAIT_MOVED.to_string());
+                }
+                // A message arriving does too, but its sender is named
+                // above.
+                if task_context.context_arrived.has_arrived() {
+                    return Ok(crate::subagents::CONTEXT_ARRIVED.to_string());
+                }
                 if now >= deadline {
                     return Ok(format!("No messages after {}.", describe_duration(wait)));
                 }
@@ -374,6 +391,11 @@ impl Tool for WaitForMessageTool {
                 changed = stopping.changed(), if stopping_open => stopping_open = changed.is_ok(),
                 changed = arrivals.changed(), if arrivals_open => arrivals_open = changed.is_ok(),
                 changed = versions.changed(), if versions_open => versions_open = changed.is_ok(),
+                // Checked above once they fired, while a message waits to
+                // be forwarded.
+                () = task_context.moved.moved(), if !task_context.moved.is_moved() => {}
+                () = task_context.context_arrived.arrived(),
+                    if !task_context.context_arrived.has_arrived() => {}
                 _ = tokio::time::sleep_until(until) => {}
             }
         }

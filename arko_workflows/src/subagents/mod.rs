@@ -36,6 +36,7 @@
 //! relaunches them, and a message to one restarts it.
 
 mod board;
+pub(crate) use board::CONTEXT_ARRIVED;
 #[cfg(test)]
 mod tests;
 mod tools;
