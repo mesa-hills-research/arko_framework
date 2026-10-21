@@ -930,6 +930,14 @@ impl TerminalManager {
                 .await?;
             let first = match first {
                 Some(run) => run.first_sentence(&limits),
+                // Stopped (by the user, or the host's exit) before its first
+                // check ended.
+                None if self
+                    .status(context.task_id, id, None)
+                    .is_ok_and(|snapshot| snapshot.state.is_terminal()) =>
+                {
+                    "It was stopped before its first check ended.".to_string()
+                }
                 None => {
                     "Its first check is still running, and changes are judged against its result."
                         .to_string()

@@ -1486,3 +1486,31 @@ async fn a_busy_agents_warning_keeps_its_usual_time() {
     assert_eq!(alert.kind, AlertKind::EndsSoon);
     assert_eq!(idle.elapsed(), minutes(4) + Duration::from_secs(2));
 }
+
+/// A check stopped while its start waits for its first run says so.
+#[tokio::test]
+async fn a_check_stopped_during_its_start_says_so() {
+    let f = fixture(MonitorLimits {
+        shortest_check: Duration::from_secs(1),
+        ..quick()
+    });
+    let (started, ()) = tokio::join!(
+        monitor(
+            &f,
+            "time.sleep(5)",
+            MonitorOptions::check(10, CheckChange::Change).with_label("slow"),
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let id = f.manager.jobs()[0].job_id;
+            f.manager.stop_for_user(f.owner, id).unwrap();
+        }
+    );
+    assert!(
+        started
+            .summary
+            .ends_with(" UTC (30 min). It was stopped before its first check ended."),
+        "{}",
+        started.summary
+    );
+}
