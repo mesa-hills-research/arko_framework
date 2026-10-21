@@ -49,6 +49,12 @@ pub(super) enum News {
         /// How long the result before lasted.
         previous_for: Duration,
     },
+    /// The monitor ends soon, at `ends_at`, and a rearm keeps it for up
+    /// to `longest` from then.
+    EndsSoon {
+        ends_at: SystemTime,
+        longest: Duration,
+    },
     /// The monitor ended.
     Ended {
         reason: EndReason,
@@ -100,6 +106,8 @@ pub(super) struct Part {
     lines: Option<Lines>,
     noisy: bool,
     check: Option<Check>,
+    /// When it ends, and the longest a rearm keeps it, for its warning.
+    ends_soon: Option<(SystemTime, Duration)>,
     ended: Option<Ended>,
     /// What of it should wake the owner, until it is announced.
     wakes: Option<AlertKind>,
@@ -154,6 +162,7 @@ impl Outbox {
                     lines: None,
                     noisy: false,
                     check: None,
+                    ends_soon: None,
                     ended: None,
                     wakes: None,
                 });
@@ -212,11 +221,16 @@ impl Outbox {
                     part.wakes = Some(AlertKind::Check);
                 }
             }
+            News::EndsSoon { ends_at, longest } => {
+                part.ends_soon = Some((ends_at, longest));
+                part.wakes = part.wakes.or(Some(AlertKind::EndsSoon));
+            }
             News::Ended {
                 reason,
                 at,
                 last_lines,
             } => {
+                part.ends_soon = None;
                 part.ended = Some(Ended {
                     reason,
                     at,
@@ -240,6 +254,23 @@ impl Outbox {
         })
     }
 
+    /// Forgets monitor `id`'s warning, for a monitor that was rearmed.
+    fn forget_warning(&mut self, id: Uuid) {
+        for part in &mut self.parts {
+            if part.header.job_id == id {
+                part.ends_soon = None;
+                if part.wakes == Some(AlertKind::EndsSoon) {
+                    part.wakes = None;
+                }
+            }
+        }
+        self.parts
+            .retain(|part| part.lines.is_some() || part.check.is_some() || part.ended.is_some());
+        if self.parts.is_empty() {
+            self.pending_since = None;
+        }
+    }
+
     /// Forgets monitor `id`'s news.
     fn forget(&mut self, id: Uuid) {
         self.parts.retain(|part| part.header.job_id != id);
@@ -260,12 +291,18 @@ impl Outbox {
     /// No runtime takes the news. Returns what to wake the owner for, the
     /// monitor and its kind of news, if any news should wake it, and marks
     /// the news as told of. The news waits for the owner's next runtime.
-    pub(super) fn announce(&mut self, now: Instant) -> Option<(Uuid, AlertKind)> {
+    /// Alerts come before warnings, and a warning wakes no one while the
+    /// user is `away`.
+    pub(super) fn announce(&mut self, now: Instant, away: bool) -> Option<(Uuid, AlertKind)> {
         self.pending_since = None;
-        let wake = self
-            .parts
-            .iter()
-            .find_map(|part| part.wakes.map(|kind| (part.header.job_id, kind)));
+        let wakes = |kind: AlertKind| {
+            self.parts
+                .iter()
+                .find_map(|part| (part.wakes == Some(kind)).then_some((part.header.job_id, kind)))
+        };
+        let wake = wakes(AlertKind::Lines)
+            .or_else(|| wakes(AlertKind::Check))
+            .or_else(|| wakes(AlertKind::EndsSoon).filter(|_| !away));
         for part in &mut self.parts {
             part.wakes = None;
         }
@@ -332,7 +369,7 @@ fn part_text(part: &Part, expires_at: SystemTime, alerts: u32, now: SystemTime) 
                 "\nA narrower pattern saves turns."
             });
         }
-        if part.ended.is_none() {
+        if part.ended.is_none() && part.ends_soon.is_none() {
             text.push_str(&format!(
                 "\nIt ends in {}.",
                 minutes_left(expires_at.duration_since(now).unwrap_or_default())
@@ -342,13 +379,21 @@ fn part_text(part: &Part, expires_at: SystemTime, alerts: u32, now: SystemTime) 
     }
     if let Some(check) = &part.check {
         let mut text = check_text(header, check);
-        if part.ended.is_none() {
+        if part.ended.is_none() && part.ends_soon.is_none() {
             text.push_str(&format!(
                 "\nIt ends in {}.",
                 minutes_left(expires_at.duration_since(now).unwrap_or_default())
             ));
         }
         paragraphs.push(text);
+    }
+    if let Some((ends_at, longest)) = part.ends_soon {
+        paragraphs.push(format!(
+            "Monitor {id} (`{command}`) ends in {}, at {}. monitor_control rearm keeps it going for up to {} from now. If you no longer need it, let it end.",
+            minutes_left(ends_at.duration_since(now).unwrap_or_default()),
+            clock(ends_at),
+            calls::describe(longest)
+        ));
     }
     if let Some(ended) = &part.ended {
         paragraphs.push(ended_text(header, ended, alerts));
@@ -525,6 +570,13 @@ impl TerminalManager {
         }
     }
 
+    /// Forgets the warning of `owner`'s monitor `id`, which was rearmed.
+    pub(super) fn drop_warning(&self, owner: Uuid, id: Uuid) {
+        if let Some(outbox) = self.outboxes.lock().unwrap().get_mut(&owner) {
+            outbox.forget_warning(id);
+        }
+    }
+
     /// Whether `owner` has monitor news it hasn't been sent.
     pub(super) fn has_monitor_news(&self, owner: Uuid) -> bool {
         self.outboxes
@@ -570,12 +622,13 @@ impl TerminalManager {
 
     /// No runtime took `owner`'s news. Wakes it if the news should.
     fn announce_news(&self, owner: Uuid) {
+        let away = self.user_away();
         let wake = self
             .outboxes
             .lock()
             .unwrap()
             .get_mut(&owner)
-            .and_then(|outbox| outbox.announce(Instant::now()));
+            .and_then(|outbox| outbox.announce(Instant::now(), away));
         if let Some((job_id, kind)) = wake {
             let _ = self.alerts.send(JobAlert {
                 owner,
@@ -758,7 +811,7 @@ mod tests {
             start,
         );
         assert_eq!(
-            outbox.announce(start + limits.gather),
+            outbox.announce(start + limits.gather, false),
             Some((id, AlertKind::Lines))
         );
         assert!(!outbox.is_empty());
@@ -774,7 +827,7 @@ mod tests {
             outbox.due(&limits),
             Some(start + limits.gather + limits.alert_interval)
         );
-        assert_eq!(outbox.announce(later), None, "an end wakes no one");
+        assert_eq!(outbox.announce(later, false), None, "an end wakes no one");
         // A runtime that binds gets everything.
         let parts = outbox.take(later);
         assert!(parts[0].lines.is_some() && parts[0].ended.is_some());
@@ -929,6 +982,70 @@ mod tests {
             format!(
                 "Monitor alert. The output of the check of job {id} (`curl -sf localhost:3000/health`, every 15 s) changed at 10:44:30 UTC, after staying the same for 3 min. Its output follows.\n  v2\nterminal_status shows the rest of it.\nIt ends in 26 min."
             )
+        );
+    }
+
+    /// The warning before a monitor ends says how long it has left and how
+    /// to keep it. It wakes an idle owner unless the user is away, after
+    /// any alert. A rearm or the monitor's end makes it moot.
+    #[test]
+    fn a_warning_says_how_long_is_left() {
+        let limits = MonitorLimits::default();
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let now = Instant::now();
+        let warning = || News::EndsSoon {
+            ends_at: at(11 * 3600 + 42 * 60),
+            longest: Duration::from_secs(1800),
+        };
+        let mut outbox = Outbox::default();
+        outbox.add(header(id, None), warning(), &limits, now);
+        assert_eq!(
+            note(&outbox.take(now), &HashMap::new(), at(11 * 3600 + 20 * 60)),
+            format!(
+                "Monitor {id} (`npm run dev`) ends in 22 min, at 11:42 UTC. monitor_control rearm keeps it going for up to 30 min from now. If you no longer need it, let it end."
+            )
+        );
+        outbox.add(header(id, None), warning(), &limits, now);
+        assert_eq!(outbox.announce(now, true), None, "the user is away");
+        outbox.add(header(other, None), lines(&["boom"], 0), &limits, now);
+        outbox.add(header(id, None), warning(), &limits, now);
+        assert_eq!(
+            outbox.announce(now, false),
+            Some((other, AlertKind::Lines)),
+            "an alert first"
+        );
+        outbox.add(header(id, None), warning(), &limits, now);
+        assert_eq!(outbox.announce(now, false), Some((id, AlertKind::EndsSoon)));
+        outbox.take(now);
+        // An alert with a warning gives the time left once.
+        outbox.add(header(id, None), lines(&["boom"], 0), &limits, now);
+        outbox.add(header(id, None), warning(), &limits, now);
+        let text = note(&outbox.take(now), &HashMap::new(), at(11 * 3600 + 37 * 60));
+        assert!(
+            !text.contains("It ends in")
+                && text.contains("\n  boom\n\nMonitor ")
+                && text.contains(" ends in 5 min, at 11:42 UTC."),
+            "{text}"
+        );
+
+        outbox.add(header(id, None), warning(), &limits, now);
+        outbox.forget_warning(id);
+        assert!(outbox.is_empty() && outbox.due(&limits).is_none());
+        outbox.add(header(id, None), warning(), &limits, now);
+        outbox.add(
+            header(id, None),
+            News::Ended {
+                reason: EndReason::Expired,
+                at: at(11 * 3600 + 42 * 60),
+                last_lines: Vec::new(),
+            },
+            &limits,
+            now,
+        );
+        let text = note(&outbox.take(now), &HashMap::new(), at(11 * 3600 + 42 * 60));
+        assert!(
+            !text.contains("rearm") && text.contains("ended at 11:42 UTC"),
+            "{text}"
         );
     }
 

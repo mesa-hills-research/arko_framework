@@ -717,3 +717,244 @@ async fn a_check_runs_its_command_again_and_again() {
     );
     assert!(broken.manager.jobs().is_empty());
 }
+
+/// Starts a check monitor of `owner` that lasts `lasts`, whose checks run
+/// every 10 minutes and always succeed, with no process.
+async fn steady_check(f: &Fixture, context: &TaskContext<'_>, lasts: Duration) -> Uuid {
+    let options = MonitorOptions::check(600, CheckChange::Change)
+        .with_label("health")
+        .with_expiry(lasts);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (checker, _) = scripted(Vec::new());
+    f.manager
+        .start_check(context, "health".into(), watching, move |_| checker)
+        .await
+        .unwrap()
+        .0
+}
+
+/// The note within an hour of paused time.
+async fn next_note(receiver: &mut mpsc::Receiver<UserCommand>) -> String {
+    note_within(receiver, Duration::from_secs(3600))
+        .await
+        .expect("a note")
+}
+
+/// A monitor warns its owner 5 minutes before it ends. A rearm keeps it
+/// longer and arms the warning again. One armed for less than 10 minutes
+/// ends without a warning, and an expiry wakes no one.
+#[tokio::test(start_paused = true)]
+async fn a_monitor_warns_before_it_ends_and_rearm_keeps_it() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    let start = Instant::now();
+    let id = steady_check(&f, &f.context(), minutes(30)).await;
+    let warning = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(25) + Duration::from_secs(2));
+    assert!(
+        warning.starts_with(&format!("Monitor {id} (`health`) ends in 5 min, at "))
+            && warning.ends_with(
+                " UTC. monitor_control rearm keeps it going for up to 30 min from now. If you no longer need it, let it end."
+            ),
+        "{warning}"
+    );
+
+    let rearmed = Instant::now();
+    let ends = f.manager.rearm(f.owner, id, minutes(20)).unwrap();
+    let JobKind::Monitor(info) = &f.manager.jobs()[0].kind else {
+        panic!("not a monitor")
+    };
+    assert_eq!(info.expires_at, ends);
+    let warning = next_note(&mut receiver).await;
+    assert_eq!(rearmed.elapsed(), minutes(15) + Duration::from_secs(2));
+    assert!(warning.contains(" ends in 5 min, at "), "{warning}");
+    let ended = next_note(&mut receiver).await;
+    assert_eq!(rearmed.elapsed(), minutes(20) + Duration::from_secs(2));
+    assert!(
+        ended.starts_with(&format!("Monitor {id} (`health`) ended at "))
+            && ended.ends_with(" UTC, and its checks stopped. It didn't alert."),
+        "{ended}"
+    );
+    let done = ended_paused(&f, id).await;
+    assert_eq!(
+        (done.state, done.error.as_deref()),
+        (JobState::TimedOut, Some("expired"))
+    );
+    assert!(finished.try_recv().is_err());
+    assert!(matches!(
+        f.manager.rearm(f.owner, id, minutes(10)),
+        Err(TerminalError::Finished)
+    ));
+
+    let started = Instant::now();
+    let short = steady_check(&f, &f.context(), minutes(9)).await;
+    assert!(
+        f.manager.rearm(f.owner, short, minutes(31)).is_err(),
+        "longer than a monitor may last"
+    );
+    let ended = next_note(&mut receiver).await;
+    assert_eq!(started.elapsed(), minutes(9) + Duration::from_secs(2));
+    assert!(ended.contains(" ended at "), "no warning first: {ended}");
+
+    // Only a monitor can be rearmed.
+    let call = f
+        .manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "search",
+            "search".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap()
+        .job_id;
+    let refused = f.manager.rearm(f.owner, call, minutes(10)).unwrap_err();
+    assert_eq!(refused.to_string(), format!("job {call} isn't a monitor"));
+}
+
+/// Waits in paused time for job `id` to end.
+async fn ended_paused(f: &Fixture, id: Uuid) -> TerminalSnapshot {
+    for _ in 0..100 {
+        let snapshot = f.manager.status(f.owner, id, None).unwrap();
+        if snapshot.state.is_terminal() {
+            return snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("job {id} didn't end");
+}
+
+/// An idle agent whose prompt cache expires before its monitor's warning
+/// is woken just before the cache expires, and the warning says how long
+/// the monitor has left. A cache kept warm puts the warning off. While the
+/// user is away the warning wakes no one, and comes at its usual time.
+#[tokio::test(start_paused = true)]
+async fn an_idle_agents_warning_comes_before_its_cache_expires() {
+    let f = Fixture::new(|_| {});
+    let mut alerts = f.manager.subscribe_alerts();
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    f.manager
+        .set_prompt_cache_expiry(f.owner, Some(SystemTime::now() + minutes(5)));
+    let start = Instant::now();
+    let id = steady_check(&f, &f.context(), minutes(30)).await;
+    let alert = alerts.recv().await.unwrap();
+    assert_eq!(start.elapsed(), minutes(4) + Duration::from_secs(2));
+    assert_eq!(
+        alert,
+        JobAlert {
+            owner: f.owner,
+            job_id: id,
+            kind: AlertKind::EndsSoon
+        }
+    );
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let warning = next_note(&mut receiver).await;
+    assert!(
+        warning.starts_with(&format!("Monitor {id} (`health`) ends in 26 min, at ")),
+        "{warning}"
+    );
+    drop((sender, receiver));
+    f.manager.cancel(f.owner, id).unwrap();
+
+    // The cache refreshed after 3 minutes, for 5 more.
+    let other = TaskContext::new(Uuid::new_v4(), "other", "test monitors", &f.root);
+    f.manager
+        .set_prompt_cache_expiry(other.task_id, Some(SystemTime::now() + minutes(5)));
+    let refreshed = steady_check(&f, &other, minutes(30)).await;
+    let start = Instant::now();
+    tokio::time::sleep(minutes(3)).await;
+    f.manager
+        .set_prompt_cache_expiry(other.task_id, Some(SystemTime::now() + minutes(5)));
+    let alert = alerts.recv().await.unwrap();
+    assert_eq!(alert.job_id, refreshed);
+    assert_eq!(start.elapsed(), minutes(7) + Duration::from_secs(2));
+    f.manager.cancel(other.task_id, refreshed).unwrap();
+
+    // The user hasn't written for longer than warnings wake for.
+    f.manager.set_warning_wakes_within(Some(minutes(1)));
+    f.manager.set_user_active_at(SystemTime::now() - minutes(2));
+    let away = TaskContext::new(Uuid::new_v4(), "away", "test monitors", &f.root);
+    f.manager
+        .set_prompt_cache_expiry(away.task_id, Some(SystemTime::now() + minutes(5)));
+    let unattended = steady_check(&f, &away, minutes(30)).await;
+    // Not before the cache expires, but 5 minutes before the end.
+    tokio::time::sleep(minutes(24)).await;
+    assert!(!f.manager.has_news(away.task_id));
+    tokio::time::sleep(minutes(3)).await;
+    assert!(alerts.try_recv().is_err(), "a warning wakes no one");
+    assert!(f.manager.has_news(away.task_id));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(away.task_id, sender.downgrade());
+    let warning = next_note(&mut receiver).await;
+    assert!(
+        warning.starts_with(&format!("Monitor {unattended} (`health`) ends in ")),
+        "{warning}"
+    );
+    // With no limit, warnings always wake.
+    f.manager.set_warning_wakes_within(None);
+    assert_eq!(f.manager.warning_wakes_within(), None);
+    drop((sender, receiver));
+    let later = steady_check(&f, &away, minutes(10)).await;
+    assert_eq!(alerts.recv().await.unwrap().job_id, later);
+}
+
+/// A line monitor's command warns, plans its warning again when its
+/// owner's prompt cache changes, takes a rearm, and is stopped at its end.
+#[tokio::test]
+async fn a_line_monitor_warns_and_takes_a_rearm() {
+    let f = fixture(MonitorLimits {
+        warned_from: Duration::from_secs(1),
+        warning_before: Duration::from_secs(1),
+        cache_margin: Duration::from_millis(500),
+        ..quick()
+    });
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let start = std::time::Instant::now();
+    let id = monitor(
+        &f,
+        "time.sleep(60)",
+        lines("error").with_expiry(Duration::from_secs(4)),
+    )
+    .await
+    .job_id;
+    // A cache that expires before the warning brings it forward.
+    f.manager.set_prompt_cache_expiry(
+        f.owner,
+        Some(SystemTime::now() + Duration::from_millis(1500)),
+    );
+    let warning = note(&mut receiver).await;
+    assert!(
+        start.elapsed() < Duration::from_millis(2800),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(
+        warning.starts_with(&format!(
+            "Monitor {id} (`dev server`) ends in less than a minute, at "
+        )),
+        "{warning}"
+    );
+    f.manager.set_prompt_cache_expiry(f.owner, None);
+    f.manager
+        .rearm(f.owner, id, Duration::from_secs(2))
+        .unwrap();
+    let rearmed = std::time::Instant::now();
+    let again = note(&mut receiver).await;
+    assert!(
+        again.contains(" ends in less than a minute, at "),
+        "{again}"
+    );
+    let end = note(&mut receiver).await;
+    assert!(rearmed.elapsed() >= Duration::from_secs(2));
+    assert!(
+        end.starts_with(&format!("Monitor {id} (`dev server`) ended at ")),
+        "{end}"
+    );
+    assert_eq!(ended(&f, id).await.state, JobState::TimedOut);
+}

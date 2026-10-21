@@ -189,6 +189,10 @@ pub(super) async fn run(
     let mut failure = None;
     // A monitor that lasted as long as it was armed for.
     let mut expired = false;
+    let mut timing = monitor
+        .as_ref()
+        .and(manager.upgrade())
+        .map(|manager| manager.watch_monitor_timing());
     while stop.is_none() {
         let wait_deadline = async {
             match deadline {
@@ -199,7 +203,7 @@ pub(super) async fn run(
         let monitor_event = until(
             monitor
                 .as_ref()
-                .and_then(|watch| watch.running.next_event(&data)),
+                .and_then(|watch| watch.running.next_event(&manager, &data)),
         );
         let partial_line = until(monitor.as_ref().and_then(|watch| watch.partial_due()));
         tokio::select! {
@@ -266,7 +270,7 @@ pub(super) async fn run(
                 }
             }
             () = monitor_event => {
-                if monitor.as_ref().is_some_and(|watch| watch.running.timed_event(&data)) {
+                if monitor.as_ref().is_some_and(|watch| watch.running.timed_event(&manager, &data, &config)) {
                     expired = true;
                     stop = Some(JobState::TimedOut);
                 }
@@ -274,6 +278,8 @@ pub(super) async fn run(
             () = partial_line => {
                 if let Some(watch) = &mut monitor { watch.flush(&manager); }
             }
+            // Planned again.
+            () = retimed(&mut timing) => {}
             control = controls.recv() => {
                 match control {
                     Some(Control::Input { revision, text, response }) => {
@@ -456,8 +462,18 @@ pub(super) async fn run(
     changed.send_replace(data.lock().unwrap().record.revision);
 }
 
+/// Resolves when `timing` changes, or never without it.
+pub(super) async fn retimed(timing: &mut Option<watch::Receiver<u64>>) {
+    if let Some(receiver) = timing
+        && receiver.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending().await
+}
+
 /// Resolves at `deadline`, or never without one.
-async fn until(deadline: Option<Instant>) {
+pub(super) async fn until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => sleep_until(deadline).await,
         None => std::future::pending().await,

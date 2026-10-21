@@ -308,8 +308,11 @@ pub(super) async fn run(
     // The start reported a first check that couldn't run, and ends the
     // monitor.
     let mut told = false;
+    let mut timing = manager
+        .upgrade()
+        .map(|manager| manager.watch_monitor_timing());
     let stop = loop {
-        let event = until(running.next_event(&data));
+        let event = runner::until(running.next_event(&manager, &data));
         let idle = current.is_none();
         let check = async {
             match current.as_mut() {
@@ -356,8 +359,10 @@ pub(super) async fn run(
                 next = started + every;
                 current = Some((checker(limit), started));
             }
+            // Planned again.
+            () = runner::retimed(&mut timing) => {}
             () = event => {
-                if running.timed_event(&data) {
+                if running.timed_event(&manager, &data, &config) {
                     expired = true;
                     break JobState::TimedOut;
                 }
@@ -408,14 +413,6 @@ pub(super) async fn run(
         );
     }
     changed.send_replace(snapshot.revision);
-}
-
-/// Resolves at `deadline`, or never without one.
-async fn until(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
 }
 
 impl TerminalManager {

@@ -334,12 +334,19 @@ pub(super) struct MonitorRecord {
     pub(super) expires_at: SystemTime,
     #[serde(default)]
     pub(super) alerts: u32,
+    /// Its warning for this arm went.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) warned: bool,
 }
 
 /// A running monitor's timing, kept with its job's data.
 #[derive(Debug, Clone)]
 pub(super) struct Arming {
     pub(super) expires: Instant,
+    /// How long it was armed for, at its start or latest rearm.
+    pub(super) lasts: Duration,
+    /// Its warning for this arm went.
+    pub(super) warned: bool,
     /// It is ending (it expired, or it was stopped), so it can't be
     /// rearmed.
     pub(super) ending: bool,
@@ -353,27 +360,76 @@ pub(super) struct Running {
 }
 
 impl Running {
-    /// When its next timed event is due, its end.
-    pub(super) fn next_event(&self, data: &Mutex<JobData>) -> Option<Instant> {
-        data.lock()
-            .unwrap()
-            .monitor
-            .as_ref()
-            .map(|arming| arming.expires)
+    /// When its next timed event is due, its warning or its end.
+    pub(super) fn next_event(
+        &self,
+        manager: &Weak<TerminalManager>,
+        data: &Mutex<JobData>,
+    ) -> Option<Instant> {
+        let inputs = self.wake_inputs(manager);
+        let data = data.lock().unwrap();
+        let arming = data.monitor.as_ref()?;
+        Some(
+            arming
+                .warning(&self.limits, inputs)
+                .map_or(arming.expires, |warning| warning.min(arming.expires)),
+        )
     }
 
-    /// Runs its timed event if it's due. Returns whether the monitor
-    /// expired, in which case it can no longer be rearmed.
-    pub(super) fn timed_event(&self, data: &Mutex<JobData>) -> bool {
-        let mut data = data.lock().unwrap();
-        let Some(arming) = data.monitor.as_mut() else {
-            return false;
+    fn wake_inputs(&self, manager: &Weak<TerminalManager>) -> warnings::WakeInputs {
+        manager
+            .upgrade()
+            .map(|manager| manager.wake_inputs(self.owner))
+            .unwrap_or_default()
+    }
+
+    /// Runs its timed event if it's due: warns its owner that it ends soon,
+    /// or ends it. Returns whether the monitor expired, in which case it can
+    /// no longer be rearmed.
+    pub(super) fn timed_event(
+        &self,
+        manager: &Weak<TerminalManager>,
+        data: &Mutex<JobData>,
+        config: &TerminalConfig,
+    ) -> bool {
+        let inputs = self.wake_inputs(manager);
+        let now = Instant::now();
+        let ends_at = {
+            let mut data = data.lock().unwrap();
+            let Some(arming) = data.monitor.as_mut() else {
+                return false;
+            };
+            if now >= arming.expires {
+                arming.ending = true;
+                return true;
+            }
+            if arming
+                .warning(&self.limits, inputs)
+                .is_none_or(|warning| now < warning)
+            {
+                return false;
+            }
+            arming.warned = true;
+            let ends_at = SystemTime::now() + (arming.expires - now);
+            if let Some(monitor) = data.record.monitor.as_mut() {
+                monitor.warned = true;
+            }
+            if let Err(error) = persist(config, &data.record) {
+                log::warn!(
+                    "Terminal job {}: could not save its warning: {error}",
+                    self.header.job_id
+                );
+            }
+            ends_at
         };
-        if Instant::now() < arming.expires {
-            return false;
-        }
-        arming.ending = true;
-        true
+        self.tell(
+            manager,
+            News::EndsSoon {
+                ends_at,
+                longest: self.limits.longest,
+            },
+        );
+        false
     }
 
     /// Marks the monitor as ending, so it can't be rearmed.
@@ -699,9 +755,12 @@ impl Watching {
                 trigger: options.trigger.clone(),
                 expires_at: SystemTime::now() + options.expires_in,
                 alerts: 0,
+                warned: false,
             },
             arming: Arming {
                 expires: Instant::now() + options.expires_in,
+                lasts: options.expires_in,
+                warned: false,
                 ending: false,
             },
             regex,

@@ -11,6 +11,7 @@ mod monitor;
 mod outbox;
 mod runner;
 mod tools;
+mod warnings;
 
 pub(crate) use calls::moved_result;
 pub use calls::{
@@ -23,6 +24,7 @@ pub use monitor::{
     MonitorTrigger,
 };
 pub use tools::TerminalTool;
+pub use warnings::DEFAULT_WARNINGS_WAKE_WITHIN;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -468,6 +470,11 @@ pub struct TerminalManager {
     /// Where news that should wake an idle owner is announced.
     alerts: tokio::sync::broadcast::Sender<JobAlert>,
     monitor_limits: Mutex<MonitorLimits>,
+    /// What decides when monitors warn their owners, and whether that
+    /// wakes them.
+    wake_rules: Mutex<warnings::WakeRules>,
+    /// Changes when monitors should plan their timed events again.
+    monitor_timing: watch::Sender<u64>,
     _directory_lock: Arc<std::fs::File>,
 }
 impl std::fmt::Debug for TerminalManager {
@@ -522,6 +529,8 @@ impl TerminalManager {
             outboxes: Mutex::default(),
             alerts: tokio::sync::broadcast::channel(64).0,
             monitor_limits: Mutex::default(),
+            wake_rules: Mutex::default(),
+            monitor_timing: watch::Sender::new(0),
             _directory_lock: Arc::new(lock),
         });
         let mut interrupted = Vec::new();
