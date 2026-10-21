@@ -1576,3 +1576,39 @@ async fn ended_paused_of(f: &Fixture, owner: Uuid, id: Uuid) {
     }
     panic!("job {id} didn't end");
 }
+
+/// A monitor's record of a kind this version doesn't know (one a later
+/// version wrote) doesn't keep the jobs directory from opening. Its job
+/// reads as a command's.
+#[tokio::test]
+async fn a_monitor_of_an_unknown_kind_reads_as_a_job() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("later");
+    std::fs::create_dir_all(&directory).unwrap();
+    let id = Uuid::new_v4();
+    std::fs::create_dir(directory.join(id.to_string())).unwrap();
+    std::fs::write(
+        directory.join(id.to_string()).join("job.json"),
+        json!({
+            "job_id": id, "owner": f.owner, "revision": 1, "state": "running",
+            "input": null, "exit_code": null, "error": null, "terminal": true,
+            "output_end": 0, "log_truncated": false, "label": "watch the server",
+            "monitor": {
+                "trigger": {"kind": "job", "job_id": Uuid::new_v4()},
+                "expires_at": {"secs_since_epoch": 1_800_000_000u64, "nanos_since_epoch": 0}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let interrupted = manager.interrupted_at_open();
+    assert_eq!(
+        (interrupted[0].job_id, &interrupted[0].kind),
+        (id, &JobKind::Command)
+    );
+    assert_eq!(
+        manager.status(f.owner, id, None).unwrap().state,
+        JobState::Interrupted
+    );
+}

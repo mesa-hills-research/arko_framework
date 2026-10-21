@@ -339,6 +339,22 @@ pub(super) struct MonitorRecord {
     pub(super) warned: bool,
 }
 
+/// A monitor's saved state, or `None` for one this version can't read, such
+/// as a trigger kind a later version added, so that one record doesn't keep
+/// the whole jobs directory from opening.
+pub(super) fn readable_record<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<MonitorRecord>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match serde_json::from_value(value) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            log::warn!("A monitor's record this version can't read is kept as a job's ({error})");
+            None
+        }
+    }))
+}
+
 /// A running monitor's timing, kept with its job's data.
 #[derive(Debug, Clone)]
 pub(super) struct Arming {

@@ -313,8 +313,13 @@ struct Record {
     /// before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stopped_by_close: bool,
-    /// What a monitor watches, for a job that is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// What a monitor watches, for a job that is one. A monitor of a kind
+    /// this version doesn't know reads as `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "monitor::readable_record"
+    )]
     monitor: Option<monitor::MonitorRecord>,
 }
 
