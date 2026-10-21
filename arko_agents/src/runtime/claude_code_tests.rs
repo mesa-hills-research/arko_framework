@@ -999,6 +999,60 @@ async fn a_failed_retry_series_doesn_t_count_into_the_next() {
     assert!(elapsed[0] < 300, "{elapsed:?}");
 }
 
+/// When Claude Code gives up on a response's stream and asks for it again
+/// without streaming, what the stream delivered goes as it stops. The
+/// response that takes its place comes whole, with its call and without a
+/// `message_start`, and its text stays when the next response starts.
+#[tokio::test]
+async fn text_of_a_response_asked_again_without_streaming_stays() {
+    let fake = Fake::new(json!([[
+        {"stream_abandoned": "Let me che"},
+        {"text": "Let me check the notes.", "unstreamed": true},
+        {"tool": "Read", "input": {"file_path": "notes.txt"}, "continues": true, "unstreamed": true},
+        {"text": "The notes are empty.", "stream": true},
+    ]]));
+    let mut config = config(&fake, &["Read"]);
+    config.tool_config.text_reply_ends_task = true;
+    let task = Task::new(config, "Read the notes.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let order: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted { .. } => Some("request".to_string()),
+            AgentEvent::AssistantResponseChunk(chunk) => Some(format!("chunk {chunk}")),
+            AgentEvent::StreamedOutputDiscarded { text_bytes, .. } => {
+                Some(format!("discard {text_bytes}"))
+            }
+            AgentEvent::ToolResult { tool_name, .. } => Some(format!("result {tool_name}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "request",
+            "chunk Let me che",
+            "discard 10",
+            "chunk Let me check the notes.",
+            "result Read",
+            "request",
+            "chunk The notes ",
+            "chunk are empty.",
+        ]
+    );
+    let texts = texts(&task);
+    assert!(
+        texts.iter().any(|text| text == "Let me check the notes."),
+        "{texts:?}"
+    );
+    assert!(!texts.iter().any(|text| text == "Let me che"), "{texts:?}");
+}
+
 /// A response that fails while it streams is discarded too when it ends
 /// the turn, or when Claude Code starts another response without reporting
 /// a retry: the host drops what it streamed before the turn's error, or

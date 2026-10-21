@@ -28,7 +28,10 @@ pub enum AgentEvent {
     /// `ReasoningChunk` events since then belong to no response, and a host
     /// that showed them drops them (`text_bytes` and `reasoning_bytes` say
     /// how much of each). A retry streams its response anew, after its own
-    /// `ModelRequestStarted`. The task keeps nothing of the failed one.
+    /// `ModelRequestStarted`. Claude Code may ask for it again without
+    /// streaming instead, and that response's text then comes whole, with no
+    /// `ModelRequestStarted` before it. The task keeps nothing of the failed
+    /// one.
     StreamedOutputDiscarded {
         text_bytes: usize,
         reasoning_bytes: usize,
