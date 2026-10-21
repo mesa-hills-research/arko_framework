@@ -40,7 +40,7 @@ impl TerminalTool {
         .collect()
     }
 }
-fn parameter(name: &str, description: &str, required: bool) -> ToolParameterDefinition {
+pub(super) fn parameter(name: &str, description: &str, required: bool) -> ToolParameterDefinition {
     ToolParameterDefinition {
         name: name.into(),
         description: description.into(),
@@ -51,7 +51,7 @@ fn parameter(name: &str, description: &str, required: bool) -> ToolParameterDefi
         default_value: None,
     }
 }
-fn string<'a>(
+pub(super) fn string<'a>(
     params: &'a HashMap<String, Value>,
     name: &str,
 ) -> std::result::Result<&'a str, ToolError> {
@@ -65,7 +65,7 @@ fn string<'a>(
 }
 /// A whole-number parameter: a number, or text holding one (as calls saved
 /// before the parameters were integers give it).
-fn number(
+pub(super) fn number(
     params: &HashMap<String, Value>,
     name: &str,
 ) -> std::result::Result<Option<u64>, ToolError> {
@@ -101,7 +101,7 @@ fn revision(params: &HashMap<String, Value>) -> std::result::Result<u64, ToolErr
         param_name: "revision".into(),
     })
 }
-fn tool_error(error: impl std::fmt::Display) -> ToolError {
+pub(super) fn tool_error(error: impl std::fmt::Display) -> ToolError {
     ToolError::ExecutionFailed(error.to_string())
 }
 

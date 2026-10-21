@@ -8,6 +8,7 @@ mod detection;
 mod guard;
 mod io;
 mod monitor;
+mod monitor_tools;
 mod outbox;
 mod runner;
 mod tools;
@@ -23,6 +24,7 @@ pub use monitor::{
     AlertKind, CheckChange, JobAlert, MonitorInfo, MonitorLimits, MonitorOptions, MonitorStarted,
     MonitorTrigger,
 };
+pub use monitor_tools::MonitorTool;
 pub use tools::TerminalTool;
 pub use warnings::DEFAULT_WARNINGS_WAKE_WITHIN;
 
@@ -610,9 +612,14 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Registers the tools. Add their names to an agent's allowlist to offer them.
+    /// Registers the terminal tools ([`TerminalTool::NAMES`]) and the
+    /// monitor tools ([`MonitorTool::NAMES`]). Add their names to an agent's
+    /// allowlist to offer them.
     pub fn register_tools(self: &Arc<Self>, registry: &mut ToolRegistry) {
         for tool in TerminalTool::all(self.clone()) {
+            registry.register(Arc::new(tool));
+        }
+        for tool in MonitorTool::all(self.clone()) {
             registry.register(Arc::new(tool));
         }
     }

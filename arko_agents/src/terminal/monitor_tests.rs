@@ -958,3 +958,245 @@ async fn a_line_monitor_warns_and_takes_a_rearm() {
     );
     assert_eq!(ended(&f, id).await.state, JobState::TimedOut);
 }
+
+fn params(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
+    serde_json::from_value(value).unwrap()
+}
+
+/// `monitor_start` starts a monitor of lines or a check from the model's
+/// parameters (numbers given as numbers or text), and refuses parameters
+/// that don't go together. `monitor_control` lists the agent's monitors,
+/// rearms one and stops one.
+#[tokio::test]
+async fn the_monitor_tools_start_list_rearm_and_stop_monitors() {
+    use crate::tool::{Tool, ToolParameterType};
+    let f = fixture(quick());
+    let tools = MonitorTool::all(f.manager.clone());
+    let (start, control) = (&tools[0], &tools[1]);
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.definition().name)
+            .collect::<Vec<_>>(),
+        MonitorTool::NAMES
+    );
+    let definition = start.definition();
+    assert!(definition.description.contains("(30 at most)"));
+    let kinds: HashMap<String, (bool, ToolParameterType)> = definition
+        .parameters
+        .iter()
+        .map(|param| {
+            (
+                param.name.clone(),
+                (param.required, param.param_type.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(kinds["command"], (true, ToolParameterType::String));
+    assert_eq!(kinds["every_seconds"], (false, ToolParameterType::Integer));
+    assert_eq!(
+        kinds["expires_minutes"],
+        (false, ToolParameterType::Integer)
+    );
+    assert!(
+        tools
+            .iter()
+            .all(|tool| !tool.allow_result_interception() && !tool.uses_host_timeout())
+    );
+
+    let started = start
+        .execute(
+            &f.context(),
+            params(json!({
+                "command": f.command("time.sleep(60)"),
+                "pattern": "error",
+                "expires_minutes": 20
+            })),
+        )
+        .await
+        .unwrap();
+    let id: Uuid = started
+        .strip_prefix("Monitor ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(started.contains(" UTC (20 min). "), "{started}");
+    let check = start
+        .execute(
+            &f.context(),
+            params(json!({
+                "command": f.command("sys.exit(0)"),
+                "every_seconds": "10",
+                "alert_when": "success"
+            })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        check.contains(" every 10 s and alerts you when it starts succeeding, until ")
+            && check.contains(". Its first check succeeded in "),
+        "{check}"
+    );
+
+    let listed: Vec<serde_json::Value> = serde_json::from_str(
+        &control
+            .execute(&f.context(), params(json!({"action": "list"})))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed.len(), 2);
+    let first = listed
+        .iter()
+        .find(|monitor| monitor["job_id"] == id.to_string())
+        .unwrap();
+    assert_eq!(first["watching"], "lines that match error");
+    assert_eq!(first["alerts"], 0);
+    assert_eq!(first["ends_in_minutes"], 20);
+
+    let rearmed = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": id.to_string(), "minutes": 10})),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rearmed.starts_with(&format!("Monitor {id} now ends at "))
+            && rearmed.ends_with(" UTC, in 10 min."),
+        "{rearmed}"
+    );
+    assert_eq!(
+        control
+            .execute(
+                &f.context(),
+                params(json!({"action": "stop", "job_id": id.to_string()})),
+            )
+            .await
+            .unwrap(),
+        format!("Stopped monitor {id}.")
+    );
+    assert_eq!(ended(&f, id).await.state, JobState::Cancelled);
+    let after = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": id.to_string()})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        after.to_string(),
+        format!("Execution failed: monitor {id} has ended. monitor_start starts a new one")
+    );
+
+    // Parameters that don't go together, or out of range.
+    for (bad, says) in [
+        (
+            json!({"command": "x", "pattern": "e", "every_seconds": 10}),
+            "Give one or the other",
+        ),
+        (
+            json!({"command": "x", "alert_when": "success"}),
+            "alert_when is for a check",
+        ),
+        (
+            json!({"command": "x", "every_seconds": 10, "alert_when": "sometimes"}),
+            "alert_when is success, failure, change or output",
+        ),
+        (
+            json!({"command": "x", "expires_minutes": 31}),
+            "expires_minutes is from 1 to 30",
+        ),
+        (
+            json!({"command": "x", "expires_minutes": 0}),
+            "expires_minutes is from 1 to 30",
+        ),
+        (
+            json!({"command": "x", "every_seconds": 5}),
+            "a check runs every 10 to 600 seconds",
+        ),
+    ] {
+        let error = start
+            .execute(&f.context(), params(bad))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(says), "{error}");
+    }
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            &f.command("time.sleep(60)"),
+            Default::default(),
+        )
+        .unwrap()
+        .job_id;
+    let stop = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "stop", "job_id": job.to_string()})),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stop.to_string()
+            .contains("isn't a monitor. terminal_control cancel stops other jobs")
+    );
+    assert!(
+        control
+            .execute(
+                &f.context(),
+                params(json!({"action": "pause", "job_id": job.to_string()}))
+            )
+            .await
+            .is_err()
+    );
+    f.manager.cancel(f.owner, job).unwrap();
+}
+
+/// `register_tools` registers the monitor tools with the terminal tools,
+/// and a runtime offered only the monitor tools gets its monitors' notes.
+#[tokio::test]
+async fn a_runtime_offered_the_monitor_tools_gets_their_notes() {
+    let f = fixture(quick());
+    let mut registry = ToolRegistry::new();
+    f.manager.register_tools(&mut registry);
+    for name in TerminalTool::NAMES.iter().chain(&MonitorTool::NAMES) {
+        assert!(registry.get(name).is_some(), "{name}");
+    }
+    let config = crate::AgentConfig::builder(
+        "monitor-test".into(),
+        "Tester".into(),
+        crate::AgentLLMConfig {
+            model: arko_ai::Model::openai_gpt_5_6_luna(),
+            generation_config: Default::default(),
+        },
+    )
+    .role_description("test".into())
+    .instructions("test".into())
+    .tool_config(crate::AgentToolConfig {
+        available_tool_names: MonitorTool::NAMES.map(String::from).to_vec(),
+        ..Default::default()
+    })
+    .build()
+    .unwrap();
+    let mut task = crate::Task::new(config, "test".into(), f.root.clone(), None);
+    task.set_state(crate::TaskState::AwaitingUserResponse {
+        questions: "pending".into(),
+    });
+    let id = task.id;
+    let (_events, commands, handle) = crate::AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let binding = f.manager.runtimes.lock().unwrap().get(&id).cloned();
+    assert!(
+        binding.is_some_and(|binding| binding.sender.upgrade().unwrap().same_channel(&commands))
+    );
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
