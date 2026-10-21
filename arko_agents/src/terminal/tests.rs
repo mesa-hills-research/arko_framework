@@ -446,6 +446,7 @@ async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
             tool_call_id: None,
             label: None,
             call: None,
+            stopped_by_close: false,
         },
     )
     .unwrap();
@@ -767,6 +768,7 @@ fn stripped_windows_keep_raw_offsets() {
         tool_call_id: None,
         label: None,
         call: None,
+        stopped_by_close: false,
     });
     data.output = raw.iter().copied().collect();
     let config = TerminalConfig::new(std::env::temp_dir());
@@ -1558,6 +1560,98 @@ async fn the_jobs_a_restart_interrupted_are_listed() {
     assert!(manager.jobs().is_empty());
     drop(manager);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The background jobs a shutdown stops are listed when the directory is
+/// opened again, by that open only. The shutdown waits for a moved call
+/// that ignores its stop to have its record. A held job and a job that
+/// ended before aren't listed.
+#[tokio::test]
+async fn the_jobs_a_shutdown_stopped_are_listed_at_the_next_open() {
+    let f = Fixture::new(|_| {});
+    // A manager of its own, so the test can drop it and open its directory
+    // again.
+    let directory = f.root.join("closed");
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let start = |code: &str, held: bool| {
+        manager
+            .start(
+                &f.context(),
+                &f.command(code),
+                StartOptions {
+                    terminal: false,
+                    detect_prompts: false,
+                    held,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .job_id
+    };
+    let command = start("time.sleep(60)", false);
+    let held = start("time.sleep(60)", true);
+    let done = start("print('done')", false);
+    timeout(Duration::from_secs(10), async {
+        while !manager
+            .status(f.owner, done, None)
+            .unwrap()
+            .state
+            .is_terminal()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let call_id = Uuid::new_v4();
+    let call = manager
+        .adopt_call(
+            f.owner,
+            call_id,
+            "fetch",
+            "fetch".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap()
+        .job_id;
+
+    manager.shutdown().await;
+    let state = |id: Uuid| -> serde_json::Value {
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join(id.to_string()).join("job.json")).unwrap(),
+        )
+        .unwrap();
+        record["state"].clone()
+    };
+    assert_eq!(state(call), "cancelled", "its record is saved");
+    drop(manager);
+    let reopened = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let mut listed = reopened
+        .interrupted_at_open()
+        .into_iter()
+        .map(|job| (job.job_id, job.kind, job.tool_call_id))
+        .collect::<Vec<_>>();
+    listed.sort_by_key(|(id, ..)| *id != command);
+    assert_eq!(
+        listed,
+        [
+            (command, JobKind::Command, None),
+            (
+                call,
+                JobKind::Call {
+                    tool_name: "fetch".into()
+                },
+                Some(call_id)
+            )
+        ]
+    );
+    for job in [command, held, call] {
+        assert_eq!(state(job), "cancelled");
+    }
+    drop(reopened);
+    let again = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    assert!(again.interrupted_at_open().is_empty(), "listed once");
 }
 
 /// Calls in the foreground are listed until they move or end, and move

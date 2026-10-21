@@ -296,6 +296,12 @@ struct Record {
     /// The moved call the job runs, for a job made from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<CallRecord>,
+    /// The host closed the manager while the job ran in the background,
+    /// which stopped it. The next open lists it once with
+    /// [`TerminalManager::interrupted_at_open`]. False in records saved
+    /// before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stopped_by_close: bool,
 }
 
 /// The moved call a job runs. See [`TerminalManager::adopt_call`].
@@ -514,16 +520,18 @@ impl TerminalManager {
                     "job record ID does not match its directory".into(),
                 ));
             }
+            // A held job ran in the foreground, so its call is in doubt and
+            // recovered as a call, not told as a background job.
+            if (record.state == JobState::Running || record.stopped_by_close) && !record.held {
+                interrupted.push(calls::info(
+                    &record,
+                    record.label.clone().unwrap_or_default(),
+                    std::time::Instant::now(),
+                ));
+            }
+            // Listed once.
+            record.stopped_by_close = false;
             if record.state == JobState::Running {
-                // A held job ran in the foreground, so its call is in doubt
-                // and recovered as a call, not told as a background job.
-                if !record.held {
-                    interrupted.push(calls::info(
-                        &record,
-                        record.label.clone().unwrap_or_default(),
-                        std::time::Instant::now(),
-                    ));
-                }
                 record.state = JobState::Interrupted;
                 record.input = None;
                 record.revision += 1;
@@ -720,6 +728,7 @@ impl TerminalManager {
             tool_call_id: context.tool_call_id,
             label: Some(options.label.clone().unwrap_or_else(|| command.to_string())),
             call: None,
+            stopped_by_close: false,
         };
         let data = Arc::new(Mutex::new(JobData::new(record)));
         let mut log = std::fs::File::create(
@@ -959,6 +968,12 @@ impl TerminalManager {
         Ok(())
     }
 
+    /// Stops every job and refuses new starts, for a host about to exit.
+    /// Waits up to 3 seconds for the jobs to end, and up to 4 for a moved
+    /// call, which gets 3 seconds after its stop. The background jobs it
+    /// stops are listed by [`interrupted_at_open`](Self::interrupted_at_open)
+    /// when the directory is opened again. Dropping the manager stops its
+    /// jobs the same way, without waiting.
     pub async fn shutdown(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);
@@ -970,11 +985,19 @@ impl TerminalManager {
             .cloned()
             .collect::<Vec<_>>();
         for job in &jobs {
-            job.cancel.send_replace(true);
+            job.stop_for_close();
         }
+        let started = tokio::time::Instant::now();
         for job in jobs {
+            // A moved call has its grace after its stop, and its record
+            // follows.
+            let wait = if job.data.lock().unwrap().record.call.is_some() {
+                calls::CALL_STOP_GRACE + Duration::from_secs(1)
+            } else {
+                Duration::from_secs(3)
+            };
             let mut done = job.done.clone();
-            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            let _ = tokio::time::timeout_at(started + wait, async {
                 while !*done.borrow_and_update() {
                     if done.changed().await.is_err() {
                         break;
@@ -988,8 +1011,26 @@ impl TerminalManager {
 impl Drop for TerminalManager {
     fn drop(&mut self) {
         for job in self.jobs.get_mut().unwrap().values() {
-            job.cancel.send_replace(true);
+            job.stop_for_close();
         }
+    }
+}
+
+impl Job {
+    /// Stops the job as its manager closes. A job running in the
+    /// background that no one stopped yet is recorded as stopped by the
+    /// close, so the next open lists it.
+    fn stop_for_close(&self) {
+        {
+            let mut data = self.data.lock().unwrap();
+            if data.record.state == JobState::Running
+                && !data.record.held
+                && data.stopped_by.is_none()
+            {
+                data.record.stopped_by_close = true;
+            }
+        }
+        self.cancel.send_replace(true);
     }
 }
 

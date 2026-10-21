@@ -143,13 +143,14 @@ as it stopped, if it did. `stop_owner_watchers(owner)` stops an owner's moved
 calls for a host whose agent run ended (a worker that finished), since their
 notes would reach no one. The owner's commands keep running. A workflow given
 the manager (`WorkflowBuilder::background_jobs`) does this for its subagents.
-Neither this nor
-`stop_for_user` is reported to `subscribe_finished`.
+Neither this nor `stop_for_user` is reported to `subscribe_finished`.
 
 A moved call's job is saved like any other, with its tool and call, and after a
 restart it is an interrupted record, never run again. `interrupted_at_open()`
-lists the jobs that were running when the last process using the directory
-stopped, so a host can tell their owners.
+lists the jobs that were running in the background when the last process using
+the directory stopped, or that its `shutdown` (or dropping the manager) stopped,
+so a host can tell their owners. Each open lists a job once, and held jobs are
+left out.
 
 ## Configuration
 
@@ -477,8 +478,9 @@ resumed runtime can replay the latest notices. Use the job ID and revision to
 recognize updates. A notice doesn't start a model run by itself, and the host decides
 whether an idle or completed agent continues.
 
-`manager.shutdown().await` cancels owned processes, waits for their cleanup, and
-prevents new starts. Dropping the manager requests cancellation. The directory
+`manager.shutdown().await` cancels owned processes, waits for their cleanup (up to
+3 seconds, and 4 for a moved call), and prevents new starts. The next open lists the
+background jobs it stopped with `interrupted_at_open()`. Dropping the manager requests cancellation. The directory
 stays locked until the workers finish. A wait timeout is independent of a job's
 execution deadline. PTY input handles control characters according to the
 program's terminal settings. Terminal resizing and closing stdin in pipe mode are

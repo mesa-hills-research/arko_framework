@@ -398,6 +398,7 @@ impl TerminalManager {
             call: Some(CallRecord {
                 tool_name: tool_name.to_string(),
             }),
+            stopped_by_close: false,
         };
         persist(&self.config, &record)?;
         let data = Arc::new(Mutex::new(JobData::new(record)));
@@ -450,10 +451,12 @@ impl TerminalManager {
     }
 
     /// The jobs that were running in the background when the last process
-    /// using this directory stopped, which are now
-    /// [`Interrupted`](JobState::Interrupted) records. They never run again,
-    /// since their effects are unknown. A host can tell their owners. Held
-    /// jobs (a host's foreground commands) are left out, like
+    /// using this directory stopped or closed its manager. A job it left
+    /// running is now an [`Interrupted`](JobState::Interrupted) record, and
+    /// one its [`shutdown`](Self::shutdown) (or dropping it) stopped keeps
+    /// the state it ended in. They never run again, since their effects are
+    /// unknown. A host can tell their owners. Each is listed by one open
+    /// only. Held jobs (a host's foreground commands) are left out, like
     /// [`jobs`](Self::jobs) leaves them out, since their calls never
     /// returned and are recovered as calls.
     pub fn interrupted_at_open(&self) -> Vec<JobInfo> {
