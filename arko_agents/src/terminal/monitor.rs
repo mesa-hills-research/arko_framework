@@ -1074,8 +1074,8 @@ pub(super) fn started_sentence(
     let watches = match trigger {
         MonitorTrigger::Lines {
             pattern: Some(pattern),
-        } => format!("alerts you of lines that match `{pattern}`"),
-        MonitorTrigger::Lines { pattern: None } => "alerts you of every line".to_string(),
+        } => format!("and alerts you of lines that match `{pattern}`"),
+        MonitorTrigger::Lines { pattern: None } => "and alerts you of every line".to_string(),
         MonitorTrigger::Check {
             every_seconds,
             when,

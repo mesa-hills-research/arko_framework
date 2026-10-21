@@ -206,7 +206,7 @@ async fn a_line_monitor_alerts_of_matching_lines() {
     let id = started.job_id;
     assert!(
         started.summary.starts_with(&format!(
-            "Monitor {id} started. It runs `dev server` alerts you of lines that match `(?i)error|warn`, until "
+            "Monitor {id} started. It runs `dev server` and alerts you of lines that match `(?i)error|warn`, until "
         )) && started.summary.contains(" UTC (30 min). "),
         "{}",
         started.summary
