@@ -27,6 +27,17 @@ the next turn's index). Steps:
                                          streams: its message_start and this
                                          text as a content_block_delta, and
                                          no message
+  {"stream_abandoned": "..."}            a response whose stream Claude Code
+                                         gives up on, before it asks again
+                                         without streaming: its
+                                         message_start, this text as a
+                                         content_block_delta, then
+                                         content_block_stop and message_stop
+                                         with no message_delta
+  a text or tool step with "unstreamed": true
+                                         a response Claude Code got without
+                                         streaming: its messages alone, with
+                                         no stream events
   {"exit_unrecorded": 3}                 as a turn's first step: the CLI
                                          exits before it saves the message
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
@@ -272,16 +283,19 @@ def assistant(content, step):
     # as Claude Code sends a response's text and its call. Like Claude
     # Code, the assistant messages carry the output count as it stood when
     # the stream started; the request's message_delta has the final one.
+    # "unstreamed": a response got without streaming has no stream events.
+    streamed = not step.get("unstreamed")
     if not step.get("continues"):
         state["message"] += 1
-        stream_event({"type": "message_start", "message": {
-            "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
-            "usage": usage(step, 1)}})
+        if streamed:
+            stream_event({"type": "message_start", "message": {
+                "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
+                "usage": usage(step, 1)}})
     text = " ".join(block["text"] if block["type"] == "text"
                     else block["thinking"] if block["type"] == "thinking"
                     else "%s %s" % (block["name"], json.dumps(block["input"]))
                     for block in content)
-    if step.get("stream"):
+    if step.get("stream") and streamed:
         for index, block in enumerate(content):
             kind = block["type"]
             if kind not in ("text", "thinking"):
@@ -297,7 +311,7 @@ def assistant(content, step):
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
                       "model": step.get("model", "claude-opus-5-5"), "content": content,
                       "usage": usage(step, 1)}})
-    if step.get("closes", True):
+    if step.get("closes", True) and streamed:
         delta(step)
 
 
@@ -425,6 +439,18 @@ def turn(text, message_uuid=None):
                 "usage": usage(step, 1)}})
             stream_event({"type": "content_block_delta", "index": 0,
                           "delta": {"type": "text_delta", "text": step["stream_fail"]}})
+            continue
+        if "stream_abandoned" in step:
+            # As Claude Code 2.1 ends a stream it gives up on: the open
+            # block and the message stop, and no message_delta says why.
+            state["message"] += 1
+            stream_event({"type": "message_start", "message": {
+                "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
+                "usage": usage(step, 1)}})
+            stream_event({"type": "content_block_delta", "index": 0,
+                          "delta": {"type": "text_delta", "text": step["stream_abandoned"]}})
+            stream_event({"type": "content_block_stop", "index": 0})
+            stream_event({"type": "message_stop"})
             continue
         if "refused" in step:
             # Claude Code keeps no content from a refused response.

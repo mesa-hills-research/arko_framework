@@ -2979,6 +2979,15 @@ impl ClaudeCodeRun {
                         self.flush_thread(&parent_tool_use_id).await?;
                     }
                 }
+                // A response that stops without its `message_delta` was
+                // abandoned. Its stream failed, and Claude Code asks for it
+                // again. Asked without streaming, the new response comes
+                // whole, with no `message_start`. What the abandoned one
+                // streamed goes now, so the host drops it before the new
+                // response shows, and keeps the new one.
+                Some("message_stop") if parent_tool_use_id.is_none() => {
+                    self.discard_unfinished_stream().await?;
+                }
                 // The main conversation's text and thinking as they come. A
                 // subagent's are its own.
                 Some("content_block_delta") if parent_tool_use_id.is_none() => {
