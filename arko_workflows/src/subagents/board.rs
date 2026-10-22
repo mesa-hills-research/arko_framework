@@ -2174,9 +2174,11 @@ impl Board {
         let state = self.state.lock();
         let mut found: Vec<&SubagentRecord> = Vec::new();
         let mut leads = vec![lead];
+        // Each run once, also if damaged records make a cycle of leads.
+        let mut seen = std::collections::HashSet::from([lead]);
         while let Some(next) = leads.pop() {
             for run in &state.runs {
-                if run.caller_run_id == next && run.state.is_active() {
+                if run.caller_run_id == next && run.state.is_active() && seen.insert(run.run_id) {
                     found.push(run);
                     leads.push(run.run_id);
                 }
@@ -2991,5 +2993,110 @@ mod stop_tests {
             .launch_if(ctx, selected.run_id, selected.pending.unwrap(), true);
         assert_eq!(workflow.subagents()[1].state, SubagentState::Stopped);
         assert!(!ctx.subagents.starting.lock().contains_key(&selected.run_id));
+    }
+}
+
+/// The walks over the subagents' records, which end on records that name
+/// each other as lead, as a damaged checkpoint can make them.
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use crate::test_support::{ResponsesServer, Workspace, agent_config};
+
+    /// A workflow with runs r1 and r2 that never get an answer from the
+    /// model, so they stay running, and that lead each other.
+    async fn runs_that_lead_each_other() -> (crate::Workflow, ResponsesServer, Workspace) {
+        let server = ResponsesServer::start(|_, _| None).await;
+        let workspace = Workspace::new();
+        let workflow = crate::Workflow::builder()
+            .name("cycle")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("lead", agent_config("Lead"))
+            .agent("worker", agent_config("Worker"))
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_caller("worker")
+                    .allow_target("worker"),
+            )
+            .subagents(SubagentsConfig::default().max_depth(3))
+            .build()
+            .unwrap();
+        let ctx = workflow.context();
+        let lead = Uuid::new_v4();
+        for task in ["First.", "Second."] {
+            ctx.subagents
+                .start(
+                    ctx,
+                    lead,
+                    "lead",
+                    0,
+                    &workspace.0,
+                    "worker",
+                    task,
+                    None,
+                    false,
+                    None,
+                    BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let mut state = ctx.subagents.state.lock();
+            let (first, second) = (state.runs[0].run_id, state.runs[1].run_id);
+            state.runs[0].caller_run_id = second;
+            state.runs[1].caller_run_id = first;
+        }
+        (workflow, server, workspace)
+    }
+
+    /// Runs `work` on a thread of its own, and fails if it doesn't return.
+    fn returns<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the walk over the records returned")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_agent_on_a_cycle_returns() {
+        let (workflow, _server, _workspace) = runs_that_lead_each_other().await;
+        let ctx = workflow.context().clone();
+        let first = workflow.subagents()[0].run_id;
+        let second = workflow.subagents()[1].run_id;
+        let handle = tokio::runtime::Handle::current();
+        let walked = ctx.clone();
+        let descendants = returns(move || walked.subagents.active_descendants(first));
+        assert_eq!(descendants, ["r2"]);
+        let stopped =
+            returns(move || handle.block_on(ctx.subagents.stop(&ctx, second, "r1", "", false)));
+        assert!(stopped.unwrap().starts_with("r1 is stopping"));
+    }
+
+    /// Two interrupted runs that lead each other have no lead that runs
+    /// again, so a resume stops both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resume_of_a_cycle_stops_its_runs() {
+        let (workflow, _server, _workspace) = runs_that_lead_each_other().await;
+        let ctx = workflow.context().clone();
+        {
+            let mut state = ctx.subagents.state.lock();
+            for run in &mut state.runs {
+                run.state = SubagentState::Interrupted;
+            }
+        }
+        let resumed = returns(move || ctx.subagents.resume_all(&ctx));
+        assert!(resumed.is_empty(), "{resumed:?}");
+        assert!(
+            workflow
+                .subagents()
+                .iter()
+                .all(|run| run.state == SubagentState::Stopped)
+        );
     }
 }
