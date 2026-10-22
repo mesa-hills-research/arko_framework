@@ -72,6 +72,14 @@ Defaults of background subagents (`WorkflowBuilder::subagents`, off until set), 
 
 - At most 4 run at once (`max_running`), and starts over that wait in a queue.
 - Subagents start no subagents (`max_depth` 1), and callers keep `run_workflow_agent`.
+  With a higher `max_depth`, every subagent of a caller agent under that depth gets the
+  tools that start runs, unless the `SubagentHook`'s `offers_start_tools` says no.
+- Stopping a subagent stops the subagents it started and theirs in turn, with the same
+  wrap-up, and a subagent that ends stops the ones it still has (a two-minute wrap-up).
+- A subagent can't report while its own subagents run. Its `complete_task` is refused up
+  to five times in a row, then accepted and the subagents are stopped. While it waits for
+  them in `wait_for_agents` it holds no `max_running` place.
+- A resume stops a subagent whose own lead won't run again instead of relaunching it.
 - A lead may link its subagents as peers, who may then send each other 20 messages
   between two of the lead's (`max_peer_messages`). The lead gets no copies unless
   `copy_peer_messages_to_lead` is set.
