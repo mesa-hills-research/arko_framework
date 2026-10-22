@@ -1318,7 +1318,7 @@ impl Board {
     /// Sends the host's `text` (its user's, say) to subagent `to` as a
     /// message from the subagent's lead goes, under `heading`, with a copy
     /// for the lead under `copy_heading` (a copy doesn't start a turn of
-    /// it).
+    /// it). An empty `copy_heading` sends no copy.
     pub(crate) fn host_message(
         &self,
         ctx: &Arc<SharedContext>,
@@ -1483,16 +1483,18 @@ impl Board {
                     ),
                     text.to_string(),
                 )),
-                Recipient::Subagent(_) => host.map(|(_, copy_heading)| {
-                    self.add_mail(
-                        &mut state,
-                        from,
-                        MailSender::Host,
-                        MailKind::Copy,
-                        copy_heading.to_string(),
-                        text.to_string(),
-                    )
-                }),
+                Recipient::Subagent(_) => host
+                    .filter(|(_, copy_heading)| !copy_heading.is_empty())
+                    .map(|(_, copy_heading)| {
+                        self.add_mail(
+                            &mut state,
+                            from,
+                            MailSender::Host,
+                            MailKind::Copy,
+                            copy_heading.to_string(),
+                            text.to_string(),
+                        )
+                    }),
                 _ => None,
             };
             (item, copy)

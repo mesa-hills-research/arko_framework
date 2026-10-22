@@ -494,8 +494,9 @@ impl Workflow {
     /// its lead goes, under `heading`. A running subagent reads it at its
     /// next step, and one that ended goes on with it. Its lead gets a copy
     /// under `copy_heading` with its next mail, which doesn't start a turn
-    /// of it. Returns what became of the message, as `message_agent`'s
-    /// result says it, or why it couldn't be sent.
+    /// of it, unless `copy_heading` is empty, which sends no copy. Returns
+    /// what became of the message, as `message_agent`'s result says it, or
+    /// why it couldn't be sent.
     pub fn message_subagent(
         &self,
         to: &str,

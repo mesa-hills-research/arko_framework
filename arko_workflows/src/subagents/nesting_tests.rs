@@ -2066,3 +2066,70 @@ async fn a_resume_relaunches_a_whole_tree_that_a_workflow_stop_cut_off() {
         resumed.subagents()
     );
 }
+
+/// The host's message to a nested subagent puts a copy in the mailbox of the
+/// run that started it, under the copy heading. An empty heading sends no
+/// copy, and the subagent gets the message either way.
+#[tokio::test]
+async fn an_empty_copy_heading_sends_no_copy_of_the_hosts_message() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("Level two."), wait()]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let records = || workflow.subagents();
+    until(|| {
+        records().len() == 2
+            && records()
+                .iter()
+                .all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    let starter = records()
+        .iter()
+        .find(|run| run.handle == "r1")
+        .unwrap()
+        .run_id;
+    let copies = || {
+        workflow
+            .pending_news(starter)
+            .into_iter()
+            .filter(|item| item.kind == MailKind::Copy)
+            .map(|item| item.heading)
+            .collect::<Vec<_>>()
+    };
+    assert!(copies().is_empty());
+
+    let sent = workflow
+        .message_subagent("r2", "First.", "The user sent you a message:", "")
+        .unwrap();
+    assert!(sent.contains("continues its task"), "{sent}");
+    assert!(copies().is_empty(), "{:?}", copies());
+    until(|| bodies_of(&server, "r2").len() == 2).await;
+    assert!(bodies_of(&server, "r2")[1].contains("First."));
+    until(|| {
+        records()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+
+    workflow
+        .message_subagent(
+            "r2",
+            "Second.",
+            "The user sent you a message:",
+            "The user messaged r2 (a copy for you):",
+        )
+        .unwrap();
+    assert_eq!(copies(), ["The user messaged r2 (a copy for you):"]);
+    until(|| bodies_of(&server, "r2").len() == 3).await;
+    assert!(bodies_of(&server, "r2")[2].contains("Second."));
+}
