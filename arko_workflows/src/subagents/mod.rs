@@ -102,7 +102,10 @@ pub const UPDATE_MAX_MAIL_BYTES: usize = 48 * 1024;
 pub struct SubagentsConfig {
     /// At most this many subagents run at once, workflow-wide. A start (or a
     /// restart) over it waits in a queue, first come first served. `None` allows
-    /// any number. Default [`DEFAULT_MAX_RUNNING`].
+    /// any number. A subagent that waits in `wait_for_agents` for subagents of
+    /// its own holds no place while it waits, or the runs it waits for could
+    /// never start. The number running may pass the limit by the waiters that
+    /// woke since. Default [`DEFAULT_MAX_RUNNING`].
     pub max_running: Option<NonZeroUsize>,
     /// How deep subagents may nest. A run may start subagents while its own
     /// depth is less than this (a run the host starts has depth 0, its

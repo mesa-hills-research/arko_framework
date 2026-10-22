@@ -587,3 +587,135 @@ async fn a_subagent_being_stopped_may_report_with_unfinished_subagents() {
     assert_eq!(records[1].state, SubagentState::Running);
     assert!(records[1].stop_requested.is_some());
 }
+
+/// Two subagents each start a subagent and wait for it while only two runs
+/// may run at once. The waiting ones hold no place, so the queued ones start.
+#[tokio::test]
+async fn subagents_waiting_for_their_own_subagents_hold_no_place() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Parent one."), start("Parent two.")]),
+        ("r1", vec![start("Child."), wait()]),
+        ("r2", vec![start("Child."), wait()]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(2).max_running(2),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    until(|| {
+        let runs = workflow.subagents();
+        runs.len() == 4 && runs.iter().all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    let depths = workflow
+        .subagents()
+        .into_iter()
+        .map(|run| run.depth)
+        .collect::<Vec<_>>();
+    assert_eq!(depths, [1, 1, 2, 2]);
+}
+
+/// A run's list says what a subagent of it waits for.
+#[tokio::test]
+async fn the_list_says_what_a_waiting_subagent_waits_for() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Parent.")]),
+        ("r1", vec![start("Child."), wait()]),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    let ctx = workflow.context();
+    // r1 may still be about to start waiting.
+    until(|| {
+        ctx.subagents
+            .list(ctx, lead.agent_run_id)
+            .contains("running, waiting for r2 for ")
+    })
+    .await;
+    let r1 = workflow.subagents()[0].run_id;
+    let listed = ctx.subagents.list(ctx, r1);
+    assert!(
+        listed.starts_with("r2 · agent `worker` · running for "),
+        "{listed}"
+    );
+    gate.open.notify_one();
+    until(|| workflow.active_subagents().is_empty()).await;
+    assert!(
+        ctx.subagents
+            .list(ctx, lead.agent_run_id)
+            .contains("finished")
+    );
+}
+
+/// A subagent that waits for queued subagents, and wakes up when they are
+/// done, doesn't make a run start twice.
+#[tokio::test]
+async fn a_waiting_subagent_that_wakes_makes_no_start_twice() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Parent.")]),
+        (
+            "r1",
+            vec![
+                start("First child."),
+                start("Second child."),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(2).max_running(1),
+    )
+    .build()
+    .unwrap();
+    let mut events = workflow.subscribe_subagents();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| {
+        let runs = workflow.subagents();
+        runs.len() == 3 && runs.iter().all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    let mut counts: BTreeMap<(String, &str), usize> = BTreeMap::new();
+    while let Ok(event) = events.try_recv() {
+        let kind = match event.kind {
+            SubagentEventKind::Queued => "queued",
+            SubagentEventKind::Started => "started",
+            SubagentEventKind::Resumed => "resumed",
+            _ => continue,
+        };
+        *counts.entry((event.handle, kind)).or_default() += 1;
+    }
+    let once =
+        |handle: &str, kind: &'static str| counts.get(&(handle.to_string(), kind)) == Some(&1);
+    for handle in ["r1", "r2", "r3"] {
+        assert!(once(handle, "started"), "{handle}: {counts:?}");
+        assert!(
+            !counts.contains_key(&(handle.to_string(), "resumed")),
+            "{counts:?}"
+        );
+    }
+    // The two children waited for a place, one time each.
+    assert!(once("r2", "queued") && once("r3", "queued"), "{counts:?}");
+}

@@ -86,6 +86,12 @@ pub(crate) struct Board {
     /// Why the runs stopped because their lead stopped or ended were
     /// stopped, in words, until they end.
     lead_stops: Mutex<HashMap<Uuid, String>>,
+    /// The subagents that wait in `wait_for_agents` for subagents of their
+    /// own that are still active, with the handles of those. They hold no
+    /// place under [`SubagentsConfig::max_running`], since a lead that
+    /// waits for the runs queued behind it would stop them from ever
+    /// starting. Not saved.
+    waiting: Mutex<HashMap<Uuid, Vec<String>>>,
 }
 
 impl Board {
@@ -121,6 +127,7 @@ impl Board {
             prepared: Mutex::new(HashMap::new()),
             starting: Mutex::new(HashMap::new()),
             lead_stops: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(HashMap::new()),
         }
     }
 
@@ -799,6 +806,18 @@ impl Board {
         Ok(config)
     }
 
+    /// How many subagents hold a place under
+    /// [`SubagentsConfig::max_running`]: those running, except the ones that
+    /// wait for subagents of their own.
+    fn places_taken(&self, state: &SubagentsSnapshot) -> usize {
+        let waiting = self.waiting.lock();
+        state
+            .runs
+            .iter()
+            .filter(|run| run.state == SubagentState::Running && !waiting.contains_key(&run.run_id))
+            .count()
+    }
+
     /// Launches run `run_id` (`launch` says how), or queues it while
     /// [`SubagentsConfig::max_running`] runs are running.
     fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
@@ -816,11 +835,7 @@ impl Board {
         let resumed = matches!(launch, PendingLaunch::Resume { .. });
         let (record, started) = {
             let mut state = self.state.lock();
-            let running = state
-                .runs
-                .iter()
-                .filter(|run| run.state == SubagentState::Running)
-                .count();
+            let running = self.places_taken(&state);
             let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id) else {
                 return;
             };
@@ -869,11 +884,7 @@ impl Board {
         loop {
             let next = {
                 let state = self.state.lock();
-                let running = state
-                    .runs
-                    .iter()
-                    .filter(|run| run.state == SubagentState::Running)
-                    .count();
+                let running = self.places_taken(&state);
                 let max = self.config.as_ref().and_then(|config| config.max_running);
                 if max.is_some_and(|max| running >= max.get()) {
                     return;
@@ -1522,6 +1533,14 @@ impl Board {
             }
         };
         let lead = self.record(me).map(|record| record.caller_run_id);
+        // While it waits for subagents of its own, a subagent holds no place.
+        struct Waiting<'a>(&'a Board, Uuid);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.waiting.lock().remove(&self.1);
+            }
+        }
+        let _waiting = Waiting(self, me);
         let mut version = self.version.subscribe();
         let mut notes = ctx.notes.watch();
         let deadline = tokio::time::Instant::now() + timeout;
@@ -1617,6 +1636,9 @@ impl Board {
             if context_arrived.has_arrived() {
                 return Ok(with_collected(CONTEXT_ARRIVED, &collected, &still));
             }
+            if lead.is_some() {
+                self.waits_for(ctx, me, &still);
+            }
             tokio::select! {
                 biased;
                 _ = ctx.run_control.stopped() => {}
@@ -1642,6 +1664,25 @@ impl Board {
                     return Ok(with_collected(&waited, &collected, &still));
                 }
             }
+        }
+    }
+
+    /// Subagent `me` is about to wait, and `still` are its subagents that
+    /// are active (none if it waits for mail alone). While some are, it
+    /// holds no place under [`SubagentsConfig::max_running`], and the runs
+    /// queued for a place may start.
+    fn waits_for(&self, ctx: &Arc<SharedContext>, me: Uuid, still: &[String]) {
+        let changed = {
+            let mut waiting = self.waiting.lock();
+            if still.is_empty() {
+                waiting.remove(&me).is_some()
+            } else {
+                waiting.insert(me, still.to_vec()).as_deref() != Some(still)
+            }
+        };
+        if changed && !still.is_empty() {
+            self.bump();
+            self.start_queued(ctx);
         }
     }
 
@@ -2144,6 +2185,10 @@ impl Board {
                 SubagentState::Running if run.asking => {
                     "running, waiting for your answer to its question".to_string()
                 }
+                SubagentState::Running => match self.waiting.lock().get(&run.run_id) {
+                    Some(handles) => format!("running, waiting for {}", handles.join(", ")),
+                    None => "running".to_string(),
+                },
                 state => state.describe().to_string(),
             };
             let place = match &run.isolated {
