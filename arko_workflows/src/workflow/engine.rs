@@ -1760,7 +1760,9 @@ impl HandoverHook for WorkflowHandover {
         // The subagents it started and still waits for: the report may not
         // name them.
         if let Some(workers) = ctx.subagents.workers_section(task.id) {
-            context.push_str("\n\n");
+            if !context.is_empty() {
+                context.push_str("\n\n");
+            }
             context.push_str(&workers);
         }
         // A chat goes on from the user's latest input, not from its first

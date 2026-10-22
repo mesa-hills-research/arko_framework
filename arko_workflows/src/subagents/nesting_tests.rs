@@ -682,7 +682,7 @@ async fn the_list_says_what_a_waiting_subagent_waits_for() {
     until(|| {
         ctx.subagents
             .list(ctx, lead.agent_run_id)
-            .contains("running, waiting for r2 for ")
+            .contains("running (waiting for r2) for ")
     })
     .await;
     let r1 = workflow.subagents()[0].run_id;
@@ -962,9 +962,10 @@ async fn a_compaction_restates_the_subagents_that_still_work() {
         restated.contains("- r1 (agent `worker`, running for "),
         "{restated}"
     );
-    // The seed of a handover has them too.
+    // The seed of a handover has them too, as its whole context when the run
+    // has no notes and no list of agents to restate.
     let seed = hook.on_handover(&task, "Report.");
-    assert!(seed.context.unwrap().contains("# Your workers"));
+    assert!(seed.context.unwrap().starts_with("# Your workers\n"));
 }
 
 /// A host's hook says more about a run, and its lead reads that with the

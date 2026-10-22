@@ -2209,9 +2209,9 @@ impl Board {
             let doing = match (worker.state, waiting.get(&worker.run_id)) {
                 (SubagentState::Queued, _) => "queued".to_string(),
                 (_, _) if worker.asking => {
-                    "running, waiting for your answer to its question".to_string()
+                    "running (waiting for your answer to its question)".to_string()
                 }
-                (_, Some(handles)) => format!("running, waiting for {}", handles.join(", ")),
+                (_, Some(handles)) => format!("running (waiting for {})", handles.join(", ")),
                 (_, None) => "running".to_string(),
             };
             let place = match worker
@@ -2418,10 +2418,10 @@ impl Board {
                     None => "queued".to_string(),
                 },
                 SubagentState::Running if run.asking => {
-                    "running, waiting for your answer to its question".to_string()
+                    "running (waiting for your answer to its question)".to_string()
                 }
                 SubagentState::Running => match self.waiting.lock().get(&run.run_id) {
-                    Some(handles) => format!("running, waiting for {}", handles.join(", ")),
+                    Some(handles) => format!("running (waiting for {})", handles.join(", ")),
                     None => "running".to_string(),
                 },
                 state => state.describe().to_string(),
