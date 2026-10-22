@@ -1657,9 +1657,17 @@ impl Board {
             None => None,
             Some(ids) => {
                 let state = self.state.lock();
+                let mine = state.runs.iter().find(|run| run.run_id == me);
                 let mut wanted = Vec::new();
                 for id in ids {
-                    let run = find(&state, id).ok_or_else(|| unknown_run(&state, me, id))?;
+                    // Its own subagents, and the peers its lead linked it with
+                    // (whose messages end the wait). The ids of other runs
+                    // would only wait for the whole limit.
+                    let run = find(&state, id)
+                        .filter(|run| {
+                            run.caller_run_id == me || mine.is_some_and(|me| linked(me, run))
+                        })
+                        .ok_or_else(|| unknown_run(&state, me, id))?;
                     wanted.push(run.run_id);
                 }
                 Some(wanted)

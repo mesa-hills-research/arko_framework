@@ -1379,3 +1379,75 @@ async fn another_tool_call_between_refusals_starts_the_count_again() {
     assert_eq!(records[0].report.as_deref(), Some("r1 done"));
     assert_eq!(records[1].state, SubagentState::Finished);
 }
+
+/// `wait_for_agents` named a run that is neither the caller's own nor
+/// linked to it. It is refused at once, and not left to wait for a report
+/// that would never come to it.
+#[tokio::test]
+async fn waiting_for_a_run_that_is_not_the_callers_is_refused_at_once() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("First."), start("Second.")]),
+        (
+            "r1",
+            vec![(
+                "wait_for_agents",
+                json!({ "runs": "r2", "timeout_seconds": 600 }),
+            )],
+        ),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    until(|| bodies_of(&server, "r1").len() >= 2).await;
+    let refused = result_of(&bodies_of(&server, "r1")[1], "r1", 0);
+    assert!(
+        refused.contains("there is no agent run `r2` of yours"),
+        "{refused}"
+    );
+    gate.open.notify_one();
+}
+
+/// A peer the lead linked the caller with can be waited for: its message
+/// ends the wait.
+#[tokio::test]
+async fn waiting_for_a_linked_peer_ends_with_its_message() {
+    let server = serve_tree(vec![
+        (
+            "lead",
+            vec![
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "First.", "peers": "all" }),
+                ),
+                start("Second."),
+            ],
+        ),
+        ("r1", vec![("wait_for_agents", json!({ "runs": "r2" }))]),
+        (
+            "r2",
+            vec![(
+                "message_agent",
+                json!({ "to": "r1", "message": "Here is what I found." }),
+            )],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    until(|| bodies_of(&server, "r1").len() >= 2).await;
+    let heard = result_of(&bodies_of(&server, "r1")[1], "r1", 0);
+    assert!(heard.contains("Here is what I found."), "{heard}");
+}

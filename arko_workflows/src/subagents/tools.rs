@@ -355,7 +355,7 @@ impl Tool for WaitForAgentsTool {
             vec![
                 param(
                     "runs",
-                    "Optional: the run ids to wait for, separated by commas (default: all of yours). Messages from your lead always end the wait.",
+                    "Optional: the ids of your own agent runs (or of runs your lead linked you with) to wait for, separated by commas (default: all of yours). Messages from your lead always end the wait.",
                     ToolParameterType::String,
                     false,
                 ),
