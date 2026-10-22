@@ -53,8 +53,9 @@ impl McpServerHandle {
 /// A server process that exited on its own (not stopped by the manager):
 /// its exit status and last stderr lines, reported in a warning.
 #[derive(Debug)]
-// Only tests read the report back; the warning carries it otherwise.
-#[cfg_attr(not(test), allow(dead_code))]
+// Only the tests that run a shell script read the report back (Unix only).
+// The warning carries it otherwise.
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 struct ServerExit {
     status: std::io::Result<ExitStatus>,
     stderr_tail: Vec<String>,
