@@ -375,9 +375,11 @@ enum CallOutcome {
     },
 }
 
-/// A gated arko call waiting for its MCP call.
+/// A gated arko call, waiting for its MCP call or run again after a stop.
 struct Admitted {
     id: Uuid,
+    /// Claude Code's ID of the call (its `tool_use_id`).
+    call_id: Option<String>,
     custom_output: Option<String>,
 }
 
@@ -431,9 +433,7 @@ impl ToolHost {
             ));
         };
         let id = admitted.id;
-        let (outcome, output) = self
-            .run(name, tool, &arguments, id, admitted.custom_output, false)
-            .await;
+        let (outcome, output) = self.run(name, tool, &arguments, admitted, false).await;
         // The CLI may report only a call's text in its hook. Keep the
         // actual images until the runtime records that completed result.
         let images = output
@@ -449,17 +449,22 @@ impl ToolHost {
         output
     }
 
-    /// Runs a call to `tool` (`recovering`: again, after the task stopped
-    /// while it ran), and returns its outcome and what Claude Code reads.
+    /// Runs the admitted call `call` to `tool` (`recovering`: again, after
+    /// the task stopped while it ran), and returns its outcome and what
+    /// Claude Code reads.
     async fn run(
         &self,
         name: &str,
         tool: Arc<dyn crate::tool::Tool>,
         arguments: &Value,
-        id: Uuid,
-        custom_output: Option<String>,
+        call: Admitted,
         recovering: bool,
     ) -> (CallOutcome, cc::ToolOutput) {
+        let Admitted {
+            id,
+            call_id,
+            custom_output,
+        } = call;
         let mut params = params_of(arguments);
         crate::tool::builtins::read_file::ignore_line_ranges(
             tool.as_ref(),
@@ -480,7 +485,7 @@ impl ToolHost {
             params,
             custom_output,
             tool,
-            call_id: None,
+            call_id,
             message_to_agent: None,
             recovering,
         };
@@ -1200,8 +1205,11 @@ impl ClaudeCodeRun {
                     &call.tool_name,
                     tool,
                     &arguments,
-                    call.tool_call_id,
-                    call.custom_output.clone(),
+                    Admitted {
+                        id: call.tool_call_id,
+                        call_id: call.call_id.clone(),
+                        custom_output: call.custom_output.clone(),
+                    },
                     true,
                 )
                 .await;
@@ -2510,7 +2518,12 @@ impl ClaudeCodeRun {
             // The permission request that follows waits for approval.
             return Ok(ask_tool());
         }
-        self.admit(&name, built_in, id, &input, None, session).await
+        let call = Admitted {
+            id,
+            call_id: tool_use_id,
+            custom_output: None,
+        };
+        self.admit(&name, built_in, call, &input, session).await
     }
 
     /// The input an allowed call of Claude Code's own tools runs with, when
@@ -2545,9 +2558,8 @@ impl ClaudeCodeRun {
         &mut self,
         name: &str,
         built_in: bool,
-        id: Uuid,
+        call: Admitted,
         input: &Value,
-        custom_output: Option<String>,
         session: &cc::ClaudeSession,
     ) -> Result<Value, ArkoAgentsError> {
         if !built_in {
@@ -2557,9 +2569,12 @@ impl ClaudeCodeRun {
                 .unwrap()
                 .entry(input_key(name, input))
                 .or_default()
-                .push_back(Admitted { id, custom_output });
+                .push_back(call);
             return Ok(allow_tool());
         }
+        let Admitted {
+            id, custom_output, ..
+        } = call;
         if let Some(output) = custom_output {
             // Claude Code runs a built-in itself: output the host supplies
             // is its result instead of running it.
@@ -2780,7 +2795,11 @@ impl ClaudeCodeRun {
                 .unwrap()
                 .entry(input_key(&approval.name, &approval.input))
                 .or_default()
-                .push_back(Admitted { id, custom_output });
+                .push_back(Admitted {
+                    id,
+                    call_id: approval.tool_use_id.clone(),
+                    custom_output,
+                });
             cc::PermissionDecision::allow()
         };
         let _ = approval.reply.send(decision);
@@ -3038,7 +3057,13 @@ impl ClaudeCodeRun {
                             }
                         }
                         if !images.is_empty() {
-                            sink.tool_images(self.task.id, call.id, &call.name, &images);
+                            sink.tool_images_with_call_id(
+                                self.task.id,
+                                call.id,
+                                Some(tool_use_id),
+                                &call.name,
+                                &images,
+                            );
                         }
                     }
                     let (id, name, record) = (call.id, call.name.clone(), call.record.clone());

@@ -694,3 +694,53 @@ async fn the_host_s_sink_gets_each_call_s_images() {
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].description, "fixture.png, 12 × 8");
 }
+
+/// Records the provider's call IDs a tool image sink is given. It implements
+/// only `tool_images_with_call_id`, which the runtime calls.
+#[derive(Default)]
+struct CallIdRecorder(std::sync::Mutex<Vec<(Uuid, Option<String>, String)>>);
+
+impl crate::tool::ToolImageSink for CallIdRecorder {
+    fn tool_images(&self, _: Uuid, _: Uuid, _: &str, _: &[ToolImage]) {
+        unreachable!("the runtime gives the provider's call ID too");
+    }
+
+    fn tool_images_with_call_id(
+        &self,
+        _task_id: Uuid,
+        tool_call_id: Uuid,
+        provider_call_id: Option<&str>,
+        tool_name: &str,
+        _images: &[ToolImage],
+    ) {
+        self.0.lock().unwrap().push((
+            tool_call_id,
+            provider_call_id.map(str::to_string),
+            tool_name.to_string(),
+        ));
+    }
+}
+
+/// A sink that implements `tool_images_with_call_id` gets the ID the model's
+/// provider gave the call, next to the runtime's. A sink that implements only
+/// `tool_images` keeps working (see the test above).
+#[tokio::test]
+async fn the_host_s_sink_gets_the_providers_call_id() {
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    let recorder = Arc::new(CallIdRecorder::default());
+    agent.image_sink = Some(recorder.clone());
+    let runtime_id = Uuid::new_v4();
+    agent
+        .execute_native_tool(&call("call_abc", "view_image"), runtime_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        [(
+            runtime_id,
+            Some("call_abc".to_string()),
+            "view_image".to_string()
+        )]
+    );
+}

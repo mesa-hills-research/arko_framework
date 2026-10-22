@@ -1390,20 +1390,37 @@ async fn a_branch_forks_again_after_a_failed_first_launch() {
     assert_eq!(history[1], "One.");
 }
 
-/// Records what a tool image sink is given: the call's ID, name and images.
+/// What a tool image sink is given for a call: its runtime ID, Claude
+/// Code's ID, its name and its images' captions.
+type Reported = (uuid::Uuid, Option<String>, String, Vec<String>);
+
+/// Records what a tool image sink is given. It implements only
+/// `tool_images_with_call_id`, which the runtime calls.
 #[derive(Default)]
-struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, Vec<String>)>>);
+struct Images(std::sync::Mutex<Vec<Reported>>);
 
 impl crate::tool::ToolImageSink for Images {
     fn tool_images(
         &self,
         _task_id: uuid::Uuid,
+        _tool_call_id: uuid::Uuid,
+        _tool_name: &str,
+        _images: &[crate::tool::ToolImage],
+    ) {
+        unreachable!("the runtime gives the provider's call ID too");
+    }
+
+    fn tool_images_with_call_id(
+        &self,
+        _task_id: uuid::Uuid,
         tool_call_id: uuid::Uuid,
+        provider_call_id: Option<&str>,
         tool_name: &str,
         images: &[crate::tool::ToolImage],
     ) {
         self.0.lock().unwrap().push((
             tool_call_id,
+            provider_call_id.map(str::to_string),
             tool_name.to_string(),
             images
                 .iter()
@@ -1415,13 +1432,13 @@ impl crate::tool::ToolImageSink for Images {
 
 /// The host's sink gets the images of an arko tool's call once (not again
 /// when Claude Code reports the result) and those of Claude Code's own
-/// `Read`, each by the call's ID in the events, and captioned alike: the
-/// file's path and size.
+/// `Read`, each by the call's ID in the events and Claude Code's own ID for
+/// it, and captioned alike: the file's path and size.
 #[tokio::test]
 async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
     let fake = Fake::new(json!([[
-        {"tool": "mcp__arko__read_file", "input": {"path": "a.png"}},
-        {"tool": "Read", "input": {"file_path": "b.png"}, "output": [
+        {"tool": "mcp__arko__read_file", "id": "toolu_arko_image", "input": {"path": "a.png"}},
+        {"tool": "Read", "id": "toolu_built_in_image", "input": {"file_path": "b.png"}, "output": [
             {"type": "text", "text": "b.png"},
             {"type": "image", "source": {"type": "base64", "data": "cGl4ZWxz", "media_type": "image/png"}},
         ]},
@@ -1446,16 +1463,24 @@ async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
     let recorded = images.0.lock().unwrap().clone();
     let names: Vec<_> = recorded
         .iter()
-        .map(|(_, name, captions)| (name.as_str(), captions.clone()))
+        .map(|(_, call_id, name, captions)| (call_id.as_deref(), name.as_str(), captions.clone()))
         .collect();
     assert_eq!(
         names,
         [
-            ("read_file", vec!["a.png, 1 KB".to_string()]),
-            ("Read", vec!["b.png, 1 KB".to_string()])
+            (
+                Some("toolu_arko_image"),
+                "read_file",
+                vec!["a.png, 1 KB".to_string()]
+            ),
+            (
+                Some("toolu_built_in_image"),
+                "Read",
+                vec!["b.png, 1 KB".to_string()]
+            )
         ]
     );
-    for (id, name, _) in &recorded {
+    for (id, _, name, _) in &recorded {
         assert!(
             events.iter().any(|event| matches!(
                 event,

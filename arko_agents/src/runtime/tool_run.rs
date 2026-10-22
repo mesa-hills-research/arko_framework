@@ -353,9 +353,10 @@ fn execute(
         if let Some(sink) = &environment.image_sink
             && !output.images.is_empty()
         {
-            sink.tool_images(
+            sink.tool_images_with_call_id(
                 environment.task_id,
                 run.tool_call_id,
+                run.call_id.as_deref(),
                 &run.tool_name,
                 &output.images,
             );

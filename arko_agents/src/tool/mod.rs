@@ -91,6 +91,11 @@ impl ToolImage {
 /// It runs on the call's task, so keep it quick (hand the images to another
 /// thread to scale or store them).
 ///
+/// The runtime calls
+/// [`tool_images_with_call_id`](Self::tool_images_with_call_id), which also
+/// gives the ID the model's provider gave the call. A sink that needs only
+/// the runtime's ID implements [`tool_images`](Self::tool_images).
+///
 /// Events carry no image bytes because every subscriber of a workflow's
 /// event broadcast, and its event log, would get a copy.
 pub trait ToolImageSink: Send + Sync {
@@ -101,6 +106,24 @@ pub trait ToolImageSink: Send + Sync {
         tool_name: &str,
         images: &[ToolImage],
     );
+
+    /// [`tool_images`](Self::tool_images) with `provider_call_id`, the ID
+    /// the model's provider gave the call (the `id` of the conversation's
+    /// [`ToolCall`](arko_ai::ToolCall), a Claude Code `tool_use_id`). It is
+    /// `None` for a call the model wrote as text, which has no provider ID.
+    /// A host that matches a call with the conversation's messages overrides
+    /// this method. The default drops the ID and calls `tool_images`.
+    fn tool_images_with_call_id(
+        &self,
+        task_id: uuid::Uuid,
+        tool_call_id: uuid::Uuid,
+        provider_call_id: Option<&str>,
+        tool_name: &str,
+        images: &[ToolImage],
+    ) {
+        let _ = provider_call_id;
+        self.tool_images(task_id, tool_call_id, tool_name, images);
+    }
 }
 
 /// Structured output is opt-in. Existing string-returning tools need no changes.
