@@ -746,6 +746,35 @@ front matter sets `name`, `description`, and `auto_load`. Identical skills are l
 once, and other name collisions get a numeric suffix. Invalid skills
 are skipped with a warning unless `on_invalid_skill` is `Error`.
 
+`SkillsConfig::embedded` holds skills given in memory, such as ones built into a
+program, so nothing is written to a folder. Each is an `EmbeddedSkill::new(name, content)`
+with the full text of a `SKILL.md`, front matter included.
+
+```rust
+let skills = SkillsConfig {
+    embedded: vec![EmbeddedSkill::new(
+        "commit-style",
+        include_str!("skills/commit-style/SKILL.md"),
+    )],
+    ..Default::default()
+};
+```
+
+An embedded skill is parsed, checked, listed and loaded like a folder skill, with
+`on_invalid_skill` deciding what an invalid one does. It has no resource files, so
+`load_skill` answers a request for one by saying the skill has none. Embedded skills
+load after the folder sources and have the lowest priority. A folder skill with the same
+name replaces the embedded one instead of being renamed, which lets a user override a
+built-in skill. A folder skill that its source's `include` or `exclude` list leaves out
+replaces nothing. `skill::scan` lists embedded skills last, with `SkillScan::embedded` set and an empty
+`path`, and names the folder skill that replaced one.
+
+Embedded skills are program code, so a saved configuration, and the task that holds it,
+leaves them out. A host that loads a saved task gives them again before `SkillManager::load`.
+A workflow does this for its agents. A run it continues, resumes or recovers takes the
+embedded skills its agent is registered with now, and `resume_from` ignores them, so a
+built-in skill that changed between versions doesn't stop a resume.
+
 When there are on-demand skills, `SkillManager::setup`, given the tool registry and the
 `AgentConfig`, registers the `load_skill` tool and adds it to the agent's tools with
 auto-approval. Call it before `Task::new`, which keeps its own copy of the
