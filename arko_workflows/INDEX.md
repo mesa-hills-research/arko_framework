@@ -874,7 +874,7 @@ The tool name constants are `subagents::START_AGENT_TOOL_NAME` and the like, all
 
 A subagent's initial prompt is its task, then a section saying it is agent run `rN` started by its lead, how to message the lead and wait for it, and where it works (an isolated workspace's `description` included).
 
-A subagent that started subagents, which still run or wait for a place, can't report yet. Its `complete_task` call is refused with the runs and what to do (`Your agent runs r2 (running) and r3 (queued) haven't finished. Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent, then report again.`), and the run goes on. A run that is being stopped, or wrapping up with the workflow, reports at once whatever its subagents do. The host's own runs may end their turn with subagents running.
+A subagent that started subagents, which still run or wait for a place, can't report yet. Its `complete_task` call is refused with the runs and what to do (`Your agent runs r2 (running) and r3 (queued) haven't finished. Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent, then report again.`), and the run goes on. The third refusal on says how many are left. After five refusals in a row (another tool call in between starts the count again) the next `complete_task` is accepted, the subagents that still work are stopped with the run, and the lead's report ends with `It finished while r2 was still working, so r2 was stopped.` A run that is being stopped, or wrapping up with the workflow, reports at once whatever its subagents do. The host's own runs may end their turn with subagents running.
 
 ### Mail and delivery
 

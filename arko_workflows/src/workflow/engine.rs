@@ -4784,8 +4784,9 @@ impl WorkflowExecutionMiddleware {
         // A subagent that started subagents isn't done while they run: its
         // report would reach its lead with their work still going on. A run
         // that is being stopped reports at once, whatever it still has.
-        if call.tool_name == COMPLETE_TASK_TOOL_NAME
-            && !self.context.run_control.was_told(execution.task_id)
+        if call.tool_name != COMPLETE_TASK_TOOL_NAME {
+            self.context.subagents.forget_refusals(execution.task_id);
+        } else if !self.context.run_control.was_told(execution.task_id)
             && !self.context.run_control.is_run_stopping(execution.task_id)
             && !self.context.run_control.is_wrapping_up()
             && let Some(message) = self.context.subagents.unfinished_workers(execution.task_id)

@@ -1275,3 +1275,107 @@ async fn a_start_by_a_subagent_without_the_start_tools_is_refused() {
     );
     assert_eq!(workflow.subagents().len(), 1);
 }
+
+/// A model that answers every refusal with another `complete_task` is
+/// refused five times. The sixth is accepted, its subagents are stopped with
+/// the run, and its lead is told they were still working.
+#[tokio::test]
+async fn a_model_that_keeps_reporting_is_refused_five_times_and_then_its_subagents_stop() {
+    let mut steps = vec![start("Level two.")];
+    for number in 1..=8 {
+        steps.push(complete(&format!("Report {number}.")));
+    }
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", steps),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    until(|| workflow.active_subagents().is_empty()).await;
+
+    // The first request, the answer to the start, and five refusals.
+    let requests = bodies_of(&server, "r1");
+    assert_eq!(requests.len(), 7);
+    let refusal = |number: usize| result_of(&requests[number + 1], "r1", number);
+    for number in 1..=2 {
+        assert!(
+            refusal(number).ends_with("then report again."),
+            "{}",
+            refusal(number)
+        );
+    }
+    for number in 3..=4 {
+        assert!(
+            refusal(number).ends_with(&format!(
+                "This is refusal {number} of 5. After refusal 5, your next complete_task is accepted and the agent runs that still work are stopped."
+            )),
+            "{}",
+            refusal(number)
+        );
+    }
+    assert!(
+        refusal(5).ends_with(
+            "That was the last refusal. Your next complete_task is accepted, and the agent runs that still work are stopped."
+        ),
+        "{}",
+        refusal(5)
+    );
+    let records = workflow.subagents();
+    assert_eq!(records[0].report.as_deref(), Some("Report 6."));
+    assert_eq!(records[1].state, SubagentState::Stopped);
+    assert_eq!(records[1].error.as_deref(), Some("its lead r1 ended"));
+    let news = workflow.pending_news(lead.agent_run_id);
+    let reports: Vec<&str> = news.iter().map(|item| item.body.as_str()).collect();
+    assert_eq!(
+        reports,
+        ["Report 6.\n\nIt finished while r2 was still working, so r2 was stopped."]
+    );
+}
+
+/// Refusals are counted in a row. Another tool call in between starts the
+/// count again.
+#[tokio::test]
+async fn another_tool_call_between_refusals_starts_the_count_again() {
+    let mut steps = vec![start("Level two.")];
+    for _ in 0..4 {
+        steps.push(complete("Done?"));
+    }
+    steps.push(("list_agents", json!({})));
+    for _ in 0..4 {
+        steps.push(complete("Done?"));
+    }
+    steps.push(("wait_for_agents", json!({ "all": true })));
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", steps),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    // The ninth request answers r1's last refusal, and it waits.
+    until(|| bodies_of(&server, "r1").len() >= 11).await;
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Running);
+    gate.open.notify_one();
+    until(|| workflow.active_subagents().is_empty()).await;
+    let records = workflow.subagents();
+    assert_eq!(records[0].report.as_deref(), Some("r1 done"));
+    assert_eq!(records[1].state, SubagentState::Finished);
+}

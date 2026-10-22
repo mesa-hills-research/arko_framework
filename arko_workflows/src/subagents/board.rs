@@ -38,6 +38,11 @@ const STOP_WRAP_UP: Duration = Duration::from_secs(120);
 /// before the message that started it.
 const CUT_BACK_REASON: &str = "its lead's conversation was cut back to before it started";
 
+/// How many times in a row a subagent's `complete_task` is refused because
+/// its own subagents still work. The next call is accepted, and the
+/// subagents that still work are stopped with the run.
+const MAX_COMPLETE_REFUSALS: u32 = 5;
+
 /// What a subagent's run is told when it goes on because mail reached it
 /// after it reported.
 const MAIL_AFTER_REPORT: &str = "You have new mail since your report: it follows. Act on it, then call `complete_task` again with your updated report.";
@@ -92,6 +97,9 @@ pub(crate) struct Board {
     /// waits for the runs queued behind it would stop them from ever
     /// starting. Not saved.
     waiting: Mutex<HashMap<Uuid, Vec<String>>>,
+    /// How many times in a row each subagent's `complete_task` was refused
+    /// because its own subagents still work. Not saved.
+    refusals: Mutex<HashMap<Uuid, u32>>,
 }
 
 impl Board {
@@ -128,6 +136,7 @@ impl Board {
             starting: Mutex::new(HashMap::new()),
             lead_stops: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
+            refusals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -931,6 +940,7 @@ impl Board {
         self.starting.lock().remove(&run_id);
         self.drivers.lock().remove(&run_id);
         let lead_stop = self.lead_stops.lock().remove(&run_id);
+        self.refusals.lock().remove(&run_id);
         let Some(record) = self.record(run_id) else {
             return;
         };
@@ -977,11 +987,30 @@ impl Board {
                     self.start_queued(ctx);
                     return;
                 }
+                // It may finish with subagents that still work, such as when
+                // it was refused too many times. They are stopped with it.
+                let working = self
+                    .active_workers_of(run_id)
+                    .into_iter()
+                    .map(|worker| worker.handle)
+                    .collect::<Vec<_>>();
+                let body = match working.as_slice() {
+                    [] => result.summary.clone(),
+                    [one] => format!(
+                        "{}\n\nIt finished while {one} was still working, so {one} was stopped.",
+                        result.summary
+                    ),
+                    many => format!(
+                        "{}\n\nIt finished while {} were still working, so they were stopped.",
+                        result.summary,
+                        handles_in_words(many)
+                    ),
+                };
                 (
                     SubagentState::Finished,
                     MailKind::Report,
                     format!("{handle} (agent `{agent}`) finished. Its report:"),
-                    result.summary.clone(),
+                    body,
                     SubagentEventKind::Finished {
                         summary: result.summary.clone(),
                     },
@@ -2091,6 +2120,16 @@ impl Board {
         if !self.is_subagent(run) {
             return None;
         }
+        // A model that keeps asking is not refused for ever.
+        let tries = {
+            let mut refusals = self.refusals.lock();
+            let tries = refusals.entry(run).or_insert(0);
+            if *tries >= MAX_COMPLETE_REFUSALS {
+                return None;
+            }
+            *tries += 1;
+            *tries
+        };
         let workers = self
             .active_workers_of(run)
             .into_iter()
@@ -2104,7 +2143,10 @@ impl Board {
             })
             .collect::<Vec<_>>();
         let (unfinished, what_to_do) = match workers.as_slice() {
-            [] => return None,
+            [] => {
+                self.refusals.lock().remove(&run);
+                return None;
+            }
             [one] => (
                 format!("Your agent run {one} hasn't finished."),
                 "Wait for it with wait_for_agents, or stop it with stop_agent",
@@ -2117,7 +2159,25 @@ impl Board {
                 "Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent",
             ),
         };
-        Some(format!("{unfinished} {what_to_do}, then report again."))
+        let warning = match MAX_COMPLETE_REFUSALS - tries {
+            0 => " That was the last refusal. Your next complete_task is accepted, and the agent runs that still work are stopped.".to_string(),
+            1 | 2 => format!(
+                " This is refusal {tries} of {MAX_COMPLETE_REFUSALS}. After refusal {MAX_COMPLETE_REFUSALS}, your next complete_task is accepted and the agent runs that still work are stopped."
+            ),
+            _ => String::new(),
+        };
+        Some(format!(
+            "{unfinished} {what_to_do}, then report again.{warning}"
+        ))
+    }
+
+    /// Run `run` did something other than call `complete_task`, so its
+    /// refusals so far don't count against it.
+    pub(crate) fn forget_refusals(&self, run: Uuid) {
+        let mut refusals = self.refusals.lock();
+        if !refusals.is_empty() {
+            refusals.remove(&run);
+        }
     }
 
     /// What a run is told again when its conversation is replaced or

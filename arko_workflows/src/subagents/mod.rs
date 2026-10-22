@@ -26,7 +26,9 @@
 //! that is gone. Each of them is told which run's stop or end reached it.
 //! A subagent isn't done while its own subagents run or wait for a place.
 //! Its `complete_task` is answered with them and what to do, and doesn't
-//! complete, unless the run is being stopped, which reports at once.
+//! complete, unless the run is being stopped, which reports at once. After
+//! five refusals in a row the next call is accepted, and the subagents that
+//! still work are stopped with the run.
 //!
 //! Reports, failures, stops and messages go through a mailbox kept per run.
 //! An item reaches its recipient in the first way that applies:
