@@ -252,6 +252,142 @@ async fn a_one_time_note_s_images_reach_a_running_agent_after_its_text() {
     );
 }
 
+/// A note's image that can't be read when the note is given (its file is
+/// gone from the run directory) isn't announced. The update says the image
+/// can't be shown, and the images that still can come as usual.
+#[tokio::test]
+async fn a_note_says_so_when_an_image_of_it_is_lost() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let worker = first.run_agent("worker", "Do it.").await.unwrap();
+    let image = |label: u8| {
+        let bytes = [
+            &b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10 "[..],
+            &[label],
+        ]
+        .concat();
+        arko_ai::Image::from_bytes(&bytes, "image/png")
+    };
+    let data = |image: &arko_ai::Image| match image {
+        arko_ai::Image::Base64 { data, .. } => data.clone(),
+        other => panic!("{other:?}"),
+    };
+    let two = first
+        .post_note(
+            Note::new("Compare these two.")
+                .once()
+                .images([image(b'1'), image(b'2')]),
+        )
+        .unwrap();
+    let alone = first
+        .post_note(Note::new("").once().images([image(b'3')]))
+        .unwrap();
+    let kept = first
+        .post_note(Note::new("Look at this.").once().images([image(b'4')]))
+        .unwrap();
+    first.checkpoint().await.unwrap();
+    drop(first);
+    // Two of the four images are gone when the workflow resumes.
+    for lost in [&two.images[1], &alone.images[0]] {
+        let NoteImage::Stored { name, .. } = lost else {
+            panic!("{lost:?}")
+        };
+        std::fs::remove_file(run_dir(&workspace).join("images").join(name)).unwrap();
+    }
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let worker = resumed.agent_result(worker.agent_run_id).unwrap();
+    let continued = resumed.continue_agent(&worker, "Carry on.").await.unwrap();
+    assert_eq!(continued.status, AgentRunStatus::Completed);
+
+    let body = server.bodies().last().unwrap().clone();
+    let text = user_text(&body);
+    assert!(
+        text.contains(
+            "Compare these two.\n  (With 1 of its 2 images, shown after this update. 1 can't be shown.)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("UTC:\n  (Its image can't be shown.)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Look at this.\n  (With an image, shown after this update.)"),
+        "{text}"
+    );
+    assert!(!text.contains("(With 2 images"), "{text}");
+    // Only the two images that are left come, each after its label.
+    assert_eq!(body.matches("data:image/png;base64,").count(), 2, "{body}");
+    for kept in [data(&image(b'1')), data(&image(b'4'))] {
+        assert!(body.contains(&kept), "{body}");
+    }
+    assert!(text.contains("Image 1 of note 1:"), "{text}");
+    assert!(
+        text.contains(&format!("The image of note {}:", kept.seq)),
+        "{text}"
+    );
+    assert!(!text.contains("The image of note 2:"), "{text}");
+}
+
+/// What a note's item says about its images, and the part of the item that
+/// a conversation holds whatever it said.
+#[test]
+fn an_item_says_which_images_can_be_shown() {
+    let mut note = posted(3, "See these.");
+    note.note.kind = NoteKind::Once;
+    assert_eq!(item(&note), item_head(&note));
+    let mut line = |count: usize, lost: usize| {
+        note.images = (0..count)
+            .map(|index| NoteImage::Url(format!("https://example.com/{index}.png")))
+            .collect();
+        let item = item_with(&note, lost);
+        assert!(item.starts_with(&item_head(&note)), "{item}");
+        item.rsplit("\n  ").next().unwrap().to_string()
+    };
+    assert_eq!(line(1, 0), "(With an image, shown after this update.)");
+    assert_eq!(line(1, 1), "(Its image can't be shown.)");
+    assert_eq!(line(3, 0), "(With 3 images, shown after this update.)");
+    assert_eq!(
+        line(3, 1),
+        "(With 2 of its 3 images, shown after this update. 1 can't be shown.)"
+    );
+    assert_eq!(line(3, 3), "(None of its 3 images can be shown.)");
+    assert_eq!(line(0, 0), "See these.");
+}
+
+/// A saved conversation holds a note whose image was lost, whichever
+/// version of its item the agent was given.
+#[test]
+fn a_conversation_holds_a_note_whose_image_was_lost() {
+    let mut note = posted(3, "See this.");
+    note.note.kind = NoteKind::Once;
+    note.images = vec![NoteImage::Url("https://example.com/a.png".to_string())];
+    let mut task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    assert!(!holds(&task, &item_head(&note)));
+    task.conversation
+        .messages
+        .push(arko_ai::Message::new_user(&format!(
+            "# Workflow context update\n\nA new note on your task.{}",
+            item_with(&note, 1)
+        )));
+    assert!(holds(&task, &item_head(&note)));
+    assert!(!holds(&task, &item(&note)));
+}
+
 /// Only a one-time note carries images, and only to agents whose models
 /// take them. A note without images still needs text.
 #[tokio::test]

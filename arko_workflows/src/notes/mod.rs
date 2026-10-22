@@ -126,8 +126,10 @@ pub struct Note {
     /// models can be sent them ([`arko_ai::Model::sendable_image`], which
     /// shrinks one over a model's limits when it is given). With images,
     /// the text may be empty. During a turn, a Claude Code agent gets the
-    /// note's text at once and its images with its next input. Once the
-    /// note is posted, the workflow keeps them apart from the notes, and
+    /// note's text at once and its images with its next input. An image
+    /// that can't be read or sent when the note is given is left out, and
+    /// the note's item in the update says so. Once the note is posted, the
+    /// workflow keeps the images apart from the notes, and
     /// [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
@@ -370,14 +372,16 @@ impl NoteBoard {
 
     /// The images of `notes` (each note's number and images), each labelled
     /// with its note, fitted to what `model` takes
-    /// ([`arko_ai::Model::sendable_image`]). One that can't be read or
-    /// sent is left out, with a warning.
+    /// ([`arko_ai::Model::sendable_image`]), and by note number how many
+    /// can't be given. An image that can't be read or sent is left out, with
+    /// a warning.
     fn context_images(
         &self,
         notes: &[(u64, Vec<NoteImage>)],
         model: Option<&arko_ai::Model>,
-    ) -> Vec<arko_agents::ContextImage> {
+    ) -> (Vec<arko_agents::ContextImage>, HashMap<u64, usize>) {
         let mut images = Vec::new();
+        let mut lost = HashMap::new();
         for (seq, note_images) in notes {
             for (index, image) in note_images.iter().enumerate() {
                 let label = if note_images.len() == 1 {
@@ -405,13 +409,16 @@ impl NoteBoard {
                 };
                 match sendable {
                     Ok(image) => images.push(arko_agents::ContextImage::new(label, image)),
-                    Err(error) => log::warn!(
-                        "An image of note {seq} can't be given, so it is left out: {error}"
-                    ),
+                    Err(error) => {
+                        *lost.entry(*seq).or_insert(0) += 1;
+                        log::warn!(
+                            "An image of note {seq} can't be given, so it is left out: {error}"
+                        );
+                    }
                 }
             }
         }
-        images
+        (images, lost)
     }
 
     /// Changes when a note is posted.
@@ -564,25 +571,33 @@ impl NoteBoard {
             Some(_) => notes[shown - 1].seq,
             None => newest,
         };
-        let text = (!notes.is_empty()).then(|| {
-            (
-                update(&notes[..shown], notes.len() - shown),
-                notes[..shown].iter().map(|posted| posted.seq).collect(),
-                notes[..shown]
-                    .iter()
-                    .filter(|posted| !posted.images.is_empty())
-                    .map(|posted| (posted.seq, posted.images.clone()))
-                    .collect::<Vec<_>>(),
-            )
+        let taken = (!notes.is_empty()).then(|| {
+            let more = notes.len() - shown;
+            let taken = notes[..shown]
+                .iter()
+                .map(|posted| (*posted).clone())
+                .collect::<Vec<_>>();
+            (taken, more)
         });
         state.seen.insert(task_id, given);
         drop(state);
-        // Read outside the lock: an image may come from its file.
+        // Read outside the lock: an image may come from its file. The text
+        // follows, since it says which images can't be given.
         let model = ctx
             .agent_configs
             .get(agent)
             .map(|config| &config.llm_config.model);
-        text.map(|(text, seqs, images)| (text, seqs, self.context_images(&images, model)))
+        taken.map(|(taken, more)| {
+            let with_images = taken
+                .iter()
+                .filter(|posted| !posted.images.is_empty())
+                .map(|posted| (posted.seq, posted.images.clone()))
+                .collect::<Vec<_>>();
+            let (images, lost) = self.context_images(&with_images, model);
+            let notes = taken.iter().collect::<Vec<_>>();
+            let seqs = taken.iter().map(|posted| posted.seq).collect();
+            (update(&notes, more, &lost), seqs, images)
+        })
     }
 
     /// Run `task` of `agent` is recovered from its task as last saved (after
@@ -609,7 +624,7 @@ impl NoteBoard {
         // long).
         let held = given
             .iter()
-            .find(|posted| holds(task, &item(posted)))
+            .find(|posted| holds(task, &item_head(posted)))
             .map_or(started, |posted| posted.seq);
         let mut state = self.state.lock();
         if state.seen.get(&task.id).is_some_and(|seen| *seen > held) {
@@ -983,28 +998,52 @@ fn cut(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// One note as a list item. Every line of its text is indented, so no line
-/// of a note can pass for a heading of the prompt.
-fn item(posted: &PostedNote) -> String {
-    let mut text = posted.note.text.replace('\n', "\n  ");
-    let with_images = match posted.images.len() {
-        0 => None,
-        1 => Some("(With an image, shown after this update.)".to_string()),
-        count => Some(format!("(With {count} images, shown after this update.)")),
-    };
-    if let Some(line) = with_images {
-        if !text.is_empty() {
-            text.push_str("\n  ");
-        }
-        text.push_str(&line);
-    }
+/// What a note's list item says about its images: it has `count`, and
+/// `lost` of them can't be given.
+fn images_line(count: usize, lost: usize) -> Option<String> {
+    let lost = lost.min(count);
+    let given = count - lost;
+    Some(match (count, given) {
+        (0, _) => return None,
+        (1, 1) => "(With an image, shown after this update.)".to_string(),
+        (1, _) => "(Its image can't be shown.)".to_string(),
+        (_, _) if lost == 0 => format!("(With {count} images, shown after this update.)"),
+        (_, 0) => format!("(None of its {count} images can be shown.)"),
+        _ => format!(
+            "(With {given} of its {count} images, shown after this update. {lost} can't be shown.)"
+        ),
+    })
+}
+
+/// The start of a note's list item: the part that doesn't depend on its
+/// images, so a conversation that holds the item holds this.
+fn item_head(posted: &PostedNote) -> String {
     format!(
         "\n- Note {} from {}, {}:\n  {}",
         posted.seq,
         source_label(&posted.note.source),
         posted.posted_at.format("%Y-%m-%d %H:%M UTC"),
-        text
+        posted.note.text.replace('\n', "\n  ")
     )
+}
+
+/// One note as a list item. Every line of its text is indented, so no line
+/// of a note can pass for a heading of the prompt. `lost` of its images
+/// can't be given, which the item says.
+fn item_with(posted: &PostedNote, lost: usize) -> String {
+    let mut text = item_head(posted);
+    if let Some(line) = images_line(posted.images.len(), lost) {
+        if !posted.note.text.is_empty() {
+            text.push_str("\n  ");
+        }
+        text.push_str(&line);
+    }
+    text
+}
+
+/// One note as a list item, with all its images given.
+fn item(posted: &PostedNote) -> String {
+    item_with(posted, 0)
 }
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
@@ -1025,8 +1064,11 @@ fn fitting(notes: &[&PostedNote]) -> usize {
     shown
 }
 
-fn items(notes: &[&PostedNote]) -> String {
-    notes.iter().map(|posted| item(posted)).collect()
+fn items(notes: &[&PostedNote], lost: &HashMap<u64, usize>) -> String {
+    notes
+        .iter()
+        .map(|posted| item_with(posted, lost.get(&posted.seq).copied().unwrap_or(0)))
+        .collect()
 }
 
 /// The notes section of a prompt: `notes` (newest first) as many as fit,
@@ -1043,13 +1085,14 @@ fn section(notes: &[&PostedNote]) -> String {
     };
     format!(
         "{SECTION_MARK}, newest first, each labelled with who wrote it. {NOTES_RULE}\n{}{left}",
-        items(&notes[..shown])
+        items(&notes[..shown], &HashMap::new())
     )
 }
 
 /// New notes for a running agent's context update, oldest first, and how
-/// many more come at its next turn boundary.
-fn update(notes: &[&PostedNote], more: usize) -> String {
+/// many more come at its next turn boundary. `lost` counts, by note number,
+/// the images that can't be given.
+fn update(notes: &[&PostedNote], more: usize, lost: &HashMap<u64, usize>) -> String {
     let intro = if notes.len() == 1 {
         "A new note on your task."
     } else {
@@ -1060,7 +1103,7 @@ fn update(notes: &[&PostedNote], more: usize) -> String {
         1 => "\n- (1 more note follows at your next turn.)".to_string(),
         more => format!("\n- ({more} more notes follow at your next turn.)"),
     };
-    format!("{intro} {NOTES_RULE}{}{more}", items(notes))
+    format!("{intro} {NOTES_RULE}{}{more}", items(notes, lost))
 }
 
 /// Posts notes to a running workflow from any task or thread.
