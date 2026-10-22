@@ -939,7 +939,7 @@ impl Board {
     ) {
         self.starting.lock().remove(&run_id);
         self.drivers.lock().remove(&run_id);
-        let lead_stop = self.lead_stops.lock().remove(&run_id);
+        let lead_stop = self.lead_stops.lock().get(&run_id).cloned();
         self.refusals.lock().remove(&run_id);
         let Some(record) = self.record(run_id) else {
             return;
@@ -982,6 +982,7 @@ impl Board {
                             record.pending = Some(launch.clone());
                         }
                     }
+                    self.lead_stops.lock().remove(&run_id);
                     self.bump();
                     self.launch_if(ctx, run_id, launch, true);
                     self.start_queued(ctx);
@@ -1109,6 +1110,9 @@ impl Board {
                 return;
             };
             settle_record(record, state, report, error);
+            // Under the board's lock, where a stop is recorded too, so that
+            // a stop is either seen here or finds the run settled.
+            self.lead_stops.lock().remove(&run_id);
             let record = record.clone();
             let item = self.add_mail(
                 &mut board,
@@ -3224,5 +3228,27 @@ mod record_tests {
                 SubagentState::Stopped
             ]
         );
+    }
+
+    /// The words of a stop that a run's lead caused are kept only until the
+    /// run ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_words_of_a_stop_for_the_lead_end_with_the_run() {
+        let (workflow, _server, _workspace) = started_runs(1).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].run_id;
+        let words = "its lead r9 was stopped";
+        let stopped = ctx.subagents.request_stop(
+            &ctx,
+            run,
+            StopRequest::operator(words),
+            StopOrigin::Lead(words.to_string()),
+        );
+        assert_eq!(stopped, Some(true));
+        assert_eq!(ctx.subagents.lead_stops.lock().len(), 1);
+        crate::subagents::tests::until(|| workflow.subagents()[0].state == SubagentState::Stopped)
+            .await;
+        assert!(ctx.subagents.lead_stops.lock().is_empty());
+        assert_eq!(workflow.subagents()[0].error.as_deref(), Some(words));
     }
 }
