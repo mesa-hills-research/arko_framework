@@ -341,10 +341,28 @@ fn checkout_repo(dir: &Path, source: &str, rev: &str) -> BenchResult<String> {
     Ok(commit.trim().to_string())
 }
 
+/// The variables by which a process that git started (a hook, or
+/// `git rebase -x`) points the git commands under it at its own repository.
+const GIT_ENVIRONMENT: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+];
+
 fn git(dir: &Path, args: &[&str]) -> BenchResult<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    // The checkouts are the repositories these commands work on, whatever
+    // repository the process that started the benchmark was in.
+    for name in GIT_ENVIRONMENT {
+        command.env_remove(name);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("running git: {error}"))?;
     if !output.status.success() {

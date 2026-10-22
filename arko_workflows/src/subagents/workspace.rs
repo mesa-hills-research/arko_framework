@@ -90,7 +90,10 @@ pub trait WorkspaceProvider: Send + Sync {
 /// worktree of its own (a subagent that starts subagents) gets a worktree
 /// made from its checkout, recorded against the main repository, so that
 /// either can be removed first. Removing one keeps its branch, and git
-/// refuses while it has changes that aren't committed.
+/// refuses while it has changes that aren't committed. The git commands it
+/// runs ignore the git variables of the process (`GIT_DIR`, `GIT_INDEX_FILE`
+/// and the like, which a hook or `git rebase -x` sets), so a host started
+/// from one works on the directories it is given.
 #[derive(Debug)]
 pub struct GitWorktreeProvider {
     folder: PathBuf,
@@ -115,12 +118,32 @@ impl GitWorktreeProvider {
     }
 }
 
+/// The variables by which a process that git started (a hook, or
+/// `git rebase -x`) points the git commands under it at its own repository.
+/// The provider's git commands drop them, so that they work on the directory
+/// they are given.
+const GIT_ENVIRONMENT: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+];
+
 async fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    command
         .arg("-C")
         .arg(directory)
         .args(args)
-        .no_console_window()
+        .no_console_window();
+    for name in GIT_ENVIRONMENT {
+        command.env_remove(name);
+    }
+    let output = command
         .output()
         .await
         .map_err(|error| format!("could not run git: {error}"))?;
@@ -248,12 +271,12 @@ mod tests {
     use super::*;
 
     fn run_git(directory: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory)
-            .args(args)
-            .output()
-            .unwrap();
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(directory).args(args);
+        for name in GIT_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        let output = command.output().unwrap();
         assert!(
             output.status.success(),
             "git {args:?}: {}",
@@ -301,6 +324,110 @@ mod tests {
             caller_run_id: Uuid::new_v4(),
             base,
         }
+    }
+
+    /// What the child process of the next test is told, so that it runs the
+    /// part of the test that is for it.
+    const CHILD: &str = "ARKO_TEST_GIT_ENVIRONMENT_CHILD";
+
+    /// Sets git's variables on `command` as a hook or `git rebase -x` sets
+    /// them, all pointing at the repository `decoy`.
+    fn point_git_at(command: &mut std::process::Command, decoy: &Path) {
+        let git_dir = decoy.join(".git");
+        for name in GIT_ENVIRONMENT {
+            let value = match name {
+                "GIT_DIR" | "GIT_COMMON_DIR" => git_dir.clone(),
+                "GIT_INDEX_FILE" => git_dir.join("index"),
+                "GIT_WORK_TREE" => decoy.to_path_buf(),
+                "GIT_OBJECT_DIRECTORY" | "GIT_ALTERNATE_OBJECT_DIRECTORIES" => {
+                    git_dir.join("objects")
+                }
+                "GIT_PREFIX" => PathBuf::from("sub/"),
+                _ => PathBuf::from("decoy"),
+            };
+            command.env(name, value);
+        }
+    }
+
+    /// Everything about `repository` that a git command aimed at it by
+    /// mistake would change.
+    fn state_of(repository: &Path) -> (Vec<String>, Vec<u8>) {
+        let git = |args: &[&str]| run_git(repository, args);
+        (
+            vec![
+                git(&["for-each-ref"]),
+                git(&["worktree", "list", "--porcelain"]),
+                git(&["rev-parse", "HEAD"]),
+                git(&["status", "--porcelain"]),
+            ],
+            std::fs::read(repository.join(".git/index")).unwrap(),
+        )
+    }
+
+    /// The git commands the provider and these helpers run work on the
+    /// directory they are given, whatever git's variables of the process
+    /// say. The process here is a child of the test, started with the
+    /// variables pointing at a decoy repository, and the decoy stays as it was.
+    #[test]
+    fn git_commands_ignore_the_git_variables_of_the_process() {
+        assert!(
+            GIT_ENVIRONMENT.contains(&"GIT_DIR") && GIT_ENVIRONMENT.contains(&"GIT_INDEX_FILE")
+        );
+        let workspace = crate::test_support::Workspace::new();
+        let decoy = workspace.0.join("decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        run_git(&decoy, &["init", "-q"]);
+        std::fs::write(decoy.join("decoy.txt"), "decoy").unwrap();
+        run_git(&decoy, &["add", "."]);
+        commit(&decoy, "decoy");
+        let before = state_of(&decoy);
+
+        let module = module_path!().split_once("::").unwrap().1;
+        let test = format!("{module}::the_child_of_the_git_variables_test");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1");
+        point_git_at(&mut child, &decoy);
+        let output = child.output().unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(
+            report.contains("1 passed"),
+            "the child test didn't run: {report}"
+        );
+        assert!(state_of(&decoy) == before, "the decoy repository changed");
+    }
+
+    /// The part of the test above that runs with git's variables set, in a
+    /// process of its own. Alone it does nothing.
+    #[tokio::test]
+    async fn the_child_of_the_git_variables_test() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        assert!(std::env::var_os("GIT_DIR").is_some());
+        let workspace = crate::test_support::Workspace::new();
+        let repository = repository_with_a_commit(&workspace);
+        let provider =
+            GitWorktreeProvider::new(workspace.0.join("worktrees")).branch_prefix("test/");
+        let first = provider
+            .create(&request_from(repository.join("sub"), "r1"))
+            .await
+            .unwrap();
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        let listed = run_git(&repository, &["worktree", "list", "--porcelain"]);
+        assert!(listed.contains("r1") && listed.contains("r2"), "{listed}");
+        provider.remove(&first).await.unwrap();
+        provider.remove(&second).await.unwrap();
+        assert!(!run_git(&repository, &["worktree", "list"]).contains("r1"));
     }
 
     /// A worktree made from a subagent's own worktree belongs to the main
