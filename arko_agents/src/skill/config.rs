@@ -89,10 +89,13 @@ pub struct SkillsConfig {
 
     /// Skills given in memory. They load after those of the folders and have
     /// the lowest priority. A folder skill with the same name replaces the
-    /// embedded one, which is how a user overrides a built-in skill. They are
-    /// saved with the configuration, and a configuration saved without them
-    /// loads with none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// embedded one, which is how a user overrides a built-in skill.
+    ///
+    /// They are program code, so a saved configuration (and so a saved task)
+    /// doesn't hold them, though one that has them still loads. A host that
+    /// loads a saved task gives them again. arko_workflows does, from the
+    /// configuration each agent is registered with.
+    #[serde(default, skip_serializing)]
     pub embedded: Vec<EmbeddedSkill>,
 
     /// Behavior when a skill fails to parse or load.

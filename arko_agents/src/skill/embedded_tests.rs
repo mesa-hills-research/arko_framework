@@ -382,33 +382,39 @@ fn a_saved_configuration_without_embedded_skills_still_loads() {
     assert!(agent.skills_config.unwrap().embedded.is_empty());
 }
 
-/// Embedded skills are saved with the configuration they are in, and
-/// load again equal.
+/// Embedded skills are program code. A saved configuration, and the task
+/// that holds it, doesn't have them, and one that lists them still loads.
 #[test]
-fn embedded_skills_survive_a_save_and_a_load() {
+fn embedded_skills_are_not_saved_with_a_configuration() {
     let config = SkillsConfig {
-        embedded: vec![
-            embedded("review", "auto_load: true\n", "Review things."),
-            embedded("deploy", "", "Deploy things."),
-        ],
+        embedded: vec![embedded("review", "auto_load: true\n", "Review things.")],
+        global_sources: vec![global(Path::new("/skills"))],
         ..Default::default()
     };
     let saved = serde_json::to_value(&config).unwrap();
-    assert_eq!(saved["embedded"][0]["name"], "review");
-    assert_eq!(
-        saved["embedded"][1]["content"],
-        text("deploy", "", "Deploy things.")
-    );
+    assert!(saved.get("embedded").is_none(), "{saved}");
     let loaded: SkillsConfig = serde_json::from_value(saved).unwrap();
-    assert_eq!(loaded.embedded, config.embedded);
+    assert!(loaded.embedded.is_empty());
+    assert_eq!(loaded.global_sources[0].path, "/skills");
+
+    // A configuration that lists them, such as a file someone wrote, loads.
+    let written = json!({ "embedded": [{
+        "name": "review",
+        "content": text("review", "", "Review things."),
+    }] });
+    let loaded: SkillsConfig = serde_json::from_value(written).unwrap();
+    assert_eq!(loaded.embedded, [embedded("review", "", "Review things.")]);
 
     // Inside an agent configuration, and so inside a saved task.
     let mut agent = agent_config();
     agent.skills_config = Some(config.clone());
     let task = crate::Task::new(agent, "Go.".into(), "/w".into(), None);
-    let task: crate::Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
     assert_eq!(
-        task.agent_config.skills_config.unwrap().embedded,
+        task.agent_config.skills_config.as_ref().unwrap().embedded,
         config.embedded
     );
+    let task: crate::Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+    let skills = task.agent_config.skills_config.unwrap();
+    assert!(skills.embedded.is_empty());
+    assert_eq!(skills.global_sources.len(), 1);
 }

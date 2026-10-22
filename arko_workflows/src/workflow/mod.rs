@@ -3111,6 +3111,14 @@ fn describe_changed_fields(changed: &[String]) -> String {
     description
 }
 
+/// A skills configuration with nothing in it, as JSON.
+fn default_skills_config() -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::to_value(arko_agents::skill::SkillsConfig::default()) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
 fn normalized_resume_agent_config(
     config: &AgentConfig,
     workflow_tools: &HashSet<String>,
@@ -3146,6 +3154,18 @@ fn normalized_resume_agent_config(
     for key in ["llm_config", "refusal_fallback"] {
         if let Some(model_config) = object.get_mut(key).and_then(|value| value.as_object_mut()) {
             model_config.remove("model");
+        }
+    }
+    // Embedded skills are program code, which a saved configuration doesn't
+    // hold. A skills configuration with nothing else loads no skills, as
+    // none does.
+    if let Some(skills) = object
+        .get_mut("skills_config")
+        .and_then(|value| value.as_object_mut())
+    {
+        skills.remove("embedded");
+        if *skills == default_skills_config() {
+            object.remove("skills_config");
         }
     }
     Ok(value)

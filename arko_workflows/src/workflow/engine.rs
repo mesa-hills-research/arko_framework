@@ -2600,6 +2600,35 @@ impl WorkflowEngine {
         self.persistence.as_ref()
     }
 
+    /// Gives a task that was saved, and loaded again, the embedded skills of
+    /// its agent's registered configuration. A saved configuration doesn't
+    /// hold them, so a run that goes on takes the current ones, and a
+    /// built-in skill that changed doesn't stop a resume. A task with
+    /// embedded skills of its own, one the host reconfigured, and one whose
+    /// agent has none are left as they are.
+    fn restore_embedded_skills(task: &mut Task, ctx: &SharedContext, agent_name: &str) {
+        if task.reconfigured {
+            return;
+        }
+        let Some(current) = ctx
+            .agent_configs
+            .get(agent_name)
+            .and_then(|registered| registered.skills_config.as_ref())
+        else {
+            return;
+        };
+        if current.embedded.is_empty() {
+            return;
+        }
+        let skills = task
+            .agent_config
+            .skills_config
+            .get_or_insert_with(Default::default);
+        if skills.embedded.is_empty() {
+            skills.embedded = current.embedded.clone();
+        }
+    }
+
     fn setup_skills(
         config: &mut AgentConfig,
         registry: &mut ToolRegistry,
@@ -3595,6 +3624,7 @@ impl WorkflowEngine {
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut registry =
             self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
+        Self::restore_embedded_skills(&mut task, ctx, agent_name);
         let skill_prompt_context = Self::setup_skills(
             &mut task.agent_config,
             &mut registry,
@@ -3847,6 +3877,7 @@ impl WorkflowEngine {
         );
         let mut registry =
             self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
+        Self::restore_embedded_skills(&mut task, ctx, agent_name);
         let skill_prompt_context = Self::setup_skills(
             &mut task.agent_config,
             &mut registry,
@@ -3963,6 +3994,7 @@ impl WorkflowEngine {
         // request has its prefix.
         let mut registry =
             self.build_tool_registry(&agent_name, ctx, RunRole::of(ctx, depth, task.id));
+        Self::restore_embedded_skills(&mut task, ctx, &agent_name);
         let skill_prompt_context = Self::setup_skills(
             &mut task.agent_config,
             &mut registry,
@@ -4119,6 +4151,7 @@ impl WorkflowEngine {
                 ctx,
                 RunRole::of(ctx, recovery.depth, task.id),
             );
+            Self::restore_embedded_skills(&mut task, ctx, agent_name);
             let skill_prompt_context = Self::setup_skills(
                 &mut task.agent_config,
                 &mut registry,
