@@ -33,8 +33,10 @@ pub struct IsolatedWorkspace {
     /// subdirectory stands in for the caller's directory).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
-    /// The repository it was made from. This is the main repository, also
-    /// when the caller worked in a worktree of it.
+    /// The repository it was made from. This is the main working tree of
+    /// the repository (its git directory when the repository is bare or
+    /// keeps its working tree apart), also when the caller worked in a
+    /// worktree of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<PathBuf>,
     /// Its branch.
@@ -89,7 +91,10 @@ pub trait WorkspaceProvider: Send + Sync {
 /// time (git locks the repository's files). A caller that works in a
 /// worktree of its own (a subagent that starts subagents) gets a worktree
 /// made from its checkout, recorded against the main repository, so that
-/// either can be removed first. Removing one keeps its branch, and git
+/// either can be removed first. For a repository that keeps its git
+/// directory apart from its working tree, such as a submodule, a caller in
+/// the repository's own working tree gets that tree recorded, and one in a
+/// linked worktree of it gets the git directory. Removing one keeps its branch, and git
 /// refuses while it has changes that aren't committed. The git commands it
 /// runs ignore the git variables of the process (`GIT_DIR`, `GIT_INDEX_FILE`
 /// and the like, which a hook or `git rebase -x` sets), so a host started
@@ -159,14 +164,54 @@ async fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// The repository's main working tree (the directory of a bare repository),
+/// The repository's main working tree (the directory of a bare repository,
+/// or the git directory of one that keeps it apart from its working tree),
 /// which `directory` is in, or is a linked worktree of.
 async fn main_worktree(directory: &Path) -> Option<PathBuf> {
-    let listed = git(directory, &["worktree", "list", "--porcelain"])
-        .await
-        .ok()?;
-    let first = listed.lines().next()?;
+    // `-z` (git 2.36) keeps a path that holds a line break whole.
+    let first = match git(directory, &["worktree", "list", "--porcelain", "-z"]).await {
+        Ok(listed) => listed.split('\0').next()?.to_string(),
+        Err(_) => {
+            let listed = git(directory, &["worktree", "list", "--porcelain"]).await;
+            listed.ok()?.lines().next()?.to_string()
+        }
+    };
     first.strip_prefix("worktree ").map(PathBuf::from)
+}
+
+/// Where git commands for worktrees of the repository `directory` is in
+/// run, given its top level `top`. A caller in the repository's own working
+/// tree gets that tree, also when its git directory is elsewhere, as a
+/// submodule's is. A caller in a linked worktree gets the repository's main
+/// working tree, so that what is made from it can be removed after it, and
+/// falls back to `top` when that tree is gone.
+async fn repository_of(directory: &Path, top: &Path) -> PathBuf {
+    let dirs = git(directory, &["rev-parse", "--git-dir", "--git-common-dir"]).await;
+    if let Ok(dirs) = dirs
+        && let [git_dir, common_dir] = dirs.lines().collect::<Vec<_>>()[..]
+    {
+        let canonical = |dir: &str| std::fs::canonicalize(directory.join(dir)).ok();
+        if canonical(git_dir).is_some() && canonical(git_dir) == canonical(common_dir) {
+            return top.to_path_buf();
+        }
+    }
+    match main_worktree(directory).await {
+        Some(main) if main.is_dir() => main,
+        _ => top.to_path_buf(),
+    }
+}
+
+/// The git directory shared by the worktrees of `worktree`'s repository,
+/// from the pointer in the worktree's `.git` file.
+fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let pointer = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let own = worktree.join(pointer.trim().strip_prefix("gitdir:")?.trim());
+    // `<common>/worktrees/<name>`.
+    let worktrees = own.parent()?;
+    (worktrees.file_name()? == "worktrees")
+        .then(|| worktrees.parent().map(Path::to_path_buf))
+        .flatten()
+        .filter(|common| common.is_dir())
 }
 
 #[async_trait]
@@ -185,7 +230,7 @@ impl WorkspaceProvider for GitWorktreeProvider {
         // The repository is the main one, also when the caller works in a
         // linked worktree (a subagent's own), so that the new worktree can
         // be removed after the caller's.
-        let repository = main_worktree(base).await.unwrap_or_else(|| top.clone());
+        let repository = repository_of(base, &top).await;
         let commit = git(base, &["rev-parse", "--verify", "HEAD"])
             .await
             .map_err(|_| "the repository has no commit to make a worktree from".to_string())?;
@@ -251,10 +296,18 @@ impl WorkspaceProvider for GitWorktreeProvider {
 
     async fn remove(&self, workspace: &IsolatedWorkspace) -> Result<(), String> {
         let root = workspace.root.as_ref().unwrap_or(&workspace.path);
-        let repository = workspace.repository.as_ref().unwrap_or(root);
+        // A record from before the repository was the main one may name the
+        // worktree this one was made from, which can be gone. The worktree
+        // knows its repository too.
+        let repository = workspace
+            .repository
+            .clone()
+            .filter(|repository| repository.is_dir())
+            .or_else(|| common_git_dir(root))
+            .unwrap_or_else(|| root.clone());
         let target = root.to_string_lossy().to_string();
         let _one_at_a_time = self.lock.lock().await;
-        git(repository, &["worktree", "remove", &target])
+        git(&repository, &["worktree", "remove", &target])
             .await
             .map(|_| ())
             .map_err(|error| {
@@ -306,7 +359,12 @@ mod tests {
 
     /// A repository with one commit, holding `sub/file.txt`.
     fn repository_with_a_commit(workspace: &crate::test_support::Workspace) -> PathBuf {
-        let repository = workspace.0.join("repo");
+        repository_in(&workspace.0)
+    }
+
+    /// A repository `repo` in `parent`, with one commit holding `sub/file.txt`.
+    fn repository_in(parent: &Path) -> PathBuf {
+        let repository = parent.join("repo");
         std::fs::create_dir_all(repository.join("sub")).unwrap();
         run_git(&repository, &["init", "-q"]);
         std::fs::write(repository.join("sub/file.txt"), "hello").unwrap();
@@ -428,6 +486,135 @@ mod tests {
         provider.remove(&first).await.unwrap();
         provider.remove(&second).await.unwrap();
         assert!(!run_git(&repository, &["worktree", "list"]).contains("r1"));
+    }
+
+    /// A record made before the repository was the main one names the
+    /// worktree the new one was made from. It is removed after that one is
+    /// gone, through the repository the worktree itself points to.
+    #[tokio::test]
+    async fn a_record_that_names_a_removed_worktree_is_still_removed() {
+        let workspace = crate::test_support::Workspace::new();
+        let repository = repository_with_a_commit(&workspace);
+        let provider = GitWorktreeProvider::new(workspace.0.join("worktrees"));
+        let first = provider
+            .create(&request_from(repository.join("sub"), "r1"))
+            .await
+            .unwrap();
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        let old = IsolatedWorkspace {
+            repository: first.root.clone(),
+            ..second.clone()
+        };
+        provider.remove(&first).await.unwrap();
+        provider.remove(&old).await.unwrap();
+        assert!(!workspace.0.join("worktrees/r2").exists());
+    }
+
+    /// A path with a line break in it, which git prints as it is, still
+    /// gives a nested worktree its main repository.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_repository_in_a_folder_with_a_line_break_gets_nested_worktrees() {
+        let workspace = crate::test_support::Workspace::new();
+        let parent = workspace.0.join("line\nbreak");
+        std::fs::create_dir_all(&parent).unwrap();
+        let repository = repository_in(&parent);
+        let provider = GitWorktreeProvider::new(workspace.0.join("worktrees"));
+        let first = provider
+            .create(&request_from(repository.join("sub"), "r1"))
+            .await
+            .unwrap();
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        provider.remove(&first).await.unwrap();
+        provider.remove(&second).await.unwrap();
+        assert!(!workspace.0.join("worktrees/r2").exists());
+    }
+
+    /// A submodule keeps its git directory in the superproject. A worktree
+    /// made from its working tree records that tree, and one made from
+    /// that worktree can still be removed after it.
+    #[tokio::test]
+    async fn the_working_tree_of_a_submodule_is_its_repository() {
+        let workspace = crate::test_support::Workspace::new();
+        let library_parent = workspace.0.join("library");
+        std::fs::create_dir_all(&library_parent).unwrap();
+        let library = repository_in(&library_parent);
+        let outer_parent = workspace.0.join("outer");
+        std::fs::create_dir_all(&outer_parent).unwrap();
+        let outer = repository_in(&outer_parent);
+        run_git(
+            &outer,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &library.to_string_lossy(),
+                "deps/lib",
+            ],
+        );
+        commit(&outer, "add the library");
+        let submodule = outer.join("deps/lib");
+        let provider = GitWorktreeProvider::new(workspace.0.join("worktrees"));
+        let first = provider
+            .create(&request_from(submodule.join("sub"), "r1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(first.repository.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(&submodule).unwrap()
+        );
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        provider.remove(&first).await.unwrap();
+        provider.remove(&second).await.unwrap();
+    }
+
+    /// A repository whose git directory was put elsewhere
+    /// (`--separate-git-dir`) records its working tree for a worktree made
+    /// there, and nested worktrees can be removed in any order.
+    #[tokio::test]
+    async fn a_repository_with_a_separate_git_directory_records_its_working_tree() {
+        let workspace = crate::test_support::Workspace::new();
+        let work = workspace.0.join("work");
+        run_git(
+            &workspace.0,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                &workspace.0.join("apart.git").to_string_lossy(),
+                &work.to_string_lossy(),
+            ],
+        );
+        std::fs::create_dir_all(work.join("sub")).unwrap();
+        std::fs::write(work.join("sub/file.txt"), "hello").unwrap();
+        run_git(&work, &["add", "."]);
+        commit(&work, "first");
+        let provider = GitWorktreeProvider::new(workspace.0.join("worktrees"));
+        let first = provider
+            .create(&request_from(work.join("sub"), "r1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(first.repository.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(&work).unwrap()
+        );
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        provider.remove(&first).await.unwrap();
+        provider.remove(&second).await.unwrap();
     }
 
     /// A worktree made from a subagent's own worktree belongs to the main
