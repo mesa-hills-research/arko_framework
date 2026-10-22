@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use lex::{Command, Piece, Subshell, VarForm, Word};
-use paths::{AbsPath, MAYBE_EMPTY, NONEMPTY, PathStyle};
+use paths::{ANY_CHILD, AbsPath, MAYBE_EMPTY, NONEMPTY, PathStyle};
 use rules::Rules;
 pub use rules::{CommandRule, RuleAction};
 
@@ -368,10 +368,25 @@ impl Host {
                         | "tty"
                 )
                 || path.parts.get(1).is_some_and(|name| name == "fd");
-            if shared_memory || (writes && harmless) {
+            // Bash opens a network connection for a redirect to
+            // `/dev/tcp/HOST/PORT` or `/dev/udp/HOST/PORT`. No such file
+            // exists, and `..` was resolved already, so `/dev/tcp/../sda` is
+            // `/dev/sda`.
+            let network = path.parts.len() == 4
+                && matches!(path.parts[1].as_str(), "tcp" | "udp")
+                && path.parts[2..]
+                    .iter()
+                    .all(|part| !part.is_empty() && part != ANY_CHILD);
+            if shared_memory || (writes && (harmless || network)) {
                 return Class::Allowed;
             }
-            return Class::Protected("a device");
+            // Under the two names bash gives network paths, but not of the
+            // form it opens, so not a device either.
+            return Class::Protected(match path.parts.get(1).map(String::as_str) {
+                Some("tcp") => "a path under /dev/tcp that is not /dev/tcp/HOST/PORT",
+                Some("udp") => "a path under /dev/udp that is not /dev/udp/HOST/PORT",
+                _ => "a device",
+            });
         }
         if path.parts.is_empty() {
             return Class::Protected(if !style.windows {

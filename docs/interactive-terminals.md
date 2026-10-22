@@ -364,6 +364,13 @@ what the shell will do rather than matching command names:
   `format`, `diskpart`, `robocopy /MIR`, `icacls /t`, `Remove-Item` and its
   aliases, `Move-Item`, `Set-Content`, `Format-Volume`, `Clear-Disk`, and
   `[IO.Directory]::Delete`.
+- A POSIX redirect to `/dev/null`, `/dev/stderr`, `/dev/fd/N` and the other standard
+  pseudo files writes to no disk, and neither does one to `/dev/tcp/HOST/PORT` or
+  `/dev/udp/HOST/PORT`, for which bash opens a network connection (`exec 3<>/dev/tcp/…`,
+  `echo hi > /dev/tcp/…`, `&>`). Only that exact form counts, with `..` resolved first,
+  so `/dev/tcp/../sda` is `/dev/sda` and is refused, as is `/dev/tcp/HOST` without a
+  port, and a host or port only known when the command runs. Paths in `cmd.exe` and
+  PowerShell are judged as before.
 - It resolves `~`, variables from the job's environment and from assignments
   earlier in the command, `cd` and `Set-Location` (an unset `cd $DIR` goes home),
   `..`, and wildcards. An unset variable expands to nothing, as in the shell, so

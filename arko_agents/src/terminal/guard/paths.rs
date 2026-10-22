@@ -9,7 +9,7 @@ pub(super) const MAYBE_EMPTY: char = '\u{1}';
 /// shell guarantees is not empty (`${X:?}`).
 pub(super) const NONEMPTY: char = '\u{2}';
 /// A child name that matches no real directory.
-const ANY_CHILD: &str = "\u{0}";
+pub(super) const ANY_CHILD: &str = "\u{0}";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PathStyle {

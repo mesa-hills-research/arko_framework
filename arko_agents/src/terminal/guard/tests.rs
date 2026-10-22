@@ -164,6 +164,159 @@ fn posix_everyday_commands_run() {
     );
 }
 
+/// Bash opens a network connection for a redirect to `/dev/tcp/HOST/PORT`
+/// or `/dev/udp/HOST/PORT`, so it writes to no device.
+#[test]
+fn bash_network_redirects_are_not_device_writes() {
+    for host in [linux(), mac()] {
+        expect(
+            &host,
+            ShellDialect::Posix,
+            &[
+                (Allowed, "echo > /dev/tcp/66.42.127.227/22"),
+                (Allowed, "echo hi > /dev/tcp/66.42.127.227/22"),
+                (Allowed, "echo hi >> /dev/tcp/example.com/80"),
+                (Allowed, "echo hi >| /dev/tcp/example.com/80"),
+                (Allowed, "echo hi > /dev/udp/127.0.0.1/514"),
+                (Allowed, "echo hi > \"/dev/tcp/example.com/http\""),
+                (Allowed, "echo hi &> /dev/tcp/example.com/80"),
+                (Allowed, "echo hi &>> /dev/udp/example.com/514"),
+                (Allowed, "echo hi >& /dev/tcp/example.com/80"),
+                (Allowed, "exec 3<>/dev/tcp/example.com/80"),
+                (Allowed, "exec 3>/dev/tcp/example.com/80"),
+                (Allowed, "exec 4</dev/tcp/example.com/80"),
+                (Allowed, "cat < /dev/tcp/example.com/80"),
+                (
+                    Allowed,
+                    "exec 3<>/dev/tcp/example.com/80; echo hi >&3; cat <&3; exec 3>&-",
+                ),
+                (Allowed, "HOST=example.com; echo hi > /dev/tcp/$HOST/80"),
+                (Allowed, "cat file > /dev/tcp/example.com/80 2>/dev/null"),
+            ],
+        );
+    }
+}
+
+/// Only exactly `/dev/tcp/HOST/PORT` is a network path. Look-alikes, and
+/// paths that resolve to a device once `..` is applied, stay refused, and so
+/// does everything else that is not a write.
+#[test]
+fn look_alikes_of_bash_network_paths_stay_refused() {
+    for host in [linux(), mac()] {
+        expect(
+            &host,
+            ShellDialect::Posix,
+            &[
+                (Protected, "echo hi > /dev/tcpfoo"),
+                (Protected, "echo hi > /dev/tcp"),
+                (Protected, "echo hi > /dev/tcp/"),
+                (Protected, "echo hi > /dev/tcp/example.com"),
+                (Protected, "echo hi > /dev/tcp/example.com/80/extra"),
+                (Protected, "echo hi > /dev/tcp//80"),
+                (Protected, "echo hi > /dev/udp"),
+                (Protected, "echo hi > /dev/udp/example.com"),
+                (Protected, "echo hi > /dev/tcp/*/80"),
+                (Protected, "echo hi > /dev/tcp/example.com/*"),
+                (Protected, "echo hi > /dev/TCP/example.com/80"),
+                (Protected, "echo hi > /dev/tcp/../sda"),
+                (Protected, "echo hi > /dev/tcp/x/../../sda"),
+                (Protected, "echo hi > /dev/udp/../sda"),
+                (Protected, "echo hi > /dev/tcp/./sda"),
+                (Protected, "echo hi > /dev/tcp/example.com/../../sda"),
+                (Protected, "echo hi > /dev/tcp/$HOST/../sda"),
+                // A part only known when the command runs could be anything.
+                (Protected, "echo hi > /dev/tcp/$(hostname)/80"),
+                (Protected, "echo hi > /dev/tcp/example.com/$UNSET_PORT"),
+                (Protected, "dd if=/dev/zero of=/dev/tcp/../sda"),
+                (Protected, "tee /dev/tcp/x/../../sda"),
+                // Not a write, so not a connection either.
+                (Protected, "rm /dev/tcp/example.com/80"),
+                (Protected, "chmod 000 /dev/udp/example.com/514"),
+                // A directory called tcp anywhere else is an ordinary one.
+                (Allowed, "echo hi > dev/tcp/example.com/80"),
+                (Allowed, "echo hi > /tmp/dev/tcp/example.com/80"),
+                (Protected, "echo hi > /var/dev/tcp/example.com/80"),
+                (Outside, "echo hi > /srv/dev/tcp/example.com/80"),
+            ],
+        );
+    }
+}
+
+/// A refusal says what the path is. A path that bash would not open as a
+/// network connection is not called a device unless it resolves to one.
+#[test]
+fn refusals_of_network_look_alikes_do_not_call_them_devices() {
+    let guard = CommandGuard::default();
+    let host = linux();
+    let message = |command: &str| {
+        guard
+            .check_on(&host, ShellDialect::Posix, command)
+            .unwrap_err()
+            .message
+    };
+    let incomplete = message("echo hi > /dev/tcp/example.com");
+    assert!(
+        incomplete.contains(
+            "`/dev/tcp/example.com`, which is a path under /dev/tcp that is not /dev/tcp/HOST/PORT"
+        ),
+        "{incomplete}"
+    );
+    assert!(!incomplete.contains("is a device"), "{incomplete}");
+    let udp = message("echo hi > /dev/udp/example.com/514/extra");
+    assert!(udp.contains("not /dev/udp/HOST/PORT"), "{udp}");
+    // Applied, `..` leaves a device, and the message says so.
+    let resolved = message("echo hi > /dev/tcp/../sda");
+    assert!(
+        resolved.contains("`/dev/sda`, which is a device"),
+        "{resolved}"
+    );
+}
+
+/// What the guard refused before is refused still.
+#[test]
+fn real_devices_are_refused_next_to_network_paths() {
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Protected, "echo x > /dev/sda"),
+            (Protected, "echo x >> /dev/sda1"),
+            (Protected, "echo x &> /dev/nvme0n1"),
+            (Protected, "dd if=/dev/zero of=/dev/sda bs=1M"),
+            (Protected, "cat image > /dev/disk/by-id/usb-1"),
+            (Protected, "rm /dev/null"),
+            (Allowed, "echo x > /dev/null"),
+            (Allowed, "echo x > /dev/stderr"),
+            (Allowed, "echo x > /dev/fd/3"),
+            (Allowed, "echo x > /dev/shm/scratch"),
+        ],
+    );
+}
+
+/// Windows and PowerShell paths are not looked at differently: a path that
+/// starts with `/dev` there is an ordinary one.
+#[test]
+fn windows_shells_treat_dev_tcp_like_any_other_path() {
+    let host = windows();
+    let before = [
+        (
+            ShellDialect::PowerShell,
+            "echo hi > /dev/tcp/example.com/80",
+        ),
+        (ShellDialect::Cmd, "echo hi > /dev/tcp/example.com/80"),
+        (ShellDialect::PowerShell, "echo hi > /dev/sda"),
+    ];
+    let guard = CommandGuard::default();
+    for (dialect, command) in before {
+        // Outside the working directory, not a device, whatever the name.
+        assert_eq!(
+            verdict(&guard, &host, dialect, command),
+            Outside,
+            "{dialect:?} {command}"
+        );
+    }
+}
+
 #[test]
 fn posix_drastic_commands_are_refused() {
     expect(
