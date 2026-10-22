@@ -872,6 +872,8 @@ The tool name constants are `subagents::START_AGENT_TOOL_NAME` and the like, all
 
 A subagent's initial prompt is its task, then a section saying it is agent run `rN` started by its lead, how to message the lead and wait for it, and where it works (an isolated workspace's `description` included).
 
+A subagent that started subagents, which still run or wait for a place, can't report yet. Its `complete_task` call is refused with the runs and what to do (`Your agent runs r2 (running) and r3 (queued) haven't finished. Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent, then report again.`), and the run goes on. A run that is being stopped, or wrapping up with the workflow, reports at once whatever its subagents do. The host's own runs may end their turn with subagents running.
+
 ### Mail and delivery
 
 Reports, failures, stops, messages and questions go through a mailbox kept per run. Each `MailItem` has `id: u64`, `to` (a run ID), `from: MailSender` (`Run(Uuid)` or `Host`), `kind: MailKind` (`Report`, `Failed`, `Stopped`, `Message`, `Question`, `Copy`), `heading`, `body`, `at`, `delivered_at` and `file`. `text()` is the whole item, `[mail N] heading`, a blank line and the body. An item reaches its recipient in the first way that applies.

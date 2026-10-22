@@ -8,7 +8,9 @@ use std::time::Duration;
 use arko_agents::{TaskContext, Tool, ToolDefinition, ToolError, ToolTypeDetails};
 use serde_json::{Value, json};
 
-use super::tests::{Gate, Step, bodies_of, result_of, role, start, turn, until, wait, within};
+use super::tests::{
+    Gate, Step, bodies_of, complete, result_of, role, start, turn, until, wait, within,
+};
 use super::*;
 use crate::services::WorkflowServicesConfig;
 use crate::test_support::{ResponsesServer, Workspace, agent_config, tool_call_turn};
@@ -475,4 +477,113 @@ async fn a_cut_back_stops_the_subagents_it_detaches_with_their_own() {
         stopped,
         [("r1".to_string(), false), ("r2".to_string(), false)]
     );
+}
+
+/// A subagent that started subagents can't report while they run or wait for
+/// a place. Its `complete_task` is answered with the runs, and it reports
+/// once they are done.
+#[tokio::test]
+async fn a_subagent_cant_report_while_its_subagents_are_unfinished() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        (
+            "r1",
+            vec![
+                start("First."),
+                start("Second."),
+                complete("Too early."),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(2).max_running(2),
+    )
+    .agent_tool("worker", gate.clone())
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| bodies_of(&server, "r1").len() >= 4).await;
+    let refused = result_of(&bodies_of(&server, "r1")[3], "r1", 2);
+    assert_eq!(
+        refused,
+        "Your agent runs r2 (running) and r3 (queued) haven't finished. Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent, then report again."
+    );
+    // The early report went nowhere.
+    let r1 = workflow.subagents().remove(0);
+    assert_eq!(r1.state, SubagentState::Running);
+    assert_eq!(r1.report, None);
+    assert!(workflow.pending_news(lead.agent_run_id).is_empty());
+
+    gate.open.notify_one();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    let r1 = workflow.subagents().remove(0);
+    assert_eq!(r1.report.as_deref(), Some("r1 done"));
+    let news = workflow.pending_news(lead.agent_run_id);
+    let reports: Vec<&str> = news.iter().map(|item| item.body.as_str()).collect();
+    assert_eq!(reports, ["r1 done"]);
+}
+
+/// One unfinished subagent is named in the singular.
+#[tokio::test]
+async fn one_unfinished_subagent_is_named_in_the_singular() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("First."), complete("Too early.")]),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| bodies_of(&server, "r1").len() >= 3).await;
+    assert_eq!(
+        result_of(&bodies_of(&server, "r1")[2], "r1", 1),
+        "Your agent run r2 (running) hasn't finished. Wait for it with wait_for_agents, or stop it with stop_agent, then report again."
+    );
+    gate.open.notify_one();
+}
+
+/// A subagent that is told to wrap up reports its progress whatever its own
+/// subagents are doing. Here one of them is stuck and won't end.
+#[tokio::test]
+async fn a_subagent_being_stopped_may_report_with_unfinished_subagents() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("Level two."), wait()]),
+        ("r2", vec![("probe", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let probe = crate::test_support::ProbeTool::new("probe", true);
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", probe.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(probe.started.notified()).await;
+    let request = StopRequest::operator("enough").wrap_up(Duration::from_secs(60));
+    assert!(workflow.stop_subagent(workflow.subagents()[0].run_id, request));
+    until(|| workflow.subagents()[0].state == SubagentState::Stopped).await;
+    let records = workflow.subagents();
+    assert_eq!(records[0].report.as_deref(), Some("r1 saved its progress"));
+    // Its subagent was told to stop too, and still hasn't ended.
+    assert_eq!(records[1].state, SubagentState::Running);
+    assert!(records[1].stop_requested.is_some());
 }

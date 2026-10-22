@@ -24,6 +24,9 @@
 //! for a place, and theirs in turn, with the same wrap-up. A subagent that
 //! ends in any other way stops them too, since they would report to a run
 //! that is gone. Each of them is told which run's stop or end reached it.
+//! A subagent isn't done while its own subagents run or wait for a place.
+//! Its `complete_task` is answered with them and what to do, and doesn't
+//! complete, unless the run is being stopped, which reports at once.
 //!
 //! Reports, failures, stops and messages go through a mailbox kept per run.
 //! An item reaches its recipient in the first way that applies:

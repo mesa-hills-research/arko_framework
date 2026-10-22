@@ -1938,6 +1938,43 @@ impl Board {
             .collect()
     }
 
+    /// What a subagent run `run` that started subagents still running is
+    /// told when it tries to complete, which is the runs and what to do. `None` for
+    /// a run that isn't a subagent (a host's run may end its turn with
+    /// subagents running) and for one with none running.
+    pub(crate) fn unfinished_workers(&self, run: Uuid) -> Option<String> {
+        if !self.is_subagent(run) {
+            return None;
+        }
+        let workers = self
+            .active_workers_of(run)
+            .into_iter()
+            .map(|worker| {
+                let state = match worker.state {
+                    SubagentState::Queued => "queued",
+                    _ if worker.asking => "asking you a question",
+                    _ => "running",
+                };
+                format!("{} ({state})", worker.handle)
+            })
+            .collect::<Vec<_>>();
+        let (unfinished, what_to_do) = match workers.as_slice() {
+            [] => return None,
+            [one] => (
+                format!("Your agent run {one} hasn't finished."),
+                "Wait for it with wait_for_agents, or stop it with stop_agent",
+            ),
+            many => (
+                format!(
+                    "Your agent runs {} haven't finished.",
+                    handles_in_words(many)
+                ),
+                "Wait for them with wait_for_agents, or stop the ones you don't need with stop_agent",
+            ),
+        };
+        Some(format!("{unfinished} {what_to_do}, then report again."))
+    }
+
     /// The handles of the subagents of run `lead` that run or wait to run,
     /// and of theirs in turn.
     fn active_descendants(&self, lead: Uuid) -> Vec<String> {
