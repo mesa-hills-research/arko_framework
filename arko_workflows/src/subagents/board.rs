@@ -651,6 +651,12 @@ impl Board {
         ctx.run_control
             .check_admission(false)
             .map_err(|_| "the workflow is stopping, so no agent run starts".to_string())?;
+        if !self.offers_start_tools(caller) {
+            return Err(
+                "You can't start agent runs. Do the work yourself, or tell your lead what you need with message_agent."
+                    .to_string(),
+            );
+        }
         if ctx.run_control.is_run_stopping(caller) {
             return Err(
                 "your run is being stopped, so it can't start agent runs; save your progress and call complete_task"
@@ -2407,6 +2413,19 @@ impl Board {
             lines.push(line);
         }
         lines.join("\n")
+    }
+
+    /// Whether the host's hook offers subagent run `run_id` the tools that
+    /// start agent runs. True when there is no hook or no such record. The
+    /// hook is asked without any lock held.
+    pub(crate) fn offers_start_tools(&self, run_id: Uuid) -> bool {
+        let Some(hook) = self.config.as_ref().and_then(|config| config.hook.as_ref()) else {
+            return true;
+        };
+        match self.record(run_id) {
+            Some(record) => hook.offers_start_tools(&record),
+            None => true,
+        }
     }
 
     /// Whether the run's lead may start subagents at `depth`.

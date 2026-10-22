@@ -346,6 +346,25 @@ pub trait SubagentHook: Send + Sync {
         let _ = record;
         None
     }
+
+    /// Whether the run `record` describes is offered the tools that start
+    /// agent runs: `start_agent`, `list_agents`, `stop_agent`, `link_agents`
+    /// and `run_workflow_agent`. The default is `true`, so every subagent at
+    /// a depth under [`SubagentsConfig::max_depth`], of an agent that is a
+    /// caller, gets them. With `false` the run is not a caller. It keeps
+    /// `message_agent` and `wait_for_agents` to talk with its lead and
+    /// peers, and a start it still attempts is refused.
+    ///
+    /// Only subagent runs are asked, never a run the host drives. The
+    /// answer is read each time the run's tools are set up, as it starts,
+    /// continues, is reconfigured, recovers and resumes, and it must be the
+    /// same each time for the same record. Decide from the record, such as
+    /// its `parameters` and `depth`. It narrows what `max_depth` allows and
+    /// can't widen it.
+    fn offers_start_tools(&self, record: &SubagentRecord) -> bool {
+        let _ = record;
+        true
+    }
 }
 
 impl<F> SubagentHook for F

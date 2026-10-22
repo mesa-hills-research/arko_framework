@@ -1543,18 +1543,32 @@ fn image_load<'a>(messages: impl Iterator<Item = &'a arko_ai::Message>) -> (usiz
 }
 
 /// What a run is, for the workflow tools it gets: how deep it is (see
-/// [`StartedRun::depth`]), and whether it is a background subagent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// [`StartedRun::depth`]), whether it is a background subagent, and whether
+/// the host's hook offers it the tools that start agent runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunRole {
     pub depth: u32,
     pub subagent: bool,
+    /// Always true for a run the host drives. For a subagent it is the
+    /// answer of [`SubagentHook::offers_start_tools`](crate::subagents::SubagentHook::offers_start_tools).
+    pub starts: bool,
+}
+
+impl Default for RunRole {
+    fn default() -> Self {
+        Self {
+            depth: 0,
+            subagent: false,
+            starts: true,
+        }
+    }
 }
 
 impl From<u32> for RunRole {
     fn from(depth: u32) -> Self {
         Self {
             depth,
-            subagent: false,
+            ..Self::default()
         }
     }
 }
@@ -1562,9 +1576,11 @@ impl From<u32> for RunRole {
 impl RunRole {
     /// The role of run `task_id` at `depth`.
     pub(crate) fn of(ctx: &SharedContext, depth: u32, task_id: uuid::Uuid) -> Self {
+        let subagent = ctx.subagents.is_subagent(task_id);
         Self {
             depth,
-            subagent: ctx.subagents.is_subagent(task_id),
+            subagent,
+            starts: !subagent || ctx.subagents.offers_start_tools(task_id),
         }
     }
 }
@@ -1573,7 +1589,8 @@ impl RunRole {
 /// (it may start subagents), and those for talking with its runs or its
 /// lead.
 fn subagent_tools(ctx: &SharedContext, agent_name: &str, role: RunRole) -> (bool, bool) {
-    let caller = ctx.subagents.may_start_at(role.depth)
+    let caller = role.starts
+        && ctx.subagents.may_start_at(role.depth)
         && ctx
             .workflow_services
             .get()
@@ -1593,6 +1610,7 @@ fn offers_blocking_tool(ctx: &SharedContext, agent_name: &str, role: RunRole) ->
     match ctx.subagents.config() {
         Some(config) => {
             allowed
+                && role.starts
                 && config.offer_blocking_tool
                 && !(role.subagent && role.depth >= config.max_depth)
         }
@@ -2942,9 +2960,15 @@ impl WorkflowEngine {
         } else {
             self.admit(agent_name, None, options.review, ctx)
         };
+        // A subagent's record is on the board already (`options.reserved`
+        // is its run id), and the hook says if it may start runs.
         let role = RunRole {
             depth: options.depth,
             subagent: options.subagent,
+            starts: !options.subagent
+                || options
+                    .reserved
+                    .is_none_or(|run_id| ctx.subagents.offers_start_tools(run_id)),
         };
         let prepared = admission.and_then(|()| {
             let base_config = match &options.config {

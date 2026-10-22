@@ -814,6 +814,10 @@ background, after what it collected.
   subagents it started that still run, and theirs in turn. A subagent that ends stops
   them too, so none keeps working for a run that is gone. A subagent can't report
   while its own subagents run, and is told to wait for them or stop them first.
+- Every subagent of a caller agent gets the tools that start runs while its depth is
+  under `max_depth`. A `SubagentHook` can narrow that per run with `offers_start_tools`.
+  A run it answers `false` for keeps `message_agent` and `wait_for_agents` and cannot
+  start runs, whatever tool list the hook sets.
 - `start_agent`'s `workspace` sets the directory a run works in, as
   `RunOptions::workspace` does for `run_agent_with`. With a `WorkspaceProvider`
   (`GitWorktreeProvider`, or your own), `isolated: true` gives the run a workspace of

@@ -9,7 +9,7 @@ use arko_agents::{TaskContext, Tool, ToolDefinition, ToolError, ToolTypeDetails}
 use serde_json::{Value, json};
 
 use super::tests::{
-    Gate, Step, bodies_of, complete, result_of, role, start, turn, until, wait, within,
+    Gate, Step, bodies_of, complete, offered, result_of, role, start, turn, until, wait, within,
 };
 use super::*;
 use crate::persistence::PersistenceConfig;
@@ -986,4 +986,258 @@ async fn the_hosts_hook_describes_a_subagent_to_its_lead() {
     let record = workflow.subagents().remove(0);
     let closure = |_: &StartRequest, _: &mut AgentConfig| Ok(());
     assert_eq!(SubagentHook::describe(&closure, &record), None);
+}
+
+/// A hook that withholds the start tools from the subagents it names by
+/// handle, and keeps who it was asked about.
+struct Withholding {
+    withheld: Vec<&'static str>,
+    asked: parking_lot::Mutex<Vec<(String, Uuid)>>,
+}
+
+impl Withholding {
+    fn new(withheld: Vec<&'static str>) -> Arc<Self> {
+        Arc::new(Self {
+            withheld,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl SubagentHook for Withholding {
+    fn prepare(&self, _: &StartRequest, config: &mut AgentConfig) -> Result<(), String> {
+        // The host lists the tools of its workers itself.
+        config.tool_config.available_tool_names = vec!["gate".to_string()];
+        Ok(())
+    }
+
+    fn offers_start_tools(&self, record: &SubagentRecord) -> bool {
+        self.asked
+            .lock()
+            .push((record.handle.clone(), record.run_id));
+        !self.withheld.contains(&record.handle.as_str())
+    }
+}
+
+const START_TOOLS: [&str; 5] = [
+    "start_agent",
+    "list_agents",
+    "stop_agent",
+    "link_agents",
+    "run_workflow_agent",
+];
+
+/// The `to` text `message_agent` has in a request.
+fn message_agent_to(body: &str) -> String {
+    let body: Value = serde_json::from_str(body).unwrap();
+    let tool = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "message_agent")
+        .unwrap();
+    tool["parameters"]["properties"]["to"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A hook can keep the tools that start runs from one subagent and leave
+/// them to another, whatever tool list it sets. The one without them still
+/// talks with its lead, and its `message_agent` is worded for that. The
+/// hook is asked about subagents only, never the run the host drives.
+#[tokio::test]
+async fn a_hook_can_withhold_the_start_tools_from_one_subagent() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("First."), start("Second.")]),
+        ("r1", vec![("gate", json!({}))]),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let hook = Withholding::new(vec!["r1"]);
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(3).hook(hook.clone()),
+    )
+    .agent_tool("worker", gate.clone())
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    until(|| gate.calls.load(std::sync::atomic::Ordering::SeqCst) == 2).await;
+
+    let first = &bodies_of(&server, "r1")[0];
+    let tools = offered(first);
+    for tool in START_TOOLS {
+        assert!(!tools.contains(&tool.to_string()), "{tool}: {tools:?}");
+    }
+    for tool in ["gate", "complete_task", "message_agent", "wait_for_agents"] {
+        assert!(tools.contains(&tool.to_string()), "{tool}: {tools:?}");
+    }
+    assert_eq!(
+        message_agent_to(first),
+        "`lead` for the agent that started you, or the run id of another agent run your lead linked you with."
+    );
+    let second = &bodies_of(&server, "r2")[0];
+    let tools = offered(second);
+    for tool in START_TOOLS {
+        assert!(tools.contains(&tool.to_string()), "{tool}: {tools:?}");
+    }
+    assert!(message_agent_to(second).starts_with("The run id of one of your agent runs"));
+    // The run the host drives keeps them, and the hook was asked about
+    // subagents only.
+    let lead_tools = offered(&bodies_of(&server, "lead")[0]);
+    assert!(
+        lead_tools.contains(&"start_agent".to_string()),
+        "{lead_tools:?}"
+    );
+    let records = workflow.subagents();
+    for (handle, run_id) in hook.asked.lock().iter() {
+        assert!(
+            records
+                .iter()
+                .any(|run| run.handle == *handle && run.run_id == *run_id),
+            "asked about {handle}"
+        );
+        assert_ne!(*run_id, lead.agent_run_id);
+    }
+    assert!(!hook.asked.lock().is_empty());
+}
+
+/// The answer of the hook is the same when the subagent is continued with a
+/// message and when it resumes from a checkpoint.
+#[tokio::test]
+async fn the_hooks_answer_stays_for_a_continued_and_a_resumed_subagent() {
+    // Continued: r1 finishes, and a message from the lead continues it.
+    let server = serve_tree(vec![("lead", vec![start("First.")])]).await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default()
+            .max_depth(3)
+            .hook(Withholding::new(vec!["r1"])),
+    )
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    let ctx = workflow.context();
+    ctx.subagents
+        .message(ctx, lead.agent_run_id, "r1", "Once more.")
+        .unwrap();
+    until(|| bodies_of(&server, "r1").len() >= 2).await;
+    let requests = bodies_of(&server, "r1");
+    assert!(requests[1].contains("Once more."));
+    let tools = offered(&requests[0]);
+    assert!(!tools.contains(&"start_agent".to_string()), "{tools:?}");
+    assert_eq!(offered(&requests[1]), tools);
+
+    // Resumed: r1 waits at its gate when the workflow stops, and the
+    // resumed workflow relaunches it.
+    let server = serve_tree(vec![
+        ("lead", vec![start("First.")]),
+        ("r1", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default()
+            .max_depth(3)
+            .hook(Withholding::new(vec!["r1"])),
+    )
+    .agent_tool("worker", gate.clone())
+    .persistence(PersistenceConfig::new(&run_dir))
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    workflow.stop(StopRequest::operator("closing"));
+    until(|| workflow.active_subagents().is_empty()).await;
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let before = bodies_of(&server, "r1").len();
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let gate = Arc::new(Gate::default());
+    let resumed = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default()
+            .max_depth(3)
+            .hook(Withholding::new(vec!["r1"])),
+    )
+    .agent_tool("worker", gate.clone())
+    .persistence(PersistenceConfig::new(&run_dir))
+    .resume_from(run_dir.join(latest.trim()))
+    .build()
+    .unwrap();
+    assert_eq!(resumed.resume_subagents(), ["r1"]);
+    until(|| bodies_of(&server, "r1").len() > before).await;
+    let requests = bodies_of(&server, "r1");
+    let tools = offered(&requests[0]);
+    assert!(!tools.contains(&"start_agent".to_string()), "{tools:?}");
+    assert_eq!(offered(requests.last().unwrap()), tools);
+}
+
+/// A start by a subagent the hook withholds the tools from is refused, in
+/// words that name no setting of the host.
+#[tokio::test]
+async fn a_start_by_a_subagent_without_the_start_tools_is_refused() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("First.")]),
+        ("r1", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default()
+            .max_depth(3)
+            .hook(Withholding::new(vec!["r1"])),
+    )
+    .agent_tool("worker", gate.clone())
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    let ctx = workflow.context();
+    let r1 = workflow.subagents()[0].run_id;
+    let refused = ctx
+        .subagents
+        .start(
+            ctx,
+            r1,
+            "worker",
+            1,
+            &workspace.0,
+            "worker",
+            "Take this.",
+            None,
+            false,
+            None,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "You can't start agent runs. Do the work yourself, or tell your lead what you need with message_agent."
+    );
+    assert_eq!(workflow.subagents().len(), 1);
 }
