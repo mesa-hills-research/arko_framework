@@ -32,8 +32,49 @@ pub struct SkillSource {
     pub exclude: Option<Vec<String>>,
 }
 
+/// A skill held in memory, such as one built into a program, instead of read
+/// from a folder.
+///
+/// It is parsed and checked as a folder skill's `SKILL.md` is, so it needs
+/// the same front matter. It has no folder, so it has no resource files to
+/// load beside it and no scripts. Build one with [`new`](Self::new).
+///
+/// ```
+/// use arko_agents::skill::EmbeddedSkill;
+///
+/// let skill = EmbeddedSkill::new(
+///     "commit-style",
+///     "---\nname: commit-style\ndescription: How to word a commit message.\n---\nStart with the area.\n",
+/// );
+/// assert_eq!(skill.name, "commit-style");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EmbeddedSkill {
+    /// Names the skill in warnings and errors, as a folder skill's folder
+    /// name does. The agents see the `name` in the front matter, which wins
+    /// (with a warning) when the two differ.
+    pub name: String,
+
+    /// The whole text of the skill's `SKILL.md`, front matter included.
+    pub content: String,
+}
+
+impl EmbeddedSkill {
+    /// A skill with the given `name` and the full text of its `SKILL.md`.
+    pub fn new(name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            content: content.into(),
+        }
+    }
+}
+
 /// Configuration for the skills system within an agent config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `SkillsConfig::default()` has no skills, so a config can be written as
+/// `SkillsConfig { embedded, ..Default::default() }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
     /// Optional workspace-relative skills directory (e.g., ".skills", ".claude/skills").
     /// Path is resolved relative to the `workspace_root` given to
@@ -45,6 +86,14 @@ pub struct SkillsConfig {
     /// Processed in order. Earlier sources have priority for deduplication.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_sources: Vec<SkillSource>,
+
+    /// Skills given in memory. They load after those of the folders and have
+    /// the lowest priority. A folder skill with the same name replaces the
+    /// embedded one, which is how a user overrides a built-in skill. They are
+    /// saved with the configuration, and a configuration saved without them
+    /// loads with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedded: Vec<EmbeddedSkill>,
 
     /// Behavior when a skill fails to parse or load.
     /// Defaults to `Warn` (skip the skill, log a warning).

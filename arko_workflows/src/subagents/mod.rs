@@ -55,6 +55,8 @@ pub(crate) use board::CONTEXT_ARRIVED;
 #[cfg(test)]
 mod nesting_tests;
 #[cfg(test)]
+mod skills_tests;
+#[cfg(test)]
 mod tests;
 mod tools;
 pub mod workspace;

@@ -5208,6 +5208,7 @@ mod tests {
                 exclude: None,
             }),
             global_sources: vec![],
+            embedded: vec![],
             on_invalid_skill: InvalidSkillPolicy::Error,
             load_skill_interception: None,
         });

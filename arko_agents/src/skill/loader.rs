@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::config::{InvalidSkillPolicy, SkillSource, SkillsConfig};
+use super::config::{EmbeddedSkill, InvalidSkillPolicy, SkillSource, SkillsConfig};
 use super::frontmatter::parse_frontmatter;
 use super::types::{
     AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillScan,
@@ -38,8 +38,12 @@ pub fn load_skills(
                 }
             }
         }
-        found.push((source, survey_or_unreadable(&directory, &label)));
+        found.push((
+            Origin::Folder(source),
+            survey_or_unreadable(&directory, &label),
+        ));
     }
+    found.extend(embedded_origin(config));
 
     let mut skills = Vec::new();
     for settled in settle(found) {
@@ -52,7 +56,7 @@ pub fn load_skills(
                 }
                 InvalidSkillPolicy::Error => return Err(error),
             },
-            Outcome::LeftOut(..) | Outcome::Duplicate(..) => {}
+            Outcome::LeftOut(..) | Outcome::Duplicate(..) | Outcome::Replaced(..) => {}
         }
     }
     let prompt_context = build_prompt_context(&skills);
@@ -60,19 +64,23 @@ pub fn load_skills(
     Ok((skills, prompt_context))
 }
 
-/// Every skill file and folder in the sources of `config`, with what
-/// [`load_skills`] makes of it, loaded (under its name, or renamed) or
-/// skipped and why. Unlike loading, it never fails. A directory that
-/// doesn't exist has nothing to list, and one that can't be read is
-/// listed as a skipped entry.
+/// Every skill file and folder in the sources of `config`, then its
+/// embedded skills, with what [`load_skills`] makes of it, loaded (under its
+/// name, or renamed) or skipped and why. Unlike loading, it never fails. A
+/// directory that doesn't exist has nothing to list, and one that can't be
+/// read is listed as a skipped entry.
 pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
     let mut found = Vec::new();
     for (source, directory, label) in sources(config, workspace_root) {
         if !directory.is_dir() {
             continue;
         }
-        found.push((source, survey_or_unreadable(&directory, &label)));
+        found.push((
+            Origin::Folder(source),
+            survey_or_unreadable(&directory, &label),
+        ));
     }
+    found.extend(embedded_origin(config));
     settle(found).into_iter().map(Settled::scan).collect()
 }
 
@@ -87,8 +95,40 @@ fn survey_or_unreadable(directory: &Path, source_label: &str) -> Vec<Found> {
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default(),
             skill: Err(Problem::Unreadable(error)),
+            embedded: false,
         }]
     })
+}
+
+/// The `LoadedSkill::source_label` of an embedded skill.
+const EMBEDDED_LABEL: &str = "embedded";
+
+/// The embedded skills of `config` as one more source, after the folders,
+/// each read. `None` without any.
+fn embedded_origin(config: &SkillsConfig) -> Option<(Origin<'_>, Vec<Found>)> {
+    if config.embedded.is_empty() {
+        return None;
+    }
+    let found = config
+        .embedded
+        .iter()
+        .map(|skill| Found {
+            path: PathBuf::new(),
+            fallback_name: skill.name.clone(),
+            skill: read_embedded_skill(skill).map_err(Problem::Invalid),
+            embedded: true,
+        })
+        .collect();
+    Some((Origin::Embedded, found))
+}
+
+/// Where the skills of one source come from, in the order they count.
+enum Origin<'a> {
+    /// A source directory, with its lists.
+    Folder(&'a SkillSource),
+    /// The embedded skills of the configuration. A folder skill with the
+    /// name of one replaces it.
+    Embedded,
 }
 
 /// The sources of `config` in the order they count (the workspace's, then
@@ -116,11 +156,13 @@ fn sources<'a>(
 
 /// A skill file or folder in a source, as read.
 struct Found {
+    /// Empty for an embedded skill.
     path: PathBuf,
     /// Its name when it can't be read: its folder's, or its file's without
-    /// the extension.
+    /// the extension, or an embedded skill's given name.
     fallback_name: String,
     skill: Result<LoadedSkill, Problem>,
+    embedded: bool,
 }
 
 /// Why a skill file or folder can't be loaded. The policy skips or
@@ -136,6 +178,7 @@ enum Problem {
 struct Settled {
     path: PathBuf,
     fallback_name: String,
+    embedded: bool,
     outcome: Outcome,
 }
 
@@ -147,12 +190,16 @@ enum Outcome {
     LeftOut(LoadedSkill, &'static str),
     /// The same content as the skill loaded under this name.
     Duplicate(LoadedSkill, String),
+    /// An embedded skill that the folder skill loaded under its name, from
+    /// this path, replaces.
+    Replaced(LoadedSkill, PathBuf),
 }
 
 impl Settled {
     fn scan(self) -> SkillScan {
         let scan = |skill: &LoadedSkill, skipped: Option<String>| SkillScan {
             path: self.path.clone(),
+            embedded: self.embedded,
             name: skill.name.clone(),
             description: skill.description.clone(),
             auto_load: skill.auto_load,
@@ -160,6 +207,7 @@ impl Settled {
         };
         let unread = |why: String| SkillScan {
             path: self.path.clone(),
+            embedded: self.embedded,
             name: self.fallback_name.clone(),
             description: String::new(),
             auto_load: false,
@@ -178,6 +226,14 @@ impl Settled {
             Outcome::Duplicate(skill, of) => scan(
                 skill,
                 Some(format!("the same as the skill '{of}', loaded already")),
+            ),
+            Outcome::Replaced(skill, by) => scan(
+                skill,
+                Some(format!(
+                    "replaced by the skill '{}' in {}",
+                    skill.name,
+                    by.display()
+                )),
             ),
         }
     }
@@ -218,6 +274,7 @@ fn survey_source(directory: &Path, source_label: &str) -> Result<Vec<Found>, Ark
                         source: e,
                     })),
                     path,
+                    embedded: false,
                 });
                 continue;
             }
@@ -246,6 +303,7 @@ fn survey_source(directory: &Path, source_label: &str) -> Result<Vec<Found>, Ark
             path,
             fallback_name,
             skill,
+            embedded: false,
         });
     }
     Ok(found)
@@ -254,22 +312,29 @@ fn survey_source(directory: &Path, source_label: &str) -> Result<Vec<Found>, Ark
 /// What loading makes of the skills `found` in each source: each source's
 /// lists leave some out, a skill with the content of one loaded already is
 /// a duplicate, and one with the name of one loaded already is renamed
-/// (`name-2`). Earlier sources come first.
-fn settle(found: Vec<(&SkillSource, Vec<Found>)>) -> Vec<Settled> {
+/// (`name-2`). Earlier sources come first. The embedded skills come last
+/// and have the lowest priority. A folder skill's name replaces an embedded
+/// skill with that name, which is left out instead of renamed.
+fn settle(found: Vec<(Origin<'_>, Vec<Found>)>) -> Vec<Settled> {
     let mut settled = Vec::new();
     let mut name_registry: HashSet<String> = HashSet::new();
+    // The path of each folder skill loaded, by the name it loaded under.
+    let mut folder_skills: HashMap<String, PathBuf> = HashMap::new();
     let mut content_hashes: HashMap<u64, String> = HashMap::new();
 
-    for (source, found) in found {
+    for (origin, found) in found {
         for Found {
             path,
             fallback_name,
             skill,
+            embedded,
         } in found
         {
+            let location = path.clone();
             let settle = |outcome| Settled {
                 path,
                 fallback_name,
+                embedded,
                 outcome,
             };
             let mut skill = match skill {
@@ -283,8 +348,20 @@ fn settle(found: Vec<(&SkillSource, Vec<Found>)>) -> Vec<Settled> {
                     continue;
                 }
             };
-            if let Some(list) = left_out(&skill, source) {
+            if let Origin::Folder(source) = &origin
+                && let Some(list) = left_out(&skill, source)
+            {
                 settled.push(settle(Outcome::LeftOut(skill, list)));
+                continue;
+            }
+            if embedded && let Some(folder) = folder_skills.get(&skill.name) {
+                log::debug!(
+                    "Embedded skill '{}' is replaced by the skill of that name in {}.",
+                    skill.name,
+                    folder.display()
+                );
+                let folder = folder.clone();
+                settled.push(settle(Outcome::Replaced(skill, folder)));
                 continue;
             }
 
@@ -318,6 +395,9 @@ fn settle(found: Vec<(&SkillSource, Vec<Found>)>) -> Vec<Settled> {
             }
 
             name_registry.insert(skill.name.clone());
+            if !embedded {
+                folder_skills.insert(skill.name.clone(), location);
+            }
             content_hashes.insert(content_hash, skill.name.clone());
             settled.push(settle(Outcome::Loaded(skill)));
         }
@@ -609,6 +689,31 @@ fn read_flat_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill, 
     })
 }
 
+/// The skill given in memory, read as a flat skill is, with no resources.
+fn read_embedded_skill(embedded: &EmbeddedSkill) -> Result<LoadedSkill, SkillLoadError> {
+    let (frontmatter, body) = parse_frontmatter(
+        &embedded.content,
+        &format!("embedded skill '{}'", embedded.name),
+    )?;
+    if frontmatter.name != embedded.name {
+        log::warn!(
+            "Embedded skill '{}' has frontmatter name '{}', which does not match its name. Using the frontmatter name.",
+            embedded.name,
+            frontmatter.name
+        );
+    }
+
+    Ok(LoadedSkill {
+        name: frontmatter.name.clone(),
+        original_name: frontmatter.name,
+        description: frontmatter.description,
+        auto_load: frontmatter.auto_load,
+        content: body,
+        resources: HashMap::new(),
+        source_label: EMBEDDED_LABEL.to_string(),
+    })
+}
+
 fn compute_skill_content_hash(skill: &LoadedSkill) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     skill.content.hash(&mut hasher);
@@ -739,6 +844,7 @@ mod tests {
                 exclude: Some(vec!["left".into()]),
             }),
             global_sources: vec![global(&second), global(&temp.0.join("missing"))],
+            embedded: Vec::new(),
             on_invalid_skill: InvalidSkillPolicy::Warn,
             load_skill_interception: None,
         };
@@ -837,6 +943,7 @@ mod tests {
         let mut config = SkillsConfig {
             workspace_source: None,
             global_sources: vec![global(&first), global(&closed)],
+            embedded: Vec::new(),
             on_invalid_skill: InvalidSkillPolicy::Warn,
             load_skill_interception: None,
         };

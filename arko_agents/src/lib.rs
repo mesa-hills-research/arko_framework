@@ -55,8 +55,8 @@ pub use runtime::{
     event::{AgentEvent, ShortenReason},
 };
 pub use skill::{
-    AutoLoadedSkillContent, InvalidSkillPolicy, LOAD_SKILL_TOOL_NAME, LoadSkillTool, SkillManager,
-    SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
+    AutoLoadedSkillContent, EmbeddedSkill, InvalidSkillPolicy, LOAD_SKILL_TOOL_NAME, LoadSkillTool,
+    SkillManager, SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
 };
 pub use snapshot::TaskSnapshotSink;
 pub use stop::{

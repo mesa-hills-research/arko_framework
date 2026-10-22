@@ -4,7 +4,10 @@ pub mod load_skill;
 mod loader;
 pub mod types;
 
-pub use config::{InvalidSkillPolicy, SkillSource, SkillsConfig};
+#[cfg(test)]
+mod embedded_tests;
+
+pub use config::{EmbeddedSkill, InvalidSkillPolicy, SkillSource, SkillsConfig};
 pub use load_skill::{LOAD_SKILL_TOOL_NAME, LoadSkillTool};
 pub use types::{
     AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillScan,
@@ -20,13 +23,15 @@ use crate::error::ArkoAgentsError;
 use crate::tool::ToolRegistry;
 
 /// Lists the skill files and folders in the sources of `config`, resolving
-/// workspace paths relative to `workspace_root`, with what
-/// [`SkillManager::load`] makes of each, the name it loads it under or why
-/// it skips it. It reads them by the same code as loading, under
-/// [`InvalidSkillPolicy::Warn`], and never fails. A source directory that
-/// doesn't exist has nothing to list, and one that can't be read is listed
-/// as skipped. Within a source, entries are taken in the order of their
-/// names, and earlier sources come first.
+/// workspace paths relative to `workspace_root`, and its embedded skills,
+/// with what [`SkillManager::load`] makes of each, the name it loads it
+/// under or why it skips it. It reads them by the same code as loading,
+/// under [`InvalidSkillPolicy::Warn`], and never fails. A source directory
+/// that doesn't exist has nothing to list, and one that can't be read is
+/// listed as skipped. Within a source, entries are taken in the order of
+/// their names, and earlier sources come first. The embedded skills come
+/// last (`embedded` is set, `path` is empty), and one that a folder skill
+/// with its name replaces is listed as skipped, with that skill's path.
 pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
     loader::scan(config, workspace_root)
 }
@@ -44,11 +49,13 @@ pub struct SkillManager {
 
 impl SkillManager {
     /// Loads skills from the given config, resolving workspace paths relative
-    /// to `workspace_root`.
+    /// to `workspace_root`. The folder sources come first, then the embedded
+    /// skills, which a folder skill of the same name replaces.
     ///
     /// Returns `Err` only if `config.on_invalid_skill` is `Error` and a
-    /// skill is invalid, can't be read, or a source directory is missing
-    /// or can't be read. Under `Warn` those are logged and skipped.
+    /// skill (an embedded one too) is invalid, can't be read, or a source
+    /// directory is missing or can't be read. Under `Warn` those are logged
+    /// and skipped.
     pub fn load(config: &SkillsConfig, workspace_root: &Path) -> Result<Self, ArkoAgentsError> {
         let (all_skills, prompt_context) = loader::load_skills(config, workspace_root)?;
 

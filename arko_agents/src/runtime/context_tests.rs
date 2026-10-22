@@ -629,10 +629,8 @@ async fn load_skill_results_are_intercepted_only_when_opted_in() {
         registry.register(Arc::new(Skill));
         agent.tool_registry = Arc::new(registry);
         agent.task.agent_config.skills_config = Some(crate::skill::SkillsConfig {
-            workspace_source: None,
-            global_sources: vec![],
-            on_invalid_skill: Default::default(),
             load_skill_interception: opt_in,
+            ..Default::default()
         });
         agent.interceptor_config = Some(InterceptorConfig {
             interceptor,

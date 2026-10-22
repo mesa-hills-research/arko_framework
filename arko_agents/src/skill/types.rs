@@ -78,7 +78,8 @@ pub struct LoadedSkill {
     /// Only .md files are included. Empty for flat/minimal skills.
     pub resources: HashMap<String, String>,
 
-    /// Human-readable label indicating where this skill was loaded from.
+    /// Human-readable label indicating where this skill was loaded from,
+    /// `workspace:<path>`, `global:<path>` or `embedded`.
     pub source_label: String,
 }
 
@@ -113,8 +114,12 @@ pub struct SkillPromptContext {
 pub struct SkillScan {
     /// Where it is, a folder skill's folder or a bundle's (`.skill`) or a
     /// flat skill's (`.md`) file. A source directory that can't be read is
-    /// listed by its own path.
+    /// listed by its own path. Empty for an embedded skill, which has none
+    /// (see `embedded`).
     pub path: PathBuf,
+    /// It is an [`EmbeddedSkill`](super::EmbeddedSkill), given in memory and
+    /// not read from a folder.
+    pub embedded: bool,
     /// Its name as agents load it, renamed (`name-2`) when a skill loaded
     /// before it has the name. One that can't be read goes by its folder's
     /// name, or its file's without the extension.
@@ -125,7 +130,8 @@ pub struct SkillScan {
     /// demand.
     pub auto_load: bool,
     /// Why it isn't loaded, if it isn't. That may be why it is invalid or
-    /// can't be read, its source's `include` or `exclude` list, or a skill
-    /// with the same content loaded before it.
+    /// can't be read, its source's `include` or `exclude` list, a skill
+    /// with the same content loaded before it, or, for an embedded skill,
+    /// the folder skill with its name that replaces it.
     pub skipped: Option<String>,
 }
