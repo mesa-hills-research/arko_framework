@@ -343,7 +343,8 @@ pub trait SubagentHook: Send + Sync {
     /// as the model it runs on and what it costs so far, or `None` (the
     /// default). `start_agent`'s result ends with it, and `list_agents` shows
     /// it under the run's task. It is called each time, without any lock of
-    /// the workflow held, so it should be quick.
+    /// the workflow held, so it should be quick. A panic in it is logged
+    /// and counts as no description.
     fn describe(&self, record: &SubagentRecord) -> Option<String> {
         let _ = record;
         None

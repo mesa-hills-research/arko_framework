@@ -15,6 +15,7 @@ use super::*;
 use crate::persistence::PersistenceConfig;
 use crate::services::WorkflowServicesConfig;
 use crate::test_support::{ResponsesServer, Workspace, agent_config, tool_call_turn};
+use crate::workflow::result::AgentRunStatus;
 use crate::{RunStopIntent, StopRequest, Workflow, WorkflowBuilder};
 
 /// A server that answers each conversation from its script, turn by turn,
@@ -1450,4 +1451,47 @@ async fn waiting_for_a_linked_peer_ends_with_its_message() {
     until(|| bodies_of(&server, "r1").len() >= 2).await;
     let heard = result_of(&bodies_of(&server, "r1")[1], "r1", 0);
     assert!(heard.contains("Here is what I found."), "{heard}");
+}
+
+/// A hook whose `describe` panics describes nothing. The start it was asked
+/// about still returns, and the run it started is still its lead's.
+#[tokio::test]
+async fn a_describe_that_panics_leaves_the_start_and_the_list_alone() {
+    struct Panicking;
+    impl SubagentHook for Panicking {
+        fn prepare(&self, _: &StartRequest, _: &mut AgentConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn describe(&self, _: &SubagentRecord) -> Option<String> {
+            panic!("a bug in the host's describe");
+        }
+    }
+    let server = serve_tree(vec![(
+        "lead",
+        vec![start("Look around."), ("list_agents", json!({}))],
+    )])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().hook(Arc::new(Panicking)),
+    )
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    assert_eq!(lead.status, AgentRunStatus::Completed);
+    let requests = bodies_of(&server, "lead");
+    let started = result_of(&requests[1], "lead", 0);
+    assert!(
+        started.starts_with("Started r1 (agent `worker`)."),
+        "{started}"
+    );
+    assert!(!started.contains('\n'), "{started}");
+    let listed = result_of(&requests[2], "lead", 1);
+    assert!(listed.starts_with("r1 · agent `worker`"), "{listed}");
+    until(|| workflow.active_subagents().is_empty()).await;
 }

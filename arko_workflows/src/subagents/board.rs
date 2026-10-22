@@ -2763,9 +2763,20 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
     }
 }
 
-/// What the host's hook says about `record`'s run, if anything.
+/// What the host's hook says about `record`'s run, if anything. A hook that
+/// panics says nothing.
 fn describe(config: &SubagentsConfig, record: &SubagentRecord) -> Option<String> {
-    let text = config.hook.as_ref()?.describe(record)?;
+    let hook = config.hook.as_ref()?;
+    // A bug in the host's text must not end the call that asks for it, such
+    // as a start that has launched its run already.
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.describe(record)))
+        .unwrap_or_else(|_| {
+            log::warn!(
+                "The subagent hook panicked describing {}, so it is described by nothing.",
+                record.handle
+            );
+            None
+        })?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
 }
