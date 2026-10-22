@@ -26,7 +26,7 @@ use crate::workflow::engine::{
     Recovery, StartOptions, drive_to_result, is_superseded, recorded_result, reopened_message,
 };
 use crate::workflow::result::{AgentResult, AgentRunStatus};
-use crate::workflow::stop::{RunStopIntent, StopRecord, StopRequest};
+use crate::workflow::stop::{RunStopIntent, StopKind, StopRecord, StopRequest, WrapUp};
 
 /// How long a subagent's question waits for its lead's answer.
 const QUESTION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -48,6 +48,19 @@ enum Recipient {
     Peer(SubagentRecord),
 }
 
+/// Who asked for the stop of a subagent, which decides what its lead is told.
+#[derive(Clone)]
+enum StopOrigin {
+    /// The workflow's host.
+    Host,
+    /// The lead's `stop_agent`, with the reason it gave (maybe none).
+    Caller(String),
+    /// The subagent's own lead was stopped or ended, in these words (`its
+    /// lead r1 was stopped`). A stop reaches the subagents of a run that
+    /// stops, and the subagents of those.
+    Lead(String),
+}
+
 pub(crate) struct Board {
     config: Option<SubagentsConfig>,
     state: Mutex<SubagentsSnapshot>,
@@ -66,6 +79,9 @@ pub(crate) struct Board {
     prepared: Mutex<HashMap<Uuid, AgentConfig>>,
     /// Stops received after launch selection and before run registration.
     starting: Mutex<HashMap<Uuid, Option<(StopRequest, std::time::Instant)>>>,
+    /// Why the runs stopped because their lead stopped or ended were
+    /// stopped, in words, until they end.
+    lead_stops: Mutex<HashMap<Uuid, String>>,
 }
 
 impl Board {
@@ -100,6 +116,7 @@ impl Board {
             mail_dir,
             prepared: Mutex::new(HashMap::new()),
             starting: Mutex::new(HashMap::new()),
+            lead_stops: Mutex::new(HashMap::new()),
         }
     }
 
@@ -875,6 +892,7 @@ impl Board {
     ) {
         self.starting.lock().remove(&run_id);
         self.drivers.lock().remove(&run_id);
+        let lead_stop = self.lead_stops.lock().remove(&run_id);
         let Some(record) = self.record(run_id) else {
             return;
         };
@@ -944,11 +962,14 @@ impl Board {
                         .unwrap_or_default();
                     let reason = reason.trim().trim_end_matches('.').to_string();
                     let by_caller = record.stopped_by_caller.clone();
-                    let who = match (&by_caller, workflow_stopped) {
-                        (Some(why), _) if why.is_empty() => "you stopped it".to_string(),
-                        (Some(why), _) => format!("you stopped it: {why}"),
-                        (None, true) => format!("it was stopped with the workflow ({reason})"),
-                        (None, false) => format!("the workflow's host stopped it ({reason})"),
+                    let who = match (&by_caller, workflow_stopped, &lead_stop) {
+                        (Some(why), ..) if why.is_empty() => "you stopped it".to_string(),
+                        (Some(why), ..) => format!("you stopped it: {why}"),
+                        (None, true, _) => format!("it was stopped with the workflow ({reason})"),
+                        (None, false, Some(words)) => words.clone(),
+                        (None, false, None) => {
+                            format!("the workflow's host stopped it ({reason})")
+                        }
                     };
                     let retired = stop.as_ref().is_some_and(StopRecord::is_retired);
                     let progress = result
@@ -1027,12 +1048,31 @@ impl Board {
         };
         self.bump();
         self.emit(&record, event);
-        self.posted(ctx, &item);
+        if lead_stop.is_some() {
+            // Its lead stopped or ended too, and isn't told to start a turn.
+            self.posted_quietly(ctx);
+        } else {
+            self.posted(ctx, &item);
+        }
         // Its moved calls' and monitors' notes would reach no one. Its
         // commands go on (a server it started for its lead, say).
         #[cfg(any(unix, windows))]
         if let Some(jobs) = &ctx.background_jobs {
             jobs.stop_owner_watchers(run_id);
+        }
+        // Its subagents would report to a run that is gone, and spend on
+        // work no one reads. When the workflow stops, all runs stop anyway.
+        if !workflow_stopped && !ctx.run_control.is_wrapping_up() {
+            let kind = record
+                .stop_requested
+                .as_ref()
+                .map_or(StopKind::Operator, |stop| stop.kind);
+            self.stop_workers_of(
+                ctx,
+                &record,
+                &StopRequest::new(kind, "").wrap_up(STOP_WRAP_UP),
+                &format!("its lead {} ended", record.handle),
+            );
         }
         if !workflow_stopped {
             self.start_queued(ctx);
@@ -1705,29 +1745,37 @@ impl Board {
         run_id: Uuid,
         request: StopRequest,
     ) -> bool {
-        self.request_stop(ctx, run_id, request, None).is_some()
+        self.request_stop(ctx, run_id, request, StopOrigin::Host)
+            .is_some()
     }
 
     /// Returns whether a changed stop belongs to a running (rather than
     /// queued) subagent. State selection and startup stops share the launch
     /// locks, so a queued stop cannot be overtaken by a driver starting it.
+    /// A stop that changes anything reaches the subagent's own active
+    /// subagents too, and theirs in turn.
     fn request_stop(
         &self,
         ctx: &Arc<SharedContext>,
         run_id: Uuid,
         request: StopRequest,
-        caller_reason: Option<String>,
+        origin: StopOrigin,
     ) -> Option<bool> {
         if ctx.run_control.is_stopped() {
             return None;
         }
-        let reason = caller_reason.as_ref().unwrap_or(&request.reason).clone();
+        let reason = match &origin {
+            StopOrigin::Caller(reason) => reason.clone(),
+            StopOrigin::Host | StopOrigin::Lead(_) => request.reason.clone(),
+        };
+        let by_caller = matches!(origin, StopOrigin::Caller(_));
         let stop_record = StopRecord {
             kind: request.kind,
             reason: request.reason.clone(),
             timestamp: Utc::now(),
             intent: Some(RunStopIntent::Relaunch),
         };
+        let for_workers = request.clone();
         let (record, running, item) = {
             let mut state = self.state.lock();
             let record = state.runs.iter_mut().find(|run| run.run_id == run_id)?;
@@ -1739,15 +1787,17 @@ impl Board {
                     record.pending = None;
                     record.asking = false;
                     let record = record.clone();
-                    let who = if caller_reason.is_some() {
-                        "you stopped it"
-                    } else {
-                        "the workflow's host stopped it"
+                    let (who, why) = match &origin {
+                        StopOrigin::Caller(_) => ("you stopped it".to_string(), reason.clone()),
+                        StopOrigin::Host => {
+                            ("the workflow's host stopped it".to_string(), reason.clone())
+                        }
+                        StopOrigin::Lead(words) => (words.clone(), String::new()),
                     };
-                    let why = if reason.is_empty() {
+                    let why = if why.is_empty() {
                         String::new()
                     } else {
-                        format!(": {reason}")
+                        format!(": {why}")
                     };
                     let item = self.add_mail(
                         &mut state,
@@ -1781,8 +1831,14 @@ impl Board {
                     ) {
                         return None;
                     }
-                    if record.stopped_by_caller.is_none() {
-                        record.stopped_by_caller = caller_reason.clone();
+                    match &origin {
+                        StopOrigin::Caller(reason) if record.stopped_by_caller.is_none() => {
+                            record.stopped_by_caller = Some(reason.clone());
+                        }
+                        StopOrigin::Lead(words) if record.stop_requested.is_none() => {
+                            self.lead_stops.lock().insert(run_id, words.clone());
+                        }
+                        _ => {}
                     }
                     record.stop_requested.get_or_insert(stop_record);
                     (record.clone(), true, None)
@@ -1798,12 +1854,91 @@ impl Board {
                 &record,
                 SubagentEventKind::Stopped {
                     reason: reason.clone(),
-                    by_caller: caller_reason.is_some(),
+                    by_caller,
                 },
             );
-            self.posted(ctx, &item.expect("queued stop has news"));
+            let news = item.expect("queued stop has news");
+            match origin {
+                // Its lead stopped too, and isn't told to start a turn for it.
+                StopOrigin::Lead(_) => self.posted_quietly(ctx),
+                _ => self.posted(ctx, &news),
+            }
         }
+        self.stop_workers_of(
+            ctx,
+            &record,
+            &for_workers,
+            &format!("its lead {} was stopped", record.handle),
+        );
         Some(running)
+    }
+
+    /// The mailbox changed in a way that wakes no one.
+    fn posted_quietly(&self, ctx: &Arc<SharedContext>) {
+        self.bump();
+        self.save_soon(ctx);
+    }
+
+    /// Stops run `lead`'s active subagents for `why` (`its lead r1 was
+    /// stopped`), the way `request` stops the run, with its kind and its
+    /// wrap-up if it has one. Their own subagents follow.
+    fn stop_workers_of(
+        &self,
+        ctx: &Arc<SharedContext>,
+        lead: &SubagentRecord,
+        request: &StopRequest,
+        why: &str,
+    ) {
+        let workers = self.active_workers_of(lead.run_id);
+        for worker in workers {
+            let request = StopRequest {
+                kind: request.kind,
+                reason: why.to_string(),
+                wrap_up: request.wrap_up.as_ref().map(|wrap_up| WrapUp {
+                    within: wrap_up.within,
+                    message: None,
+                }),
+            };
+            self.request_stop(
+                ctx,
+                worker.run_id,
+                request,
+                StopOrigin::Lead(why.to_string()),
+            );
+        }
+    }
+
+    /// The subagents that run, or wait to run, for run `lead`.
+    fn active_workers_of(&self, lead: Uuid) -> Vec<SubagentRecord> {
+        self.state
+            .lock()
+            .runs
+            .iter()
+            .filter(|run| run.caller_run_id == lead && run.state.is_active())
+            .cloned()
+            .collect()
+    }
+
+    /// The handles of the subagents of run `lead` that run or wait to run,
+    /// and of theirs in turn.
+    fn active_descendants(&self, lead: Uuid) -> Vec<String> {
+        let state = self.state.lock();
+        let mut found: Vec<&SubagentRecord> = Vec::new();
+        let mut leads = vec![lead];
+        while let Some(next) = leads.pop() {
+            for run in &state.runs {
+                if run.caller_run_id == next && run.state.is_active() {
+                    found.push(run);
+                    leads.push(run.run_id);
+                }
+            }
+        }
+        let mut handles = found
+            .into_iter()
+            .map(|run| (run.created, run.handle.clone()))
+            .collect::<Vec<_>>();
+        handles.sort();
+        handles.into_iter().map(|(_, handle)| handle).collect()
     }
 
     /// Stops run `id` of caller `caller`, as `stop_agent` does: the tool's
@@ -1833,23 +1968,35 @@ impl Board {
         } else {
             format!("your lead stopped you: {reason}")
         };
+        let workers = self.active_descendants(run.run_id);
         let stopped = self.request_stop(
             ctx,
             run.run_id,
             StopRequest::operator(why).wrap_up(STOP_WRAP_UP),
-            Some(reason),
+            StopOrigin::Caller(reason),
         );
         if stopped.is_none() && !remove_workspace {
             return Ok(format!("{handle} is already stopped or stopping."));
         }
         let stopping = stopped == Some(true);
+        // Its agent runs stop with it.
+        let with_it = match workers.as_slice() {
+            [] => String::new(),
+            [one] => format!(" Its own agent run {one} is stopping with it."),
+            many => format!(
+                " Its own agent runs {} are stopping with it.",
+                handles_in_words(many)
+            ),
+        };
         if !remove_workspace {
             return Ok(if stopping {
                 format!(
-                    "{handle} is stopping: it saves its progress, and its report reaches you. message_agent restarts it later, where it stopped."
+                    "{handle} is stopping: it saves its progress, and its report reaches you.{with_it} message_agent restarts it later, where it stopped."
                 )
             } else {
-                format!("Stopped {handle} before it started. message_agent starts it later.")
+                format!(
+                    "Stopped {handle} before it started.{with_it} message_agent starts it later."
+                )
             });
         }
         // Removed once its run has ended.
@@ -2471,6 +2618,15 @@ fn still_running(still: &[String]) -> String {
         [] => "None of your agent runs is running now.".to_string(),
         [one] => format!("Still running: {one}."),
         many => format!("Still running: {}.", many.join(", ")),
+    }
+}
+
+/// Handles in a sentence: `r3`, `r3 and r4`, `r3, r4 and r5`.
+fn handles_in_words(handles: &[String]) -> String {
+    match handles {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 

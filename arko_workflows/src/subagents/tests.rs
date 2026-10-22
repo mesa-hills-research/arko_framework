@@ -21,11 +21,11 @@ use crate::workflow::result::AgentRunStatus;
 use crate::{Workflow, WorkflowBuilder};
 
 /// A model turn: the tool it calls and its arguments.
-type Step = (&'static str, Value);
+pub(super) type Step = (&'static str, Value);
 
 /// Which conversation a request belongs to: a subagent's (`r1`, `r2`, ...)
 /// or the lead's.
-fn role(body: &str) -> String {
+pub(super) fn role(body: &str) -> String {
     for n in 1..10 {
         if body.contains(&format!("You are agent run r{n},")) {
             return format!("r{n}");
@@ -35,13 +35,13 @@ fn role(body: &str) -> String {
 }
 
 /// How many tool results a request sends: the turn its conversation is at.
-fn turn(body: &str) -> usize {
+pub(super) fn turn(body: &str) -> usize {
     body.matches("\"function_call_output\"").count()
 }
 
 /// A server that answers each conversation from its script, turn by turn,
 /// and completes it (`<role> done`) once the script is over.
-async fn serve(scripts: Vec<(&'static str, Vec<Step>)>) -> ResponsesServer {
+pub(super) async fn serve(scripts: Vec<(&'static str, Vec<Step>)>) -> ResponsesServer {
     let scripts: HashMap<String, Vec<Step>> = scripts
         .into_iter()
         .map(|(role, steps)| (role.to_string(), steps))
@@ -62,7 +62,7 @@ async fn serve(scripts: Vec<(&'static str, Vec<Step>)>) -> ResponsesServer {
     .await
 }
 
-fn builder(
+pub(super) fn builder(
     server: &ResponsesServer,
     workspace: &Workspace,
     config: SubagentsConfig,
@@ -71,7 +71,7 @@ fn builder(
 }
 
 /// [`builder`] with agent `worker` configured as `worker`.
-fn builder_with(
+pub(super) fn builder_with(
     server: &ResponsesServer,
     workspace: &Workspace,
     config: SubagentsConfig,
@@ -91,14 +91,14 @@ fn builder_with(
         .subagents(config)
 }
 
-async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(super) async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(30), future)
         .await
         .expect("in time")
 }
 
 /// Waits until `done` holds.
-async fn until(mut done: impl FnMut() -> bool) {
+pub(super) async fn until(mut done: impl FnMut() -> bool) {
     within(async {
         while !done() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -108,7 +108,7 @@ async fn until(mut done: impl FnMut() -> bool) {
 }
 
 /// The requests of conversation `role`, in order.
-fn bodies_of(server: &ResponsesServer, of: &str) -> Vec<String> {
+pub(super) fn bodies_of(server: &ResponsesServer, of: &str) -> Vec<String> {
     server
         .bodies()
         .into_iter()
@@ -118,7 +118,7 @@ fn bodies_of(server: &ResponsesServer, of: &str) -> Vec<String> {
 
 /// The tool result a conversation's request carries for its call at turn
 /// `turn` (whose id is `<role>_<turn>`).
-fn result_of(body: &str, of: &str, turn: usize) -> String {
+pub(super) fn result_of(body: &str, of: &str, turn: usize) -> String {
     let body: Value = serde_json::from_str(body).unwrap();
     body["input"]
         .as_array()
@@ -133,7 +133,7 @@ fn result_of(body: &str, of: &str, turn: usize) -> String {
 }
 
 /// The names of the tools a request offers.
-fn offered(body: &str) -> Vec<String> {
+pub(super) fn offered(body: &str) -> Vec<String> {
     let body: Value = serde_json::from_str(body).unwrap();
     body["tools"]
         .as_array()
@@ -149,10 +149,10 @@ fn offered(body: &str) -> Vec<String> {
 /// A tool that waits until the test opens it, or the task's stop signal
 /// fires.
 #[derive(Debug, Default)]
-struct Gate {
-    started: tokio::sync::Notify,
-    open: tokio::sync::Notify,
-    calls: AtomicUsize,
+pub(super) struct Gate {
+    pub(super) started: tokio::sync::Notify,
+    pub(super) open: tokio::sync::Notify,
+    pub(super) calls: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -213,15 +213,15 @@ impl Tool for Where {
     }
 }
 
-fn start(task: &str) -> Step {
+pub(super) fn start(task: &str) -> Step {
     ("start_agent", json!({ "agent": "worker", "task": task }))
 }
 
-fn wait() -> Step {
+pub(super) fn wait() -> Step {
     ("wait_for_agents", json!({}))
 }
 
-fn complete(summary: &str) -> Step {
+pub(super) fn complete(summary: &str) -> Step {
     ("complete_task", json!({ "summary": summary }))
 }
 

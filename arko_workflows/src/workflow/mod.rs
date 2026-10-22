@@ -480,7 +480,9 @@ impl Workflow {
     /// Stops a queued or running background subagent and reports the stop
     /// to its lead. A queued run stops before it starts. A running run uses
     /// `request` with [`RunStopIntent::Relaunch`], so a later message from
-    /// its lead can restart it. Returns whether this call changed its stop.
+    /// its lead can restart it. The subagents it started that still run or
+    /// wait for a place are stopped with it, with the same kind and wrap-up,
+    /// and theirs in turn. Returns whether this call changed its stop.
     pub fn stop_subagent(&self, run_id: uuid::Uuid, request: StopRequest) -> bool {
         self.context
             .subagents

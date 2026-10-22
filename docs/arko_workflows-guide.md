@@ -810,6 +810,9 @@ background, after what it collected.
 - Starts over `max_running` wait in a queue (`unlimited()` lifts the cap).
   Subagents start no subagents of their own unless `max_depth` allows it. Two peers
   may send each other `max_peer_messages` messages between two of their lead's.
+- Stopping a subagent (`stop_subagent`, or its lead's `stop_agent`) also stops the
+  subagents it started that still run, and theirs in turn. A subagent that ends stops
+  them too, so none keeps working for a run that is gone.
 - `start_agent`'s `workspace` sets the directory a run works in, as
   `RunOptions::workspace` does for `run_agent_with`. With a `WorkspaceProvider`
   (`GitWorktreeProvider`, or your own), `isolated: true` gives the run a workspace of

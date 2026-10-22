@@ -17,6 +17,14 @@
 //! inside a tool call of its lead, so the lead's run can end, or be stopped,
 //! while it runs on. Stopping or cancelling the whole workflow stops it too.
 //!
+//! A subagent may start subagents of its own when
+//! [`SubagentsConfig::max_depth`] allows it. Stopping a subagent, with
+//! [`Workflow::stop_subagent`](crate::Workflow::stop_subagent) or its lead's
+//! `stop_agent`, also stops the subagents it started that still run or wait
+//! for a place, and theirs in turn, with the same wrap-up. A subagent that
+//! ends in any other way stops them too, since they would report to a run
+//! that is gone. Each of them is told which run's stop or end reached it.
+//!
 //! Reports, failures, stops and messages go through a mailbox kept per run.
 //! An item reaches its recipient in the first way that applies:
 //! - a `wait_for_agents` call that waits for it returns it, whole.
@@ -37,6 +45,8 @@
 
 mod board;
 pub(crate) use board::CONTEXT_ARRIVED;
+#[cfg(test)]
+mod nesting_tests;
 #[cfg(test)]
 mod tests;
 mod tools;
