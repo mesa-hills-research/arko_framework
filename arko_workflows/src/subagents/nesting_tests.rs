@@ -386,3 +386,93 @@ async fn a_stop_reaches_the_subagents_still_waiting_for_a_place() {
         "{reasons:?}"
     );
 }
+
+/// A lead cut back to before the message that started a subagent no longer
+/// has that subagent. It is detached, nobody reads its report, so it is
+/// stopped with the subagents it started, and the lead's conversation hears
+/// nothing of them.
+#[tokio::test]
+async fn a_cut_back_stops_the_subagents_it_detaches_with_their_own() {
+    let server = ResponsesServer::start(|_, body| {
+        let role = role(body);
+        let id = format!("{role}_{}", turn(body));
+        let complete =
+            |summary: &str| tool_call_turn(&id, "complete_task", json!({ "summary": summary }));
+        Some(match role.as_str() {
+            _ if body.contains("Your run is being stopped") => complete("saved its progress"),
+            "lead" if body.contains("Something else.") => complete("lead done again"),
+            "lead" if body.contains("Delegate.") && !body.contains("Started r1") => {
+                let (tool, arguments) = start("Level two.");
+                tool_call_turn(&id, tool, arguments)
+            }
+            "r1" if turn(body) == 0 => {
+                let (tool, arguments) = start("Level three.");
+                tool_call_turn(&id, tool, arguments)
+            }
+            "r1" => tool_call_turn(&id, "wait_for_agents", json!({})),
+            "r2" => tool_call_turn(&id, "gate", json!({})),
+            _ => complete("lead done"),
+        })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(3))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let mut events = workflow.subscribe_subagents();
+    let first = within(workflow.run_agent("lead", "First.")).await.unwrap();
+    let delegated = within(workflow.continue_agent(&first, "Delegate."))
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    let index = delegated
+        .task
+        .user_turns()
+        .iter()
+        .find(|turn| turn.text.starts_with("Delegate."))
+        .unwrap()
+        .index;
+    let again = within(workflow.continue_agent_with(
+        &delegated,
+        "Something else.",
+        crate::ContinueOptions::new().cut_back_to(index),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(again.summary, "lead done again");
+
+    let record = |handle: &str| {
+        workflow
+            .subagents()
+            .into_iter()
+            .find(|run| run.handle == handle)
+            .unwrap()
+    };
+    until(|| workflow.active_subagents().is_empty()).await;
+    let (r1, r2) = (record("r1"), record("r2"));
+    assert!(r1.detached && !r2.detached);
+    assert_eq!(r1.state, SubagentState::Stopped);
+    assert_eq!(r2.state, SubagentState::Stopped);
+    assert_eq!(
+        r1.error.as_deref(),
+        Some("its lead's conversation was cut back to before it started")
+    );
+    assert_eq!(r2.error.as_deref(), Some("its lead r1 was stopped"));
+    // The lead's conversation didn't hear of r1, started or stopped.
+    let last = bodies_of(&server, "lead").last().unwrap().clone();
+    assert!(!last.contains("r1 (agent"), "{last}");
+    assert!(!last.contains("saved its progress"), "{last}");
+    let mut stopped = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let SubagentEventKind::Stopped { by_caller, .. } = event.kind {
+            stopped.push((event.handle, by_caller));
+        }
+    }
+    stopped.sort();
+    assert_eq!(
+        stopped,
+        [("r1".to_string(), false), ("r2".to_string(), false)]
+    );
+}

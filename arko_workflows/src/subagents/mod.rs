@@ -460,7 +460,8 @@ pub struct SubagentRecord {
     /// Its lead's conversation was cut back to before the call that started
     /// it (`ContinueOptions::cut_back_to`), so that conversation never
     /// started it, so its mail stays here, withheld from its lead
-    /// ([`MailItem::withheld`]).
+    /// ([`MailItem::withheld`]). If it still ran, it was stopped then, with
+    /// its own subagents.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
 }

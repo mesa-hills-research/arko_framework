@@ -34,6 +34,10 @@ const QUESTION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// How long a stopped subagent gets to wrap up before it is cancelled.
 const STOP_WRAP_UP: Duration = Duration::from_secs(120);
 
+/// Why a subagent is stopped when its lead's conversation is cut back to
+/// before the message that started it.
+const CUT_BACK_REASON: &str = "its lead's conversation was cut back to before it started";
+
 /// What a subagent's run is told when it goes on because mail reached it
 /// after it reported.
 const MAIL_AFTER_REPORT: &str = "You have new mail since your report: it follows. Act on it, then call `complete_task` again with your updated report.";
@@ -540,8 +544,15 @@ impl Board {
     /// or not, and any still to come) is withheld, kept in the records for
     /// the host to show. Those it started in the messages it keeps, or in a
     /// conversation a handover replaced, stay. The mail of the subagents it
-    /// still started that the removed messages held is given again.
-    pub(crate) fn cut_back(&self, task: &Task, removed: &[arko_ai::Message]) {
+    /// still started that the removed messages held is given again. A
+    /// detached subagent that still runs or waits for a place is stopped,
+    /// with its own subagents, since no one reads its report.
+    pub(crate) fn cut_back(
+        &self,
+        ctx: &Arc<SharedContext>,
+        task: &Task,
+        removed: &[arko_ai::Message],
+    ) {
         let mut state = self.state.lock();
         let mut detached = Vec::new();
         for record in &mut state.runs {
@@ -550,15 +561,16 @@ impl Board {
                 && holds_start(removed, &record.handle)
             {
                 record.detached = true;
-                detached.push(record.run_id);
+                detached.push((record.run_id, record.state.is_active()));
             }
         }
+        let detached_ids = detached.iter().map(|(id, _)| *id).collect::<Vec<_>>();
         let now = Utc::now();
         for item in &mut state.mail {
             if item.to != task.id || item.withheld {
                 continue;
             }
-            if matches!(item.from, MailSender::Run(sender) if detached.contains(&sender)) {
+            if matches!(item.from, MailSender::Run(sender) if detached_ids.contains(&sender)) {
                 item.withheld = true;
                 item.delivered_at.get_or_insert(now);
             } else if item.delivered_at.is_some() && !task_holds(task, item) {
@@ -567,6 +579,13 @@ impl Board {
         }
         drop(state);
         self.bump();
+        let request = StopRequest::operator(CUT_BACK_REASON).wrap_up(STOP_WRAP_UP);
+        for (run_id, active) in detached {
+            if active {
+                let origin = StopOrigin::Lead(CUT_BACK_REASON.to_string());
+                self.request_stop(ctx, run_id, request.clone(), origin);
+            }
+        }
     }
 
     /// Run `task.id` is recovered from its task as last saved, which may

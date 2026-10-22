@@ -3591,7 +3591,7 @@ impl WorkflowEngine {
             }
             let messages = &previous.task.conversation.messages;
             ctx.subagents
-                .cut_back(&task, &messages[index.min(messages.len())..]);
+                .cut_back(ctx, &task, &messages[index.min(messages.len())..]);
         }
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
