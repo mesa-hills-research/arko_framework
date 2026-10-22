@@ -852,10 +852,11 @@ fn start_parameter(self, parameter: ToolParameterDefinition) -> Self;
 // The hook, also implemented by closures of the same signature
 trait SubagentHook: Send + Sync {
     fn prepare(&self, request: &StartRequest, config: &mut AgentConfig) -> Result<(), String>;
+    fn describe(&self, record: &SubagentRecord) -> Option<String> { None }   // defaulted
 }
 ```
 
-`build` rejects a start parameter named like one of `start_agent`'s own (`agent`, `task`, `workspace`, `isolated`, `peers`) or another start parameter. `StartRequest` (`Debug`, `Clone`, `PartialEq`, Serde) has `workflow_run_id`, `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `task` and `parameters: BTreeMap<String, Value>`, the host parameters the call gave. The hook runs once per start, before a workspace is made, and its error is the caller's `start_agent` error. It runs again on resume, for each saved subagent, so that a resumed task's configuration compares with the prepared one, not the agent's.
+`build` rejects a start parameter named like one of `start_agent`'s own (`agent`, `task`, `workspace`, `isolated`, `peers`) or another start parameter. `StartRequest` (`Debug`, `Clone`, `PartialEq`, Serde) has `workflow_run_id`, `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `task` and `parameters: BTreeMap<String, Value>`, the host parameters the call gave. The hook runs once per start, before a workspace is made, and its error is the caller's `start_agent` error. It runs again on resume, for each saved subagent, so that a resumed task's configuration compares with the prepared one, not the agent's. `describe` is optional. Its text (the model a run uses and its cost, say) ends `start_agent`'s result and shows under the run's task in `list_agents`, and is read each time, with no lock of the workflow held.
 
 ### Tools
 

@@ -336,6 +336,16 @@ pub trait SubagentHook: Send + Sync {
     /// checked against the registered one with the same changes. It should
     /// make the same changes for the same request.
     fn prepare(&self, request: &StartRequest, config: &mut AgentConfig) -> Result<(), String>;
+
+    /// A few words about `record`'s run that its lead is told more of, such
+    /// as the model it runs on and what it costs so far, or `None` (the
+    /// default). `start_agent`'s result ends with it, and `list_agents` shows
+    /// it under the run's task. It is called each time, without any lock of
+    /// the workflow held, so it should be quick.
+    fn describe(&self, record: &SubagentRecord) -> Option<String> {
+        let _ = record;
+        None
+    }
 }
 
 impl<F> SubagentHook for F

@@ -931,3 +931,59 @@ async fn a_compaction_restates_the_subagents_that_still_work() {
     let seed = hook.on_handover(&task, "Report.");
     assert!(seed.context.unwrap().contains("# Your workers"));
 }
+
+/// A host's hook says more about a run, and its lead reads that with the
+/// start's result and in the list.
+#[tokio::test]
+async fn the_hosts_hook_describes_a_subagent_to_its_lead() {
+    struct Describing;
+    impl SubagentHook for Describing {
+        fn prepare(&self, _: &StartRequest, _: &mut AgentConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn describe(&self, record: &SubagentRecord) -> Option<String> {
+            Some(format!(
+                "{} runs on a model of the host's choosing.\nIt was started at depth {}.",
+                record.handle, record.depth
+            ))
+        }
+    }
+    let server = serve_tree(vec![(
+        "lead",
+        vec![start("Look around."), ("list_agents", json!({}))],
+    )])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().hook(Arc::new(Describing)),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let started = result_of(&lead[1], "lead", 0);
+    assert!(
+        started.starts_with("Started r1 (agent `worker`).")
+            && started.ends_with(
+                "\nr1 runs on a model of the host's choosing.\nIt was started at depth 1."
+            ),
+        "{started}"
+    );
+    let listed = result_of(&lead[2], "lead", 1);
+    assert!(
+        listed.contains(
+            "\n  task: Look around.\n  r1 runs on a model of the host's choosing.\n  It was started at depth 1."
+        ),
+        "{listed}"
+    );
+    // A hook that doesn't describe leaves both as they were, and so does a
+    // closure.
+    let record = workflow.subagents().remove(0);
+    let closure = |_: &StartRequest, _: &mut AgentConfig| Ok(());
+    assert_eq!(SubagentHook::describe(&closure, &record), None);
+}

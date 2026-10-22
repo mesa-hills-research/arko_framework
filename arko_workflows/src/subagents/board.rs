@@ -759,11 +759,10 @@ impl Board {
         record.isolated = isolated.clone();
         let prompt = subagent_prompt(config, self.workflow_run_id, &record);
         self.prepared.lock().insert(run_id, prepared);
-        self.state.lock().runs.push(record);
+        self.state.lock().runs.push(record.clone());
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
-        let queued = self
-            .record(run_id)
-            .is_some_and(|record| record.state == SubagentState::Queued);
+        let latest = self.record(run_id).unwrap_or(record);
+        let queued = latest.state == SubagentState::Queued;
         let place = match &isolated {
             Some(isolated) => match &isolated.branch {
                 Some(branch) => format!(
@@ -783,8 +782,11 @@ impl Board {
         } else {
             format!("Started {handle} (agent `{agent}`){place}.")
         };
+        let described = describe(config, &latest)
+            .map(|text| format!("\n{text}"))
+            .unwrap_or_default();
         Ok(format!(
-            "{start} It works while you go on, and its report reaches you when it finishes (wait_for_agents waits for it). message_agent with to \"{handle}\" sends it a message."
+            "{start} It works while you go on, and its report reaches you when it finishes (wait_for_agents waits for it). message_agent with to \"{handle}\" sends it a message.{described}"
         ))
     }
 
@@ -2297,6 +2299,16 @@ impl Board {
 
     /// `list_agents`'s result for run `me`.
     pub(crate) fn list(&self, ctx: &SharedContext, me: Uuid) -> String {
+        // The host describes the runs before any lock is taken.
+        let described = match &self.config {
+            Some(config) if config.hook.is_some() => self
+                .records()
+                .iter()
+                .filter(|run| run.caller_run_id == me)
+                .filter_map(|run| describe(config, run).map(|text| (run.run_id, text)))
+                .collect::<HashMap<_, _>>(),
+            _ => HashMap::new(),
+        };
         let state = self.state.lock();
         let now = Utc::now();
         let mine = state
@@ -2348,6 +2360,9 @@ impl Board {
                 ago(run.since, now),
                 cut(&run.task, 200)
             );
+            if let Some(text) = described.get(&run.run_id) {
+                line.push_str(&format!("\n  {}", text.replace('\n', "\n  ")));
+            }
             if !run.state.is_active() {
                 if let Some(report) = &run.report {
                     line.push_str(&format!("\n  report: {}", cut(report, 300)));
@@ -2651,6 +2666,13 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             withheld: false,
         });
     }
+}
+
+/// What the host's hook says about `record`'s run, if anything.
+fn describe(config: &SubagentsConfig, record: &SubagentRecord) -> Option<String> {
+    let text = config.hook.as_ref()?.describe(record)?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The record a mailbox item to `to` from `from` concerns: the sending
