@@ -1197,7 +1197,10 @@ impl Board {
                     .runs
                     .iter()
                     .find(|lead| lead.run_id == run.caller_run_id)
-                    .is_none_or(|lead| lead.state.is_active() || relaunched.contains(&lead.run_id));
+                    .is_none_or(|lead| {
+                        // A queued lead is among the runs to relaunch too.
+                        lead.state == SubagentState::Running || relaunched.contains(&lead.run_id)
+                    });
                 if lead_goes_on && !relaunched.contains(&run.run_id) {
                     relaunched.push(run.run_id);
                 }
@@ -3003,9 +3006,9 @@ mod record_tests {
     use super::*;
     use crate::test_support::{ResponsesServer, Workspace, agent_config};
 
-    /// A workflow with runs r1 and r2 that never get an answer from the
-    /// model, so they stay running, and that lead each other.
-    async fn runs_that_lead_each_other() -> (crate::Workflow, ResponsesServer, Workspace) {
+    /// A workflow with `count` runs, r1 to r<count>, that never get an
+    /// answer from the model, so they stay running. The host leads them all.
+    async fn started_runs(count: usize) -> (crate::Workflow, ResponsesServer, Workspace) {
         let server = ResponsesServer::start(|_, _| None).await;
         let workspace = Workspace::new();
         let workflow = crate::Workflow::builder()
@@ -3025,7 +3028,8 @@ mod record_tests {
             .unwrap();
         let ctx = workflow.context();
         let lead = Uuid::new_v4();
-        for task in ["First.", "Second."] {
+        for number in 1..=count {
+            let task = format!("Task {number}.");
             ctx.subagents
                 .start(
                     ctx,
@@ -3034,7 +3038,7 @@ mod record_tests {
                     0,
                     &workspace.0,
                     "worker",
-                    task,
+                    &task,
                     None,
                     false,
                     None,
@@ -3043,8 +3047,14 @@ mod record_tests {
                 .await
                 .unwrap();
         }
+        (workflow, server, workspace)
+    }
+
+    /// r1 and r2 that lead each other.
+    async fn runs_that_lead_each_other() -> (crate::Workflow, ResponsesServer, Workspace) {
+        let (workflow, server, workspace) = started_runs(2).await;
         {
-            let mut state = ctx.subagents.state.lock();
+            let mut state = workflow.context().subagents.state.lock();
             let (first, second) = (state.runs[0].run_id, state.runs[1].run_id);
             state.runs[0].caller_run_id = second;
             state.runs[1].caller_run_id = first;
@@ -3097,6 +3107,43 @@ mod record_tests {
                 .subagents()
                 .iter()
                 .all(|run| run.state == SubagentState::Stopped)
+        );
+    }
+
+    /// A lead that is queued when the workflow resumes is relaunched only if
+    /// its own lead is, so the subagents under it are not judged by it
+    /// running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_lead_that_is_not_relaunched_leaves_its_subagents_orphans() {
+        let (workflow, _server, _workspace) = started_runs(3).await;
+        let ctx = workflow.context().clone();
+        {
+            let mut state = ctx.subagents.state.lock();
+            let second = state.runs[1].run_id;
+            // r1 failed, r2 (its subagent) is queued and r3 (r2's) was running.
+            state.runs[1].caller_run_id = state.runs[0].run_id;
+            state.runs[2].caller_run_id = second;
+            state.runs[0].state = SubagentState::Failed;
+            state.runs[1].state = SubagentState::Queued;
+            state.runs[1].pending = Some(PendingLaunch::Resume {
+                message: String::new(),
+            });
+            state.runs[2].state = SubagentState::Interrupted;
+        }
+        let resumed = ctx.subagents.resume_all(&ctx);
+        assert!(resumed.is_empty(), "{resumed:?}");
+        let states = workflow
+            .subagents()
+            .iter()
+            .map(|run| run.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                SubagentState::Failed,
+                SubagentState::Stopped,
+                SubagentState::Stopped
+            ]
         );
     }
 }
