@@ -252,6 +252,26 @@ async fn a_one_time_note_s_images_reach_a_running_agent_after_its_text() {
     );
 }
 
+/// Copies the run directory `from` to `to`, leaving out the image files
+/// named in `lost`. A file that goes while it is copied (a temporary file
+/// the first workflow renames) is left out too.
+fn copy_run_dir_without(from: &std::path::Path, to: &std::path::Path, lost: &[&str]) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let (path, name) = (entry.path(), entry.file_name());
+        if lost.contains(&name.to_string_lossy().as_ref()) {
+            continue;
+        }
+        if path.is_dir() {
+            copy_run_dir_without(&path, &to.join(&name), lost);
+        } else if let Err(error) = std::fs::copy(&path, to.join(&name))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            panic!("could not copy {}: {error}", path.display());
+        }
+    }
+}
+
 /// A note's image that can't be read when the note is given (its file is
 /// gone from the run directory) isn't announced. The update says the image
 /// can't be shown, and the images that still can come as usual.
@@ -259,11 +279,10 @@ async fn a_one_time_note_s_images_reach_a_running_agent_after_its_text() {
 async fn a_note_says_so_when_an_image_of_it_is_lost() {
     let workspace = Workspace::new();
     let server = done_server().await;
-    let persisted = || {
-        builder(&server, &workspace, &["worker"])
-            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    let persisted = |run_dir: std::path::PathBuf| {
+        builder(&server, &workspace, &["worker"]).persistence(PersistenceConfig::new(run_dir))
     };
-    let first = persisted().build().unwrap();
+    let first = persisted(run_dir(&workspace)).build().unwrap();
     let worker = first.run_agent("worker", "Do it.").await.unwrap();
     let image = |label: u8| {
         let bytes = [
@@ -292,16 +311,20 @@ async fn a_note_says_so_when_an_image_of_it_is_lost() {
         .unwrap();
     first.checkpoint().await.unwrap();
     drop(first);
-    // Two of the four images are gone when the workflow resumes.
-    for lost in [&two.images[1], &alone.images[0]] {
-        let NoteImage::Stored { name, .. } = lost else {
-            panic!("{lost:?}")
-        };
-        std::fs::remove_file(run_dir(&workspace).join("images").join(name)).unwrap();
-    }
+    // The run directory resumes from a copy without two of the four images.
+    // A copy in another place, so that nothing the first workflow still
+    // holds in memory (its tasks may outlive it) can give the images back.
+    let names = [&two.images[1], &alone.images[0]].map(|lost| match lost {
+        NoteImage::Stored { name, .. } => name.as_str(),
+        other => panic!("{other:?}"),
+    });
+    let copy = workspace.0.join("run-without-images");
+    copy_run_dir_without(&run_dir(&workspace), &copy, &names);
+    assert_eq!(std::fs::read_dir(copy.join("images")).unwrap().count(), 2);
 
-    let resumed = persisted()
-        .resume_from(latest_checkpoint(&workspace))
+    let checkpoint = std::fs::read_to_string(copy.join("latest-checkpoint")).unwrap();
+    let resumed = persisted(copy.clone())
+        .resume_from(copy.join(checkpoint.trim()))
         .build()
         .unwrap();
     let worker = resumed.agent_result(worker.agent_run_id).unwrap();
