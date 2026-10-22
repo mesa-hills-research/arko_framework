@@ -371,6 +371,37 @@ async fn a_run_that_ends_in_a_drain_stops_its_subagents_in_a_drain() {
     }
 }
 
+/// The lead of a subagent that stopped because its own lead did is told so,
+/// in its mailbox, and not in the words of a stop by the host.
+#[tokio::test]
+async fn the_news_of_a_subagent_stopped_for_its_lead_says_so() {
+    let tree = Tree::grow_waiting().await;
+    let request = StopRequest::operator("replacing it").wrap_up(Duration::from_secs(30));
+    assert!(
+        tree.workflow
+            .stop_run(tree.run_id("r1"), request, RunStopIntent::Relaunch)
+    );
+    for handle in ["r1", "r2", "r3"] {
+        tree.until_in(handle, SubagentState::Stopped).await;
+    }
+    // Their leads ended, so the news waits in their mailboxes.
+    let headings = |handle: &str| {
+        tree.workflow
+            .pending_news(tree.run_id(handle))
+            .into_iter()
+            .map(|item| item.heading)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        headings("r1"),
+        ["r2 (agent `worker`) stopped before it finished: its lead r1 ended."]
+    );
+    assert_eq!(
+        headings("r2"),
+        ["r3 (agent `worker`) stopped before it finished: its lead r2 was stopped."]
+    );
+}
+
 /// A subagent waiting for a place is stopped before it starts.
 #[tokio::test]
 async fn a_stop_reaches_the_subagents_still_waiting_for_a_place() {
@@ -1495,4 +1526,543 @@ async fn a_describe_that_panics_leaves_the_start_and_the_list_alone() {
     let listed = result_of(&requests[2], "lead", 1);
     assert!(listed.starts_with("r1 · agent `worker`"), "{listed}");
     until(|| workflow.active_subagents().is_empty()).await;
+}
+
+/// A workflow stop with a wrap-up, when a run ends first and its subagent is
+/// stuck in a tool that ignores stops, leaves the subagent's stop the
+/// workflow's own, not the one a run that ends makes for its subagents.
+#[tokio::test]
+async fn a_workflow_wrap_up_stays_the_stop_of_a_subagent_that_outlasts_its_lead() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("Level two."), wait()]),
+        ("r2", vec![("probe", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let probe = crate::test_support::ProbeTool::new("probe", true);
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", probe.clone())
+        .cancel_grace_period(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(probe.started.notified()).await;
+    assert!(workflow.stop(StopRequest::operator("closing").wrap_up(Duration::from_secs(300))));
+    // r1 finishes its wrap-up, and r2 can't.
+    until(|| workflow.subagents()[0].state == SubagentState::Stopped).await;
+    assert_eq!(workflow.subagents()[1].state, SubagentState::Running);
+    // The wrap-up ends now, and r2 is aborted.
+    assert!(workflow.stop(StopRequest::operator("closing for good")));
+    until(|| workflow.active_subagents().is_empty()).await;
+    let stop = workflow
+        .agent_result(workflow.subagents()[1].run_id)
+        .unwrap()
+        .stopped_by
+        .unwrap();
+    assert_eq!((stop.reason.as_str(), stop.intent), ("closing", None));
+    assert_eq!(workflow.subagents()[1].error.as_deref(), Some("closing"));
+}
+
+/// A worker whose text reply ends its task isn't offered `complete_task`, so
+/// it can end with subagents that still work. Its subagents are stopped, and
+/// the news of that doesn't start its finished run again.
+#[tokio::test]
+async fn the_news_of_subagents_stopped_for_a_finished_lead_does_not_restart_it() {
+    // r2 waits for a place (one run at a time), or runs and waits at a gate.
+    for max_running in [1, 2] {
+        let server = ResponsesServer::start(move |_, body| {
+            let role = role(body);
+            let id = format!("{role}_{}", turn(body));
+            if body.contains("Your run is being stopped") {
+                return Some(crate::test_support::text_turn(
+                    &id,
+                    &format!("{role} saved"),
+                ));
+            }
+            Some(match (role.as_str(), turn(body)) {
+                ("lead", 0) => {
+                    let (tool, arguments) = start("Level one.");
+                    tool_call_turn(&id, tool, arguments)
+                }
+                ("r1", 0) => {
+                    let (tool, arguments) = start("Level two.");
+                    tool_call_turn(&id, tool, arguments)
+                }
+                ("r1", _) => crate::test_support::text_turn(&id, "r1 is finished"),
+                ("r2", _) => tool_call_turn(&id, "gate", json!({})),
+                _ => tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" })),
+            })
+        })
+        .await;
+        let workspace = Workspace::new();
+        let gate = Arc::new(Gate::default());
+        let mut worker = agent_config("Worker");
+        worker.tool_config.text_reply_ends_task = true;
+        let workflow = Workflow::builder()
+            .name("nesting-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("lead", agent_config("Lead"))
+            .agent("worker", worker)
+            .workflow_services(
+                WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_caller("worker")
+                    .allow_target("worker"),
+            )
+            .subagents(
+                SubagentsConfig::default()
+                    .max_depth(2)
+                    .max_running(max_running),
+            )
+            .agent_tool("worker", gate.clone())
+            .build()
+            .unwrap();
+        let mut events = workflow.subscribe_subagents();
+        within(workflow.run_agent("lead", "Delegate."))
+            .await
+            .unwrap();
+        // r1 ends at once with r2 queued (one place), or after r2 started.
+        until(|| {
+            workflow
+                .subagents()
+                .get(1)
+                .is_some_and(|run| run.state == SubagentState::Stopped)
+        })
+        .await;
+        let records = workflow.subagents();
+        assert_eq!(records[0].state, SubagentState::Finished, "{max_running}");
+        assert_eq!(records[1].error.as_deref(), Some("its lead r1 ended"));
+        // The stop ran to its end already (the runtime of the test is one
+        // thread), and r1 wasn't relaunched to read it.
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event.kind, SubagentEventKind::Resumed),
+                "{} resumed",
+                event.handle
+            );
+        }
+        assert_eq!(records[0].state, SubagentState::Finished);
+    }
+}
+
+/// A subagent that woke from its wait holds a place again. With one place, a
+/// start by its lead is queued behind it.
+#[tokio::test]
+async fn a_subagent_that_woke_from_its_wait_holds_a_place_again() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Parent.")]),
+        ("r1", vec![start("Child."), wait(), ("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(2).max_running(1),
+    )
+    .agent_tool("worker", gate.clone())
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    // r1 woke with its child's report and works at the gate.
+    within(gate.started.notified()).await;
+    let ctx = workflow.context();
+    let started = ctx
+        .subagents
+        .start(
+            ctx,
+            lead.agent_run_id,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Another.",
+            None,
+            false,
+            None,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.starts_with("Queued r3 (agent `worker`)"),
+        "{started}"
+    );
+    gate.open.notify_one();
+}
+
+/// Starts a `worker` for run `caller` at `depth` from the board, as
+/// `start_agent` does, and returns its result.
+async fn begin(
+    ctx: &Arc<crate::context::SharedContext>,
+    caller: Uuid,
+    depth: u32,
+    directory: &std::path::Path,
+    task: &str,
+) -> String {
+    ctx.subagents
+        .start(
+            ctx,
+            caller,
+            "lead",
+            depth,
+            directory,
+            "worker",
+            task,
+            None,
+            false,
+            None,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A wait that is cancelled gives its place back to nobody: the run holds
+/// its place again.
+#[tokio::test]
+async fn a_cancelled_wait_leaves_no_waiter_behind() {
+    // r1 and r2 never get an answer, so they stay running. r3 finishes.
+    let server = ResponsesServer::start(|_, body| match role(body).as_str() {
+        "r1" | "r2" => None,
+        other => Some(tool_call_turn(
+            &format!("{other}_0"),
+            "complete_task",
+            json!({ "summary": format!("{other} done") }),
+        )),
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_depth(2).max_running(2),
+    )
+    .build()
+    .unwrap();
+    let ctx = workflow.context();
+    let lead = Uuid::new_v4();
+    begin(ctx, lead, 0, &workspace.0, "First.").await;
+    let r1 = workflow.subagents()[0].run_id;
+    begin(ctx, r1, 1, &workspace.0, "Child.").await;
+
+    // r1 waits for its child, and holds no place meanwhile.
+    let tool = WaitForAgentsTool::new(ctx.clone(), "worker".into(), Arc::new(server.client()));
+    let waiting = tokio::spawn({
+        let directory = workspace.0.clone();
+        async move {
+            let task_context = TaskContext::new(r1, "worker", "", &directory);
+            tool.execute(&task_context, HashMap::new()).await
+        }
+    });
+    until(|| {
+        ctx.subagents
+            .list(ctx, lead)
+            .contains("running (waiting for r2)")
+    })
+    .await;
+    let started = begin(ctx, lead, 0, &workspace.0, "Third.").await;
+    assert!(started.starts_with("Started r3"), "{started}");
+    until(|| workflow.subagents()[2].state == SubagentState::Finished).await;
+
+    // The wait is cancelled, and r1 holds its place again, next to r2.
+    waiting.abort();
+    let _ = waiting.await;
+    let started = begin(ctx, lead, 0, &workspace.0, "Fourth.").await;
+    assert!(started.starts_with("Queued r4"), "{started}");
+}
+
+/// Stopping the run the host drives, as when its user interrupts it, leaves
+/// the subagents it started working.
+#[tokio::test]
+async fn stopping_the_run_the_host_drives_leaves_its_subagents_working() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one."), wait()]),
+        ("r1", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = Arc::new(
+        nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+            .agent_tool("worker", gate.clone())
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Delegate.").await }
+    });
+    within(gate.started.notified()).await;
+    let lead = workflow.subagents()[0].caller_run_id;
+    assert!(workflow.stop_run(lead, StopRequest::operator("esc"), RunStopIntent::Relaunch));
+    let _ = within(run).await.unwrap();
+    // It is still working: it finishes when its gate opens.
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Running);
+    gate.open.notify_one();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    assert_eq!(workflow.subagents()[0].report.as_deref(), Some("r1 done"));
+}
+
+/// A server whose model reply to the second request of `held` waits until
+/// the test lets it go, so that the test can stop a run while the run's reply
+/// is on its way. The reply is a `complete_task` call.
+async fn serve_holding_a_report(
+    held: &'static str,
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+) -> ResponsesServer {
+    use crate::test_support::Reply;
+    ResponsesServer::start_async(move |_, body| {
+        let (role, turn) = (role(&body), turn(&body));
+        let id = format!("{role}_{turn}");
+        let notice =
+            body.contains("Your run is being stopped") || body.contains("The workflow is stopping");
+        let (reached, release) = (reached.clone(), release.clone());
+        Box::pin(async move {
+            let stream = match (role.as_str(), turn) {
+                ("lead", 0) => {
+                    let (tool, arguments) = start("Level one.");
+                    tool_call_turn(&id, tool, arguments)
+                }
+                (role, 0) if role == held => {
+                    let (tool, arguments) = start("Level two.");
+                    tool_call_turn(&id, tool, arguments)
+                }
+                (role, 1) if role == held && !notice => {
+                    reached.notify_one();
+                    release.notified().await;
+                    tool_call_turn(&id, "complete_task", json!({ "summary": "Report." }))
+                }
+                ("r2", _) if !notice => tool_call_turn(&id, "gate", json!({})),
+                _ => tool_call_turn(
+                    &id,
+                    "complete_task",
+                    json!({ "summary": "saved its progress" }),
+                ),
+            };
+            Some(Reply::Stream(stream))
+        })
+    })
+    .await
+}
+
+/// A run that is stopped while its report is on its way is let through even
+/// before it has been told, whatever its subagents do. The stop is the run's
+/// own, or the workflow's wrap-up.
+#[tokio::test]
+async fn a_report_on_its_way_is_let_through_when_the_run_or_the_workflow_is_stopping() {
+    for workflow_stop in [false, true] {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server = serve_holding_a_report("r1", reached.clone(), release.clone()).await;
+        let workspace = Workspace::new();
+        let gate = Arc::new(Gate::default());
+        let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+            .agent_tool("worker", gate.clone())
+            .build()
+            .unwrap();
+        within(workflow.run_agent("lead", "Delegate."))
+            .await
+            .unwrap();
+        within(gate.started.notified()).await;
+        within(reached.notified()).await;
+        let request = StopRequest::operator("enough").wrap_up(Duration::from_secs(300));
+        if workflow_stop {
+            assert!(workflow.stop(request));
+        } else {
+            assert!(workflow.stop_subagent(workflow.subagents()[0].run_id, request));
+        }
+        // r1's `complete_task` arrives, with r2 still working.
+        release.notify_one();
+        until(|| workflow.subagents()[0].state == SubagentState::Stopped).await;
+        // It was not refused: no request followed the report.
+        let requests = bodies_of(&server, "r1");
+        assert_eq!(requests.len(), 2, "workflow stop {workflow_stop}");
+        assert_eq!(
+            workflow.subagents()[0].report.as_deref(),
+            Some("Report."),
+            "workflow stop {workflow_stop}"
+        );
+    }
+}
+
+/// Past twenty, the subagents a handover restates are counted, not listed.
+#[tokio::test]
+async fn a_handover_lists_twenty_subagents_and_counts_the_rest() {
+    let server = ResponsesServer::start(|_, _| None).await;
+    let workspace = Workspace::new();
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().unlimited())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = Uuid::new_v4();
+    for number in 1..=25 {
+        ctx.subagents
+            .start(
+                ctx,
+                lead,
+                "lead",
+                0,
+                &workspace.0,
+                "worker",
+                &format!("Task number {number}."),
+                None,
+                false,
+                None,
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let section = ctx.subagents.workers_section(lead).unwrap();
+    let listed = section
+        .lines()
+        .filter(|line| line.starts_with("- r"))
+        .count();
+    assert_eq!(listed, 20, "{section}");
+    assert!(
+        section.contains("- r20 (agent `worker`, running for "),
+        "{section}"
+    );
+    assert!(!section.contains("- r21 "), "{section}");
+    assert!(
+        section.ends_with("- (5 more, list_agents shows all of them.)"),
+        "{section}"
+    );
+}
+
+/// `stop_agent` names every run that stops with the one it stops.
+#[tokio::test]
+async fn stop_agent_names_all_the_runs_that_stop_with_a_subagent() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("First."), start("Second."), wait()]),
+        ("r2", vec![("gate", json!({}))]),
+        ("r3", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| gate.calls.load(std::sync::atomic::Ordering::SeqCst) == 2).await;
+    let ctx = workflow.context();
+    let stopping = ctx
+        .subagents
+        .stop(ctx, lead.agent_run_id, "r1", "", false)
+        .await
+        .unwrap();
+    assert!(
+        stopping.contains("Its own agent runs r2 and r3 are stopping with it."),
+        "{stopping}"
+    );
+    until(|| workflow.active_subagents().is_empty()).await;
+}
+
+/// A run's subagent that waits for the run's answer is named as such when
+/// the run tries to report.
+#[tokio::test]
+async fn a_subagent_asking_a_question_is_named_when_its_lead_tries_to_report() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        (
+            "r1",
+            vec![start("Level two."), ("hold", json!({})), complete("Early.")],
+        ),
+        (
+            "r2",
+            vec![("ask_user", json!({ "questions": "May I go on?" }))],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let hold = Barrier::new("hold");
+    let mut worker = agent_config("Worker");
+    worker
+        .tool_config
+        .available_tool_names
+        .push("ask_user".to_string());
+    let workflow = Workflow::builder()
+        .name("nesting-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Lead"))
+        .agent("worker", worker)
+        .workflow_services(
+            WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_caller("worker")
+                .allow_target("worker"),
+        )
+        .subagents(SubagentsConfig::default().max_depth(2))
+        .agent_tool("worker", hold.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents().get(1).is_some_and(|run| run.asking)).await;
+    hold.open.notify_one();
+    until(|| bodies_of(&server, "r1").len() >= 4).await;
+    let refused = result_of(&bodies_of(&server, "r1")[3], "r1", 2);
+    assert!(
+        refused.starts_with("Your agent run r2 (asking you a question) hasn't finished."),
+        "{refused}"
+    );
+}
+
+/// A workflow stopped without a wrap-up, with a tree of runs working, is
+/// relaunched whole by a resume.
+#[tokio::test]
+async fn a_resume_relaunches_a_whole_tree_that_a_workflow_stop_cut_off() {
+    let server = serve_tree(vec![
+        ("lead", vec![start("Level one.")]),
+        ("r1", vec![start("Level two."), wait()]),
+        ("r2", vec![start("Level three."), wait()]),
+        ("r3", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(3))
+        .agent_tool("worker", gate.clone())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    workflow.stop(StopRequest::operator("closing"));
+    until(|| workflow.active_subagents().is_empty()).await;
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let resumed = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(3))
+        .agent_tool("worker", Arc::new(Gate::default()))
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+    assert_eq!(resumed.resume_subagents(), ["r1", "r2", "r3"]);
+    assert!(
+        resumed.subagents().iter().all(|run| run.state.is_active()),
+        "{:?}",
+        resumed.subagents()
+    );
 }

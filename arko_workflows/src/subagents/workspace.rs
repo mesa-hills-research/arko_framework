@@ -539,6 +539,31 @@ mod tests {
         assert!(!workspace.0.join("worktrees/r2").exists());
     }
 
+    /// The git directory shared by the worktrees is found from a worktree's
+    /// own `.git` file, also after the worktree it was made from is gone.
+    #[tokio::test]
+    async fn a_worktree_points_to_the_git_directory_it_shares() {
+        let workspace = crate::test_support::Workspace::new();
+        let repository = repository_with_a_commit(&workspace);
+        let provider = GitWorktreeProvider::new(workspace.0.join("worktrees"));
+        let first = provider
+            .create(&request_from(repository.join("sub"), "r1"))
+            .await
+            .unwrap();
+        let second = provider
+            .create(&request_from(first.path.clone(), "r2"))
+            .await
+            .unwrap();
+        provider.remove(&first).await.unwrap();
+        let shared = common_git_dir(second.root.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(shared).unwrap(),
+            std::fs::canonicalize(repository.join(".git")).unwrap()
+        );
+        assert_eq!(common_git_dir(&repository), None);
+        provider.remove(&second).await.unwrap();
+    }
+
     /// A path with a line break in it, which git prints as it is, still
     /// gives a nested worktree its main repository.
     #[cfg(unix)]
