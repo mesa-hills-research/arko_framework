@@ -2475,3 +2475,114 @@ async fn a_review_nobody_resumes_does_not_need_its_configuration() {
         AgentRunStatus::Cancelled
     );
 }
+
+/// The images of a task the journal already holds are not copied again at
+/// each safe point: the latest snapshot is refreshed in place, to equal the
+/// task, and keeps its images. With `--nocapture` the test prints what a
+/// safe point costs against a clone of the task (about 15 MB of images).
+#[tokio::test]
+async fn the_journal_keeps_the_images_it_holds_at_each_safe_point() {
+    use crate::persistence::TaskJournal;
+    use arko_agents::TaskSnapshotSink as _;
+
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|_, _| Some(tool_call_turn("probe", "probe", json!({})))).await;
+    let probe = ProbeTool::new("probe", true);
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .global_tool(probe.clone())
+            .persistence(config(&workspace))
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Write it.").await }
+    });
+    // The run waits in its tool, so these reports are the only ones.
+    within(probe.started.notified()).await;
+    let manager = workflow.engine.persistence().unwrap().clone();
+    let journal = TaskJournal::new(manager.clone(), workflow.context.clone());
+    let id = std::fs::read_dir(run_dir(&workspace).join("agents"))
+        .unwrap()
+        .flatten()
+        .find_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<uuid::Uuid>()
+                .ok()
+        })
+        .unwrap();
+    let mut task = manager.latest_live_task(id).unwrap();
+
+    // About 15 MB of screenshots (ten, a step each).
+    let screenshot = |fill: u8| {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10".to_vec();
+        bytes.resize(1_100_000, fill);
+        arko_ai::Image::from_bytes(&bytes, "image/png")
+    };
+    for fill in 0..10 {
+        task.conversation
+            .add_user_message_with_image(&format!("Screenshot {fill}."), screenshot(fill));
+        task.conversation
+            .add_assistant_message(&format!("Seen {fill}."));
+    }
+    // A durable report returns once the snapshot is written, and the writer
+    // has let go of it.
+    journal.task_changed(&task, true).await.unwrap();
+    let held = manager.live_image_addresses(id);
+    assert_eq!(held.len(), 10);
+
+    // Safe points that add only text: the snapshot keeps its images.
+    let (mut cloning, mut reporting) = (Duration::ZERO, Duration::ZERO);
+    for step in 0..5 {
+        task.conversation
+            .add_user_message(&format!("Carry on {step}."));
+        task.conversation
+            .add_assistant_message(&format!("Carrying on {step}."));
+        let started = std::time::Instant::now();
+        let copy = task.clone();
+        cloning += started.elapsed();
+        drop(copy);
+        let started = std::time::Instant::now();
+        journal.task_changed(&task, false).await.unwrap();
+        reporting += started.elapsed();
+        // The writer has let go of it again.
+        journal.task_changed(&task, true).await.unwrap();
+        assert_eq!(manager.live_image_addresses(id), held);
+    }
+    let megabytes = task
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .map(|content| match content {
+            arko_ai::Content::Image(arko_ai::Image::Base64 { data, .. }) => data.len(),
+            _ => 0,
+        })
+        .sum::<usize>()
+        >> 20;
+    println!(
+        "a safe point of a task with {megabytes} MB of images: {:?} to clone it, {:?} to report it",
+        cloning / 5,
+        reporting / 5,
+    );
+
+    // A step that adds an image keeps the others and holds the new one.
+    task.conversation
+        .add_user_message_with_image("Screenshot 10.", screenshot(10));
+    journal.task_changed(&task, true).await.unwrap();
+    let addresses = manager.live_image_addresses(id);
+    assert_eq!(addresses.len(), 11);
+    assert_eq!(addresses[..10], held[..]);
+
+    // What the journal holds is the task, as a clone of it would be.
+    let saved = manager.latest_live_task(id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap(),
+        serde_json::to_value(&task).unwrap()
+    );
+    crash(workflow, vec![run]).await;
+}

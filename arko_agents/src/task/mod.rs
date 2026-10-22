@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod copy;
 mod cut_back;
 mod refusal;
 pub(crate) use cut_back::{RESTARTED_CALL, UNREACHED_CALL};

@@ -1248,6 +1248,27 @@ impl PersistenceManager {
         self.live.lock().runs.get(&id)?.task.as_deref().cloned()
     }
 
+    /// Where the images of running agent run `id`'s latest snapshot are in
+    /// memory, to see which a later snapshot kept.
+    #[cfg(test)]
+    pub(crate) fn live_image_addresses(&self, id: uuid::Uuid) -> Vec<usize> {
+        let live = self.live.lock();
+        let Some(task) = live.runs.get(&id).and_then(|run| run.task.as_deref()) else {
+            return Vec::new();
+        };
+        task.conversation
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|content| match content {
+                arko_ai::Content::Image(arko_ai::Image::Base64 { data, .. }) => {
+                    Some(data.as_ptr() as usize)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether the task journal saves any running agent run now.
     pub(crate) fn has_live_runs(&self) -> bool {
         !self.live.lock().runs.is_empty()
@@ -1279,20 +1300,39 @@ impl PersistenceManager {
         task: &arko_agents::Task,
         durable: bool,
     ) -> Result<(), String> {
-        let task = Arc::new(task.clone());
-        {
+        let id = task.id;
+        // The latest snapshot becomes this one in place when no one holds it
+        // (the file isn't being written from it), keeping the messages and
+        // images it has instead of cloning them again. A task with many
+        // images costs a comparison of them, not a copy.
+        let refreshed = {
             let mut live = self.live.lock();
-            let Some(run) = live.runs.get_mut(&task.id) else {
+            match live.runs.get_mut(&id) {
                 // No longer saved: recorded, or dropped.
+                None => return Ok(()),
+                Some(run) => match run.task.as_mut().and_then(Arc::get_mut) {
+                    Some(latest) => {
+                        task.refresh_copy(latest);
+                        run.pending = true;
+                        true
+                    }
+                    None => false,
+                },
+            }
+        };
+        if !refreshed {
+            let copy = Arc::new(task.clone());
+            let mut live = self.live.lock();
+            let Some(run) = live.runs.get_mut(&id) else {
                 return Ok(());
             };
-            run.task = Some(task.clone());
+            run.task = Some(copy);
             run.pending = true;
         }
         if durable {
-            return self.save_live_run(ctx, task.id, true).await;
+            return self.save_live_run(ctx, id, true).await;
         }
-        let (manager, ctx, id) = (self.clone(), ctx.clone(), task.id);
+        let (manager, ctx) = (self.clone(), ctx.clone());
         tokio::spawn(async move {
             if let Err(error) = manager.save_live_run(&ctx, id, false).await {
                 log::warn!(

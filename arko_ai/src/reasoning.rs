@@ -448,27 +448,27 @@ impl ReasoningConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AnthropicReasoningFragment {
     Thinking { thinking: String, signature: String },
     RedactedThinking { data: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoogleReasoningFragment {
     pub summary: String,
     pub signature: String,
 }
 
 /// One OpenAI Responses `reasoning` output item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAIReasoningItem {
     pub encrypted_content: String,
     pub summaries: Option<Vec<String>>,
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ReasoningArtifactRepr")]
 pub enum ReasoningArtifact {
     /// Every reasoning item of one OpenAI response, in output order. All of

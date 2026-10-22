@@ -115,6 +115,37 @@ impl Conversation {
         }
     }
 
+    /// Makes this conversation equal to `source`, as `*self = source.clone()`
+    /// does, but keeps the leading messages of this one that `source` still
+    /// has instead of cloning them again. A copy of a conversation that
+    /// grows at its end, refreshed after each message, costs the new
+    /// messages and a comparison of the old ones, which reads their images
+    /// but doesn't copy them.
+    pub fn refresh_from(&mut self, source: &Conversation) {
+        // Every field is named, so that a new one has to be copied here too.
+        let Conversation {
+            model,
+            system_message,
+            enable_cache,
+            prompt_cache_key,
+            messages,
+            openai_turn_state,
+        } = source;
+        self.model.clone_from(model);
+        self.system_message.clone_from(system_message);
+        self.enable_cache = *enable_cache;
+        self.prompt_cache_key.clone_from(prompt_cache_key);
+        self.openai_turn_state.clone_from(openai_turn_state);
+        let kept = self
+            .messages
+            .iter()
+            .zip(messages)
+            .take_while(|(mine, theirs)| mine == theirs)
+            .count();
+        self.messages.truncate(kept);
+        self.messages.extend_from_slice(&messages[kept..]);
+    }
+
     /// Index and fingerprint of the message that started the current turn:
     /// the last user message without tool results.
     fn turn_start(&self) -> (Option<usize>, Option<String>) {
@@ -716,5 +747,53 @@ mod tests {
         let restored: Conversation = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(conversation.prompt_cache_key, restored.prompt_cache_key);
+    }
+
+    /// A refreshed copy equals a clone, whatever happened to the messages
+    /// since the copy was made, and keeps the messages that stayed.
+    #[test]
+    fn a_refreshed_copy_equals_a_clone_and_keeps_the_messages_that_stayed() {
+        let image = |fill: u8| crate::message::Image::from_bytes(&[fill; 2048], "image/png");
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message_with_image("one", image(1));
+        conversation.add_assistant_message("ok");
+        let mut copy = conversation.clone();
+        let address = |conversation: &Conversation| match &conversation.messages[0].content[1] {
+            crate::message::Content::Image(crate::message::Image::Base64 { data, .. }) => {
+                data.as_ptr()
+            }
+            other => panic!("{other:?}"),
+        };
+        let kept = address(&copy);
+        let same = |copy: &Conversation, source: &Conversation| {
+            assert_eq!(
+                serde_json::to_value(copy).unwrap(),
+                serde_json::to_value(source).unwrap()
+            );
+        };
+
+        // Messages added.
+        conversation.add_user_message_with_image("two", image(2));
+        copy.refresh_from(&conversation);
+        same(&copy, &conversation);
+        assert_eq!(address(&copy), kept);
+
+        // A setting changed, a message edited, an image replaced, and the
+        // conversation cut back and started over.
+        conversation.system_message = Some("Be brief.".into());
+        conversation.enable_cache = false;
+        conversation.messages[1] = Message::new_assistant("edited");
+        copy.refresh_from(&conversation);
+        same(&copy, &conversation);
+        conversation.messages[2].content[1] = crate::message::Content::Image(image(9));
+        copy.refresh_from(&conversation);
+        same(&copy, &conversation);
+        conversation.messages.truncate(1);
+        copy.refresh_from(&conversation);
+        same(&copy, &conversation);
+        let other = Conversation::new(Model::openai_gpt_5_6_sol());
+        copy.refresh_from(&other);
+        same(&copy, &other);
+        assert_eq!(copy.prompt_cache_key, other.prompt_cache_key);
     }
 }

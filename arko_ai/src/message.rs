@@ -20,7 +20,7 @@ impl fmt::Display for Role {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Content {
     Text(String),
     Image(Image),
@@ -215,7 +215,7 @@ impl ConfigurationUpdate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<Content>,

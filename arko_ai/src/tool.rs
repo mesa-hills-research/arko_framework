@@ -42,7 +42,7 @@ impl ToolDefinition {
 /// to calls on OpenAI (`call_id`), Anthropic (`tool_use` `id`), and Google
 /// Gemini via the Interactions API (`function_call` step `id`). This is
 /// especially important for parallel tool calls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: Option<String>,
     pub name: String,
@@ -124,7 +124,7 @@ impl ToolCall {
 ///
 /// The easiest way to construct a result is via [`ToolResult::from_tool_call`],
 /// which copies both fields from the originating call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub call_id: Option<String>,
     pub name: String,
@@ -148,7 +148,7 @@ pub struct ToolResult {
 }
 
 /// An image returned with a [`ToolResult`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultImage {
     /// Short text sent before the image, such as its file name and size.
     /// Empty sends none (inside a result) or only the tool and call names
