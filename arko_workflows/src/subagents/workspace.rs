@@ -124,17 +124,26 @@ impl GitWorktreeProvider {
 }
 
 /// The variables by which a process that git started (a hook, or
-/// `git rebase -x`) points the git commands under it at its own repository.
-/// The provider's git commands drop them, so that they work on the directory
-/// they are given.
-const GIT_ENVIRONMENT: [&str; 8] = [
-    "GIT_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
+/// `git rebase -x`) points the git commands under it at its own repository,
+/// which are the ones `git rev-parse --local-env-vars` prints, and
+/// `GIT_NAMESPACE`. The provider's git commands drop them, so that they work
+/// on the directory they are given.
+const GIT_ENVIRONMENT: [&str; 16] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
     "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
     "GIT_NAMESPACE",
 ];
 
@@ -428,9 +437,26 @@ mod tests {
     /// variables pointing at a decoy repository, and the decoy stays as it was.
     #[test]
     fn git_commands_ignore_the_git_variables_of_the_process() {
-        assert!(
-            GIT_ENVIRONMENT.contains(&"GIT_DIR") && GIT_ENVIRONMENT.contains(&"GIT_INDEX_FILE")
-        );
+        // Git's own list of the variables that belong to one repository.
+        for name in [
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_IMPLICIT_WORK_TREE",
+            "GIT_GRAFT_FILE",
+            "GIT_INDEX_FILE",
+            "GIT_NO_REPLACE_OBJECTS",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_PREFIX",
+            "GIT_SHALLOW_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(GIT_ENVIRONMENT.contains(&name), "{name}");
+        }
         let workspace = crate::test_support::Workspace::new();
         let decoy = workspace.0.join("decoy");
         std::fs::create_dir_all(&decoy).unwrap();

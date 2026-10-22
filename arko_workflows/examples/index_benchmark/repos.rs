@@ -342,15 +342,25 @@ fn checkout_repo(dir: &Path, source: &str, rev: &str) -> BenchResult<String> {
 }
 
 /// The variables by which a process that git started (a hook, or
-/// `git rebase -x`) points the git commands under it at its own repository.
-const GIT_ENVIRONMENT: [&str; 8] = [
-    "GIT_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
+/// `git rebase -x`) points the git commands under it at its own repository,
+/// which are the ones `git rev-parse --local-env-vars` prints, and
+/// `GIT_NAMESPACE`.
+const GIT_ENVIRONMENT: [&str; 16] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
     "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
     "GIT_NAMESPACE",
 ];
 
