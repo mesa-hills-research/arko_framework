@@ -1608,6 +1608,7 @@ pub struct WorkflowBuilder {
     cancel_grace_period: std::time::Duration,
     /// Agents that get a note only when it names them.
     notes_by_name_only: std::collections::BTreeSet<String>,
+    notes_reply_hints: std::collections::BTreeMap<String, String>,
     /// Agents whose saved runs keep their own configuration on resume.
     keep_saved_configs: std::collections::BTreeSet<String>,
     /// Read notes from the run directory's control folder.
@@ -1658,6 +1659,7 @@ impl WorkflowBuilder {
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
             notes_by_name_only: std::collections::BTreeSet::new(),
+            notes_reply_hints: std::collections::BTreeMap::new(),
             keep_saved_configs: std::collections::BTreeSet::new(),
             control_folder: false,
         }
@@ -2043,6 +2045,25 @@ impl WorkflowBuilder {
         self
     }
 
+    /// Ends the context updates that give `agent` (a registration name) a
+    /// note with `hint`, as a paragraph of its own after the notes, when at
+    /// least one note in the update is the operator's
+    /// ([`NoteSource::Operator`](crate::notes::NoteSource::Operator)). The
+    /// framework only places the text. A host words it, for instance to
+    /// remind the agent to answer an operator's note in its reply, where the
+    /// user reads it, and not in its thinking. An update that carries only
+    /// notes from the host or from other agents, and every initial prompt and
+    /// handover, has none. The hint is trimmed, and a blank one removes the
+    /// agent's earlier hint. By default, no agent has one.
+    pub fn notes_reply_hint(mut self, agent: impl Into<String>, hint: impl Into<String>) -> Self {
+        let (agent, hint) = (agent.into(), hint.into());
+        match hint.trim() {
+            "" => self.notes_reply_hints.remove(&agent),
+            hint => self.notes_reply_hints.insert(agent, hint.to_string()),
+        };
+        self
+    }
+
     /// Opt in to reading notes from the run directory's control
     /// folder, `<run dir>/control/`, which another process writes with
     /// [`notes::control::post_note`](crate::notes::control::post_note) (a
@@ -2360,6 +2381,15 @@ impl WorkflowBuilder {
         {
             return Err(WorkflowError::BuilderInvalid(format!(
                 "notes_by_name_only names unknown agent '{unknown}'"
+            )));
+        }
+        if let Some(unknown) = self
+            .notes_reply_hints
+            .keys()
+            .find(|agent| !agent_names.contains(*agent))
+        {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "notes_reply_hint names unknown agent '{unknown}'"
             )));
         }
         if let Some(unknown) = self
@@ -2774,7 +2804,8 @@ impl WorkflowBuilder {
                 self.notes_by_name_only,
                 control_folder,
                 persistence.clone(),
-            ),
+            )
+            .with_reply_hints(self.notes_reply_hints),
             subagents: crate::subagents::Board::new(
                 self.subagents,
                 restored_subagents,

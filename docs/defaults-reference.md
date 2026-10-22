@@ -53,7 +53,8 @@ Operator notes and graceful stops have these defaults:
 
 - Operator notes do nothing until a note is posted, and the control folder through which
   another process posts them is off (`WorkflowBuilder::control_folder`). Completion
-  verifiers' reviews get only the notes that name them. See
+  verifiers' reviews get only the notes that name them, and no agent has a reply hint
+  (`WorkflowBuilder::notes_reply_hint`). See
   [Builder defaults](reference-map.md#builder-defaults-arko_workflows).
 - A stop (`Workflow::stop`) has no wrap-up unless its `StopRequest` asks for one, and
   nothing is timed until a stop is under way. A `StopAwareCommand`'s graces (10 s, then

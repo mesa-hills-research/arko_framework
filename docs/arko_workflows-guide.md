@@ -563,6 +563,12 @@ note to it too when the note changes what counts as done. Notes are saved in che
 into the fresh conversation after a handover, and given again after Claude Code compacts a
 Claude Code agent's conversation.
 
+An agent can answer an operator's note in its thinking, where the user doesn't read it.
+`WorkflowBuilder::notes_reply_hint(agent, hint)` ends the context updates that give that
+agent a note with a line you word, such as a reminder to answer in its reply. The line comes
+once per update, after the notes, and only when one of them is the operator's. Notes from the
+host or from other agents, prompts and handovers don't carry it.
+
 To post from another process (a `note` subcommand of your binary, a bot, an
 observer), turn on the control folder with `WorkflowBuilder::control_folder()`. It needs
 persistence. Another process appends notes to `<run dir>/control/notes.jsonl` with

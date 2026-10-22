@@ -272,6 +272,9 @@ pub(crate) struct NoteBoard {
     /// Agents that receive a note only when it names them (besides the
     /// completion verifiers).
     by_name_only: BTreeSet<String>,
+    /// Per agent, the line a context update ends with when one of its notes
+    /// came from the operator (`WorkflowBuilder::notes_reply_hint`).
+    reply_hints: BTreeMap<String, String>,
     /// The control folder, when enabled.
     control: Option<PathBuf>,
     /// Held while the control folder is read.
@@ -302,6 +305,7 @@ impl NoteBoard {
         let board = Self {
             state: Mutex::new(restored.unwrap_or_default()),
             by_name_only,
+            reply_hints: BTreeMap::new(),
             control,
             reading: Mutex::new(()),
             read_error: Mutex::new(None),
@@ -328,6 +332,13 @@ impl NoteBoard {
         }
         drop(state);
         board
+    }
+
+    /// The line each agent's context updates end with when one of the notes
+    /// in them is the operator's (`WorkflowBuilder::notes_reply_hint`).
+    pub(crate) fn with_reply_hints(mut self, hints: BTreeMap<String, String>) -> Self {
+        self.reply_hints = hints;
+        self
     }
 
     /// Takes `note`'s images and keeps them: in the run's image files, or in
@@ -596,7 +607,17 @@ impl NoteBoard {
             let (images, lost) = self.context_images(&with_images, model);
             let notes = taken.iter().collect::<Vec<_>>();
             let seqs = taken.iter().map(|posted| posted.seq).collect();
-            (update(&notes, more, &lost), seqs, images)
+            // Once per update, after the notes, when one is the operator's.
+            let hint = self
+                .reply_hints
+                .get(agent)
+                .filter(|_| {
+                    taken
+                        .iter()
+                        .any(|posted| posted.note.source == NoteSource::Operator)
+                })
+                .map(String::as_str);
+            (update(&notes, more, &lost, hint), seqs, images)
         })
     }
 
@@ -1091,8 +1112,14 @@ fn section(notes: &[&PostedNote]) -> String {
 
 /// New notes for a running agent's context update, oldest first, and how
 /// many more come at its next turn boundary. `lost` counts, by note number,
-/// the images that can't be given.
-fn update(notes: &[&PostedNote], more: usize, lost: &HashMap<u64, usize>) -> String {
+/// the images that can't be given. `hint` is the host's line that ends the
+/// update, as its own paragraph.
+fn update(
+    notes: &[&PostedNote],
+    more: usize,
+    lost: &HashMap<u64, usize>,
+    hint: Option<&str>,
+) -> String {
     let intro = if notes.len() == 1 {
         "A new note on your task."
     } else {
@@ -1103,7 +1130,8 @@ fn update(notes: &[&PostedNote], more: usize, lost: &HashMap<u64, usize>) -> Str
         1 => "\n- (1 more note follows at your next turn.)".to_string(),
         more => format!("\n- ({more} more notes follow at your next turn.)"),
     };
-    format!("{intro} {NOTES_RULE}{}{more}", items(notes, lost))
+    let hint = hint.map(|hint| format!("\n\n{hint}")).unwrap_or_default();
+    format!("{intro} {NOTES_RULE}{}{more}{hint}", items(notes, lost))
 }
 
 /// Posts notes to a running workflow from any task or thread.

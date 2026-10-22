@@ -1818,3 +1818,253 @@ async fn the_leak_warning_is_kept_for_paths_that_stay_open() {
         [true, true]
     );
 }
+
+const HINT: &str = "Answer the operator in your reply, not in your thinking.";
+
+/// A workflow of `worker` and `lead` that completes at once. `worker`'s
+/// notes end with `hint` when it is given.
+fn hinted(server: &ResponsesServer, workspace: &Workspace, hint: Option<&str>) -> Workflow {
+    let mut builder = builder(server, workspace, &["worker", "lead"]);
+    if let Some(hint) = hint {
+        builder = builder.notes_reply_hint("worker", hint);
+    }
+    builder.build().unwrap()
+}
+
+/// What `agent` is told when it is continued after `notes` were posted: the
+/// user text of the request.
+async fn told_after(
+    workflow: &Workflow,
+    server: &ResponsesServer,
+    agent: &str,
+    notes: Vec<Note>,
+) -> String {
+    let result = workflow.run_agent(agent, "Do it.").await.unwrap();
+    let before = server.bodies().len();
+    for note in notes {
+        workflow.post_note(note).unwrap();
+    }
+    workflow.continue_agent(&result, "Carry on.").await.unwrap();
+    let bodies = server.bodies();
+    assert!(bodies.len() > before);
+    user_text(bodies.last().unwrap())
+}
+
+/// An update that gives an agent a note from the operator ends with the
+/// host's reply hint, once however many notes it holds. The hint comes
+/// after the notes, as a paragraph of its own.
+#[tokio::test]
+async fn an_update_with_the_operators_notes_ends_with_the_reply_hint_once() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = hinted(&server, &workspace, Some(HINT));
+    let notes = vec![
+        Note::new("Use the orbit method.").to(["worker"]),
+        Note::new("Check the units.").to(["worker"]),
+        Note::new("The build is slow.")
+            .to(["worker"])
+            .source(NoteSource::Host),
+    ];
+    let told = told_after(&workflow, &server, "worker", notes).await;
+    assert_eq!(told.matches(HINT).count(), 1, "{told}");
+    let notes_end = told.find("The build is slow.").unwrap();
+    assert!(told.find("Use the orbit method.").unwrap() < notes_end);
+    assert!(
+        told[notes_end..]
+            .trim_end()
+            .ends_with(&format!("\n\n{HINT}")),
+        "{told}"
+    );
+}
+
+/// Updates with only the host's notes or other agents' notes have none, and
+/// neither does the notes section of a new run's prompt.
+#[tokio::test]
+async fn the_reply_hint_goes_with_the_operators_notes_in_updates_only() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = hinted(&server, &workspace, Some(HINT));
+    let notes = vec![
+        Note::new("From the host.")
+            .to(["worker"])
+            .source(NoteSource::Host),
+        Note::new("From the observer.")
+            .to(["worker"])
+            .source(NoteSource::Agent("observer".into())),
+    ];
+    let told = told_after(&workflow, &server, "worker", notes).await;
+    assert!(told.contains("From the observer."), "{told}");
+    assert!(!told.contains(HINT), "{told}");
+
+    // A standing note of the operator, in a new run's prompt.
+    workflow
+        .post_note(Note::new("Spell it the British way."))
+        .unwrap();
+    workflow.run_agent("worker", "Draft it.").await.unwrap();
+    let prompt = user_text(server.bodies().last().unwrap());
+    assert!(prompt.contains("# Notes on your task"), "{prompt}");
+    assert!(prompt.contains("Spell it the British way."), "{prompt}");
+    assert!(!prompt.contains(HINT), "{prompt}");
+}
+
+/// The hint is one agent's. Another agent's update with the same notes has
+/// none, and a workflow without hints gives none.
+#[tokio::test]
+async fn the_reply_hint_is_per_agent_and_absent_by_default() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = hinted(&server, &workspace, Some(HINT));
+    let lead = told_after(&workflow, &server, "lead", vec![Note::new("For both.")]).await;
+    assert!(lead.contains("For both."), "{lead}");
+    assert!(!lead.contains(HINT), "{lead}");
+
+    let server = done_server().await;
+    let workflow = hinted(&server, &workspace, None);
+    let told = told_after(&workflow, &server, "worker", vec![Note::new("For both.")]).await;
+    assert!(told.contains("For both."), "{told}");
+    assert!(!told.contains(HINT), "{told}");
+}
+
+/// A hint names a registered agent, and a blank one takes an earlier hint
+/// away.
+#[tokio::test]
+async fn a_reply_hint_names_a_registered_agent() {
+    let server = done_server().await;
+    let workspace = Workspace::new();
+    let unknown = builder(&server, &workspace, &["worker"])
+        .notes_reply_hint("ghost", HINT)
+        .build()
+        .err()
+        .expect("an unknown agent is refused")
+        .to_string();
+    assert!(
+        unknown.contains("notes_reply_hint names unknown agent 'ghost'"),
+        "{unknown}"
+    );
+    builder(&server, &workspace, &["worker"])
+        .notes_reply_hint("ghost", HINT)
+        .notes_reply_hint("ghost", "  ")
+        .build()
+        .unwrap();
+}
+
+/// The hint is placed after the notes of an update and after its count of
+/// notes that follow, and an update holds it once.
+#[test]
+fn an_update_places_the_hint_after_its_notes_and_the_count_of_more() {
+    let notes = [posted(1, "One."), posted(2, "Two.")];
+    let refs = notes.iter().collect::<Vec<_>>();
+    let none = update(&refs, 0, &HashMap::new(), None);
+    let hinted = update(&refs, 3, &HashMap::new(), Some(HINT));
+    assert!(!none.contains(HINT));
+    assert!(
+        hinted.ends_with(&format!(
+            "(3 more notes follow at your next turn.)\n\n{HINT}"
+        )),
+        "{hinted}"
+    );
+    assert_eq!(hinted.matches(HINT).count(), 1);
+}
+
+/// A note posted while a Claude Code agent works reaches it in the context
+/// of the next tool result, with the reply hint after the notes (against
+/// the scripted fake CLI of arko_agents' tests).
+#[tokio::test]
+async fn a_claude_code_agent_gets_the_reply_hint_mid_turn() {
+    let workspace = Workspace::new();
+    let fake = std::env::temp_dir().join(format!("arko-notes-fake-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fake).unwrap();
+    std::fs::write(
+        fake.join("script.json"),
+        json!([[
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"sleep": 1.5},
+            {"tool": "Grep", "input": {"pattern": "b"}},
+            {"tool": "mcp__arko__complete_task", "input": {"summary": "searched"}},
+        ]])
+        .to_string(),
+    )
+    .unwrap();
+    let python = std::env::var("ARKO_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../arko_agents/tests/fixtures/fake_claude_agent.py");
+    let path = |name: &str| fake.join(name).display().to_string();
+    let mut writer = agent_config("Friendly writer");
+    writer.llm_config.model =
+        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
+    writer.tool_config.available_tool_names.push("Grep".into());
+    writer.claude_code = Some(arko_agents::ClaudeCodeSettings {
+        cli_path: Some(python.into()),
+        cli_args: vec![script.display().to_string()],
+        env: std::collections::BTreeMap::from([
+            ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
+            ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
+            ("FAKE_CLAUDE_STATE".to_string(), path("state")),
+        ]),
+        ..Default::default()
+    });
+    let workflow = Arc::new(
+        Workflow::builder()
+            .name("notes-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("writer", writer)
+            .notes_reply_hint("writer", HINT)
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("writer", "Search it.").await }
+    });
+    // Posted while the first search is done and the agent waits for the next.
+    let logged = || {
+        std::fs::read_to_string(fake.join("log.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while !logged().iter().any(|entry| entry["event"] == "post") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first search ran");
+    workflow
+        .post_note(Note::new("Skip the vendor folder."))
+        .unwrap();
+    workflow
+        .post_note(Note::new("Prefer small files."))
+        .unwrap();
+
+    let result = run.await.unwrap().unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let contexts: Vec<String> = logged()
+        .iter()
+        .filter(|entry| entry["event"] == "post")
+        .filter_map(|entry| {
+            entry["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    let [context] = contexts.as_slice() else {
+        panic!("{contexts:#?}");
+    };
+    assert!(context.contains("Skip the vendor folder."), "{context}");
+    assert!(context.contains("Prefer small files."), "{context}");
+    assert_eq!(context.matches(HINT).count(), 1, "{context}");
+    assert!(
+        context.trim_end().ends_with(&format!("\n\n{HINT}")),
+        "{context}"
+    );
+    let _ = std::fs::remove_dir_all(&fake);
+}
