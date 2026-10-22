@@ -908,13 +908,20 @@ When a checkpoint contains a task that can be resumed (including an interrupted 
 `build` rejects a changed agent configuration, and the error names the changed fields
 (`agent 'coder' configuration changed since its checkpoint (instructions,
 tool_config.available_tool_names changed); ...`). Workflow-injected tools and prepared prompt state are excluded from this
-comparison, as are saved model registry details and `SkillsConfig::embedded`. A run that
-goes on after a resume loads the embedded skills its agent is registered with now. It keeps
-the system prompt it started with, so an auto-loaded skill in the prompt and the list of
-on-demand skills stay as they were, and `load_skill` returns the current text. Provider, model ID, generation settings,
-and other user configuration must remain compatible. `keep_saved_configs(agents)` lets
+comparison, as are saved model registry details and `SkillsConfig::embedded`. Provider,
+model ID, generation settings, and other user configuration must remain compatible. `keep_saved_configs(agents)` lets
 those agents change for their new runs while each saved run keeps the configuration saved
 in its task, as long as the tools it offers are still registered.
+
+A saved task doesn't hold the agent's embedded skills (`SkillsConfig::embedded`). A run that
+is continued, resumed or recovered, or kept warm with `refresh_prompt_cache`, takes the
+embedded skills its agent is registered with now. A subagent hook's changes to the
+configuration aren't seen there. A run the host reconfigured gets them when its own skills
+configuration is set, and has none when it isn't. A subagent has the skills of its own
+agent's configuration, not its lead's. A run keeps the system prompt it started with, so an
+auto-loaded skill in the prompt and the list of on-demand skills stay as they were, and
+`load_skill` returns the current text.
+
 The event log records every event, including each streamed text and reasoning
 fragment. `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least

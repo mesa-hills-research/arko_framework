@@ -93,8 +93,10 @@ pub struct SkillsConfig {
     ///
     /// They are program code, so a saved configuration (and so a saved task)
     /// doesn't hold them, though one that has them still loads. A host that
-    /// loads a saved task gives them again. arko_workflows does, from the
-    /// configuration each agent is registered with.
+    /// loads a saved task gives them again. arko_workflows does for a run that
+    /// goes on, from the configuration its agent is registered with (a run the
+    /// host reconfigured gets them when its own skills configuration is set).
+    /// A subagent has the skills of its own agent, not its lead's.
     #[serde(default, skip_serializing)]
     pub embedded: Vec<EmbeddedSkill>,
 

@@ -494,9 +494,9 @@ impl Workflow {
     /// its lead goes, under `heading`. A running subagent reads it at its
     /// next step, and one that ended goes on with it. Its lead gets a copy
     /// under `copy_heading` with its next mail, which doesn't start a turn
-    /// of it, unless `copy_heading` is empty, which sends no copy. Returns
-    /// what became of the message, as `message_agent`'s result says it, or
-    /// why it couldn't be sent.
+    /// of it, unless `copy_heading` is empty, which sends no copy (before 0.1.4
+    /// an empty heading still sent one). Returns what became of the message,
+    /// as `message_agent`'s result says it, or why it couldn't be sent.
     pub fn message_subagent(
         &self,
         to: &str,
@@ -3164,6 +3164,8 @@ fn normalized_resume_agent_config(
         .get_mut("skills_config")
         .and_then(|value| value.as_object_mut())
     {
+        // Never written now, so this only guards a configuration saved
+        // with the text by a version that wrote it.
         skills.remove("embedded");
         if *skills == default_skills_config() {
             object.remove("skills_config");

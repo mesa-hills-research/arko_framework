@@ -1245,7 +1245,7 @@ See [Running tasks](arko_agents-guide.md#running-tasks).
 |---|---|---|
 | `SkillsConfig::workspace_source` | `None` | A `SkillSource { path, include, exclude }` whose `path` is joined to the `workspace_root` given to `SkillManager::load`. |
 | `SkillsConfig::global_sources` | Empty | Paths are used as written. `~` is not expanded. Identical skills load once. Another skill with a name already taken gets a numeric suffix. |
-| `SkillsConfig::embedded` | Empty | `EmbeddedSkill` values, loaded after the folder sources. A folder skill with the same name replaces an embedded one. They have no resources. A saved configuration leaves them out. A workflow's continued, resumed and recovered runs take those of the agent's registered configuration, and `resume_from` doesn't compare them. |
+| `SkillsConfig::embedded` | Empty | `EmbeddedSkill` values, loaded after the folder sources. A folder skill with the same name replaces an embedded one. They have no resources. A saved configuration leaves them out. A workflow's continued, resumed, recovered and kept-warm runs take those of the agent's registered configuration (a reconfigured run only when its own skills configuration is set), and `resume_from` doesn't compare them. A subagent has its own agent's. |
 | `SkillsConfig::on_invalid_skill` | `Warn`. An invalid skill (an embedded one too), or a missing directory, is skipped | `Error` makes `SkillManager::load` fail. |
 | `SkillsConfig::load_skill_interception` | `None`, `load_skill` results are never intercepted | `Some(policy)` lets the runtime's interceptor replace them, under `policy`. |
 | `McpServerConfig::args`, `McpServerConfig::env` | Empty | The server inherits the host's environment, plus `env`. |
