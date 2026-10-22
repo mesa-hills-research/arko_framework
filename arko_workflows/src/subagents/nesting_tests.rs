@@ -336,6 +336,40 @@ async fn a_run_that_ends_stops_its_subagents() {
     assert_eq!(stops["r3"], stopped("its lead r2 was stopped", false));
 }
 
+/// The kind of the stop that ends a run is the kind of the stop of the
+/// subagents it takes with it, and of theirs in turn.
+#[tokio::test]
+async fn a_run_that_ends_in_a_drain_stops_its_subagents_in_a_drain() {
+    let tree = Tree::grow_waiting().await;
+    let request = StopRequest::drain("moving").wrap_up(Duration::from_secs(30));
+    assert!(
+        tree.workflow
+            .stop_run(tree.run_id("r1"), request, RunStopIntent::Relaunch)
+    );
+    for handle in ["r1", "r2", "r3"] {
+        tree.until_in(handle, SubagentState::Stopped).await;
+    }
+    let stop_of = |handle: &str| {
+        tree.workflow
+            .agent_result(tree.run_id(handle))
+            .unwrap()
+            .stopped_by
+            .unwrap()
+    };
+    for (handle, reason) in [
+        ("r1", "moving"),
+        ("r2", "its lead r1 ended"),
+        ("r3", "its lead r2 was stopped"),
+    ] {
+        let stop = stop_of(handle);
+        assert_eq!(
+            (stop.kind, stop.reason.as_str()),
+            (crate::StopKind::Drain, reason),
+            "{handle}"
+        );
+    }
+}
+
 /// A subagent waiting for a place is stopped before it starts.
 #[tokio::test]
 async fn a_stop_reaches_the_subagents_still_waiting_for_a_place() {

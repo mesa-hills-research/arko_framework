@@ -939,6 +939,13 @@ impl Board {
             Err(_) => recorded_result(ctx, run_id),
         };
         let workflow_stopped = ctx.run_control.error().is_some();
+        // The kind of the stop that ended it, which its subagents' stop
+        // keeps. Read before the record is settled and forgets its stop.
+        let stop_kind = result
+            .as_ref()
+            .and_then(|result| result.stopped_by.as_ref())
+            .or(record.stop_requested.as_ref())
+            .map_or(StopKind::Operator, |stop| stop.kind);
         let handle = &record.handle;
         let agent = &record.agent;
         let (state, kind, heading, body, event) = match &outcome {
@@ -1101,14 +1108,10 @@ impl Board {
         // Its subagents would report to a run that is gone, and spend on
         // work no one reads. When the workflow stops, all runs stop anyway.
         if !workflow_stopped && !ctx.run_control.is_wrapping_up() {
-            let kind = record
-                .stop_requested
-                .as_ref()
-                .map_or(StopKind::Operator, |stop| stop.kind);
             self.stop_workers_of(
                 ctx,
                 &record,
-                &StopRequest::new(kind, "").wrap_up(STOP_WRAP_UP),
+                &StopRequest::new(stop_kind, "").wrap_up(STOP_WRAP_UP),
                 &format!("its lead {} ended", record.handle),
             );
         }
