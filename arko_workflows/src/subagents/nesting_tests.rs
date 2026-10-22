@@ -12,6 +12,7 @@ use super::tests::{
     Gate, Step, bodies_of, complete, result_of, role, start, turn, until, wait, within,
 };
 use super::*;
+use crate::persistence::PersistenceConfig;
 use crate::services::WorkflowServicesConfig;
 use crate::test_support::{ResponsesServer, Workspace, agent_config, tool_call_turn};
 use crate::{RunStopIntent, StopRequest, Workflow, WorkflowBuilder};
@@ -718,4 +719,90 @@ async fn a_waiting_subagent_that_wakes_makes_no_start_twice() {
     }
     // The two children waited for a place, one time each.
     assert!(once("r2", "queued") && once("r3", "queued"), "{counts:?}");
+}
+
+/// After a resume, a subagent whose lead won't run again isn't relaunched,
+/// since it would report to a run that is gone. It is stopped, and its lead
+/// is told. One whose lead is relaunched too goes on.
+#[tokio::test]
+async fn a_resume_stops_a_subagent_whose_lead_does_not_run_again() {
+    for lead_state in ["failed", "interrupted"] {
+        let server = serve_tree(vec![
+            ("lead", vec![start("Level one.")]),
+            ("r1", vec![start("Level two."), wait()]),
+            ("r2", vec![("gate", json!({}))]),
+        ])
+        .await;
+        let workspace = Workspace::new();
+        let run_dir = workspace.0.join(".run");
+        let gate = Arc::new(Gate::default());
+        let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+            .agent_tool("worker", gate.clone())
+            .persistence(PersistenceConfig::new(&run_dir))
+            .build()
+            .unwrap();
+        within(workflow.run_agent("lead", "Delegate."))
+            .await
+            .unwrap();
+        within(gate.started.notified()).await;
+        workflow.stop(StopRequest::operator("closing"));
+        until(|| workflow.active_subagents().is_empty()).await;
+        workflow.checkpoint().await.unwrap();
+        drop(workflow);
+
+        // As if r1 had failed (or the process had ended with r2 running).
+        let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+        let mut saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(run_dir.join(latest.trim())).unwrap())
+                .unwrap();
+        saved["subagents"]["runs"][0]["state"] = json!(lead_state);
+        saved["subagents"]["runs"][1]["state"] = json!("interrupted");
+        // In a file of its own, which nothing else writes.
+        let path = run_dir.join("edited-checkpoint.json");
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let before = bodies_of(&server, "r2").len();
+        let resumed = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(2))
+            .agent_tool("worker", Arc::new(Gate::default()))
+            .persistence(PersistenceConfig::new(&run_dir))
+            .resume_from(&path)
+            .build()
+            .unwrap();
+        let records = resumed.subagents();
+        let lead = records[0].run_id;
+        let relaunched = resumed.resume_subagents();
+        let records = resumed.subagents();
+        if lead_state == "interrupted" {
+            assert_eq!(relaunched, ["r1", "r2"]);
+            assert!(
+                records.iter().all(|run| run.state.is_active()),
+                "{records:?}"
+            );
+            continue;
+        }
+        assert!(relaunched.is_empty(), "{relaunched:?}");
+        assert_eq!(records[0].state, SubagentState::Failed);
+        assert_eq!(records[1].state, SubagentState::Stopped);
+        assert_eq!(
+            records[1].error.as_deref(),
+            Some("its lead r1 isn't running")
+        );
+        assert_eq!(bodies_of(&server, "r2").len(), before);
+        let news = resumed.pending_news(lead);
+        assert!(
+            news.iter().any(|item| item.kind == MailKind::Stopped
+                && item.heading
+                    == "r2 (agent `worker`) stopped before it was relaunched: its lead r1 isn't running."),
+            "{news:?}"
+        );
+        // Its lead's message restarts it where it stopped.
+        let lead_run = records[1].caller_run_id;
+        let sent = resumed
+            .context()
+            .subagents
+            .message(resumed.context(), lead_run, "r2", "Carry on.")
+            .unwrap();
+        assert!(sent.contains("restarts where it stopped"), "{sent}");
+        until(|| bodies_of(&server, "r2").len() > before).await;
+    }
 }

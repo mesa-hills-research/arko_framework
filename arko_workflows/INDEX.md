@@ -916,7 +916,7 @@ fn branch_prefix(self, prefix: impl Into<String>) -> Self;
 | `subscribe_subagents(&self) -> broadcast::Receiver<SubagentEvent>` | The events above. |
 | `pending_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | The mail for a run it hasn't received, oldest first. |
 | `take_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | Takes that mail out of the mailbox, for a host that puts it in its own message to the run. |
-| `resume_subagents(&self) -> Vec<String>` | After `resume_from`, relaunches the subagents that were running or queued when the workflow stopped, and returns their ids. A subagent not relaunched waits, and its lead's message restarts it. |
+| `resume_subagents(&self) -> Vec<String>` | After `resume_from`, relaunches the subagents that were running or queued when the workflow stopped, and returns their ids. A subagent not relaunched waits, and its lead's message restarts it. A subagent whose own lead (a subagent too) is neither running nor relaunched isn't relaunched either. It is stopped (`its lead r1 isn't running`), since it would report to a run that is gone, and its lead is told. |
 | `transfer_subagents(&self, from: Uuid, to: Uuid) -> usize` | Run `from`'s subagents, and its pending mail, become run `to`'s (a new conversation of the same lead). Returns how many. |
 | `notes_given(&self, agent_run_id: Uuid) -> u64` | The number of the newest [note](#operator-notes) the run has been given (`NotesHandle::given` too). |
 

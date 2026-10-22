@@ -44,7 +44,9 @@
 //! The runs, their mailboxes and their workspaces are saved in checkpoints.
 //! After a resume, the runs that were running are `interrupted`.
 //! [`Workflow::resume_subagents`](crate::Workflow::resume_subagents)
-//! relaunches them, and a message to one restarts it.
+//! relaunches them, except those whose own lead, a subagent too, isn't
+//! running or relaunched. They are stopped instead, since they would report
+//! to a run that is gone. A message to one restarts it.
 
 mod board;
 pub(crate) use board::CONTEXT_ARRIVED;

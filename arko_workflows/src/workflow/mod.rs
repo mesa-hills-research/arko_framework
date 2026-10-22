@@ -541,7 +541,10 @@ impl Workflow {
     /// leads as usual. The news that a relaunched one stopped with the
     /// workflow, which its lead hasn't received, is withdrawn, so the lead
     /// isn't told to restart a subagent that goes on. A subagent that isn't
-    /// relaunched waits, and a message from its lead restarts it.
+    /// relaunched waits, and a message from its lead restarts it. That
+    /// includes one whose own lead, a subagent too, is neither running nor
+    /// relaunched. It is stopped (it would report to a run that is gone),
+    /// and its lead is told.
     pub fn resume_subagents(&self) -> Vec<String> {
         self.context.subagents.resume_all(&self.context)
     }

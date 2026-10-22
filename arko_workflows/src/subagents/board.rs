@@ -1111,7 +1111,10 @@ impl Board {
 
     /// Relaunches the subagents a stop of the workflow ended, or that were
     /// running when it ended: their handles. The news that one stopped,
-    /// which its lead hasn't received, is withdrawn: it goes on.
+    /// which its lead hasn't received, is withdrawn: it goes on. A subagent
+    /// whose own lead (a subagent too) isn't running or relaunched is not
+    /// relaunched, since it would report to a run that is gone. It is
+    /// stopped instead, and its lead is told.
     pub(crate) fn resume_all(&self, ctx: &Arc<SharedContext>) -> Vec<String> {
         let runs = self
             .records()
@@ -1123,6 +1126,10 @@ impl Board {
                 ) || (run.state == SubagentState::Stopped && stopped_with_workflow(ctx, run.run_id))
             })
             .collect::<Vec<_>>();
+        let (runs, orphans) = self.split_orphans(runs);
+        for orphan in orphans {
+            self.stop_orphan(ctx, orphan);
+        }
         let withdrawn = {
             let mut state = self.state.lock();
             let before = state.mail.len();
@@ -1162,6 +1169,89 @@ impl Board {
         }
         self.start_queued(ctx);
         resumed
+    }
+
+    /// Splits `runs`, the subagents to relaunch, into those whose lead is
+    /// running, relaunched too or driven by the host, and the orphans.
+    fn split_orphans(
+        &self,
+        runs: Vec<SubagentRecord>,
+    ) -> (Vec<SubagentRecord>, Vec<SubagentRecord>) {
+        let state = self.state.lock();
+        let mut relaunched: Vec<Uuid> = Vec::new();
+        loop {
+            let before = relaunched.len();
+            for run in &runs {
+                let lead_goes_on = state
+                    .runs
+                    .iter()
+                    .find(|lead| lead.run_id == run.caller_run_id)
+                    .is_none_or(|lead| lead.state.is_active() || relaunched.contains(&lead.run_id));
+                if lead_goes_on && !relaunched.contains(&run.run_id) {
+                    relaunched.push(run.run_id);
+                }
+            }
+            if relaunched.len() == before {
+                break;
+            }
+        }
+        runs.into_iter()
+            .partition(|run| relaunched.contains(&run.run_id))
+    }
+
+    /// Subagent `orphan` isn't relaunched because its lead isn't running. It
+    /// stays stopped (or becomes so), and its lead gets the news when it
+    /// runs again. A message from the lead then restarts it.
+    fn stop_orphan(&self, ctx: &Arc<SharedContext>, orphan: SubagentRecord) {
+        let lead = {
+            let state = self.state.lock();
+            state
+                .runs
+                .iter()
+                .find(|lead| lead.run_id == orphan.caller_run_id)
+                .map_or_else(String::new, |lead| lead.handle.clone())
+        };
+        let reason = format!("its lead {lead} isn't running");
+        let record = {
+            let mut state = self.state.lock();
+            let Some(record) = state
+                .runs
+                .iter_mut()
+                .find(|record| record.run_id == orphan.run_id)
+            else {
+                return;
+            };
+            // A run a stop of the workflow ended has its stop news already.
+            if record.state == SubagentState::Stopped {
+                return;
+            }
+            record.state = SubagentState::Stopped;
+            record.since = Utc::now();
+            record.error = Some(reason.clone());
+            record.pending = None;
+            record.asking = false;
+            let record = record.clone();
+            self.add_mail(
+                &mut state,
+                record.caller_run_id,
+                MailSender::Run(record.run_id),
+                MailKind::Stopped,
+                format!(
+                    "{} (agent `{}`) stopped before it was relaunched: {reason}.",
+                    record.handle, record.agent
+                ),
+                "message_agent restarts it where it stopped.".to_string(),
+            );
+            record
+        };
+        self.emit(
+            &record,
+            SubagentEventKind::Stopped {
+                reason,
+                by_caller: false,
+            },
+        );
+        self.posted_quietly(ctx);
     }
 
     // ----- messages, waits and stops -----
