@@ -311,6 +311,8 @@ mod tests {
         assert!(ahead >= now + Duration::from_secs(299) && ahead <= now + Duration::from_secs(301));
         let behind = instant(SystemTime::now() - Duration::from_secs(300));
         assert!(behind <= now - Duration::from_secs(299));
-        assert!(instant(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX / 4)) > now);
+        // About two thousand years ahead, which every platform's wall clock
+        // holds (Windows' ends far sooner than Linux's).
+        assert!(instant(SystemTime::UNIX_EPOCH + Duration::from_secs(1 << 36)) > now);
     }
 }
