@@ -1698,7 +1698,8 @@ pub(crate) fn task_part(prompt: &str) -> &str {
 /// the fresh conversation restates the task without the delivered messages
 /// (the report covers them), with the standing notes for the agent it had
 /// been given (newer ones come in its next context update), and with the
-/// current list of agents it may message, when its prompt had one. After
+/// current list of agents it may message, when its prompt had one, and the
+/// subagents it started that still run (`# Your workers`). After
 /// Claude Code compacted the conversation of an agent whose model runs in
 /// it, the agent gets those standing notes again, which a summary may leave
 /// out.
@@ -1738,6 +1739,12 @@ impl HandoverHook for WorkflowHandover {
             context.push_str(ROSTER_HEADING);
             context.push_str(&render_recipients(ctx, &roster));
         }
+        // The subagents it started and still waits for: the report may not
+        // name them.
+        if let Some(workers) = ctx.subagents.workers_section(task.id) {
+            context.push_str("\n\n");
+            context.push_str(&workers);
+        }
         // A chat goes on from the user's latest input, not from its first
         // message.
         let task_prompt = if task.agent_config.tool_config.chat {
@@ -1756,8 +1763,12 @@ impl HandoverHook for WorkflowHandover {
             .context
             .notes
             .handover_section(&self.agent_name, task.id, self.review);
-        let notes = notes.trim();
-        (!notes.is_empty()).then(|| notes.to_string())
+        let workers = self.context.subagents.workers_section(task.id);
+        let parts = [notes.trim(), workers.as_deref().unwrap_or_default()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 }
 

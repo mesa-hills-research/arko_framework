@@ -2106,6 +2106,57 @@ impl Board {
         Some(format!("{unfinished} {what_to_do}, then report again."))
     }
 
+    /// What a run is told again when its conversation is replaced or
+    /// compacted, which is its subagents that still run or wait to run.
+    /// `None` when there are none.
+    pub(crate) fn workers_section(&self, run: Uuid) -> Option<String> {
+        const SHOWN: usize = 20;
+        let state = self.state.lock();
+        let now = Utc::now();
+        let workers = state
+            .runs
+            .iter()
+            .filter(|worker| worker.caller_run_id == run && worker.state.is_active())
+            .collect::<Vec<_>>();
+        if workers.is_empty() {
+            return None;
+        }
+        let waiting = self.waiting.lock();
+        let mut text = "# Your workers\nThese agent runs of yours still work, and their reports reach you as they finish. wait_for_agents waits for them, list_agents lists them with more detail, and stop_agent stops one.".to_string();
+        for worker in workers.iter().take(SHOWN) {
+            let doing = match (worker.state, waiting.get(&worker.run_id)) {
+                (SubagentState::Queued, _) => "queued".to_string(),
+                (_, _) if worker.asking => {
+                    "running, waiting for your answer to its question".to_string()
+                }
+                (_, Some(handles)) => format!("running, waiting for {}", handles.join(", ")),
+                (_, None) => "running".to_string(),
+            };
+            let place = match worker
+                .isolated
+                .as_ref()
+                .and_then(|isolated| isolated.branch.as_ref())
+            {
+                Some(branch) => format!(", on branch {branch}"),
+                None => String::new(),
+            };
+            text.push_str(&format!(
+                "\n- {} (agent `{}`, {doing} {}{place}): {}",
+                worker.handle,
+                worker.agent,
+                ago(worker.since, now),
+                cut(&worker.task, 200)
+            ));
+        }
+        if workers.len() > SHOWN {
+            text.push_str(&format!(
+                "\n- ({} more, list_agents shows all of them.)",
+                workers.len() - SHOWN
+            ));
+        }
+        Some(text)
+    }
+
     /// The handles of the subagents of run `lead` that run or wait to run,
     /// and of theirs in turn.
     fn active_descendants(&self, lead: Uuid) -> Vec<String> {

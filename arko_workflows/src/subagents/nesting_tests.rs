@@ -806,3 +806,128 @@ async fn a_resume_stops_a_subagent_whose_lead_does_not_run_again() {
         until(|| bodies_of(&server, "r2").len() > before).await;
     }
 }
+
+/// A run that hands its conversation over is told again which subagents it
+/// started still work, and it hears from them as before.
+#[tokio::test]
+async fn a_handover_restates_the_subagents_that_still_work() {
+    const REPORT: &str = "HANDOVER-REPORT: waiting for the count.";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = ResponsesServer::start(move |_, body| {
+        let id = format!(
+            "{}_{}",
+            role(body),
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        );
+        if role(body) == "r1" {
+            return Some(tool_call_turn(&id, "gate", json!({})));
+        }
+        Some(
+            if body.contains("Your conversation is getting long") && !body.contains(REPORT) {
+                tool_call_turn(&id, "handover_report", json!({ "report": REPORT }))
+            } else if body.contains(REPORT) {
+                tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" }))
+            } else if turn(body) == 0 {
+                let (tool, arguments) = start("Count the files.");
+                tool_call_turn(&id, tool, arguments)
+            } else {
+                // The conversation grows over the handover's size.
+                tool_call_turn(&id, "list_agents", json!({}))
+                    .replace("\"input_tokens\":10", "\"input_tokens\":5000")
+            },
+        )
+    })
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let mut lead = agent_config("Lead");
+    lead.handover = Some(arko_agents::HandoverConfig::at_input_tokens(1_000));
+    let workflow = Workflow::builder()
+        .name("nesting-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", lead)
+        .agent("worker", agent_config("Worker"))
+        .workflow_services(
+            WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .subagents(SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let result = within(workflow.run_agent("lead", "Delegate the count."))
+        .await
+        .unwrap();
+    assert_eq!(result.task.handovers.len(), 1);
+    let after = bodies_of(&server, "lead")
+        .into_iter()
+        .find(|body| body.contains(REPORT))
+        .unwrap();
+    assert!(
+        after.contains("# Your workers\\nThese agent runs of yours still work"),
+        "{after}"
+    );
+    assert!(
+        after.contains("- r1 (agent `worker`, running for ")
+            && after.contains("): Count the files."),
+        "{after}"
+    );
+    // The report stays where it was, ahead of the workers.
+    assert!(after.find(REPORT).unwrap() < after.find("# Your workers").unwrap());
+}
+
+/// After Claude Code compacts a conversation, the host's hook gives the
+/// run's standing notes and its subagents again.
+#[tokio::test]
+async fn a_compaction_restates_the_subagents_that_still_work() {
+    let server = serve_tree(vec![("r1", vec![("gate", json!({}))])]).await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let task = arko_agents::Task::new(
+        agent_config("Lead"),
+        "Delegate.".to_string(),
+        workspace.0.clone(),
+        None,
+    );
+    let hook = crate::workflow::engine::WorkflowHandover {
+        context: ctx.clone(),
+        agent_name: "lead".to_string(),
+        prompt_message_ids: Vec::new(),
+        review: false,
+    };
+    use arko_agents::HandoverHook;
+    assert_eq!(hook.on_compaction(&task), None);
+    ctx.subagents
+        .start(
+            ctx,
+            task.id,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Count the files.",
+            None,
+            false,
+            None,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    within(gate.started.notified()).await;
+    let restated = hook.on_compaction(&task).unwrap();
+    assert!(restated.starts_with("# Your workers\n"), "{restated}");
+    assert!(
+        restated.contains("- r1 (agent `worker`, running for "),
+        "{restated}"
+    );
+    // The seed of a handover has them too.
+    let seed = hook.on_handover(&task, "Report.");
+    assert!(seed.context.unwrap().contains("# Your workers"));
+}
