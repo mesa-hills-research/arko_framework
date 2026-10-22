@@ -12,7 +12,7 @@ use super::*;
 use crate::persistence::PersistenceConfig;
 use crate::services::WorkflowServicesConfig;
 use crate::test_support::{
-    ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+    Reply, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
 };
 use crate::{Workflow, WorkflowBuilder};
 
@@ -316,4 +316,244 @@ async fn a_run_saved_without_skills_resumes_with_the_embedded_ones() {
         .unwrap()
         .to_string();
     assert!(error.contains("skills_config"), "{error}");
+}
+
+/// A server where the lead completes unless it is told "Go on." (then it
+/// loads `review`) or "Load it two." (then it loads `review` again).
+async fn serve_loads() -> ResponsesServer {
+    ResponsesServer::start(|_, body| {
+        Some(
+            if body.contains("Load it two.") && !body.contains("call_c2") {
+                tool_call_turn("c2", "load_skill", json!({ "name": "review" }))
+            } else if body.contains("Go on.") && !body.contains("call_c1") {
+                tool_call_turn("c1", "load_skill", json!({ "name": "review" }))
+            } else {
+                complete_turn("done", "lead done")
+            },
+        )
+    })
+    .await
+}
+
+fn review(version: &str) -> Option<SkillsConfig> {
+    Some(SkillsConfig {
+        embedded: vec![skill("review", false, version)],
+        ..Default::default()
+    })
+}
+
+/// A run the host reconfigured with embedded skills keeps the ones it was
+/// given while the process lives, and has the registered agent's after a
+/// save and a resume, since a saved configuration doesn't hold the text.
+#[tokio::test]
+async fn a_reconfigured_run_has_embedded_skills_across_a_save_and_a_resume() {
+    let server = serve_loads().await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(&server, &workspace, review("registered"), None)
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "Hello.")).await.unwrap();
+    let mut given = agent_config("Lead");
+    given.skills_config = review("given");
+    let second = within(workflow.continue_agent_with(
+        &first,
+        "Reconfigured.",
+        crate::ContinueOptions::new().reconfigure(given),
+    ))
+    .await
+    .unwrap();
+    assert!(second.task.reconfigured);
+
+    // The skills the host gave stay, and the registered agent's don't replace them.
+    within(workflow.continue_agent(&second, "Go on."))
+        .await
+        .unwrap();
+    let last = bodies_of(&server, "lead").pop().unwrap();
+    assert!(
+        output_of(&last, "c1").contains("The review given."),
+        "{}",
+        output_of(&last, "c1")
+    );
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // After the resume, the run has the registered agent's skills, and
+    // `load_skill` is still offered.
+    let resumed = builder_with(&server, &workspace, review("registered"), None)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert!(restored.task.reconfigured);
+    within(resumed.continue_agent(&restored, "Load it two."))
+        .await
+        .unwrap();
+    let last = bodies_of(&server, "lead").pop().unwrap();
+    assert!(offered(&last).contains(&"load_skill".to_string()));
+    assert!(
+        output_of(&last, "c2").contains("The review registered."),
+        "{}",
+        output_of(&last, "c2")
+    );
+}
+
+/// A run the host reconfigured without a skills configuration stays
+/// without one after a save and a resume, though its agent is registered
+/// with embedded skills.
+#[tokio::test]
+async fn a_reconfigured_run_without_skills_stays_without_them_after_a_resume() {
+    let server = serve_loads().await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(&server, &workspace, review("registered"), None)
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "Hello.")).await.unwrap();
+    let mut given = agent_config("Lead");
+    given.skills_config = None;
+    within(workflow.continue_agent_with(
+        &first,
+        "Reconfigured.",
+        crate::ContinueOptions::new().reconfigure(given),
+    ))
+    .await
+    .unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let resumed = builder_with(&server, &workspace, review("registered"), None)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    within(resumed.continue_agent(&restored, "Load it two."))
+        .await
+        .unwrap();
+    let requests = bodies_of(&server, "lead");
+    assert!(
+        !offered(requests.last().unwrap()).contains(&"load_skill".to_string()),
+        "{}",
+        requests.last().unwrap()
+    );
+}
+
+/// The prompt cache refresh of a run loaded from a save offers the
+/// registered agent's skills, as the run's next request will.
+#[tokio::test]
+async fn a_refresh_of_a_saved_run_offers_the_registered_skills() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start_async(|index, _| {
+        let reply = if index == 0 {
+            Reply::Stream(complete_turn("first", "lead first"))
+        } else {
+            Reply::Status {
+                status: 200,
+                retry_after: None,
+                body: json!({
+                    "id": "resp_r", "object": "response", "created_at": 0, "status": "completed",
+                    "model": "gpt-5.6-luna",
+                    "output": [{"type": "message", "id": "m1", "status": "completed",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "ok", "annotations": []}]}],
+                    "usage": {"input_tokens": 1200, "output_tokens": 1},
+                })
+                .to_string(),
+            }
+        };
+        Box::pin(async move { Some(reply) })
+    })
+    .await;
+    let workflow = builder_with(&server, &workspace, review("registered"), None)
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "Hello.")).await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let resumed = builder_with(&server, &workspace, review("registered"), None)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    within(resumed.refresh_prompt_cache(&restored))
+        .await
+        .unwrap();
+    let refresh = server.bodies().pop().unwrap();
+    assert!(
+        offered(&refresh).contains(&"load_skill".to_string()),
+        "{refresh}"
+    );
+}
+
+/// A paused run whose task came from a save (it has no embedded skills)
+/// goes on with its agent's registered ones when it is resumed.
+#[tokio::test]
+async fn a_resumed_pause_takes_the_registered_embedded_skills() {
+    use crate::policy::{AgentResume, ErrorRecoveryPolicy};
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start_async(|index, body| {
+        let reply = if index == 0 {
+            Reply::Status {
+                status: 503,
+                retry_after: None,
+                body: json!({"error": {"message": "synthetic 503", "type": "server_error"}})
+                    .to_string(),
+            }
+        } else if !body.contains("call_c1") {
+            Reply::Stream(tool_call_turn(
+                "c1",
+                "load_skill",
+                json!({ "name": "review" }),
+            ))
+        } else {
+            Reply::Stream(complete_turn("done", "lead done"))
+        };
+        let reply = Some(reply);
+        Box::pin(async move { reply })
+    })
+    .await;
+    let mut lead = agent_config("Lead");
+    lead.llm_error_policy =
+        arko_agents::LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+    lead.skills_config = review("registered");
+    let workflow = Workflow::builder()
+        .name("skills-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", lead)
+        .error_recovery_policy(ErrorRecoveryPolicy::ReturnToCaller)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("lead", "Hello."))
+        .await
+        .unwrap_err();
+    let crate::WorkflowError::AgentPaused { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    // As if loaded from a save, which leaves the embedded skills out.
+    let mut paused = workflow.agent_result(task_id).unwrap();
+    paused.task = serde_json::from_value(serde_json::to_value(&paused.task).unwrap()).unwrap();
+    assert!(
+        paused
+            .task
+            .agent_config
+            .skills_config
+            .as_ref()
+            .unwrap()
+            .embedded
+            .is_empty()
+    );
+    within(workflow.resume_agent(&paused, AgentResume::ContinueAfterError { note: None }))
+        .await
+        .unwrap();
+    let bodies = server.bodies();
+    assert!(
+        offered(&bodies[1]).contains(&"load_skill".to_string()),
+        "{}",
+        bodies[1]
+    );
+    assert!(
+        output_of(bodies.last().unwrap(), "c1").contains("The review registered."),
+        "{}",
+        bodies.last().unwrap()
+    );
 }

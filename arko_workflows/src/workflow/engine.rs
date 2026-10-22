@@ -2604,12 +2604,12 @@ impl WorkflowEngine {
     /// its agent's registered configuration. A saved configuration doesn't
     /// hold them, so a run that goes on takes the current ones, and a
     /// built-in skill that changed doesn't stop a resume. A task with
-    /// embedded skills of its own, one the host reconfigured, and one whose
-    /// agent has none are left as they are.
+    /// embedded skills of its own, and one whose agent has none, are left as
+    /// they are. A task the host reconfigured gets them when its own skills
+    /// configuration is set, and stays without when it has none. Only the
+    /// embedded skills come from the registered configuration, and the
+    /// invalid skill policy of a task that had no skills configuration.
     fn restore_embedded_skills(task: &mut Task, ctx: &SharedContext, agent_name: &str) {
-        if task.reconfigured {
-            return;
-        }
         let Some(current) = ctx
             .agent_configs
             .get(agent_name)
@@ -2620,10 +2620,19 @@ impl WorkflowEngine {
         if current.embedded.is_empty() {
             return;
         }
-        let skills = task
-            .agent_config
-            .skills_config
-            .get_or_insert_with(Default::default);
+        let skills = if task.reconfigured {
+            match task.agent_config.skills_config.as_mut() {
+                Some(skills) => skills,
+                None => return,
+            }
+        } else {
+            task.agent_config.skills_config.get_or_insert_with(|| {
+                arko_agents::skill::SkillsConfig {
+                    on_invalid_skill: current.on_invalid_skill.clone(),
+                    ..Default::default()
+                }
+            })
+        };
         if skills.embedded.is_empty() {
             skills.embedded = current.embedded.clone();
         }

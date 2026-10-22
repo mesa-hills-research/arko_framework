@@ -152,6 +152,72 @@ async fn crash_mid_tool(
     path
 }
 
+/// A run recovered from a save takes the embedded skills its agent is
+/// registered with now, which the save doesn't hold.
+#[tokio::test]
+async fn a_recovered_run_takes_the_registered_embedded_skills() {
+    use arko_agents::skill::{EmbeddedSkill, SkillsConfig};
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        Some(if body.contains("BEGIN SKILL: review") {
+            complete_turn("done", "done")
+        } else if body.contains(RESTARTED) {
+            tool_call_turn("c1", "load_skill", json!({ "name": "review" }))
+        } else {
+            tool_call_turn("probe", "probe", json!({}))
+        })
+    })
+    .await;
+    let build = |probe: Arc<ProbeTool>| {
+        let mut coder = agent_config("Friendly Coder");
+        coder.skills_config = Some(SkillsConfig {
+            embedded: vec![EmbeddedSkill::new(
+                "review",
+                "---\nname: review\ndescription: The review skill.\n---\nThe review text.\n",
+            )],
+            ..Default::default()
+        });
+        Workflow::builder()
+            .name("recovery-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", coder)
+            .global_tool(probe)
+            .persistence(config(&workspace))
+    };
+    let probe = ProbeTool::new("probe", true);
+    let workflow = Arc::new(build(probe.clone()).build().unwrap());
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Write it.").await }
+    });
+    within(probe.started.notified()).await;
+    let path = latest(&workspace);
+    crash(workflow, vec![run]).await;
+
+    let resumed = build(ProbeTool::new("probe", false))
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    let interrupted = resumed.interrupted_runs();
+    assert_eq!(interrupted.len(), 1);
+    let result = within(resumed.recover_agent(&interrupted[0]))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "done");
+    let bodies = server.bodies();
+    let offers_load_skill = |body: &str| {
+        serde_json::from_str::<Value>(body).unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "load_skill")
+    };
+    let recovered = bodies.iter().find(|body| body.contains(RESTARTED)).unwrap();
+    assert!(offers_load_skill(recovered), "{recovered}");
+    assert!(bodies.last().unwrap().contains("The review text."));
+}
+
 /// A run that crashed while its tool call ran comes back interrupted with
 /// its task, and `recover_agent` continues it where it was: the call (in
 /// doubt by default) is answered without running again, no message is
