@@ -230,7 +230,7 @@ async fn a_folder_skill_replaces_the_embedded_skill_of_its_name() {
                 true,
                 Some(format!(
                     "replaced by the skill 'review' in {}",
-                    workspace.join(".skills/review").display()
+                    workspace.join(".skills").join("review").display()
                 ))
             ),
             (
@@ -245,7 +245,7 @@ async fn a_folder_skill_replaces_the_embedded_skill_of_its_name() {
         ]
     );
     assert!(scanned[2].path.as_os_str().is_empty());
-    assert_eq!(scanned[0].path, workspace.join(".skills/review"));
+    assert_eq!(scanned[0].path, workspace.join(".skills").join("review"));
 }
 
 /// A folder skill that its source's list leaves out replaces nothing.
@@ -270,7 +270,7 @@ fn a_folder_skill_left_out_does_not_replace_the_embedded_one() {
     assert!(scanned[1].skipped.is_none() && scanned[1].embedded);
 }
 
-/// Embedded skills among themselves go by the rules of folders: the same
+/// Embedded skills among themselves go by the rules of folders. The same
 /// content loads once, and another skill with the name is renamed.
 #[test]
 fn embedded_skills_with_the_same_name_follow_the_folder_rules() {
