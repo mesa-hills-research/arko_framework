@@ -19,6 +19,7 @@
 //! the agent goes on from Claude Code's summary.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -235,6 +236,78 @@ fn allow_tool() -> Value {
 /// Sends the call to the permission request, where it waits for approval.
 fn ask_tool() -> Value {
     json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}})
+}
+
+/// The input a built-in call runs with so that Claude Code runs it in
+/// `directory`, the task's working directory, where the CLI doesn't run after
+/// the task moved (see [`Task::claude_code_directory`]). The command guard and
+/// the path policy judge the call from `directory`. `None` when the call
+/// needs no change.
+///
+/// - `Bash` and `PowerShell` commands start with a change into `directory`.
+///   A failed change ends the command before it runs.
+/// - A path that names a file or a directory is made absolute from
+///   `directory`, the way the path policy resolves it. A `Glob` or `Grep`
+///   without a `path` searches `directory`.
+fn in_directory(name: &str, input: &Value, directory: &Path) -> Option<Value> {
+    let mut moved = input.as_object()?.clone();
+    match name {
+        "Bash" | "PowerShell" => {
+            let command = moved.get("command")?.as_str()?;
+            let text = directory.to_string_lossy();
+            let change = if name == "Bash" {
+                // Git Bash on Windows reads `C:/dir` and not `C:\dir`.
+                let text = if cfg!(windows) {
+                    text.replace('\\', "/")
+                } else {
+                    text.into_owned()
+                };
+                format!("cd -- '{}' || exit 1", text.replace('\'', r"'\''"))
+            } else {
+                // PowerShell reads the curly quotes as straight ones.
+                let quoted: String = text
+                    .chars()
+                    .flat_map(|c| {
+                        let doubled = matches!(c, '\'' | '‘' | '’' | '‚' | '‛');
+                        std::iter::once(c).chain(doubled.then_some(c))
+                    })
+                    .collect();
+                format!("Set-Location -LiteralPath '{quoted}' -ErrorAction Stop")
+            };
+            let command = format!("{change}\n{command}");
+            moved.insert("command".into(), Value::String(command));
+        }
+        _ => {
+            let parameters = built_in_path_parameters(name);
+            if parameters.is_empty() {
+                return None;
+            }
+            for parameter in parameters {
+                let given = match moved.get(*parameter) {
+                    Some(Value::String(path)) if !path.trim().is_empty() => Some(path.as_str()),
+                    _ => None,
+                };
+                let path = match given {
+                    // An absolute path, or one from the home directory,
+                    // doesn't depend on where Claude Code runs.
+                    Some(path) if path.starts_with('~') || Path::new(path).is_absolute() => {
+                        continue;
+                    }
+                    Some(path) => path,
+                    // Without a path, the search tools use the CLI's directory.
+                    None if matches!(name, "Glob" | "Grep") => ".",
+                    None => continue,
+                };
+                let absolute = crate::utils::resolve_path(path, directory).ok()?;
+                moved.insert(
+                    parameter.to_string(),
+                    Value::String(absolute.to_string_lossy().into_owned()),
+                );
+            }
+        }
+    }
+    let moved = Value::Object(moved);
+    (moved != *input).then_some(moved)
 }
 
 fn add_context(text: &str) -> Value {
@@ -2237,11 +2310,14 @@ impl ClaudeCodeRun {
                 input,
                 reply,
             } => {
-                let answer = self
-                    .gate(tool_use_id.clone(), &tool_name, input, session)
+                let mut answer = self
+                    .gate(tool_use_id.clone(), &tool_name, input.clone(), session)
                     .await?;
                 let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
                 if allowed {
+                    if let Some(moved) = self.input_in_task_directory(&tool_name, &input) {
+                        answer["hookSpecificOutput"]["updatedInput"] = moved;
+                    }
                     self.record_running(tool_use_id.as_ref(), None).await;
                 }
                 match self.slow_down.filter(|_| allowed) {
@@ -2435,6 +2511,16 @@ impl ClaudeCodeRun {
             return Ok(ask_tool());
         }
         self.admit(&name, built_in, id, &input, None, session).await
+    }
+
+    /// The input an allowed call of Claude Code's own tools runs with, when
+    /// the CLI doesn't run in the task's working directory (the task moved
+    /// and the session stayed where it started) and the call depends on it.
+    fn input_in_task_directory(&self, served: &str, input: &Value) -> Option<Value> {
+        if self.task.claude_code_directory.is_none() || arko_name(served).is_some() {
+            return None;
+        }
+        in_directory(served, input, &self.task.current_working_directory)
     }
 
     async fn reject_call(
@@ -2678,7 +2764,11 @@ impl ClaudeCodeRun {
                 None => {
                     self.record_running(approval.tool_use_id.as_ref(), None)
                         .await;
-                    cc::PermissionDecision::allow()
+                    cc::PermissionDecision::Allow {
+                        updated_input: self
+                            .input_in_task_directory(&approval.name, &approval.input),
+                        updated_permissions: Vec::new(),
+                    }
                 }
             }
         } else {

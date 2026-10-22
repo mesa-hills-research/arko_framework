@@ -1466,9 +1466,23 @@ observing the conversation start over, the cache monitor judges the compacted
 conversation alone, and `HandoverHook::on_compaction` can give the agent context again
 (arko_workflows gives it the standing notes), sent with its next input.
 
+A task moved to another directory (`Task::move_to`) keeps its Claude Code session in the
+directory the session started in, where Claude Code finds it, and the CLI gets the new
+directory with `--add-dir`. The runtime changes each call of Claude Code's own tools so that
+it runs in the new directory, where the command guard and the path policy judge it. A `Bash`
+command starts with a `cd` into the directory (`Set-Location` for `PowerShell`), a `Glob` or
+`Grep` without a `path` searches it, and a relative `path` is made absolute from it. The
+change travels in the answer to Claude Code's `PreToolUse` hook (`updatedInput`), or in the
+approval for a call that waits for one, and the host still sees the call as the model wrote
+it. A relative `file_path` of `Read`, `Edit` or `Write` reaches the runtime already made
+absolute from the session's directory, so the path policy refuses it as outside the
+workspace and the model has to give the full path.
+
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
 handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
-compacts at the threshold instead). It uses the CLI's login and counts against its plan
+compacts at the threshold instead). `examples/claude_code_move.rs` moves a task after its
+first run and prints where `Bash`, `Glob`, `Grep` and `Read` run (with `--ask`, each call
+waits for an approval). They use the CLI's login and count against its plan
 usage. The tests run a scripted fake CLI
 (`tests/fixtures/fake_claude_agent.py`) and need Python 3 (`ARKO_TEST_PYTHON` selects the
 interpreter).

@@ -495,9 +495,10 @@ pub struct Task {
     /// when it differs from the task's working directory. This is the one the
     /// session started in, which Claude Code finds it from. Set when the
     /// task moves ([`Task::move_to`]). arko's tools and checks work in
-    /// [`current_working_directory`](Self::current_working_directory), and
-    /// the CLI is given that directory too. A new session starts in the
-    /// working directory.
+    /// [`current_working_directory`](Self::current_working_directory), the
+    /// CLI is given that directory too, and the runtime changes the calls of
+    /// its own tools to run there. A new session starts in the working
+    /// directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_directory: Option<PathBuf>,
     /// How many messages of the conversation the Claude Code session has
@@ -968,7 +969,9 @@ impl Task {
     /// directory) is written again. A Claude Code task with a session keeps
     /// running the CLI in the session's directory, where Claude Code finds
     /// the session ([`claude_code_directory`](Self::claude_code_directory)),
-    /// and the session gets the new prompt.
+    /// and the session gets the new prompt. The runtime changes the calls of
+    /// Claude Code's own tools (`Bash`, `Glob`, …) to run in the new
+    /// directory.
     pub fn move_to(&mut self, directory: PathBuf) {
         if directory == self.current_working_directory {
             return;

@@ -2002,6 +2002,222 @@ async fn command_rules_refuse_shell_commands() {
     )));
 }
 
+/// The calls of Claude Code's own tools, as the fake CLI ran them (without
+/// the task's `complete_task` calls).
+fn executed_built_ins(fake: &Fake) -> Vec<Value> {
+    fake.logged("post")
+        .into_iter()
+        .filter(|post| post["tool"] != "mcp__arko__complete_task")
+        .collect()
+}
+
+/// A task that ran in the workspace and moved to a `project` directory.
+async fn moved_task(fake: &Fake, config: AgentConfig) -> (Task, PathBuf) {
+    let task = Task::new(config, "Start.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    let project = fake.dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    task.move_to(project.clone());
+    task.prepare_for_resumption_from_completed("Look around.".into())
+        .unwrap();
+    assert!(task.claude_code_directory.is_some());
+    (task, project)
+}
+
+/// The CLI runs where the session started after the task moved, so the
+/// calls of its own tools are given the task's directory, the one the
+/// command guard and the path policy judge them from.
+#[tokio::test]
+async fn a_moved_task_runs_claude_codes_tools_in_its_directory() {
+    let fake = Fake::new(json!([]));
+    // A path that is absolute names the same file wherever the CLI runs.
+    let absolute = fake.dir.join("project").join("notes.txt");
+    let script = json!([[complete("First")], [
+        {"tool": "Bash", "input": {"command": "ls build", "description": "List"}},
+        {"tool": "Glob", "input": {"pattern": "*.rs"}},
+        {"tool": "Grep", "input": {"pattern": "main", "path": "src"}},
+        {"tool": "Read", "input": {"file_path": "Cargo.toml"}},
+        {"tool": "Read", "input": {"file_path": "notes.txt"}},
+        {"tool": "Read", "input": {"file_path": absolute.display().to_string()}},
+        complete("Looked"),
+    ]]);
+    std::fs::write(fake.dir.join("script.json"), script.to_string()).unwrap();
+    let (task, project) = moved_task(&fake, config(&fake, &["Bash", "Glob", "Grep", "Read"])).await;
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(&task.current_state, TaskState::Completed { summary } if summary == "Looked"));
+
+    let calls = executed_built_ins(&fake);
+    let path = |name: &str| project.join(name).display().to_string();
+    let input = |index: usize| &calls[index]["input"];
+    if cfg!(unix) {
+        assert_eq!(
+            input(0)["command"],
+            format!("cd -- '{}' || exit 1\nls build", project.display())
+        );
+    } else {
+        assert!(
+            input(0)["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("\nls build")
+        );
+    }
+    assert_eq!(input(0)["description"], "List");
+    assert_eq!(input(1)["path"], project.display().to_string());
+    assert_eq!(input(1)["pattern"], "*.rs");
+    assert_eq!(input(2)["path"], path("src"));
+    assert_eq!(input(3)["file_path"], path("Cargo.toml"));
+    assert_eq!(input(4)["file_path"], path("notes.txt"));
+    assert_eq!(input(5)["file_path"], absolute.display().to_string());
+
+    // The host sees the calls as the model wrote them.
+    let formatted: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallFormatted {
+                tool_name,
+                parameters,
+                ..
+            } if tool_name == "Bash" => Some(parameters["command"].clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(formatted, [json!("ls build")]);
+}
+
+/// A call that waits for approval runs in the task's directory too.
+#[tokio::test]
+async fn an_approved_call_of_a_moved_task_runs_in_its_directory() {
+    let fake = Fake::new(json!([[complete("First")], [
+        {"tool": "Grep", "input": {"pattern": "main"}},
+        complete("Looked"),
+    ]]));
+    let mut config = config(&fake, &["Grep"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Grep".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let (task, project) = moved_task(&fake, config).await;
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval {
+        tool_call_id,
+        parameters,
+        ..
+    }) = events.last()
+    else {
+        panic!("{events:#?}");
+    };
+    // The request shows the call as the model wrote it.
+    assert!(!parameters.contains_key("path"), "{parameters:?}");
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    run.finish().await;
+    let calls = executed_built_ins(&fake);
+    assert_eq!(calls[0]["input"]["path"], project.display().to_string());
+}
+
+/// A task that didn't move runs where the CLI does: its calls are left as
+/// the model wrote them.
+#[tokio::test]
+async fn a_task_that_didnt_move_keeps_its_calls_as_written() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "ls"}},
+        {"tool": "Glob", "input": {"pattern": "*.rs"}},
+        complete("Looked"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Bash", "Glob"]),
+        "Look.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    assert!(task.claude_code_directory.is_none());
+    let calls = executed_built_ins(&fake);
+    assert_eq!(calls[0]["input"], json!({"command": "ls"}));
+    assert_eq!(calls[1]["input"], json!({"pattern": "*.rs"}));
+    for pre in fake.logged("pre") {
+        assert!(
+            pre["answer"]["hookSpecificOutput"]
+                .get("updatedInput")
+                .is_none(),
+            "{pre}"
+        );
+    }
+}
+
+#[test]
+fn shell_commands_change_into_the_directory_first() {
+    let directory = std::path::Path::new(if cfg!(windows) {
+        r"C:\it's here"
+    } else {
+        "/it's here"
+    });
+    let input = json!({"command": "make", "timeout": 5});
+    let bash = super::in_directory("Bash", &input, directory).unwrap();
+    let expected = if cfg!(windows) {
+        "cd -- 'C:/it'\\''s here' || exit 1\nmake"
+    } else {
+        "cd -- '/it'\\''s here' || exit 1\nmake"
+    };
+    assert_eq!(bash, json!({"command": expected, "timeout": 5}));
+    // A quote in the directory can't end PowerShell's string early, curly ones included.
+    let directory = std::path::Path::new(if cfg!(windows) {
+        r"C:\it’s"
+    } else {
+        "/it’s"
+    });
+    let shell = super::in_directory("PowerShell", &input, directory).unwrap();
+    let expected = if cfg!(windows) {
+        "Set-Location -LiteralPath 'C:\\it’’s' -ErrorAction Stop\nmake"
+    } else {
+        "Set-Location -LiteralPath '/it’’s' -ErrorAction Stop\nmake"
+    };
+    assert_eq!(shell["command"], expected);
+}
+
+#[test]
+fn only_calls_that_depend_on_the_directory_are_changed() {
+    let directory = std::path::Path::new(if cfg!(windows) { r"C:\work" } else { "/work" });
+    let change = |name: &str, input: Value| super::in_directory(name, &input, directory);
+    let inside = |relative: &str| directory.join(relative).display().to_string();
+    let itself = directory.display().to_string();
+    assert_eq!(
+        change("Glob", json!({"pattern": "*"})),
+        Some(json!({"pattern": "*", "path": itself}))
+    );
+    assert_eq!(
+        change("Grep", json!({"pattern": "a", "path": ""})),
+        Some(json!({"pattern": "a", "path": itself}))
+    );
+    assert_eq!(
+        change("Edit", json!({"file_path": "src/../lib.rs"})),
+        Some(json!({"file_path": inside("lib.rs")}))
+    );
+    // Absolute paths, paths from the home directory, and tools that name no path.
+    let absolute = inside("a.txt");
+    assert_eq!(change("Read", json!({"file_path": absolute})), None);
+    assert_eq!(change("Read", json!({"file_path": "~/a.txt"})), None);
+    assert_eq!(change("Read", json!({})), None);
+    assert_eq!(
+        change("WebFetch", json!({"url": "https://example.com"})),
+        None
+    );
+    assert_eq!(change("Bash", json!({})), None);
+}
+
 #[tokio::test]
 async fn a_call_held_for_the_report_says_it_is_not_an_error() {
     let fake = Fake::new(json!([[

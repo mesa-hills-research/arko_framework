@@ -333,6 +333,10 @@ def call_tool(step, index):
     decision = pre.get("hookSpecificOutput", {})
     verdict = decision.get("permissionDecision")
     output, is_error = None, False
+    # Like Claude Code, the call runs with the input a hook or a permission
+    # answer replaced, and the PostToolUse hook gets that input.
+    if decision.get("updatedInput") is not None:
+        tool_input = decision["updatedInput"]
     if verdict == "deny":
         output, is_error = decision.get("permissionDecisionReason", ""), True
     elif verdict == "ask":
@@ -341,6 +345,8 @@ def call_tool(step, index):
         log("permission", tool=name, answer=answer)
         if answer.get("behavior") != "allow":
             output, is_error = answer.get("message", ""), True
+        elif answer.get("updatedInput") is not None:
+            tool_input = answer["updatedInput"]
     if output is None and step.get("crash") == "pre":
         sys.exit(3)
     if output is None:
@@ -356,7 +362,7 @@ def call_tool(step, index):
             output = step.get("output", "builtin %s ran" % name)
     post = hook("PostToolUse", {"tool_name": name, "tool_input": tool_input,
                                 "tool_response": output}, tool_use_id)
-    log("post", tool=name, answer=post, output=output, is_error=is_error)
+    log("post", tool=name, answer=post, output=output, is_error=is_error, input=tool_input)
     if step.get("crash") == "post":
         sys.exit(3)
     send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
