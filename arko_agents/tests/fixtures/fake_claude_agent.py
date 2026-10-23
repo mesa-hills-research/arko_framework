@@ -48,6 +48,9 @@ the next turn's index). Steps:
                                          after its PostToolUse hook, before
                                          its result is reported
   {"rate_limit": {...}}                  a rate_limit_event with this info
+  {"serve": 1}                           waits for the host's next control
+                                         request and answers it (such as
+                                         get_usage after a rate_limit)
   {"fail": "..."}                        the turn ends in this error, with
                                          "terminal_reason" (such as
                                          "prompt_too_long") when given
@@ -412,6 +415,9 @@ def turn(text, message_uuid=None):
             send({"type": "rate_limit_event", "rate_limit_info": step["rate_limit"],
                   "session_id": SESSION})
             continue
+        if "serve" in step:
+            handle(read())
+            continue
         if "system" in step:
             send(dict({"type": "system", "session_id": SESSION}, **step["system"]))
             continue
@@ -525,6 +531,16 @@ def handle(message):
         elif subtype == "interrupt":
             state["interrupted"] = True
             reply(message["request_id"], {})
+        elif subtype == "get_usage":
+            # The file FAKE_CLAUDE_USAGE names is the answer. Without one, the
+            # CLI doesn't know the request.
+            log("get_usage", skip_behaviors=request.get("skip_behaviors"))
+            if os.environ.get("FAKE_CLAUDE_USAGE"):
+                reply(message["request_id"], json.load(open(os.environ["FAKE_CLAUDE_USAGE"])))
+            else:
+                send({"type": "control_response", "response": {
+                    "subtype": "error", "request_id": message["request_id"],
+                    "error": "Unsupported control request subtype: get_usage"}})
         else:
             reply(message["request_id"], {})
     elif message.get("type") == "user":

@@ -1430,6 +1430,10 @@ the estimate at list prices).
 Claude Code's `rate_limit_event` is reported as
 `PlanUsageReported` (its five-hour window as the primary one, its seven-day window as the
 secondary) and attached to the requests after it, and the plan-usage threshold applies.
+The event's flags about extra usage are in `PlanUsage::extra_usage`. An event also asks Claude
+Code for its usage data (`get_usage`), at most every five minutes and without waiting. The answer
+adds the monthly limit, the credits used and the currency to a report of its own and to the
+reports after it. A Claude Code that doesn't answer leaves the flags alone.
 `Pause` interrupts the turn and pauses as a monitor. `SlowDown` holds each tool call (and
 so the request after it) for its delay while usage stays over the threshold, and a
 cancellation or suspension ends the hold at once. A turn that fails while Claude Code

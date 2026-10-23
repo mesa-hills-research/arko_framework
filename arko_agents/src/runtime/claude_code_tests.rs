@@ -38,20 +38,30 @@ impl Fake {
         self.dir.join("workspace")
     }
 
+    /// What the fake answers `get_usage` with. Without it the fake gives an
+    /// error, as a CLI that doesn't know the request does.
+    fn answer_usage(&self, answer: Value) {
+        std::fs::write(self.dir.join("usage.json"), answer.to_string()).unwrap();
+    }
+
     fn settings(&self) -> ClaudeCodeSettings {
         let python = std::env::var("ARKO_TEST_PYTHON")
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_claude_agent.py");
         let path = |name: &str| self.dir.join(name).display().to_string();
+        let mut env = BTreeMap::from([
+            ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
+            ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
+            ("FAKE_CLAUDE_STATE".to_string(), path("state")),
+        ]);
+        if self.dir.join("usage.json").exists() {
+            env.insert("FAKE_CLAUDE_USAGE".to_string(), path("usage.json"));
+        }
         ClaudeCodeSettings {
             cli_path: Some(python.into()),
             cli_args: vec![script.display().to_string()],
-            env: BTreeMap::from([
-                ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
-                ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
-                ("FAKE_CLAUDE_STATE".to_string(), path("state")),
-            ]),
+            env,
             ..ClaudeCodeSettings::default()
         }
     }
@@ -2561,6 +2571,117 @@ async fn plan_usage_is_reported_and_the_threshold_pauses() {
         2,
         "the second call ran before the interrupt"
     );
+}
+
+/// The plan usage events a run reported.
+fn plan_usage_events(events: &[AgentEvent]) -> Vec<&arko_ai::PlanUsage> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::PlanUsageReported(usage) => Some(usage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The event's flags about extra usage reach the plan usage, and Claude
+/// Code's usage data (`get_usage`, asked once however many events come) adds
+/// the amounts to it and to the events after it.
+#[tokio::test]
+async fn extra_usage_follows_the_event_and_the_usage_data() {
+    let event = json!({
+        "status": "rejected", "rateLimitType": "five_hour", "isUsingOverage": true,
+        "resetsAt": 1_793_152_800_u64, "overageStatus": "allowed",
+        "overageResetsAt": 1_793_152_800_u64, "unifiedWindows": windows(1.0, 0.4),
+    });
+    let fake = Fake::new(json!([[
+        {"rate_limit": event}, {"serve": 1}, {"rate_limit": event}, complete("done"),
+    ]]));
+    fake.answer_usage(json!({
+        "session": {"total_cost_usd": 0.0, "total_api_duration_ms": 0, "total_duration_ms": 0,
+                    "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}},
+        "subscription_type": "max", "rate_limits_available": true,
+        "rate_limits": {
+            "five_hour": {"utilization": 100, "resets_at": "2026-10-23T12:00:00Z"},
+            "extra_usage": {"is_enabled": true, "monthly_limit": 50000, "used_credits": 27140,
+                            "utilization": 54, "currency": "USD", "disabled_reason": null},
+        },
+        "behaviors": null,
+    }));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run.events_until(|_| false).await;
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+
+    let usage = plan_usage_events(&events);
+    assert_eq!(usage.len(), 3, "{usage:#?}");
+    let flags = usage[0].extra_usage.as_ref().unwrap();
+    assert!(flags.in_use);
+    assert_eq!(flags.status.as_deref(), Some("allowed"));
+    assert_eq!(flags.resets_at, Some(1_793_152_800));
+    assert_eq!(flags.monthly_limit, None);
+    // The answer and the event after it have the amounts.
+    for with_amounts in &usage[1..] {
+        let extra = with_amounts.extra_usage.as_ref().unwrap();
+        assert!(extra.in_use);
+        assert_eq!(extra.enabled, Some(true));
+        assert_eq!(extra.status.as_deref(), Some("allowed"));
+        assert_eq!(extra.monthly_limit, Some(50_000.0));
+        assert_eq!(extra.used_credits, Some(27_140.0));
+        assert_eq!(extra.utilization, Some(54.0));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+    }
+    assert_eq!(fake.logged("get_usage").len(), 1);
+    assert_eq!(fake.logged("get_usage")[0]["skip_behaviors"], true);
+}
+
+/// Without usage data (a CLI that doesn't know the request), the plan usage
+/// has the event's flags. The event a real Claude Code wrote for an account
+/// whose organization turned extra usage off, and an event of the usage
+/// credits' own limit, which isn't a plan window.
+#[tokio::test]
+async fn extra_usage_follows_the_event_alone_without_usage_data() {
+    let fake = Fake::new(json!([[
+        {"rate_limit": {
+            "status": "allowed_warning", "resetsAt": 1_793_152_800_u64,
+            "rateLimitType": "seven_day", "utilization": 0.71, "overageStatus": "rejected",
+            "overageDisabledReason": "org_level_disabled", "isUsingOverage": false,
+            "unifiedWindows": {
+                "five_hour": {"utilization": 0.09, "resetsAt": 1_792_764_000_u64},
+                "seven_day": {"utilization": 0.71, "resetsAt": 1_793_152_800_u64},
+            },
+            "overageEnabled": false,
+        }},
+        {"serve": 1},
+        {"rate_limit": {"status": "allowed_warning", "rateLimitType": "overage",
+                        "utilization": 0.9, "overageStatus": "allowed_warning"}},
+        complete("done"),
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run.events_until(|_| false).await;
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+
+    let usage = plan_usage_events(&events);
+    assert_eq!(usage.len(), 2, "{usage:#?}");
+    assert_eq!(
+        usage[0].extra_usage,
+        Some(arko_ai::ExtraUsage {
+            enabled: Some(false),
+            status: Some("rejected".into()),
+            disabled_reason: Some("org_level_disabled".into()),
+            ..Default::default()
+        })
+    );
+    assert!((usage[0].secondary.as_ref().unwrap().used_percent - 71.0).abs() < 1e-9);
+    let credits = usage[1];
+    assert!(credits.primary.is_none() && credits.secondary.is_none());
+    let extra = credits.extra_usage.as_ref().unwrap();
+    assert_eq!(extra.status.as_deref(), Some("allowed_warning"));
+    assert!((extra.utilization.unwrap() - 90.0).abs() < 1e-9);
+    assert_eq!(extra.monthly_limit, None);
 }
 
 #[tokio::test]

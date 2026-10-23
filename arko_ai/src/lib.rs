@@ -66,8 +66,8 @@ pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult, ToolResultImage};
 pub use trace::RequestTrace;
 pub use usage::{
-    BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanCredits, PlanUsage,
-    PlanUsageWindow, SubscriptionPlan, UsageInfo,
+    BillingKind, ContextEvent, ContextEventType, ExtraUsage, ModelCallUsage, PlanCredits,
+    PlanUsage, PlanUsageWindow, SubscriptionPlan, UsageInfo,
 };
 
 pub use embedding_client::EmbeddingClient;
