@@ -51,7 +51,9 @@ the next turn's index). Steps:
   {"serve": 1}                           answers the host's get_usage
                                          requests, waiting for one if none
                                          came yet, after "after" seconds
-                                         when it has them. A CLI that is
+                                         when it has them, and once the file
+                                         FAKE_CLAUDE_GATE names exists when
+                                         "gated" is true. A CLI that is
                                          slow never answers one that no
                                          such step serves
   {"fail": "..."}                        the turn ends in this error, with
@@ -433,6 +435,13 @@ def turn(text, message_uuid=None):
             while not state.get("held"):
                 handle(read())
             time.sleep(step.get("after", 0))
+            # Until the test has seen what it waits for, with a limit so that a
+            # failing test doesn't leave the fake waiting.
+            deadline = time.time() + 30
+            while step.get("gated") and not os.path.exists(os.environ["FAKE_CLAUDE_GATE"]):
+                if time.time() > deadline:
+                    break
+                time.sleep(0.01)
             for request_id in state.pop("held"):
                 answer_usage(request_id)
             continue

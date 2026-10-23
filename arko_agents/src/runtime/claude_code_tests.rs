@@ -38,6 +38,11 @@ impl Fake {
         self.dir.join("workspace")
     }
 
+    /// The file whose existence releases a gated `serve` step of the fake.
+    fn gate(&self) -> PathBuf {
+        self.dir.join("gate")
+    }
+
     /// What the fake answers `get_usage` with. Without it the fake gives an
     /// error, as a CLI that doesn't know the request does.
     fn answer_usage(&self, answer: Value) {
@@ -54,6 +59,7 @@ impl Fake {
             ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
             ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
             ("FAKE_CLAUDE_STATE".to_string(), path("state")),
+            ("FAKE_CLAUDE_GATE".to_string(), path("gate")),
         ]);
         if self.dir.join("usage.json").exists() {
             env.insert("FAKE_CLAUDE_USAGE".to_string(), path("usage.json"));
@@ -2594,8 +2600,13 @@ async fn extra_usage_follows_the_event_and_the_usage_data() {
         "resetsAt": 1_793_152_800_u64, "overageStatus": "allowed",
         "overageResetsAt": 1_793_152_800_u64, "unifiedWindows": windows(1.0, 0.4),
     });
+    // The fake answers once the test has seen the first report, so the order
+    // is the same on a slow machine.
     let fake = Fake::new(json!([[
-        {"rate_limit": event}, {"serve": 1}, {"rate_limit": event}, complete("done"),
+        {"rate_limit": event},
+        {"serve": 1, "gated": true},
+        {"rate_limit": event},
+        complete("done"),
     ]]));
     fake.answer_usage(json!({
         "session": {"total_cost_usd": 0.0, "total_api_duration_ms": 0, "total_duration_ms": 0,
@@ -2610,7 +2621,11 @@ async fn extra_usage_follows_the_event_and_the_usage_data() {
     }));
     let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
     let mut run = start(task);
-    let events = run.events_until(|_| false).await;
+    let mut events = run
+        .events_until(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+        .await;
+    std::fs::write(fake.gate(), "").unwrap();
+    events.extend(run.events_until(|_| false).await);
     let (task, _) = run.finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
 
