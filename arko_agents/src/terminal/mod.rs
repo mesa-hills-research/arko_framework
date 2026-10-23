@@ -1061,8 +1061,9 @@ impl TerminalManager {
     /// call, which gets 3 seconds after its stop. The background jobs it
     /// stops are listed by [`interrupted_at_open`](Self::interrupted_at_open)
     /// when the directory is opened again, which works as soon as this
-    /// returns. Dropping the manager stops its jobs the same way, without
-    /// waiting.
+    /// returns. A job that is still ending then finishes its own record,
+    /// which can replace what a newer manager wrote for it. Dropping the
+    /// manager stops its jobs the same way, without waiting.
     pub async fn shutdown(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1147,9 +1148,17 @@ fn background(jobs: &HashMap<Uuid, Arc<Job>>) -> Vec<BackgroundJob> {
 
 fn persist(config: &TerminalConfig, record: &Record) -> Result<()> {
     let directory = config.directory.join(record.job_id.to_string());
-    let temporary = directory.join("job.json.tmp");
+    // A name of its own, so a late task of a closed manager and a new manager
+    // of the directory never write one file.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = directory.join(format!(
+        "job.json.{}.tmp",
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&temporary, serde_json::to_vec(record)?)?;
-    std::fs::rename(temporary, directory.join("job.json"))?;
+    std::fs::rename(&temporary, directory.join("job.json")).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })?;
     Ok(())
 }
 
