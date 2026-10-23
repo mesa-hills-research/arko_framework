@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arko_agents::{InterceptedResult, TaskContext, Tool, ToolError, ToolResultInterceptor};
 use serde_json::{Value, json};
 
-use super::tests::{bodies_of, builder, complete, result_of, serve, start, until, within};
+use super::tests::{Gate, bodies_of, builder, complete, result_of, serve, start, until, within};
 use super::*;
 use crate::test_support::Workspace;
 
@@ -103,6 +103,34 @@ async fn delegate(reports: &[String], waits: usize, all: bool, over: usize) -> O
     }
 }
 
+/// Starts a subagent for `lead` (a run id that is no run of the workflow).
+async fn start_run(
+    workflow: &crate::Workflow,
+    workspace: &Workspace,
+    lead: uuid::Uuid,
+    task: &str,
+) {
+    let none = std::collections::BTreeMap::new();
+    let ctx = workflow.context();
+    let started = ctx
+        .subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            task,
+            None,
+            false,
+            None,
+            none,
+        )
+        .await;
+    started.unwrap();
+}
+
 /// Two reports that don't fit one result don't come in one. The first is
 /// whole in the wait, the other comes in the context update at the lead's
 /// next step, and nothing is given again at the end.
@@ -138,24 +166,7 @@ async fn a_wait_leaves_the_mail_that_does_not_fit_for_the_next() {
     let ctx = workflow.context();
     let lead = uuid::Uuid::new_v4();
     for task in ["Task 1.", "Task 2."] {
-        let none = std::collections::BTreeMap::new();
-        let started = ctx
-            .subagents
-            .start(
-                ctx,
-                lead,
-                "lead",
-                0,
-                &workspace.0,
-                "worker",
-                task,
-                None,
-                false,
-                None,
-                none,
-            )
-            .await;
-        started.unwrap();
+        start_run(&workflow, &workspace, lead, task).await;
     }
     until(|| {
         workflow
@@ -233,4 +244,69 @@ async fn a_report_cut_short_in_the_conversation_is_given_again() {
     assert_eq!(outcome.news, [1]);
     assert_eq!(outcome.pending.len(), 1);
     assert!(outcome.pending[0].resent);
+}
+
+/// A small report behind one that doesn't fit stays behind it, and a wait
+/// for all returns when its result is full though a run still works. The
+/// mail left comes in order with the next wait.
+#[tokio::test]
+async fn a_full_wait_returns_while_runs_go_on_and_keeps_the_order() {
+    let (a, b) = (report("A", 30_000), report("B", 30_000));
+    let server = serve(vec![
+        ("r1", vec![complete(&a)]),
+        ("r2", vec![complete(&b)]),
+        ("r3", vec![complete("A small report.")]),
+        ("r4", vec![("gate", json!({})), complete("Late.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    let lead = uuid::Uuid::new_v4();
+    // One after the other, so that the mail numbers follow the run numbers.
+    for (done, task) in ["Task 1.", "Task 2.", "Task 3.", "Task 4."]
+        .into_iter()
+        .enumerate()
+    {
+        start_run(&workflow, &workspace, lead, task).await;
+        if done < 3 {
+            until(|| {
+                let runs = workflow.subagents();
+                runs.iter()
+                    .filter(|run| run.state == SubagentState::Finished)
+                    .count()
+                    == done + 1
+            })
+            .await;
+        }
+    }
+    within(gate.started.notified()).await;
+    let ctx = workflow.context();
+    let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
+    let task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    let all = HashMap::from([("all".to_string(), json!(true))]);
+    let first = within(tool.execute(&task_context, all)).await.unwrap();
+    assert!(first.starts_with("Still running: r4."), "{first}");
+    assert!(first.contains("[end of mail 1]"));
+    assert!(
+        !first.contains("[mail 2]") && !first.contains("[mail 3]"),
+        "{first}"
+    );
+    assert!(first.ends_with("Mail from r2 and r3 didn't fit here and follows next."));
+    assert_eq!(workflow.pending_news(lead).len(), 2);
+    let second = within(tool.execute(&task_context, HashMap::new()))
+        .await
+        .unwrap();
+    let (two, three) = (
+        second.find("[mail 2]").unwrap(),
+        second.find("[mail 3]").unwrap(),
+    );
+    assert!(
+        two < three && second.contains("[end of mail 3]"),
+        "{second}"
+    );
+    gate.open.notify_one();
 }
