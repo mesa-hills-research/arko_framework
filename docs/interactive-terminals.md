@@ -650,8 +650,8 @@ whether an idle or completed agent continues.
 
 `manager.shutdown().await` cancels owned processes, waits for their cleanup (up to
 3 seconds, and 4 for a moved call), and prevents new starts. It then releases the
-directory, so opening it again works at once. A job that is still ending finishes its own
-record, which can replace what the new manager wrote for it. The next open lists the
+directory, so opening it again works at once. A job that is still ending then saves no
+record once a newer manager has opened the directory. The next open lists the
 background jobs it stopped with `interrupted_at_open()`. Dropping the manager requests
 cancellation. The directory stays locked until the workers finish. A wait timeout is independent of a job's
 execution deadline. PTY input handles control characters according to the

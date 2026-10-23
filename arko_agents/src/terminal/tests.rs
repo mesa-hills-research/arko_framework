@@ -447,6 +447,7 @@ async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
             label: None,
             call: None,
             stopped_by_close: false,
+            generation: manager.generation,
             monitor: None,
         },
     )
@@ -770,6 +771,7 @@ fn stripped_windows_keep_raw_offsets() {
         label: None,
         call: None,
         stopped_by_close: false,
+        generation: 0,
         monitor: None,
     });
     data.output = raw.iter().copied().collect();
@@ -1690,6 +1692,44 @@ async fn the_directory_opens_again_as_soon_as_a_shutdown_returns() {
     TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
 }
 
+/// A job whose task ends after the directory opened again (here a call that
+/// ignores its stop) leaves the record the new manager wrote, so a third
+/// open doesn't list the job as stopped again.
+#[tokio::test(start_paused = true)]
+async fn a_job_ending_after_a_reopen_leaves_the_new_managers_record() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("closed");
+    let first = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let id = first
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "fetch",
+            "fetch".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap()
+        .job_id;
+    let mut done = first.jobs.lock().unwrap()[&id].done.clone();
+    tokio::join!(
+        first.shutdown(),
+        tokio::time::advance(Duration::from_secs(10))
+    );
+    assert!(!*done.borrow(), "the call ended before the shutdown did");
+    drop(first);
+    let second = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    assert_eq!(second.interrupted_at_open().len(), 1);
+    done.wait_for(|done| *done).await.unwrap();
+    drop(second);
+    let third = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    assert!(third.interrupted_at_open().is_empty(), "listed once");
+    assert_eq!(
+        third.status(f.owner, id, None).unwrap().state,
+        JobState::Interrupted
+    );
+}
+
 /// Two writers of one job's record, such as a late task of a closed manager
 /// and the manager that opened the directory next, never share a temporary
 /// file, so no write fails and none is left behind.
@@ -1699,8 +1739,9 @@ async fn records_written_at_once_all_succeed() {
     let job = f.python("print('done')", StartOptions::default()).job_id;
     f.finished(job).await;
     let directory = f.root.join("jobs").join(job.to_string());
-    let record: Record =
+    let mut record: Record =
         serde_json::from_slice(&std::fs::read(directory.join("job.json")).unwrap()).unwrap();
+    record.generation = f.manager.generation;
     let writers: Vec<_> = (0..4)
         .map(|_| {
             let (config, record) = (f.manager.config.clone(), record.clone());
