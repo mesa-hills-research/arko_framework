@@ -560,7 +560,8 @@ impl Workflow {
     /// Changes [`SubagentsConfig::max_failed_requests`](crate::subagents::SubagentsConfig::max_failed_requests)
     /// while the workflow runs (`None` sets no cap). A subagent that is
     /// running gets the new cap at its next failed request, counting the
-    /// ones it has had in a row already.
+    /// ones it has had in a row already. It does nothing in a workflow built
+    /// without `subagents(...)`.
     pub fn set_max_failed_requests(&self, max: Option<u32>) {
         self.context.subagents.set_max_failed_requests(max);
     }
@@ -884,11 +885,13 @@ impl Workflow {
     /// `AgentNotFound` for an unregistered agent.
     ///
     /// The runs that start after the call have the new skills, such as a new
-    /// conversation of the agent and the subagents it starts later. A run
+    /// conversation of the agent and the subagents it starts later. A
+    /// subagent already queued keeps the skills it was prepared with. A run
     /// already going keeps its system prompt and skills, so its prompt cache
-    /// holds. A run that is continued, resumed or recovered takes the new
-    /// embedded skills as it takes registered ones. The change isn't saved
-    /// in checkpoints.
+    /// holds, and so does a run continued in memory. A run loaded from a save
+    /// (after `resume_from`) takes the new embedded skills, through
+    /// `load_skill` and with its prompt as it was. The change isn't saved in
+    /// checkpoints.
     pub fn set_agent_skills(
         &self,
         agent: &str,

@@ -117,7 +117,7 @@ pub(crate) struct ParallelSettings {
 }
 
 impl SharedContext {
-    /// `agent`'s registered configuration as it is now: with the skills the
+    /// `agent`'s registered configuration as it is now, with the skills the
     /// host set last.
     pub(crate) fn registered_config(&self, agent: &str) -> Option<AgentConfig> {
         let mut config = self.agent_configs.get(agent)?.clone();

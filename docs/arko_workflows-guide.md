@@ -916,7 +916,8 @@ in its task, as long as the tools it offers are still registered.
 
 A saved task doesn't hold the agent's embedded skills (`SkillsConfig::embedded`). A run that
 is continued, resumed or recovered, or kept warm with `refresh_prompt_cache`, takes the
-embedded skills its agent is registered with now. A subagent hook's changes to the
+embedded skills its agent is registered with now when its task holds none, as a task loaded
+from a save does. A task still in memory keeps the ones it holds. A subagent hook's changes to the
 configuration aren't seen there. A run the host reconfigured gets them when its own skills
 configuration is set, and has none when it isn't. A subagent has the skills of its own
 agent's configuration, not its lead's. A run keeps the system prompt it started with, so an
@@ -926,9 +927,11 @@ auto-loaded skill in the prompt and the list of on-demand skills stay as they we
 `Workflow::set_agent_skills(agent, skills)` replaces the skills configuration an agent is
 registered with while the workflow runs (`None` removes it). The runs that start after the
 call have the new skills, such as a new conversation of the agent and the subagents it
-starts later. A run already going keeps its prompt and skills, so its prompt cache holds. A
-run that is continued, resumed or recovered takes the new embedded skills as described above.
-The change isn't saved, so a resumed workflow has the skills its builder registers.
+starts later. A subagent already queued keeps the skills it was prepared with. A run already
+going keeps its prompt and skills, so its prompt cache holds, and so does a run continued in
+memory. A run loaded from a save (after `resume_from`) takes the new embedded skills, as
+described above. The change isn't saved, so a resumed workflow has the skills its builder
+registers.
 
 The event log records every event, including each streamed text and reasoning
 fragment. `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the

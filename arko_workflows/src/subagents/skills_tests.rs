@@ -484,10 +484,10 @@ async fn a_refresh_of_a_saved_run_offers_the_registered_skills() {
     );
 }
 
-/// A paused run whose task came from a save (it has no embedded skills)
-/// goes on with its agent's registered ones when it is resumed.
-#[tokio::test]
-async fn a_resumed_pause_takes_the_registered_embedded_skills() {
+/// Resumes a paused run whose task came from a save (it has no embedded
+/// skills), after the host set its agent's skills to a `review` of version
+/// `set_since` if given. Returns what the run's `load_skill` gave.
+async fn load_after_a_resumed_pause(set_since: Option<&str>) -> String {
     use crate::policy::{AgentResume, ErrorRecoveryPolicy};
     let workspace = Workspace::new();
     let server = ResponsesServer::start_async(|index, body| {
@@ -529,6 +529,9 @@ async fn a_resumed_pause_takes_the_registered_embedded_skills() {
     let crate::WorkflowError::AgentPaused { task_id, .. } = error else {
         panic!("{error:?}");
     };
+    if let Some(version) = set_since {
+        workflow.set_agent_skills("lead", review(version)).unwrap();
+    }
     // As if loaded from a save, which leaves the embedded skills out.
     let mut paused = workflow.agent_result(task_id).unwrap();
     paused.task = serde_json::from_value(serde_json::to_value(&paused.task).unwrap()).unwrap();
@@ -551,11 +554,23 @@ async fn a_resumed_pause_takes_the_registered_embedded_skills() {
         "{}",
         bodies[1]
     );
-    assert!(
-        output_of(bodies.last().unwrap(), "c1").contains("The review registered."),
-        "{}",
-        bodies.last().unwrap()
-    );
+    output_of(bodies.last().unwrap(), "c1")
+}
+
+/// A paused run whose task came from a save (it has no embedded skills)
+/// goes on with its agent's registered ones when it is resumed.
+#[tokio::test]
+async fn a_resumed_pause_takes_the_registered_embedded_skills() {
+    let loaded = load_after_a_resumed_pause(None).await;
+    assert!(loaded.contains("The review registered."), "{loaded}");
+}
+
+/// The skills the host set since the run started are the ones it goes on
+/// with, as for a run resumed from a save.
+#[tokio::test]
+async fn a_resumed_pause_takes_the_embedded_skills_set_since() {
+    let loaded = load_after_a_resumed_pause(Some("changed")).await;
+    assert!(loaded.contains("The review changed."), "{loaded}");
 }
 
 /// The host replaces an agent's skills while a subagent of it runs. That
