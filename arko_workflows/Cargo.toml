@@ -1,6 +1,6 @@
 [package]
 name = "arko_workflows"
-version = "0.1.6"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Multi-agent workflows in plain Rust, with shared memory, messaging, budgets, hooks, verification and persistence"

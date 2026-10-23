@@ -1,6 +1,6 @@
 # Arko Workflows API index
 
-Reference for `arko_workflows` 0.1.6, covering the public Rust API, the optional Python API, the agent tools a workflow injects, configuration defaults, result contracts, and execution behavior. Workflow control flow is ordinary Rust or Python code. The crate supplies the orchestration primitives.
+Reference for `arko_workflows` 0.2.0, covering the public Rust API, the optional Python API, the agent tools a workflow injects, configuration defaults, result contracts, and execution behavior. Workflow control flow is ordinary Rust or Python code. The crate supplies the orchestration primitives.
 
 Signatures are declarations with their receivers, not complete implementations. Standard imports are abbreviated, with `Arc`/`Weak`/`OnceLock` from `std::sync`, `HashMap`/`HashSet` from `std::collections`, `Path`/`PathBuf` from `std::path`, `Uuid` from `uuid`, `Value` from `serde_json`, and `Mutex`/`RwLock` from `parking_lot` unless qualified. `AgentConfig`, `Task`, `Tool`, `ToolError`, `ToolResultInterceptor`, and `InterceptionFailurePolicy` come from `arko_agents`. `LLMClient`, `Model`, and `UsageInfo` come from `arko_ai`. Builder setters consume and return `Self` unless shown otherwise. Derived standard traits are noted only where they matter to callers.
 
