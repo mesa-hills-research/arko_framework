@@ -259,6 +259,7 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     let worker = &bodies_of(&server, "r1")[0];
     assert!(worker.contains("Count the files."));
     assert!(worker.contains("started by agent `lead` (your lead)"));
+    assert!(worker.contains("Keep it under about 16 KB, and put long detail in a file"));
     // The lead may start runs and use the blocking tool; the subagent
     // talks with its lead only.
     let lead_tools = offered(&lead[0]);

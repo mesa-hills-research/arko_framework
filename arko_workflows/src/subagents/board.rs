@@ -2945,7 +2945,7 @@ fn subagent_prompt(
         None => record.task.clone(),
     };
     text.push_str(&format!(
-        "\n\n# Working as an agent run\nYou are agent run {}, started by agent `{}` (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
+        "\n\n# Working as an agent run\nYou are agent run {}, started by agent `{}` (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. Keep it under about 16 KB, and put long detail in a file and give its path. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
         record.handle, record.caller_agent
     ));
     if config.questions_to_lead {
