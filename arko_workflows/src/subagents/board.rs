@@ -3473,6 +3473,7 @@ mod update_tests {
                 delivered_at: None,
                 file: None,
                 withheld: false,
+                resent: false,
             })
             .collect();
         let snapshot = SubagentsSnapshot {

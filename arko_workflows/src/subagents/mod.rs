@@ -705,15 +705,15 @@ impl MailItem {
 
     /// The item as a context update shows it when it alone is longer than
     /// `limit` characters: its start up to a line end, then the file that
-    /// holds all of it and the line to read on from. The whole body when it
-    /// fits.
+    /// holds all of it and the line to read on from, then its end marker, so
+    /// it counts as held. The whole body when it fits.
     pub(crate) fn excerpt_within(&self, limit: usize) -> String {
         let body = self.body.trim();
         let file = self.file.as_ref().map(|file| file.display().to_string());
         let head = format!("{} {}\n", self.marker(), self.heading);
-        // Room for the note that ends the excerpt.
+        // Room for the note that ends the excerpt and the end marker.
         let used =
-            head.chars().count() + 200 + file.as_ref().map_or(0, |file| file.chars().count());
+            head.chars().count() + 230 + file.as_ref().map_or(0, |file| file.chars().count());
         let room = limit.saturating_sub(used);
         // Every line after the first is indented by two characters.
         let mut chars = 0;
@@ -737,7 +737,7 @@ impl MailItem {
             ),
             None => "[... cut here: wait_for_agents returns the whole text ...]".to_string(),
         };
-        format!("{head}{shown}\n\n{note}").replace('\n', "\n  ")
+        format!("{head}{shown}\n\n{note}\n{}", self.end_marker()).replace('\n', "\n  ")
     }
 }
 
