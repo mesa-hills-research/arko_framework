@@ -2119,7 +2119,9 @@ async fn drive_run_to_result(
     };
 
     let stopping = drive_result.as_ref().is_err_and(|error| !is_pause(error));
-    let wound_down = if stopping {
+    // Once, so what is published is what is recorded.
+    let ended = stopping.then(|| stopped_state(ctx, &drive_result));
+    let wound_down = if let Some(ended) = &ended {
         let deadline = stop_deadline(ctx, depth);
         wind_down(
             &agent_name,
@@ -2128,7 +2130,7 @@ async fn drive_run_to_result(
             &cmd_tx,
             &mut join_handle,
             deadline,
-            &stopped_state(ctx, &drive_result),
+            ended,
             ctx,
             persistence,
         )
@@ -2183,10 +2185,10 @@ async fn drive_run_to_result(
         Ok(mut task) => {
             // The runtime records its generic reason for a CancelTask; the
             // workflow knows why it sent it.
-            if stopping
+            if let Some(ended) = ended
                 && matches!(&task.current_state, TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER)
             {
-                task.set_state(stopped_state(ctx, &drive_result));
+                task.set_state(ended);
             }
             finalize_agent_task(
                 agent_name.clone(),
