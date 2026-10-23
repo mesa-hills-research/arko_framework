@@ -1891,6 +1891,7 @@ async fn an_update_with_the_operators_notes_ends_with_the_reply_hint_once() {
     ];
     let told = told_after(&workflow, &server, "worker", notes).await;
     assert_eq!(told.matches(HINT).count(), 1, "{told}");
+    assert_eq!(told.matches(NOTES_RULE).count(), 1, "{told}");
     let operator = told.find("Use the orbit method.").unwrap();
     assert!(told.find("The build is slow.").unwrap() < operator);
     assert!(told.find("Check the units.").unwrap() > operator);
@@ -1979,8 +1980,8 @@ async fn a_reply_hint_names_a_registered_agent() {
 fn an_update_places_the_hint_after_its_notes_and_the_count_of_more() {
     let notes = [posted(1, "One."), posted(2, "Two.")];
     let refs = notes.iter().collect::<Vec<_>>();
-    let none = update(&refs, 0, &HashMap::new(), None);
-    let hinted = update(&refs, 3, &HashMap::new(), Some(HINT));
+    let none = update(&refs, 0, &HashMap::new(), None, true);
+    let hinted = update(&refs, 3, &HashMap::new(), Some(HINT), true);
     assert!(!none.contains(HINT));
     assert!(
         hinted.ends_with(&format!(
@@ -2089,6 +2090,7 @@ async fn a_claude_code_agent_gets_the_operators_notes_as_a_user_message_mid_turn
         panic!("{contexts:#?}");
     };
     assert!(context.contains("Tests are slow."), "{context}");
+    assert!(context.contains(NOTES_RULE), "{context}");
     assert!(!context.contains("Skip the vendor folder."), "{context}");
     assert!(!context.contains(HINT), "{context}");
     let sent: Vec<Value> = logged()
@@ -2103,6 +2105,7 @@ async fn a_claude_code_agent_gets_the_operators_notes_as_a_user_message_mid_turn
     assert!(text.contains("Skip the vendor folder."), "{text}");
     assert!(text.contains("Prefer small files."), "{text}");
     assert!(!text.contains("Tests are slow."), "{text}");
+    assert!(!text.contains(NOTES_RULE), "{text}");
     assert_eq!(text.matches(HINT).count(), 1, "{text}");
     assert!(text.trim_end().ends_with(&format!("\n\n{HINT}")), "{text}");
     let _ = std::fs::remove_dir_all(&fake);

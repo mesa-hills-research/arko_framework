@@ -614,16 +614,18 @@ impl NoteBoard {
             // The count of notes that follow and the host's reply hint end
             // the operator's update, which comes last, or the only one.
             let (others, operator) = if operator.is_empty() {
-                (update(&others, more, &lost, None), String::new())
+                (update(&others, more, &lost, None, true), String::new())
             } else {
-                // Once per update, after the notes.
+                // Once per update, after the notes. The rule of notes is in
+                // the first of the two updates.
                 let hint = self.reply_hints.get(agent).map(String::as_str);
                 let others = if others.is_empty() {
                     String::new()
                 } else {
-                    update(&others, 0, &lost, None)
+                    update(&others, 0, &lost, None, true)
                 };
-                (others, update(&operator, more, &lost, hint))
+                let rule = others.is_empty();
+                (others, update(&operator, more, &lost, hint, rule))
             };
             NotesUpdate {
                 others,
@@ -1126,12 +1128,14 @@ fn section(notes: &[&PostedNote]) -> String {
 /// New notes for a running agent's context update, oldest first, and how
 /// many more come at its next turn boundary. `lost` counts, by note number,
 /// the images that can't be given. `hint` is the host's line that ends the
-/// update, as its own paragraph.
+/// update, as its own paragraph. `rule` says whether the update states the
+/// rule of notes (the update that comes with another one doesn't repeat it).
 fn update(
     notes: &[&PostedNote],
     more: usize,
     lost: &HashMap<u64, usize>,
     hint: Option<&str>,
+    rule: bool,
 ) -> String {
     let intro = if notes.len() == 1 {
         "A new note on your task."
@@ -1144,7 +1148,12 @@ fn update(
         more => format!("\n- ({more} more notes follow at your next turn.)"),
     };
     let hint = hint.map(|hint| format!("\n\n{hint}")).unwrap_or_default();
-    format!("{intro} {NOTES_RULE}{}{more}{hint}", items(notes, lost))
+    let rule = if rule {
+        format!(" {NOTES_RULE}")
+    } else {
+        String::new()
+    };
+    format!("{intro}{rule}{}{more}{hint}", items(notes, lost))
 }
 
 /// Posts notes to a running workflow from any task or thread.
