@@ -514,15 +514,16 @@ impl Board {
 
     /// Run `task.id` ended as `task`: the mail it was given that its task
     /// holds leaves the mailbox, and the mail its task doesn't hold (given
-    /// as it ended, or after its last save) is given again. A run the host
-    /// drives with mail waiting gets `NewsWaiting`.
+    /// as it ended, or after its last save) is given again, except mail
+    /// withheld from it. A run the host drives with mail waiting gets
+    /// `NewsWaiting`.
     pub(crate) fn settle_run(&self, ctx: &Arc<SharedContext>, task: &Task) {
         let delivered = {
             let state = self.state.lock();
             state
                 .mail
                 .iter()
-                .filter(|item| item.to == task.id && item.delivered_at.is_some())
+                .filter(|item| item.to == task.id && item.delivered_at.is_some() && !item.withheld)
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -538,7 +539,7 @@ impl Board {
         {
             let mut state = self.state.lock();
             state.mail.retain_mut(|item| {
-                if item.to != task.id || item.delivered_at.is_none() {
+                if item.to != task.id || item.delivered_at.is_none() || item.withheld {
                     return true;
                 }
                 if held.contains(&item.id) {
@@ -614,7 +615,7 @@ impl Board {
             state
                 .mail
                 .iter()
-                .filter(|item| item.to == task.id && item.delivered_at.is_some())
+                .filter(|item| item.to == task.id && item.delivered_at.is_some() && !item.withheld)
                 .cloned()
                 .collect::<Vec<_>>()
         };

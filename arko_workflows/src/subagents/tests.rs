@@ -1592,6 +1592,9 @@ async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
     let records = workflow.subagents();
     assert!(records[0].detached);
     assert_eq!(records[0].report.as_deref(), Some("There are 3 files."));
+    // The check at the end of the lead's run leaves the report set aside.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(workflow.pending_news(again.agent_run_id).is_empty());
 }
 
 /// A subagent's prompt cache is refreshed with the tools of its own
