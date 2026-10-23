@@ -301,7 +301,7 @@ impl LLMClient {
             return Some(client);
         }
         match &self.openai_accounts {
-            Some(accounts) => Some(accounts.preferred_client().clone()),
+            Some(accounts) => Some(accounts.preferred_client()),
             None => self.openai_client.clone(),
         }
     }

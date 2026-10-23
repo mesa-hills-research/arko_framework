@@ -600,6 +600,21 @@ impl OpenAIClient {
         }
     }
 
+    /// This client with `signed_in`'s credentials (and what belongs to
+    /// them: its store, its epoch, whether summaries are refused), keeping
+    /// this client's settings. For an entry of a ChatGPT account list that
+    /// signs in as another account.
+    pub(crate) fn with_sign_in_of(&self, signed_in: &OpenAIClient) -> OpenAIClient {
+        OpenAIClient {
+            auth: signed_in.auth.clone(),
+            credential_store: signed_in.credential_store.clone(),
+            warn_unsaved_rotation: signed_in.warn_unsaved_rotation,
+            auth_epoch: signed_in.auth_epoch.clone(),
+            summaries_refused: signed_in.summaries_refused.clone(),
+            ..self.clone()
+        }
+    }
+
     /// Sends Responses requests to `{base_url}/responses` instead of the
     /// default for the auth mode (`https://api.openai.com/v1` for API keys,
     /// `https://chatgpt.com/backend-api/codex` for ChatGPT OAuth), for example
