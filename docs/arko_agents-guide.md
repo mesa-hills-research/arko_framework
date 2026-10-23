@@ -1432,11 +1432,12 @@ Claude Code's `rate_limit_event` is reported as
 secondary) and attached to the requests after it, and the plan-usage threshold applies.
 The event's flags about extra usage are in `PlanUsage::extra_usage`. Each run asks Claude Code
 for its usage data (`get_usage`) without waiting when its turn starts, so a chat asks at each
-message, and an event asks again when the last ask is over five minutes old. Every turn asks
-once more as it ends and waits up to three seconds for the answer, so the plan usage is current
-when the turn is over. The answer adds the monthly limit, the credits used, the currency and its
-decimal places to a report of its own when it comes after an event, and to the reports after it.
-A Claude Code that doesn't answer leaves the flags alone.
+message, and an event asks again when the last ask is over five minutes old. A turn that ends
+with plan usage reported asks once more and waits up to a second for the answer, so the plan usage
+is current when the turn is over. A task that already completed doesn't ask. The answer adds the
+monthly limit, the credits used, the currency and its decimal places to a report of its own when
+it comes after an event, and to the reports after it. A Claude Code that doesn't answer leaves
+the flags alone.
 `Pause` interrupts the turn and pauses as a monitor. `SlowDown` holds each tool call (and
 so the request after it) for its delay while usage stays over the threshold, and a
 cancellation or suspension ends the hold at once. A turn that fails while Claude Code

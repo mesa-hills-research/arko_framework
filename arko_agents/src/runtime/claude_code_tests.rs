@@ -2591,8 +2591,8 @@ fn plan_usage_events(events: &[AgentEvent]) -> Vec<&arko_ai::PlanUsage> {
 }
 
 /// The event's flags about extra usage reach the plan usage, and Claude
-/// Code's usage data (`get_usage`, asked once however many events come, and
-/// again as the turn ends) adds the amounts to it and to the events after it.
+/// Code's usage data (`get_usage`, asked once however many events come) adds
+/// the amounts to it and to the events after it.
 #[tokio::test]
 async fn extra_usage_follows_the_event_and_the_usage_data() {
     let event = json!({
@@ -2630,7 +2630,7 @@ async fn extra_usage_follows_the_event_and_the_usage_data() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
 
     let usage = plan_usage_events(&events);
-    assert_eq!(usage.len(), 4, "{usage:#?}");
+    assert_eq!(usage.len(), 3, "{usage:#?}");
     let flags = usage[0].extra_usage.as_ref().unwrap();
     assert!(flags.in_use);
     assert_eq!(flags.status.as_deref(), Some("allowed"));
@@ -2648,7 +2648,7 @@ async fn extra_usage_follows_the_event_and_the_usage_data() {
         assert_eq!(extra.currency.as_deref(), Some("USD"));
         assert_eq!(extra.decimal_places, Some(2));
     }
-    assert_eq!(fake.logged("get_usage").len(), 2);
+    assert_eq!(fake.logged("get_usage").len(), 1);
     assert_eq!(fake.logged("get_usage")[0]["skip_behaviors"], true);
 }
 
@@ -2710,6 +2710,16 @@ async fn the_amounts_are_asked_again_as_a_turn_ends() {
         .collect();
     assert_eq!(used, [Some(27_140.0), Some(27_390.0)], "{usage:#?}");
     assert_eq!(fake.logged("get_usage").len(), 2);
+    // The last report comes before the state that ends the task.
+    let position = |wanted: fn(&AgentEvent) -> bool| events.iter().rposition(wanted).unwrap();
+    assert!(
+        position(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+            < position(|event| matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::Completed { .. })
+            )),
+        "{events:#?}"
+    );
 }
 
 /// Claude Code's own decimal places are kept, and the others are two, or none

@@ -99,7 +99,7 @@ const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
 /// before an event asks for it again.
 const USAGE_READ_EVERY: Duration = Duration::from_secs(300);
 /// How long the end of a turn waits for Claude Code's answer about its usage.
-const USAGE_END_WAIT: Duration = Duration::from_secs(3);
+const USAGE_END_WAIT: Duration = Duration::from_secs(1);
 
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
@@ -340,7 +340,7 @@ fn input_blocks<'a>(contents: impl Iterator<Item = &'a ai::Content>) -> Value {
                 ai::Content::Text(text) => Some(json!({"type": "text", "text": text})),
                 ai::Content::Image(ai::Image::Base64 { data, mime_type }) => Some(json!({
                     "type": "image",
-                    "source": {"type": "base64", "data": data, "media_type": mime_type},
+                    "source": {"type": "base64", "data": &**data, "media_type": mime_type},
                 })),
                 ai::Content::Image(ai::Image::Url(url)) => {
                     Some(json!({"type": "text", "text": format!("Image: {url}")}))
@@ -4216,8 +4216,13 @@ impl ClaudeCodeRun {
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
         // The amounts of extra usage after this turn are asked for as it
-        // ends, so the plan usage is current once the turn is over.
-        if self.stopping.is_none() {
+        // ends, so the plan usage is current once the turn is over. A task
+        // that already ended has no reader for a report, and without a plan
+        // usage there is nothing to add the amounts to.
+        if self.stopping.is_none()
+            && !self.task.current_state.is_terminal()
+            && self.plan_usage.is_some()
+        {
             self.ask_usage(session).await;
             self.take_usage_answer().await?;
         }
