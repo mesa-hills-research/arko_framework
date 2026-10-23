@@ -569,6 +569,11 @@ pub struct MailItem {
     /// [`MAX_MAIL_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
+    /// It was given before, but its recipient's conversation didn't hold it
+    /// when the run ended (a result the runtime shortened, say), so it goes
+    /// out again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resent: bool,
     /// Not given to its recipient. It is from a subagent the recipient's
     /// conversation no longer started ([`SubagentRecord::detached`]). It
     /// stays in the records for the host to show, and `delivered_at` is when
@@ -743,7 +748,8 @@ pub enum SubagentEventKind {
     /// The lead (`caller_run_id`) isn't running and has news waiting, and
     /// mailbox items `mail_ids` are for it. Start a turn of it (continue
     /// or restart its run), and the news arrives at its first turn
-    /// boundary. It may come more than once for the same news. Check
+    /// boundary. It may come more than once for the same news, and an item
+    /// that goes out again has [`MailItem::resent`]. Check
     /// [`Workflow::pending_news`](crate::Workflow::pending_news).
     NewsWaiting { mail_ids: Vec<u64> },
     /// Its isolated workspace was removed.

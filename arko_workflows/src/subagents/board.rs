@@ -357,6 +357,7 @@ impl Board {
             at: now,
             delivered_at: withheld.then_some(now),
             file,
+            resent: false,
             withheld,
         };
         state.mail.push(item.clone());
@@ -544,6 +545,7 @@ impl Board {
                     return false;
                 }
                 item.delivered_at = None;
+                item.resent = true;
                 true
             });
         }
@@ -2788,6 +2790,7 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             at: Utc::now(),
             delivered_at: None,
             file: None,
+            resent: false,
             withheld: false,
         });
     }

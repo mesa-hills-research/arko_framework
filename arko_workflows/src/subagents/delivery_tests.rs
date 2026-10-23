@@ -223,7 +223,7 @@ async fn reports_that_fit_come_together() {
 
 /// A result the runtime cut before the end of a report doesn't count as
 /// delivered, though it holds the report's first marker. The report goes out
-/// again.
+/// again, marked.
 #[tokio::test]
 async fn a_report_cut_short_in_the_conversation_is_given_again() {
     let outcome = delegate(&[report("A", 5_000)], 1, false, 3_000).await;
@@ -232,4 +232,5 @@ async fn a_report_cut_short_in_the_conversation_is_given_again() {
     assert!(waited.contains("[mail 1]") && !waited.contains("[end of mail 1]"));
     assert_eq!(outcome.news, [1]);
     assert_eq!(outcome.pending.len(), 1);
+    assert!(outcome.pending[0].resent);
 }
