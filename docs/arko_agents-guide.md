@@ -383,6 +383,10 @@ open the path `resolve_path` returns, so the check judges the path the tool open
 End-user command tools receive that path. A non-string value for an `is_path` parameter
 is rejected.
 
+A path that starts with `~` (`~` alone, `~/...`, and `~\...` on Windows) is always outside,
+because Claude Code's search tools and programs a tool starts may expand it to the home
+directory.
+
 The check compares the resolved path with the working directory component by component.
 On Windows it ignores ASCII case (`c:\work\x` is inside `C:\Work`) and matches a verbatim
 prefix with its ordinary form (`\\?\C:\` with `C:\`, `\\?\UNC\server\share` with
