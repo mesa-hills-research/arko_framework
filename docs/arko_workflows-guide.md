@@ -942,13 +942,18 @@ stops an agent. `WorkflowBuilder::resume_from(path)` restores this state into a 
 workflow. See [persistence](../arko_workflows/INDEX.md#persistence-and-checkpoint-state) for what is
 restored and what must be configured again.
 
-A resume reads the task file of a run that completed only when its task is needed, so
-a long session with many finished agents opens fast and keeps their conversations out
-of memory until one is used. Its result has what lists and notices need
-(`AgentResult::info`, with the configuration, first prompt, times, parent and usage
-totals), and `AgentResult::task()` reads the task, once, the first time it's called.
-Continuing the run reads it too. A task file that can't be read fails there with
-`WorkflowError::Persistence`, not at the resume.
+A resume in its checkpoint's run directory reads the task file of a run that completed
+only when its task is needed, so a long session with many finished agents opens fast
+and keeps their conversations out of memory until one is used. Its result has what
+lists and notices need (`AgentResult::info`, with the configuration, first prompt,
+times, parent and usage totals), and `AgentResult::task()` reads the task, once, the
+first time it's called. Continuing the run reads it too. A task file that can't be
+read fails there with `WorkflowError::Persistence`, not at the resume. This needs a
+checkpoint that describes each run's task (`AgentRunRecord::info`). One saved before
+records described tasks reads every task at the resume until the next checkpoint is
+saved, and so does a resume into another run directory. Runs that failed, paused,
+were cancelled or interrupted, or completed in a stop's wrap-up are always read at the
+resume.
 
 ## Custom tools
 

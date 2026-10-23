@@ -204,7 +204,7 @@ impl RunTask {
                     unreachable!("a task without a file is given");
                 };
                 let mut warnings = Vec::new();
-                let task = file.read(&mut warnings).map_err(|error| error.to_string());
+                let task = file.read(&mut warnings);
                 if let Ok(task) = &task {
                     warnings.extend(file.state_warning(task));
                 }

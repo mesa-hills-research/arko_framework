@@ -188,11 +188,9 @@ impl TaskFile {
     }
 
     /// Reads the task, with a warning in `warnings` for its images no longer
-    /// available.
-    pub(crate) fn read(
-        &self,
-        warnings: &mut Vec<String>,
-    ) -> Result<arko_agents::Task, crate::WorkflowError> {
+    /// available. Fails with what a [`WorkflowError::Persistence`](crate::WorkflowError::Persistence)
+    /// says.
+    pub(crate) fn read(&self, warnings: &mut Vec<String>) -> Result<arko_agents::Task, String> {
         std::fs::read_to_string(&self.path)
             .map_err(crate::WorkflowError::from)
             .and_then(|json| {
@@ -213,12 +211,12 @@ impl TaskFile {
                 }
                 Ok(task)
             })
-            .map_err(|error| {
-                crate::WorkflowError::Persistence(format!(
+            .map_err(|error: crate::WorkflowError| {
+                format!(
                     "the checkpoint's task file {} for agent '{}' can't be loaded: {error}",
                     self.path.display(),
                     self.agent_name
-                ))
+                )
             })
     }
 
@@ -287,6 +285,13 @@ impl WorkflowState {
     ) -> Result<(Vec<AgentResult>, Vec<String>), crate::WorkflowError> {
         let mut results = self.agent_results.clone();
         let mut warnings = Vec::new();
+        // Absolute, as the tasks read on demand are read later, maybe after
+        // the process changed its working directory.
+        let run_dir = &std::path::absolute(if run_dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            run_dir
+        })?;
         // The tasks' images are in the run directory's image files.
         let images = super::images::ImageFiles::in_run_dir(run_dir);
         for record in &self.agent_runs {
@@ -302,7 +307,9 @@ impl WorkflowState {
                 results.push(AgentResult::of_record(record, task));
                 continue;
             }
-            let task = file.read(&mut warnings)?;
+            let task = file
+                .read(&mut warnings)
+                .map_err(crate::WorkflowError::Persistence)?;
             if let Some(missing) = missing {
                 let mut result = AgentResult::of_task(record.agent_name.clone(), task);
                 result.stopped_by = record.stopped_by.clone();
@@ -552,5 +559,108 @@ mod tests {
             arko_agents::TaskState::Cancelled { .. }
         ));
         assert!(state.cancellation.is_none());
+    }
+
+    /// A checkpoint of one completed run of agent `coder`, whose task file is
+    /// in `run_dir` and whose record describes its task (`info`) or not.
+    fn one_completed_run(run_dir: &std::path::Path, info: bool) -> WorkflowState {
+        let mut task = arko_agents::Task::new(
+            crate::test_support::agent_config("Coder"),
+            "prompt".into(),
+            run_dir.into(),
+            None,
+        );
+        task.set_state(arko_agents::TaskState::Completed {
+            summary: "done".into(),
+        });
+        let file = format!("agents/{}/version.json", task.id);
+        std::fs::create_dir_all(run_dir.join(&file).parent().unwrap()).unwrap();
+        std::fs::write(run_dir.join(&file), serde_json::to_string(&task).unwrap()).unwrap();
+        let mut record = AgentRunRecord::of(&AgentResult::of_task("coder".into(), task), file);
+        if !info {
+            record.info = None;
+        }
+        serde_json::from_value(serde_json::json!({
+            "workflow_name": "state-test",
+            "checkpoint_id": uuid::Uuid::new_v4(),
+            "timestamp": "2026-10-01T00:00:00Z",
+            "memory_snapshot": [],
+            "message_queues": {},
+            "budget_spent": 0.0,
+            "agent_runs": [record],
+        }))
+        .unwrap()
+    }
+
+    /// A task file that can't be read fails with the same error whether its
+    /// task is read at once (a record without `info`) or on demand.
+    #[test]
+    fn a_task_file_that_cant_be_read_fails_alike_at_once_and_on_demand() {
+        let workspace = crate::test_support::Workspace::new();
+        let described = one_completed_run(&workspace.0, true);
+        let older = one_completed_run(&workspace.0, false);
+        std::fs::remove_dir_all(workspace.0.join("agents")).unwrap();
+        let results = described.agent_results_in(&workspace.0).unwrap();
+        let on_demand = results[0].task().unwrap_err();
+        let at_once = older.agent_results_in(&workspace.0).unwrap_err();
+        let message = |error: &crate::WorkflowError| match error {
+            crate::WorkflowError::Persistence(message) => message
+                .replace(&described.agent_runs[0].task_file, "TASK FILE")
+                .replace(&older.agent_runs[0].task_file, "TASK FILE"),
+            error => panic!("{error}"),
+        };
+        assert_eq!(message(&on_demand), message(&at_once));
+        assert_eq!(
+            on_demand.to_string().matches("Persistence error").count(),
+            1
+        );
+    }
+
+    /// Set for [`the_child_of_the_directory_test`].
+    const DIRECTORY_CHILD: &str = "ARKO_TEST_DIRECTORY_CHILD";
+
+    /// A task read on demand is read from the run directory the checkpoint
+    /// was read from, also after the process changed its working directory.
+    /// The process here is a child of the test, which changes its directory.
+    #[test]
+    fn a_task_read_on_demand_is_read_from_the_run_directory_given() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let test = format!("{module}::the_child_of_the_directory_test");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(DIRECTORY_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(
+            report.contains("1 passed"),
+            "the child test didn't run: {report}"
+        );
+    }
+
+    /// The part of the test above that changes the working directory, in a
+    /// process of its own. Alone it does nothing.
+    #[test]
+    fn the_child_of_the_directory_test() {
+        if std::env::var_os(DIRECTORY_CHILD).is_none() {
+            return;
+        }
+        let workspace = crate::test_support::Workspace::new();
+        let state = one_completed_run(&workspace.0, true);
+        let start = std::env::current_dir().unwrap();
+        std::env::set_current_dir(workspace.0.parent().unwrap()).unwrap();
+        let relative = std::path::Path::new(workspace.0.file_name().unwrap());
+        let results = state.agent_results_in(relative).unwrap();
+        std::env::set_current_dir(&workspace.0).unwrap();
+        let read = results[0]
+            .task()
+            .map(|task| task.initial_task_prompt.clone());
+        std::env::set_current_dir(start).unwrap();
+        assert_eq!(read.unwrap(), "prompt");
     }
 }
