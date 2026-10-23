@@ -55,7 +55,8 @@ the next turn's index). Steps:
                                          FAKE_CLAUDE_GATE names exists when
                                          "gated" is true. A CLI that is
                                          slow never answers one that no
-                                         such step serves
+                                         such step serves during a turn,
+                                         and answers any between turns
   {"fail": "..."}                        the turn ends in this error, with
                                          "terminal_reason" (such as
                                          "prompt_too_long") when given
@@ -109,7 +110,7 @@ import sys
 import uuid
 
 ARGS = sys.argv[1:]
-state = {"counter": 0, "hooks": {}, "interrupted": False, "message": 0}
+state = {"counter": 0, "hooks": {}, "interrupted": False, "message": 0, "usage_answers": 0}
 
 
 def flag(*names):
@@ -216,10 +217,15 @@ def reply(request_id, response):
 
 
 def answer_usage(request_id):
-    # The file FAKE_CLAUDE_USAGE names is the answer. Without one, the CLI
+    # The file FAKE_CLAUDE_USAGE names is the answer, or a list of answers
+    # given in turn (the last one again after that). Without one, the CLI
     # doesn't know the request.
     if os.environ.get("FAKE_CLAUDE_USAGE"):
-        reply(request_id, json.load(open(os.environ["FAKE_CLAUDE_USAGE"])))
+        answer = json.load(open(os.environ["FAKE_CLAUDE_USAGE"]))
+        if isinstance(answer, list):
+            answer = answer[min(state["usage_answers"], len(answer) - 1)]
+            state["usage_answers"] += 1
+        reply(request_id, answer)
     else:
         send({"type": "control_response", "response": {
             "subtype": "error", "request_id": request_id,
@@ -560,7 +566,11 @@ def handle(message):
             reply(message["request_id"], {})
         elif subtype == "get_usage":
             log("get_usage", skip_behaviors=request.get("skip_behaviors"))
-            state.setdefault("held", []).append(message["request_id"])
+            if state.get("working"):
+                state.setdefault("held", []).append(message["request_id"])
+            else:
+                # Between turns it answers at once.
+                answer_usage(message["request_id"])
         else:
             reply(message["request_id"], {})
     elif message.get("type") == "user":
