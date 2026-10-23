@@ -255,8 +255,10 @@ impl ClaudeSession {
         self.session_id.lock().unwrap().clone()
     }
 
-    /// Sends a user message, starting a turn (or queueing it behind the
-    /// running one). Returns its UUID, which names it in the session's
+    /// Sends a user message, starting a turn. Sent during a turn, it doesn't
+    /// wait for the turn to end. The CLI gives it to the model at the next
+    /// tool boundary, in a system message after the tool result, and the
+    /// turn doesn't split. Returns its UUID, which names it in the session's
     /// transcript (for [`SessionStart::Resume`](super::SessionStart::Resume)'s
     /// `at`).
     pub async fn send(&self, text: impl Into<String>) -> Result<String, ClaudeError> {
@@ -266,14 +268,31 @@ impl ClaudeSession {
     /// Sends a user message with content blocks (text, images), and returns
     /// its UUID as [`send`](Self::send) does.
     pub async fn send_content(&self, content: Value) -> Result<String, ClaudeError> {
+        self.write_user(content, false).await
+    }
+
+    /// Sends text the user typed themselves (marked with `origin` `human`),
+    /// and returns its UUID as [`send`](Self::send) does. Sent during a turn,
+    /// the CLI gives it to the model at the next tool boundary as a text block
+    /// after the tool result, in the same user message, instead of a system
+    /// message. The CLI doesn't say when the model gets it, so this returns
+    /// once the message is written.
+    pub async fn send_human(&self, text: impl Into<String>) -> Result<String, ClaudeError> {
+        self.write_user(Value::String(text.into()), true).await
+    }
+
+    async fn write_user(&self, content: Value, human: bool) -> Result<String, ClaudeError> {
         let uuid = uuid::Uuid::new_v4().to_string();
-        let message = json!({
+        let mut message = json!({
             "type": "user",
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": null,
             "session_id": self.session_id().unwrap_or_else(|| "default".into()),
             "uuid": uuid,
         });
+        if human {
+            message["origin"] = json!({"kind": "human"});
+        }
         self.write(&message).await.map(|()| uuid)
     }
 

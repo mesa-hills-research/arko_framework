@@ -1295,7 +1295,7 @@ session.close().await?;
 
 | Capability | How |
 | --- | --- |
-| Turns | One process per conversation. `send` starts a turn, `receive_turn` collects it up to its `Result` |
+| Turns | One process per conversation. `send` starts a turn, `receive_turn` collects it up to its `Result`. A message sent during a turn doesn't wait for its end. The CLI gives it to the model at the next tool boundary, in a system message after the tool result, and the turn doesn't split. `send_human` marks the text as the user's own (`origin` `human`), and the CLI then gives it as a text block after the tool result, in the same user message |
 | Model and effort | `--model` and `--effort` per process. `set_model` switches the model mid-session. To change effort, start a new session with `SessionStart::Resume` |
 | System prompt | `system_prompt` (`--system-prompt` or `--append-system-prompt`). Claude Code records a conversation's prompt at its first request and sends that record on every later request and resume, until a compaction. `system_prompt_snapshot: Some(false)` (`--system-prompt-snapshot off`) sends the prompt the launch passes instead, for a resumed conversation whose prompt changed. Each later launch needs it too |
 | Conversation history | Claude Code keeps the transcript. Hold on to `session_id()` and resume with `SessionStart::Resume { session, fork, at }`, where `at` goes on from an earlier message (the UUID `send` returns, or a message's `uuid`). `SessionStart::WithId` names a new session, and `SessionStart::Fork { session, at, new_session }` copies one (up to `at`) into a new session with the ID `new_session`, leaving the original as it was |
