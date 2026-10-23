@@ -291,7 +291,7 @@ pub(crate) struct NoteBoard {
     warned: Mutex<HashSet<String>>,
     /// The notes' images by name, in a run that isn't persisted (a
     /// persisted run's are in its image files).
-    images: Mutex<HashMap<String, String>>,
+    images: Mutex<HashMap<String, Arc<str>>>,
     /// The notes' images fitted for a model's limits, by name and limits,
     /// fitted once for the recipients that share them.
     fitted: Mutex<HashMap<(String, String), arko_ai::Image>>,
@@ -376,7 +376,7 @@ impl NoteBoard {
         };
         let data = match (self.images.lock().get(name).cloned(), &self.events) {
             (Some(data), _) => data,
-            (None, Some(persistence)) => persistence.images().load(name, mime_type)?,
+            (None, Some(persistence)) => persistence.images().load(name, mime_type)?.into(),
             (None, None) => return Err(format!("this run doesn't keep an image named {name}")),
         };
         Ok(arko_ai::Image::Base64 {

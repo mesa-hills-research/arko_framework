@@ -54,10 +54,16 @@ impl Content {
 /// {"data": .., "mime_type": ..}}`. Inside
 /// [`with_image_store`](crate::image_store::with_image_store), a base64
 /// image is saved in the store and written as a reference instead.
+///
+/// The base64 data is shared, so a clone of a message or a conversation
+/// holds the same bytes as the original.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Image {
     Url(String),
-    Base64 { data: String, mime_type: String },
+    Base64 {
+        data: std::sync::Arc<str>,
+        mime_type: String,
+    },
 }
 
 impl Image {
@@ -67,7 +73,7 @@ impl Image {
 
     pub fn new_base64(data: &str, mime_type: &str) -> Self {
         Image::Base64 {
-            data: data.to_string(),
+            data: data.into(),
             mime_type: mime_type.to_string(),
         }
     }
@@ -76,7 +82,9 @@ impl Image {
     pub fn from_bytes(bytes: &[u8], mime_type: &str) -> Self {
         use base64::Engine as _;
         Image::Base64 {
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            data: base64::engine::general_purpose::STANDARD
+                .encode(bytes)
+                .into(),
             mime_type: mime_type.to_string(),
         }
     }
@@ -364,6 +372,26 @@ impl Message {
 mod tests {
     use super::*;
     use crate::tool::{ToolResult, ToolResultImage};
+
+    /// A message saved when an image's data was a `String` reads back and is
+    /// written the same. A clone shares the data instead of copying it.
+    #[test]
+    fn an_image_saved_as_a_string_reads_back_and_clones_share_its_bytes() {
+        let saved = r#"{"role":"User","content":[{"Image":{"Base64":{"data":"cGl4ZWxz","mime_type":"image/png"}}}],"reasoning_artifact":null,"id":null}"#;
+        let message: Message = serde_json::from_str(saved).unwrap();
+        assert_eq!(
+            message.content[0].as_image(),
+            Some(&Image::new_base64("cGl4ZWxz", "image/png"))
+        );
+        assert_eq!(serde_json::to_string(&message).unwrap(), saved);
+
+        let copy = message.clone();
+        let data = |message: &Message| match message.content[0].as_image() {
+            Some(Image::Base64 { data, .. }) => data.as_ptr(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(data(&copy), data(&message));
+    }
 
     #[test]
     fn images_inside_tool_results_count_and_are_removed_too() {

@@ -84,7 +84,7 @@ impl Image {
     /// A placeholder for an image that is gone, saying why.
     pub fn unavailable(reason: &str) -> Self {
         Image::Base64 {
-            data: reason.to_string(),
+            data: reason.into(),
             mime_type: MISSING_IMAGE_TYPE.to_string(),
         }
     }
@@ -114,7 +114,7 @@ impl Serialize for Image {
                 let mut variant = serializer.serialize_struct_variant("Image", 1, "Base64", 2)?;
                 match &stored {
                     Some(reference) => variant.serialize_field("stored", reference)?,
-                    None => variant.serialize_field("data", data)?,
+                    None => variant.serialize_field("data", &**data)?,
                 }
                 variant.serialize_field("mime_type", mime_type)?;
                 variant.end()
@@ -145,7 +145,10 @@ impl<'de> Deserialize<'de> for Image {
                 data: Some(data),
                 mime_type,
                 ..
-            } => Image::Base64 { data, mime_type },
+            } => Image::Base64 {
+                data: data.into(),
+                mime_type,
+            },
             Repr::Base64 {
                 data: None,
                 mime_type,
@@ -157,7 +160,10 @@ impl<'de> Deserialize<'de> for Image {
                     ))
                 })?;
                 match store.load(&reference, &mime_type) {
-                    Ok(data) => Image::Base64 { data, mime_type },
+                    Ok(data) => Image::Base64 {
+                        data: data.into(),
+                        mime_type,
+                    },
                     Err(reason) => {
                         log::warn!("An image can't be read back: {reason}");
                         Image::unavailable(&reason)

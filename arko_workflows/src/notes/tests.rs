@@ -351,7 +351,7 @@ async fn a_note_says_so_when_an_image_of_it_is_lost() {
     // Only the two images that are left come, each after its label.
     assert_eq!(body.matches("data:image/png;base64,").count(), 2, "{body}");
     for kept in [data(&image(b'1')), data(&image(b'4'))] {
-        assert!(body.contains(&kept), "{body}");
+        assert!(body.contains(&*kept), "{body}");
     }
     assert!(text.contains("Image 1 of note 1:"), "{text}");
     assert!(
@@ -1045,7 +1045,7 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     let continued = resumed.continue_agent(&worker, "Carry on.").await.unwrap();
     assert_eq!(continued.status, AgentRunStatus::Completed);
     let body = server.bodies().last().unwrap().clone();
-    assert_eq!(body.matches(data.as_str()).count(), 2, "{body}");
+    assert_eq!(body.matches(&**data).count(), 2, "{body}");
     // The conversation holds them now, and its saved versions name them.
     let held = continued
         .task

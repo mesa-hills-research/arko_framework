@@ -232,7 +232,7 @@ mod tests {
         else {
             panic!("no image");
         };
-        assert_eq!(data, &image_data(9));
+        assert_eq!(&**data, image_data(9));
 
         task.conversation.messages[4]
             .content
@@ -276,7 +276,7 @@ mod tests {
 
     fn image_data(fill: u8) -> String {
         match image(fill) {
-            Image::Base64 { data, .. } => data,
+            Image::Base64 { data, .. } => data.to_string(),
             Image::Url(_) => unreachable!(),
         }
     }

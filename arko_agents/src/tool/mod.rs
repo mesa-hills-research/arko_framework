@@ -59,7 +59,7 @@ impl ToolImage {
         Self {
             description: description.into(),
             image: arko_ai::Image::Base64 {
-                data,
+                data: data.into(),
                 mime_type: mime_type.to_string(),
             },
         }

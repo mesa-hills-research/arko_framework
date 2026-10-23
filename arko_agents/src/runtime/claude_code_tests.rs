@@ -3635,9 +3635,9 @@ async fn completed_tool_images_survive_a_stop_before_claude_code_records_the_res
     let call = &saved.running_tool_calls[0];
     assert_eq!(call.output_images.len(), 1);
     assert_eq!(call.output_images[0].image, image);
-    assert!(!call.output.as_ref().unwrap().contains(data));
+    assert!(!call.output.as_ref().unwrap().contains(&**data));
     assert!(
-        !format!("{call:?}").contains(data),
+        !format!("{call:?}").contains(&**data),
         "debug must omit pixels"
     );
     // The CLI's hook in this fixture returns text only. The host must have

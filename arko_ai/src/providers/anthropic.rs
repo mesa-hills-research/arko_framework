@@ -1299,7 +1299,7 @@ impl AnthropicClient {
                 source: AnthropicImageSource {
                     type_: "base64".to_string(),
                     media_type: mime_type.clone(),
-                    data: data.clone(),
+                    data: data.to_string(),
                 },
             }),
         }
