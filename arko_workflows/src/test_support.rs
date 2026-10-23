@@ -22,6 +22,9 @@ pub(crate) enum Reply {
         stream: String,
         headers: Vec<String>,
     },
+    /// A 200 response that closes after the first `sent` bytes of the
+    /// server-sent events it announced, as when a connection drops.
+    Cut { stream: String, sent: usize },
     /// An error status, with an optional `Retry-After` in seconds.
     Status {
         status: u16,
@@ -44,6 +47,11 @@ impl Reply {
                     .map(|header| format!("{header}\r\n"))
                     .collect::<String>(),
                 stream.len()
+            ),
+            Self::Cut { stream, sent } => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                stream.len(),
+                &stream[..*sent]
             ),
             Self::Status {
                 status,
