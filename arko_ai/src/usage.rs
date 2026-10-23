@@ -138,7 +138,8 @@ pub struct ExtraUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<u64>,
     /// The monthly spend limit, in minor units of [`currency`](Self::currency)
-    /// (cents for USD). `None` is no limit, or not read yet.
+    /// (cents for USD, see [`decimal_places`](Self::decimal_places)). `None`
+    /// is no limit, or not read yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_limit: Option<f64>,
     /// What this period has used, in the same units (`used_credits`).
@@ -150,6 +151,12 @@ pub struct ExtraUsage {
     /// The currency of the amounts, such as `USD`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
+    /// The digits after the decimal point of the currency, so an amount
+    /// divided by 10 to this power is in whole units. Claude Code reports
+    /// it, and else it is 2, with 0 for JPY, KRW and VND as Claude Code
+    /// shows them. `None` until the amounts are read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimal_places: Option<u32>,
 }
 
 /// A ChatGPT account's usage credits, as the backend reports them in the

@@ -2631,9 +2631,60 @@ async fn extra_usage_follows_the_event_and_the_usage_data() {
         assert_eq!(extra.used_credits, Some(27_140.0));
         assert_eq!(extra.utilization, Some(54.0));
         assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.decimal_places, Some(2));
     }
     assert_eq!(fake.logged("get_usage").len(), 1);
     assert_eq!(fake.logged("get_usage")[0]["skip_behaviors"], true);
+}
+
+/// A chat turn's event comes right before its result, so the amounts have to
+/// be asked for at the turn's start. The answer, slow here, comes first and the
+/// event has the amounts. The currency says where the decimal point is.
+#[tokio::test]
+async fn the_event_of_a_chat_turn_has_the_amounts_asked_at_its_start() {
+    let fake = Fake::new(json!([[
+        {"serve": 1, "after": 0.3},
+        {"rate_limit": {"status": "allowed_warning", "rateLimitType": "five_hour",
+                        "overageStatus": "allowed", "unifiedWindows": windows(0.5, 0.4)}},
+        {"text": "hello"},
+    ]]));
+    fake.answer_usage(json!({
+        "rate_limits": {"extra_usage": {"is_enabled": true, "monthly_limit": 500000,
+                                        "used_credits": 271400, "utilization": 54,
+                                        "currency": "JPY", "decimal_places": null}},
+    }));
+    let task = Task::new(chat_config(&fake), "Hello.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run.events_until(|_| false).await;
+    run.finish().await;
+
+    let usage = plan_usage_events(&events);
+    assert_eq!(usage.len(), 1, "{usage:#?}");
+    let extra = usage[0].extra_usage.as_ref().unwrap();
+    assert_eq!(extra.used_credits, Some(271_400.0));
+    assert_eq!(extra.currency.as_deref(), Some("JPY"));
+    assert_eq!(extra.decimal_places, Some(0));
+    assert_eq!(fake.logged("get_usage").len(), 1);
+}
+
+/// Claude Code's own decimal places are kept, and the others are two, or none
+/// for the currencies it shows in whole units.
+#[test]
+fn the_decimal_places_of_the_amounts_follow_the_currency() {
+    let read = |extra: Value| {
+        super::extra_usage_read(&json!({"rate_limits": {"extra_usage": extra}}))
+            .unwrap()
+            .decimal_places
+    };
+    assert_eq!(
+        read(json!({"currency": "USD", "decimal_places": 3})),
+        Some(3)
+    );
+    assert_eq!(read(json!({"currency": "EUR"})), Some(2));
+    for currency in ["JPY", "krw", "VND"] {
+        assert_eq!(read(json!({"currency": currency})), Some(0));
+    }
+    assert_eq!(read(json!({"is_enabled": false, "currency": null})), None);
 }
 
 /// Without usage data (a CLI that doesn't know the request), the plan usage

@@ -442,8 +442,9 @@ Claude Code reports a Claude plan the same way (`SubscriptionPlan::ClaudeCode`).
 now calls usage credits. Its flags (`enabled`, `in_use`, `status`, `disabled_reason`,
 `resets_at`) come from the `rate_limit_event`, and the amounts (`monthly_limit`,
 `used_credits`, `utilization`, `currency`) from Claude Code's usage data, which
-`ClaudeSession::request_usage` asks for. Amounts are in minor units of the currency, so
-27140 is $271.40.
+`ClaudeSession::request_usage` asks for. Amounts are in minor units of the currency.
+`decimal_places` tells where the point is (2 for USD, so 27140 is $271.40, and 0 for JPY,
+KRW and VND, which Claude Code shows in whole units).
 
 ### Reroutes
 

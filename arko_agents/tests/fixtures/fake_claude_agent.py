@@ -48,9 +48,12 @@ the next turn's index). Steps:
                                          after its PostToolUse hook, before
                                          its result is reported
   {"rate_limit": {...}}                  a rate_limit_event with this info
-  {"serve": 1}                           waits for the host's next control
-                                         request and answers it (such as
-                                         get_usage after a rate_limit)
+  {"serve": 1}                           answers the host's get_usage
+                                         requests, waiting for one if none
+                                         came yet, after "after" seconds
+                                         when it has them. A CLI that is
+                                         slow never answers one that no
+                                         such step serves
   {"fail": "..."}                        the turn ends in this error, with
                                          "terminal_reason" (such as
                                          "prompt_too_long") when given
@@ -208,6 +211,17 @@ def read():
 def reply(request_id, response):
     send({"type": "control_response",
           "response": {"subtype": "success", "request_id": request_id, "response": response}})
+
+
+def answer_usage(request_id):
+    # The file FAKE_CLAUDE_USAGE names is the answer. Without one, the CLI
+    # doesn't know the request.
+    if os.environ.get("FAKE_CLAUDE_USAGE"):
+        reply(request_id, json.load(open(os.environ["FAKE_CLAUDE_USAGE"])))
+    else:
+        send({"type": "control_response", "response": {
+            "subtype": "error", "request_id": request_id,
+            "error": "Unsupported control request subtype: get_usage"}})
 
 
 def ask(request):
@@ -416,7 +430,11 @@ def turn(text, message_uuid=None):
                   "session_id": SESSION})
             continue
         if "serve" in step:
-            handle(read())
+            while not state.get("held"):
+                handle(read())
+            time.sleep(step.get("after", 0))
+            for request_id in state.pop("held"):
+                answer_usage(request_id)
             continue
         if "system" in step:
             send(dict({"type": "system", "session_id": SESSION}, **step["system"]))
@@ -532,15 +550,8 @@ def handle(message):
             state["interrupted"] = True
             reply(message["request_id"], {})
         elif subtype == "get_usage":
-            # The file FAKE_CLAUDE_USAGE names is the answer. Without one, the
-            # CLI doesn't know the request.
             log("get_usage", skip_behaviors=request.get("skip_behaviors"))
-            if os.environ.get("FAKE_CLAUDE_USAGE"):
-                reply(message["request_id"], json.load(open(os.environ["FAKE_CLAUDE_USAGE"])))
-            else:
-                send({"type": "control_response", "response": {
-                    "subtype": "error", "request_id": message["request_id"],
-                    "error": "Unsupported control request subtype: get_usage"}})
+            state.setdefault("held", []).append(message["request_id"])
         else:
             reply(message["request_id"], {})
     elif message.get("type") == "user":

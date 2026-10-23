@@ -2206,6 +2206,8 @@ impl ClaudeCodeRun {
                 return Ok(end);
             }
         }
+        // The answer comes while the model works, before the first event.
+        self.ask_usage_if_due(&session).await;
         self.emit_context_receipts().await?;
         self.questions = None;
         // Claude Code exited on its own: it may not have saved every call.
@@ -3905,10 +3907,12 @@ impl ClaudeCodeRun {
         extra.used_credits = read.used_credits;
         extra.utilization = extra.utilization.or(read.utilization);
         extra.currency = read.currency.clone();
+        extra.decimal_places = read.decimal_places;
     }
 
     /// Asks Claude Code for its usage data, which holds the amounts of extra
-    /// usage, when it was last asked more than [`USAGE_READ_EVERY`] ago. The
+    /// usage, when this run last asked more than [`USAGE_READ_EVERY`] ago (a
+    /// run asks when its turn starts, and an event asks again when due). The
     /// answer comes in the turn's messages, so nothing waits for it.
     async fn ask_usage_if_due(&mut self, session: &cc::ClaudeSession) {
         if self
@@ -3938,18 +3942,19 @@ impl ClaudeCodeRun {
 
     /// Claude Code's answer about its usage. One that gives no extra usage,
     /// or an error from a CLI that doesn't know the request, leaves the
-    /// event's flags alone.
+    /// event's flags alone and drops what an earlier answer showed. No answer
+    /// at all (the session ended) keeps it.
     async fn extra_usage_read(
         &mut self,
         answer: Option<Result<Value, String>>,
     ) -> Result<(), ArkoAgentsError> {
-        let Some(Ok(answer)) = answer else {
+        let Some(answer) = answer else {
             return Ok(());
         };
-        let Some(read) = extra_usage_read(&answer) else {
+        self.usage_read = answer.ok().as_ref().and_then(extra_usage_read);
+        if self.usage_read.is_none() {
             return Ok(());
-        };
-        self.usage_read = Some(read);
+        }
         if let Some(mut usage) = self.plan_usage.clone() {
             self.show_extra_usage(&mut usage);
             self.plan_usage = Some(usage.clone());
@@ -5053,13 +5058,18 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
 fn extra_usage_of(info: &Value) -> Option<ai::ExtraUsage> {
     let flag = |name: &str| info.get(name).and_then(Value::as_bool);
     let text = |name: &str| info.get(name).and_then(Value::as_str).map(str::to_string);
+    // For the credits' own limit, the event's reset and utilization are theirs.
+    let credits_limit = info["rateLimitType"] == "overage";
     let extra = ai::ExtraUsage {
         enabled: flag("overageEnabled"),
         in_use: flag("isUsingOverage") == Some(true) || flag("overageInUse") == Some(true),
         status: text("overageStatus"),
         disabled_reason: text("overageDisabledReason"),
-        resets_at: info.get("overageResetsAt").and_then(Value::as_u64),
-        utilization: (info["rateLimitType"] == "overage")
+        resets_at: info
+            .get("overageResetsAt")
+            .and_then(Value::as_u64)
+            .or_else(|| credits_limit.then(|| info["resetsAt"].as_u64()).flatten()),
+        utilization: credits_limit
             .then(|| {
                 info["utilization"]
                     .as_f64()
@@ -5076,7 +5086,25 @@ fn extra_usage_of(info: &Value) -> Option<ai::ExtraUsage> {
 /// currency (cents for USD). `None` when the answer has none.
 fn extra_usage_read(answer: &Value) -> Option<ai::ExtraUsage> {
     let extra = answer["rate_limits"]["extra_usage"].as_object()?;
+    let currency = extra
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // Else as Claude Code shows amounts, in whole units for these currencies.
+    let decimal_places = extra
+        .get("decimal_places")
+        .and_then(Value::as_u64)
+        .and_then(|places| u32::try_from(places).ok())
+        .or_else(|| {
+            let currency = currency.as_deref()?.to_uppercase();
+            Some(if ["JPY", "KRW", "VND"].contains(&currency.as_str()) {
+                0
+            } else {
+                2
+            })
+        });
     Some(ai::ExtraUsage {
+        decimal_places,
         enabled: extra.get("is_enabled").and_then(Value::as_bool),
         disabled_reason: extra
             .get("disabled_reason")
@@ -5085,10 +5113,7 @@ fn extra_usage_read(answer: &Value) -> Option<ai::ExtraUsage> {
         monthly_limit: extra.get("monthly_limit").and_then(Value::as_f64),
         used_credits: extra.get("used_credits").and_then(Value::as_f64),
         utilization: extra.get("utilization").and_then(Value::as_f64),
-        currency: extra
-            .get("currency")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        currency,
         ..Default::default()
     })
 }
