@@ -3,7 +3,7 @@
 //! interpreter).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -2276,15 +2276,20 @@ fn executed_built_ins(fake: &Fake) -> Vec<Value> {
 
 /// A task that ran in the workspace and moved to a `project` directory.
 async fn moved_task(fake: &Fake, config: AgentConfig) -> (Task, PathBuf) {
+    let project = fake.dir.join("project");
+    (moved_task_to(fake, config, project.clone()).await, project)
+}
+
+/// A task that ran in the workspace and moved to `project`.
+async fn moved_task_to(fake: &Fake, config: AgentConfig, project: PathBuf) -> Task {
     let task = Task::new(config, "Start.".into(), fake.workspace(), None);
     let (mut task, _) = start(task).finish().await;
-    let project = fake.dir.join("project");
     std::fs::create_dir_all(&project).unwrap();
-    task.move_to(project.clone());
+    task.move_to(project);
     task.prepare_for_resumption_from_completed("Look around.".into())
         .unwrap();
     assert!(task.claude_code_directory.is_some());
-    (task, project)
+    task
 }
 
 /// The CLI runs where the session started after the task moved, so the
@@ -2348,6 +2353,78 @@ async fn a_moved_task_runs_claude_codes_tools_in_its_directory() {
     assert_eq!(formatted, [json!("ls build")]);
 }
 
+/// Claude Code makes a file tool's relative path absolute from the directory
+/// it runs in, so after a move the path arrives under the session's
+/// directory. It becomes the task's, for the path policy, the host and the
+/// CLI, unless it is inside the task's directory already.
+#[tokio::test]
+async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
+    let fake = Fake::new(json!([]));
+    // The task moves into a directory under the one the session started in.
+    let session = fake.workspace();
+    let project = session.join("project");
+    let path = |directory: &Path, name: &str| directory.join(name).display().to_string();
+    let script = json!([[complete("First")], [
+        {"tool": "Read", "input": {"file_path": path(&session, "notes.txt")}},
+        {"tool": "NotebookEdit", "input": {"notebook_path": path(&session, "n.ipynb"), "new_source": "x"}},
+        {"tool": "Write", "input": {"file_path": path(&project, "kept.txt"), "content": "c"}},
+        {"tool": "Edit", "input": {"file_path": path(&session, "src/lib.rs"),
+                                   "old_string": "a", "new_string": "b"}},
+        complete("Done"),
+    ]]);
+    std::fs::write(fake.dir.join("script.json"), script.to_string()).unwrap();
+    let mut config = config(&fake, &["Read", "NotebookEdit", "Write", "Edit"]);
+    config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::AutoReject;
+    config.tool_config.tool_specific_configs.insert(
+        "Edit".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let task = moved_task_to(&fake, config, project.clone()).await;
+    let mut run = start(task);
+    // The call that waits for approval shows the file it runs on, which is
+    // inside the workspace.
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval {
+        tool_call_id,
+        parameters,
+        approval_reason,
+        ..
+    }) = events.last()
+    else {
+        panic!("{events:#?}");
+    };
+    assert_eq!(parameters["file_path"], path(&project, "src/lib.rs"));
+    assert_eq!(approval_reason.path_outside_workspace, None);
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(&task.current_state, TaskState::Completed { summary } if summary == "Done"));
+
+    let calls = executed_built_ins(&fake);
+    assert_eq!(calls.len(), 4);
+    for call in &calls {
+        assert_eq!(call["is_error"], false, "{call}");
+    }
+    assert_eq!(calls[0]["input"]["file_path"], path(&project, "notes.txt"));
+    assert_eq!(
+        calls[1]["input"]["notebook_path"],
+        path(&project, "n.ipynb")
+    );
+    assert_eq!(calls[2]["input"]["file_path"], path(&project, "kept.txt"));
+    assert_eq!(calls[3]["input"]["file_path"], path(&project, "src/lib.rs"));
+}
+
 /// A call that waits for approval runs in the task's directory too.
 #[tokio::test]
 async fn an_approved_call_of_a_moved_task_runs_in_its_directory() {
@@ -2395,13 +2472,17 @@ async fn an_approved_call_of_a_moved_task_runs_in_its_directory() {
 /// the model wrote them.
 #[tokio::test]
 async fn a_task_that_didnt_move_keeps_its_calls_as_written() {
-    let fake = Fake::new(json!([[
+    let fake = Fake::new(json!([]));
+    let notes = fake.workspace().join("notes.txt").display().to_string();
+    let script = json!([[
         {"tool": "Bash", "input": {"command": "ls"}},
         {"tool": "Glob", "input": {"pattern": "*.rs"}},
+        {"tool": "Read", "input": {"file_path": notes}},
         complete("Looked"),
-    ]]));
+    ]]);
+    std::fs::write(fake.dir.join("script.json"), script.to_string()).unwrap();
     let task = Task::new(
-        config(&fake, &["Bash", "Glob"]),
+        config(&fake, &["Bash", "Glob", "Read"]),
         "Look.".into(),
         fake.workspace(),
         None,
@@ -2411,6 +2492,7 @@ async fn a_task_that_didnt_move_keeps_its_calls_as_written() {
     let calls = executed_built_ins(&fake);
     assert_eq!(calls[0]["input"], json!({"command": "ls"}));
     assert_eq!(calls[1]["input"], json!({"pattern": "*.rs"}));
+    assert_eq!(calls[2]["input"], json!({"file_path": notes}));
     for pre in fake.logged("pre") {
         assert!(
             pre["answer"]["hookSpecificOutput"]
