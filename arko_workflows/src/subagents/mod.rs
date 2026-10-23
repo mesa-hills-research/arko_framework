@@ -53,6 +53,8 @@
 mod board;
 pub(crate) use board::CONTEXT_ARRIVED;
 #[cfg(test)]
+mod delivery_tests;
+#[cfg(test)]
 mod nesting_tests;
 #[cfg(test)]
 mod skills_tests;
@@ -582,14 +584,32 @@ impl MailItem {
         format!("[mail {}]", self.id)
     }
 
-    /// The whole item with its marker, heading and body.
+    /// The marker the item ends with. It doesn't start with `[mail `, which
+    /// views of a conversation count the items by.
+    pub(crate) fn end_marker(&self) -> String {
+        format!("[end of mail {}]", self.id)
+    }
+
+    /// Whether `text` holds the item: its marker and its end marker, so an
+    /// item cut short doesn't count.
+    pub(crate) fn held_in(&self, text: &str) -> bool {
+        text.contains(&self.marker()) && text.contains(&self.end_marker())
+    }
+
+    /// The whole item with its marker, heading and body, and its end marker.
     pub fn text(&self) -> String {
-        format!("{} {}\n\n{}", self.marker(), self.heading, self.body.trim())
+        format!(
+            "{} {}\n\n{}\n\n{}",
+            self.marker(),
+            self.heading,
+            self.body.trim(),
+            self.end_marker()
+        )
     }
 
     /// The item as a context update shows it: whole, or for a long body an
-    /// excerpt with the file holding all of it. Every line after the first
-    /// indented.
+    /// excerpt with the file holding all of it, then its end marker. Every
+    /// line after the first indented.
     pub(crate) fn excerpt(&self) -> String {
         let body = self.body.trim();
         let body = if body.len() <= MAX_MAIL_BYTES {
@@ -608,7 +628,14 @@ impl MailItem {
             };
             format!("{}\n\n[... cut here: {rest} ...]", &body[..end])
         };
-        format!("{} {}\n{}", self.marker(), self.heading, body).replace('\n', "\n  ")
+        format!(
+            "{} {}\n{}\n{}",
+            self.marker(),
+            self.heading,
+            body,
+            self.end_marker()
+        )
+        .replace('\n', "\n  ")
     }
 }
 

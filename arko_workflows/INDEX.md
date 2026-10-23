@@ -878,7 +878,7 @@ A subagent that started subagents, which still run or wait for a place, can't re
 
 ### Mail and delivery
 
-Reports, failures, stops, messages and questions go through a mailbox kept per run. Each `MailItem` has `id: u64`, `to` (a run ID), `from: MailSender` (`Run(Uuid)` or `Host`), `kind: MailKind` (`Report`, `Failed`, `Stopped`, `Message`, `Question`, `Copy`), `heading`, `body`, `at`, `delivered_at` and `file`. `text()` is the whole item, `[mail N] heading`, a blank line and the body. An item reaches its recipient in the first way that applies.
+Reports, failures, stops, messages and questions go through a mailbox kept per run. Each `MailItem` has `id: u64`, `to` (a run ID), `from: MailSender` (`Run(Uuid)` or `Host`), `kind: MailKind` (`Report`, `Failed`, `Stopped`, `Message`, `Question`, `Copy`), `heading`, `body`, `at`, `delivered_at` and `file`. `text()` is the whole item, `[mail N] heading`, a blank line, the body, a blank line and `[end of mail N]`. A conversation holds an item only when it holds both markers in one message or result, so an item cut short is given again. An item reaches its recipient in the first way that applies.
 
 1. A `wait_for_agents` call waiting for it returns it whole.
 2. While the recipient runs, its next turn boundary adds it to the `# Workflow context update`, oldest first, up to about `UPDATE_MAX_MAIL_BYTES` (48 KiB) per update, with the rest at the next boundary. An item over `MAX_MAIL_BYTES` (16 KiB) is shown as an excerpt with the path of the file that holds all of it (`<checkpoint_dir>/subagents/mail-N.md` with persistence, else under the temp directory).

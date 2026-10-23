@@ -1515,7 +1515,7 @@ fn a_snapshot_loads_with_defaults() {
     }))
     .unwrap();
     assert_eq!(item.delivered_at, None);
-    assert_eq!(item.text(), "[mail 3] h\n\nb");
+    assert_eq!(item.text(), "[mail 3] h\n\nb\n\n[end of mail 3]");
     let long = MailItem {
         body: "x".repeat(MAX_MAIL_BYTES + 10),
         file: Some("/tmp/mail-3.md".into()),

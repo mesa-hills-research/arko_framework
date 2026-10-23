@@ -2871,16 +2871,15 @@ fn task_holds(task: &Task, item: &MailItem) -> bool {
     {
         return true;
     }
-    let marker = item.marker();
     task.pending_context_injections
         .iter()
-        .any(|content| content.contains(&marker))
+        .any(|content| item.held_in(content))
         || task.conversation.messages.iter().any(|message| {
             message.content.iter().any(|content| match content {
                 arko_ai::Content::Text(text) => {
-                    message.role == arko_ai::Role::User && text.contains(&marker)
+                    message.role == arko_ai::Role::User && item.held_in(text)
                 }
-                arko_ai::Content::ToolResult(result) => result.output.contains(&marker),
+                arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
                 arko_ai::Content::Image(_) => false,
             })
         })
