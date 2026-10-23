@@ -94,7 +94,7 @@ pub const DEFAULT_MAX_PEER_MESSAGES: u32 = 20;
 
 /// The longest mailbox item a context update shows whole, 16 KiB in bytes.
 /// A longer one is shown as an excerpt, with the file that holds all of it
-/// (`wait_for_agents` returns it whole).
+/// (`wait_for_agents` returns it whole, up to the limit of its own result).
 pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 
 /// About this many bytes of mail go into one context update. The rest come
@@ -603,6 +603,44 @@ impl MailItem {
             self.marker(),
             self.heading,
             self.body.trim(),
+            self.end_marker()
+        )
+    }
+
+    /// [`Self::text`] if it is at most `max` bytes. Otherwise its first
+    /// part, cut at a line, with the file that holds all of it and the line
+    /// to read on from.
+    pub(crate) fn text_within(&self, max: usize) -> String {
+        let text = self.text();
+        if text.len() <= max {
+            return text;
+        }
+        let body = self.body.trim();
+        let head = format!("{} {}\n\n", self.marker(), self.heading);
+        let room = match &self.file {
+            Some(file) => 400 + file.as_os_str().len(),
+            None => 400,
+        };
+        let mut end = max.saturating_sub(head.len() + room).min(body.len());
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        // The file is the heading, a blank line and the body.
+        let mut line = self.heading.matches('\n').count() + 3;
+        if let Some(newline) = body[..end].rfind('\n') {
+            line += body[..newline].matches('\n').count() + 1;
+            end = newline;
+        }
+        let rest = match &self.file {
+            Some(file) => format!(
+                "All of it is in {}. Read on from line {line} (read_file with start_line {line}).",
+                file.display()
+            ),
+            None => "The rest couldn't be saved to a file.".to_string(),
+        };
+        format!(
+            "{head}{}\n\n[... cut here. {rest} ...]\n\n{}",
+            &body[..end],
             self.end_marker()
         )
     }

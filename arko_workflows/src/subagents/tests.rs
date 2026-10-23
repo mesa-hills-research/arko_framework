@@ -1815,7 +1815,7 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
     let result = result.unwrap();
     assert!(result.contains("r2 found it"), "{result}");
     assert!(
-        result.ends_with(&format!("Still running: r1.\n\n{}", board::WAIT_MOVED)),
+        result.starts_with(&format!("{} Still running: r1.", board::WAIT_MOVED)),
         "{result}"
     );
 
