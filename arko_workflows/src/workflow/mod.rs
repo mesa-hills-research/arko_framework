@@ -557,6 +557,15 @@ impl Workflow {
         self.context.subagents.transfer(from, to)
     }
 
+    /// Changes [`SubagentsConfig::max_failed_requests`](crate::subagents::SubagentsConfig::max_failed_requests)
+    /// while the workflow runs (`None` sets no cap). A subagent that is
+    /// running gets the new cap at its next failed request, counting the
+    /// ones it has had in a row already. It does nothing in a workflow built
+    /// without `subagents(...)`.
+    pub fn set_max_failed_requests(&self, max: Option<u32>) {
+        self.context.subagents.set_max_failed_requests(max);
+    }
+
     /// The number of the newest note agent run `agent_run_id` has been
     /// given. See [`NotesHandle::given`](crate::notes::NotesHandle::given).
     pub fn notes_given(&self, agent_run_id: uuid::Uuid) -> u64 {
@@ -869,6 +878,33 @@ impl Workflow {
             .agent_configs
             .contains_key(agent_name)
             .then(|| self.context.recipient_status(agent_name))
+    }
+
+    /// Replaces the skills configuration that registered agent `agent` starts
+    /// runs with, its embedded skills included (`None` removes it). Returns
+    /// `AgentNotFound` for an unregistered agent.
+    ///
+    /// The runs that start after the call have the new skills, such as a new
+    /// conversation of the agent and the subagents it starts later. A
+    /// subagent already queued keeps the skills it was prepared with. A run
+    /// already going keeps its system prompt and skills, so its prompt cache
+    /// holds, and so does a run continued in memory. A run loaded from a save
+    /// (after `resume_from`) takes the new embedded skills, through
+    /// `load_skill` and with its prompt as it was. The change isn't saved in
+    /// checkpoints.
+    pub fn set_agent_skills(
+        &self,
+        agent: &str,
+        skills: Option<arko_agents::skill::SkillsConfig>,
+    ) -> Result<(), WorkflowError> {
+        if !self.context.agent_configs.contains_key(agent) {
+            return Err(WorkflowError::AgentNotFound(agent.to_string()));
+        }
+        self.context
+            .agent_skills
+            .write()
+            .insert(agent.to_string(), skills);
+        Ok(())
     }
 
     /// Add a manual cost entry to the workflow budget.
@@ -2765,6 +2801,7 @@ impl WorkflowBuilder {
             resource_tracker,
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
+            agent_skills: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             agent_results: parking_lot::RwLock::new(resumed_results.clone()),

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use arko_agents::skill::SkillsConfig;
 use arko_agents::{AgentConfig, InterceptionFailurePolicy, ToolResultInterceptor};
 
 use crate::budget::BudgetManager;
@@ -30,7 +31,13 @@ pub struct SharedContext {
     pub(crate) wait_timeouts: crate::messaging::wait::WaitTimeouts,
     pub resource_tracker: Option<ResourceTracker>,
     pub hooks: Arc<HookRegistry>,
+    /// The agents' configurations as registered. `Workflow::set_agent_skills`
+    /// changes an agent's skills after that, so read them through
+    /// [`registered_config`](Self::registered_config).
     pub agent_configs: HashMap<String, AgentConfig>,
+    /// The skills configurations the host set after the build, by agent.
+    /// `None` is no skills.
+    pub(crate) agent_skills: RwLock<HashMap<String, Option<SkillsConfig>>>,
     pub global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     pub agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     pub agent_results: RwLock<Vec<AgentResult>>,
@@ -110,6 +117,22 @@ pub(crate) struct ParallelSettings {
 }
 
 impl SharedContext {
+    /// `agent`'s registered configuration as it is now, with the skills the
+    /// host set last.
+    pub(crate) fn registered_config(&self, agent: &str) -> Option<AgentConfig> {
+        let mut config = self.agent_configs.get(agent)?.clone();
+        config.skills_config = self.registered_skills(agent);
+        Some(config)
+    }
+
+    /// The skills configuration `agent` is registered with now.
+    pub(crate) fn registered_skills(&self, agent: &str) -> Option<SkillsConfig> {
+        match self.agent_skills.read().get(agent) {
+            Some(skills) => skills.clone(),
+            None => self.agent_configs.get(agent)?.skills_config.clone(),
+        }
+    }
+
     /// The agents `agent_name` may message with `send_message`, among registered
     /// agents other than itself that the messaging policy permits. Empty when
     /// messaging is disabled. The agent is then not offered the tool.

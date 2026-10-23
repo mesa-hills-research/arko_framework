@@ -437,6 +437,15 @@ the plan it is of (`SubscriptionPlan::ChatGpt`), the plan type, the active limit
 primary and secondary windows' used percentage, length and reset time. arko_agents reports them as
 events and can act on a threshold.
 
+Claude Code reports a Claude plan the same way (`SubscriptionPlan::ClaudeCode`).
+`PlanUsage::extra_usage` holds the account's extra usage (`ExtraUsage`), which Claude Code
+now calls usage credits. Its flags (`enabled`, `in_use`, `status`, `disabled_reason`,
+`resets_at`) come from the `rate_limit_event`, and the amounts (`monthly_limit`,
+`used_credits`, `utilization`, `currency`) from Claude Code's usage data, which
+`ClaudeSession::request_usage` asks for. Amounts are in minor units of the currency.
+`decimal_places` tells where the point is (2 for USD, so 27140 is $271.40, and 0 for JPY,
+KRW and VND, which Claude Code shows in whole units).
+
 ### Reroutes
 
 `ModelCallUsage::served_model` is the model the provider reports
@@ -1342,7 +1351,7 @@ session.close().await?;
 | Hooks | `hooks` registers host callbacks for events such as `PreToolUse`. `Hook::deny_tool` blocks a call |
 | Host tools | `tool_servers` are served in-process as MCP servers over the same pipes. The model sees `mcp__<server>__<tool>` |
 | Settings | `settings` (`--settings`, for example `{"autoCompactEnabled": false}` or `{"promptCacheTtl": "1h"}`). Unset, Claude Code caches the main conversation for 1 hour on a subscription within its limits and 5 minutes on an API key, and reports each request's split in `usage.cache_creation`. `setting_sources` (`--setting-sources`) picks the user's settings files, and `Some(vec![])` loads none |
-| Control | `interrupt`, `set_model`, `set_permission_mode` |
+| Control | `interrupt`, `set_model`, `set_permission_mode`, `request_usage` (asks for the plan's usage data and returns the channel its answer comes on) |
 | Messages | `Message` variants keep their raw JSON, so message types this client does not model are still available. Usage follows Anthropic's exclusive counts, where `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` add up to a request's whole input. An `assistant` message's output count is the one when its stream started (one response can arrive as several messages with the same id), and the turn's `result` sums the turn's requests. With `include_partial_messages`, each request's `message_delta` stream event has its final usage |
 
 On Windows, npm installs Claude Code as a `claude.cmd` launcher script, which can't be

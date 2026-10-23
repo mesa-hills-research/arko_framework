@@ -171,6 +171,43 @@ async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
     );
 }
 
+/// The host sets the cap while a worker, under none, keeps failing. The worker
+/// is past it already, so it fails at its next failed request.
+#[tokio::test]
+async fn a_cap_the_host_sets_while_a_worker_runs_applies_to_it() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = flaky(vec![], calls.clone()).await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(
+        &server,
+        &workspace,
+        SubagentsConfig::default(),
+        quick("Worker"),
+    )
+    .recovery_waits(instant())
+    .build()
+    .unwrap();
+    let host = async {
+        until(|| calls.load(Ordering::SeqCst) >= 7).await;
+        assert_eq!(workflow.subagents()[0].state, SubagentState::Running);
+        workflow.set_max_failed_requests(Some(2));
+        until(|| workflow.subagents()[0].state == SubagentState::Failed).await;
+    };
+    let (lead, ()) = tokio::join!(
+        within(workflow.run_agent("lead", "Delegate the count.")),
+        host
+    );
+    lead.unwrap();
+
+    let error = workflow.subagents()[0].error.clone().unwrap();
+    let failed = error
+        .split("It stopped after ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|count| count.parse::<u32>().ok());
+    assert!(failed.is_some_and(|failed| failed >= 6), "{error}");
+}
+
 /// The cap is for workers. The run the host drives recovers as often as its
 /// policy says.
 #[tokio::test]

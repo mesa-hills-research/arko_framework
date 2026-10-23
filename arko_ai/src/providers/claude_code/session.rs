@@ -343,6 +343,19 @@ impl ClaudeSession {
         .map(drop)
     }
 
+    /// Asks the CLI for the account's plan usage (`get_usage`, without the
+    /// scan of local transcripts) and returns without waiting for the answer.
+    /// The answer comes on the returned channel, as the CLI wrote it, or as
+    /// the reason it refused, which a CLI that doesn't know the request
+    /// gives.
+    pub async fn request_usage(
+        &self,
+    ) -> Result<oneshot::Receiver<Result<Value, String>>, ClaudeError> {
+        self.send_control(json!({"subtype": "get_usage", "skip_behaviors": true}))
+            .await
+            .map(|(_, receiver)| receiver)
+    }
+
     /// Ends the conversation by closing stdin so the CLI finishes and saves its
     /// transcript, and kills it if it has not exited within a grace period.
     /// The programs it started that still run are killed with it.
@@ -370,14 +383,7 @@ impl ClaudeSession {
 
     async fn control(&self, request: Value, timeout: Duration) -> Result<Value, ClaudeError> {
         let subtype = request["subtype"].as_str().unwrap_or_default().to_string();
-        let id = format!("req_{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), sender);
-        let message = json!({"type": "control_request", "request_id": id, "request": request});
-        if let Err(error) = self.write(&message).await {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(error);
-        }
+        let (id, receiver) = self.send_control(request).await?;
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(Ok(response))) => Ok(response),
             Ok(Ok(Err(message))) => Err(ClaudeError::Control { subtype, message }),
@@ -387,6 +393,22 @@ impl ClaudeSession {
                 Err(ClaudeError::Timeout(subtype))
             }
         }
+    }
+
+    /// Writes a control request. Its answer comes on the returned channel.
+    async fn send_control(
+        &self,
+        request: Value,
+    ) -> Result<(String, oneshot::Receiver<Result<Value, String>>), ClaudeError> {
+        let id = format!("req_{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id.clone(), sender);
+        let message = json!({"type": "control_request", "request_id": id, "request": request});
+        if let Err(error) = self.write(&message).await {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(error);
+        }
+        Ok((id, receiver))
     }
 
     fn exited(&self) -> ClaudeError {

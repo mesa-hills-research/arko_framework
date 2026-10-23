@@ -95,6 +95,9 @@ const HOOK_MAX_CHARS: usize = 9_500;
 /// How long a stopped session waits for the CLI to say what became of a note
 /// sent just before.
 const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
+/// How long what Claude Code's usage data says about extra usage stands
+/// before an event asks for it again.
+const USAGE_READ_EVERY: Duration = Duration::from_secs(300);
 
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
@@ -731,6 +734,11 @@ pub(super) struct ClaudeCodeRun {
     /// the reset of a limit it reported reached.
     plan_usage: Option<ai::PlanUsage>,
     limit_reached: Option<Option<u64>>,
+    /// The answer awaited to the request for Claude Code's usage data, when
+    /// it was asked, and the extra usage it last showed.
+    usage_reply: Option<oneshot::Receiver<Result<Value, String>>>,
+    usage_asked: Option<std::time::Instant>,
+    usage_read: Option<ai::ExtraUsage>,
     /// The main conversation's prompt-cache lifetime, as Claude Code's cache
     /// writes show it (1 hour or 5 minutes).
     cache_lifetime: Option<Duration>,
@@ -889,6 +897,9 @@ impl ClaudeCodeRun {
             subagent_calls: Vec::new(),
             plan_usage: None,
             limit_reached: None,
+            usage_reply: None,
+            usage_asked: None,
+            usage_read: None,
             cache_lifetime: None,
             served_tools: None,
             bytes_per_token: super::result_budget::DEFAULT_BYTES_PER_TOKEN,
@@ -2195,6 +2206,8 @@ impl ClaudeCodeRun {
                 return Ok(end);
             }
         }
+        // The answer comes while the model works, before the first event.
+        self.ask_usage_if_due(&session).await;
         self.emit_context_receipts().await?;
         self.questions = None;
         // Claude Code exited on its own: it may not have saved every call.
@@ -2229,6 +2242,10 @@ impl ClaudeCodeRun {
                         let (_, reply, answer) = self.slowed.pop_front().expect("checked");
                         let _ = reply.send(answer);
                     }
+                }
+                answer = Self::usage_answer(&mut self.usage_reply), if self.usage_reply.is_some() => {
+                    self.usage_reply = None;
+                    self.extra_usage_read(answer).await?;
                 }
                 message = session.next_message() => match message {
                     None => {
@@ -3874,6 +3891,78 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
+    /// Adds what Claude Code's usage data last showed about extra usage to
+    /// `usage`, which has the event's flags.
+    fn show_extra_usage(&self, usage: &mut ai::PlanUsage) {
+        let Some(read) = &self.usage_read else {
+            return;
+        };
+        let extra = usage.extra_usage.get_or_insert_with(Default::default);
+        extra.enabled = read.enabled.or(extra.enabled);
+        extra.disabled_reason = extra
+            .disabled_reason
+            .take()
+            .or(read.disabled_reason.clone());
+        extra.monthly_limit = read.monthly_limit;
+        extra.used_credits = read.used_credits;
+        extra.utilization = extra.utilization.or(read.utilization);
+        extra.currency = read.currency.clone();
+        extra.decimal_places = read.decimal_places;
+    }
+
+    /// Asks Claude Code for its usage data, which holds the amounts of extra
+    /// usage, when this run last asked more than [`USAGE_READ_EVERY`] ago (a
+    /// run asks when its turn starts, and an event asks again when due). The
+    /// answer comes in the turn's messages, so nothing waits for it.
+    async fn ask_usage_if_due(&mut self, session: &cc::ClaudeSession) {
+        if self
+            .usage_asked
+            .is_some_and(|asked| asked.elapsed() < USAGE_READ_EVERY)
+        {
+            return;
+        }
+        self.usage_asked = Some(std::time::Instant::now());
+        match session.request_usage().await {
+            Ok(reply) => self.usage_reply = Some(reply),
+            Err(error) => log::debug!(
+                "Task {}: asking Claude Code for usage: {error}",
+                self.task.id
+            ),
+        }
+    }
+
+    async fn usage_answer(
+        reply: &mut Option<oneshot::Receiver<Result<Value, String>>>,
+    ) -> Option<Result<Value, String>> {
+        match reply {
+            Some(reply) => reply.await.ok(),
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Claude Code's answer about its usage. One that gives no extra usage,
+    /// or an error from a CLI that doesn't know the request, leaves the
+    /// event's flags alone and drops what an earlier answer showed. No answer
+    /// at all (the session ended) keeps it.
+    async fn extra_usage_read(
+        &mut self,
+        answer: Option<Result<Value, String>>,
+    ) -> Result<(), ArkoAgentsError> {
+        let Some(answer) = answer else {
+            return Ok(());
+        };
+        self.usage_read = answer.ok().as_ref().and_then(extra_usage_read);
+        if self.usage_read.is_none() {
+            return Ok(());
+        }
+        if let Some(mut usage) = self.plan_usage.clone() {
+            self.show_extra_usage(&mut usage);
+            self.plan_usage = Some(usage.clone());
+            self.emit(AgentEvent::PlanUsageReported(usage)).await?;
+        }
+        Ok(())
+    }
+
     /// Claude Code's plan usage (`rate_limit_event`: its five-hour window as
     /// the primary one, its seven-day window as the secondary), reported
     /// and checked against the opt-in threshold.
@@ -3882,7 +3971,9 @@ impl ClaudeCodeRun {
         info: &Value,
         session: &cc::ClaudeSession,
     ) -> Result<(), ArkoAgentsError> {
-        let usage = plan_usage_of(info);
+        let mut usage = plan_usage_of(info);
+        self.show_extra_usage(&mut usage);
+        self.ask_usage_if_due(session).await;
         self.limit_reached = (info["status"] == "rejected" && info["isUsingOverage"] != true)
             .then(|| info["resetsAt"].as_u64());
         self.emit(AgentEvent::PlanUsageReported(usage.clone()))
@@ -4944,8 +5035,9 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         ),
         None => match limit_type.as_deref() {
             Some("five_hour") => (window(info, 300), None),
+            // The usage credits' limit, not a window of the plan.
+            Some("overage") | None => (None, None),
             Some(_) => (None, window(info, 10_080)),
-            None => (None, None),
         },
     };
     ai::PlanUsage {
@@ -4955,7 +5047,75 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         primary,
         secondary,
         credits: None,
+        extra_usage: extra_usage_of(info),
     }
+}
+
+/// What a `rate_limit_info` says about extra usage (`overage*` fields).
+/// `None` when it says nothing. Its `utilization` is the credits' limit used
+/// when the limit it reports is that of the credits (`rateLimitType`
+/// `overage`).
+fn extra_usage_of(info: &Value) -> Option<ai::ExtraUsage> {
+    let flag = |name: &str| info.get(name).and_then(Value::as_bool);
+    let text = |name: &str| info.get(name).and_then(Value::as_str).map(str::to_string);
+    // For the credits' own limit, the event's reset and utilization are theirs.
+    let credits_limit = info["rateLimitType"] == "overage";
+    let extra = ai::ExtraUsage {
+        enabled: flag("overageEnabled"),
+        in_use: flag("isUsingOverage") == Some(true) || flag("overageInUse") == Some(true),
+        status: text("overageStatus"),
+        disabled_reason: text("overageDisabledReason"),
+        resets_at: info
+            .get("overageResetsAt")
+            .and_then(Value::as_u64)
+            .or_else(|| credits_limit.then(|| info["resetsAt"].as_u64()).flatten()),
+        utilization: credits_limit
+            .then(|| {
+                info["utilization"]
+                    .as_f64()
+                    .map(|fraction| fraction * 100.0)
+            })
+            .flatten(),
+        ..Default::default()
+    };
+    (extra != ai::ExtraUsage::default()).then_some(extra)
+}
+
+/// The extra usage in Claude Code's answer to `get_usage`
+/// (`rate_limits.extra_usage`), whose amounts are in minor units of its
+/// currency (cents for USD). `None` when the answer has none.
+fn extra_usage_read(answer: &Value) -> Option<ai::ExtraUsage> {
+    let extra = answer["rate_limits"]["extra_usage"].as_object()?;
+    let currency = extra
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // Else as Claude Code shows amounts, in whole units for these currencies.
+    let decimal_places = extra
+        .get("decimal_places")
+        .and_then(Value::as_u64)
+        .and_then(|places| u32::try_from(places).ok())
+        .or_else(|| {
+            let currency = currency.as_deref()?.to_uppercase();
+            Some(if ["JPY", "KRW", "VND"].contains(&currency.as_str()) {
+                0
+            } else {
+                2
+            })
+        });
+    Some(ai::ExtraUsage {
+        decimal_places,
+        enabled: extra.get("is_enabled").and_then(Value::as_bool),
+        disabled_reason: extra
+            .get("disabled_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        monthly_limit: extra.get("monthly_limit").and_then(Value::as_f64),
+        used_credits: extra.get("used_credits").and_then(Value::as_f64),
+        utilization: extra.get("utilization").and_then(Value::as_f64),
+        currency,
+        ..Default::default()
+    })
 }
 
 /// A refusal Claude Code reported (`model_refusal`,

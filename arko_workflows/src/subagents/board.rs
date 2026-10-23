@@ -96,6 +96,9 @@ impl Drop for HandleClaim<'_> {
 
 pub(crate) struct Board {
     config: Option<SubagentsConfig>,
+    /// [`SubagentsConfig::max_failed_requests`], which the host may change
+    /// while the workflow runs.
+    max_failed_requests: Mutex<Option<u32>>,
     state: Mutex<SubagentsSnapshot>,
     /// Bumped at every change, for the waits.
     version: watch::Sender<u64>,
@@ -148,6 +151,11 @@ impl Board {
         let mut state = restored.unwrap_or_default();
         settle_restored(&mut state, results);
         Self {
+            max_failed_requests: Mutex::new(
+                config
+                    .as_ref()
+                    .and_then(|config| config.max_failed_requests),
+            ),
             config,
             state: Mutex::new(state),
             version: watch::Sender::new(0),
@@ -166,6 +174,14 @@ impl Board {
 
     pub(crate) fn config(&self) -> Option<&SubagentsConfig> {
         self.config.as_ref()
+    }
+
+    pub(crate) fn max_failed_requests(&self) -> Option<u32> {
+        *self.max_failed_requests.lock()
+    }
+
+    pub(crate) fn set_max_failed_requests(&self, max: Option<u32>) {
+        *self.max_failed_requests.lock() = max;
     }
 
     /// The state a checkpoint saves. `None` while there is nothing.
@@ -863,9 +879,7 @@ impl Board {
         record: &SubagentRecord,
     ) -> Result<AgentConfig, String> {
         let mut config = ctx
-            .agent_configs
-            .get(&record.agent)
-            .cloned()
+            .registered_config(&record.agent)
             .ok_or_else(|| format!("there is no agent `{}`", record.agent))?;
         if let Some(hook) = self.config.as_ref().and_then(|config| config.hook.as_ref()) {
             hook.prepare(&start_request(self.workflow_run_id, record), &mut config)?;

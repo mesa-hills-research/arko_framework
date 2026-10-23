@@ -165,6 +165,8 @@ pub struct SubagentsConfig {
     /// count, and it starts again when the run is resumed or continued. The
     /// subagents of a failed subagent stop with it. It never applies to a
     /// run the host drives. `None` sets no cap, which is the default.
+    /// [`Workflow::set_max_failed_requests`](crate::Workflow::set_max_failed_requests)
+    /// changes it while the workflow runs.
     pub max_failed_requests: Option<u32>,
 }
 

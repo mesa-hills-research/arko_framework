@@ -107,6 +107,56 @@ pub struct PlanUsage {
     /// The account's credits (`x-codex-credits-*`), when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<PlanCredits>,
+    /// The account's extra usage (usage credits that pay for requests once
+    /// the plan's windows are used up), as Claude Code reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<ExtraUsage>,
+}
+
+/// A Claude account's extra usage, which Claude Code now calls usage
+/// credits. The flags come from its `rate_limit_event`, and the amounts from
+/// its usage data (`get_usage`), which is read now and then.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExtraUsage {
+    /// Extra usage is turned on for the account (`overageEnabled`). The
+    /// event reports it only with a warning, so `None` is not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Extra usage pays for requests now, because a plan window is used up
+    /// (`isUsingOverage`, `overageInUse`).
+    #[serde(default)]
+    pub in_use: bool,
+    /// Whether extra usage takes requests, as `allowed`, `allowed_warning` or
+    /// `rejected` (`overageStatus`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Why it doesn't, such as `out_of_credits` or `org_level_disabled`
+    /// (`overageDisabledReason`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+    /// When the spending period resets, in Unix seconds (`overageResetsAt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
+    /// The monthly spend limit, in minor units of [`currency`](Self::currency)
+    /// (cents for USD, see [`decimal_places`](Self::decimal_places)). `None`
+    /// is no limit, or not read yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_limit: Option<f64>,
+    /// What this period has used, in the same units (`used_credits`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_credits: Option<f64>,
+    /// Percentage of the limit used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<f64>,
+    /// The currency of the amounts, such as `USD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// The digits after the decimal point of the currency, so an amount
+    /// divided by 10 to this power is in whole units. Claude Code reports
+    /// it, and else it is 2, with 0 for JPY, KRW and VND as Claude Code
+    /// shows them. `None` until the amounts are read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimal_places: Option<u32>,
 }
 
 /// A ChatGPT account's usage credits, as the backend reports them in the
@@ -239,6 +289,7 @@ impl PlanUsage {
             primary: window("primary"),
             secondary: window("secondary"),
             credits,
+            extra_usage: None,
         };
         (usage != Self::default()).then_some(Self {
             plan: Some(SubscriptionPlan::ChatGpt),
@@ -864,6 +915,7 @@ mod tests {
         let old: PlanUsage =
             serde_json::from_str(r#"{"plan_type":"pro","primary":{"used_percent":5.0}}"#).unwrap();
         assert_eq!(old.plan, None);
+        assert_eq!(old.extra_usage, None);
     }
 
     fn priced(model: &Model, usage: UsageInfo, config: Option<&GenerationConfig>) -> UsageInfo {
