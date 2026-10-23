@@ -144,6 +144,19 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<arko_ai::ErrorKind>,
     },
+    /// Claude Code's own message about a model request that failed, such as
+    /// "API Error: Connection lost mid-response. The response above may be
+    /// incomplete." A host shows `text` as a line in a warning colour,
+    /// apart from the reply. The task keeps no message for it, so a
+    /// reopened conversation doesn't hold it as reply text.
+    ///
+    /// Claude Code then ends the turn with an error that carries the same
+    /// text, so an `ErrorEncountered` and a retry or a pause follow it,
+    /// sometimes with a prefix. A host shows one line for the failure and
+    /// shows what follows as a state (a retry prompt, a banner) without
+    /// repeating a message that holds the text of a `ServiceWarning` of the
+    /// same turn. Emitted for a Claude Code model only.
+    ServiceWarning { text: String },
     /// A tool result was shortened before it went into the conversation
     /// by the overflow guard, by an opt-in cap, or to recover from a
     /// request the provider found over the model's input limit (see

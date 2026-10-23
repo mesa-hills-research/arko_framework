@@ -498,8 +498,8 @@ pub struct Task {
     /// task moves ([`Task::move_to`]). arko's tools and checks work in
     /// [`current_working_directory`](Self::current_working_directory), the
     /// CLI is given that directory too, and the runtime changes the calls of
-    /// its own tools to run there. A new session starts in the working
-    /// directory.
+    /// its own tools to run there, and the paths of its file tools to be
+    /// the task's. A new session starts in the working directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_directory: Option<PathBuf>,
     /// How many messages of the conversation the Claude Code session has
@@ -972,7 +972,8 @@ impl Task {
     /// the session ([`claude_code_directory`](Self::claude_code_directory)),
     /// and the session gets the new prompt. The runtime changes the calls of
     /// Claude Code's own tools (`Bash`, `Glob`, …) to run in the new
-    /// directory.
+    /// directory, and the paths of its file tools (`Read`, `Edit`, …) to be
+    /// the new directory's.
     pub fn move_to(&mut self, directory: PathBuf) {
         if directory == self.current_working_directory {
             return;

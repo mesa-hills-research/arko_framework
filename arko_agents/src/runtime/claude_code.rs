@@ -327,6 +327,36 @@ fn in_directory(name: &str, input: &Value, directory: &Path) -> Option<Value> {
     (moved != *input).then_some(moved)
 }
 
+/// `input` with its file path moved to the task's directory, when a file
+/// tool names one in `from`, the directory the CLI still runs in after the
+/// task moved. Claude Code makes a relative `file_path` (`notebook_path`)
+/// absolute from `from` before the hooks see it, so a path under `from` that
+/// is outside `directory`, the task's working directory, is the same path
+/// under `directory`. A path inside `directory` stays as it is. `None` when
+/// the call needs no change.
+fn from_session_directory(
+    name: &str,
+    input: &Value,
+    from: &Path,
+    directory: &Path,
+) -> Option<Value> {
+    let parameter = match name {
+        "Read" | "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        _ => return None,
+    };
+    let path = input.get(parameter)?.as_str()?;
+    if crate::utils::is_path_in_workspace(path, directory).ok()? {
+        return None;
+    }
+    // Below `from` by the rule the path policy uses (case and `\\?\` on Windows).
+    let relative = crate::utils::path_in_workspace(path, from).ok()??;
+    let moved = crate::utils::resolve_path(&relative.to_string_lossy(), directory).ok()?;
+    let mut mapped = input.clone();
+    mapped[parameter] = Value::String(moved.to_string_lossy().into_owned());
+    Some(mapped)
+}
+
 fn add_context(text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}})
 }
@@ -2411,8 +2441,11 @@ impl ClaudeCodeRun {
                 input,
                 reply,
             } => {
+                let judged = self
+                    .input_from_session_directory(&tool_name, &input)
+                    .unwrap_or_else(|| input.clone());
                 let mut answer = self
-                    .gate(tool_use_id.clone(), &tool_name, input.clone(), session)
+                    .gate(tool_use_id.clone(), &tool_name, judged, session)
                     .await?;
                 let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
                 if allowed {
@@ -2628,7 +2661,22 @@ impl ClaudeCodeRun {
         if self.task.claude_code_directory.is_none() || arko_name(served).is_some() {
             return None;
         }
-        in_directory(served, input, &self.task.current_working_directory)
+        let mapped = self.input_from_session_directory(served, input);
+        in_directory(
+            served,
+            mapped.as_ref().unwrap_or(input),
+            &self.task.current_working_directory,
+        )
+        .or(mapped)
+    }
+
+    /// The input of a call of Claude Code's own tools with a file path that
+    /// the CLI made absolute from the session's directory made the task's
+    /// (see [`from_session_directory`]). The path policy judges and the host
+    /// shows the call with it, since that is the file the call runs on.
+    fn input_from_session_directory(&self, served: &str, input: &Value) -> Option<Value> {
+        let from = self.task.claude_code_directory.as_deref()?;
+        from_session_directory(served, input, from, &self.task.current_working_directory)
     }
 
     async fn reject_call(
@@ -2760,8 +2808,11 @@ impl ClaudeCodeRun {
             ));
             return Ok(());
         };
+        let judged = built_in
+            .then(|| self.input_from_session_directory(&name, &request.input))
+            .flatten();
         let config = &self.task.agent_config;
-        let params = params_of(&request.input);
+        let params = params_of(judged.as_ref().unwrap_or(&request.input));
         let description = if built_in {
             format!("Claude Code's {name} tool.")
         } else {
@@ -3125,6 +3176,13 @@ impl ClaudeCodeRun {
                 let mut calls = Vec::new();
                 for block in &assistant.content {
                     match block {
+                        // Claude Code's note about a failed request is a
+                        // warning for the host, and not part of the reply or
+                        // the conversation.
+                        cc::ContentBlock::Text(note) if self.api_error.is_some() => {
+                            self.emit(AgentEvent::ServiceWarning { text: note.clone() })
+                                .await?;
+                        }
                         cc::ContentBlock::Text(chunk) => {
                             if !streamed {
                                 self.emit(AgentEvent::AssistantResponseChunk(chunk.clone()))

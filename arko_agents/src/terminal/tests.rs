@@ -1664,6 +1664,61 @@ async fn the_jobs_a_shutdown_stopped_are_listed_at_the_next_open() {
     assert!(again.interrupted_at_open().is_empty(), "listed once");
 }
 
+/// The directory opens again as soon as a shutdown returns, also when a
+/// job's task hadn't run to its end by then (here the clock jumps past the
+/// shutdown's waits before a call that ignores its stop is dropped).
+#[tokio::test(start_paused = true)]
+async fn the_directory_opens_again_as_soon_as_a_shutdown_returns() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("closed");
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "fetch",
+            "fetch".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap();
+    tokio::join!(
+        manager.shutdown(),
+        tokio::time::advance(Duration::from_secs(10))
+    );
+    drop(manager);
+    TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+}
+
+/// Two writers of one job's record, such as a late task of a closed manager
+/// and the manager that opened the directory next, never share a temporary
+/// file, so no write fails and none is left behind.
+#[tokio::test]
+async fn records_written_at_once_all_succeed() {
+    let f = Fixture::new(|_| {});
+    let job = f.python("print('done')", StartOptions::default()).job_id;
+    f.finished(job).await;
+    let directory = f.root.join("jobs").join(job.to_string());
+    let record: Record =
+        serde_json::from_slice(&std::fs::read(directory.join("job.json")).unwrap()).unwrap();
+    let writers: Vec<_> = (0..4)
+        .map(|_| {
+            let (config, record) = (f.manager.config.clone(), record.clone());
+            std::thread::spawn(move || (0..200).all(|_| persist(&config, &record).is_ok()))
+        })
+        .collect();
+    for writer in writers {
+        assert!(writer.join().unwrap(), "a write failed");
+    }
+    let mut files: Vec<_> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("job.json"))
+        .collect();
+    files.sort();
+    assert_eq!(files, ["job.json"]);
+}
+
 /// Calls in the foreground are listed until they move or end, and move
 /// once. A closed manager moves none.
 #[tokio::test]

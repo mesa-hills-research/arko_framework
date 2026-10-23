@@ -851,6 +851,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `ToolResultShortened` | A result was shortened before it went into the conversation (`reason` names the overflow guard, a cap, or overflow recovery). See [Tool result size](#tool-result-size). |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that didn't run (stopped, held, not reached, announced in an output-based turn that can't run them, or a `complete_task` refused after an earlier call of its turn was rejected or failed). |
 | `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause. `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified. `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
+| `ServiceWarning { text }` | A Claude Code agent's own message about a failed model request, such as "API Error: Connection lost mid-response." A host shows `text` as a warning line, apart from the reply. The conversation doesn't keep it. Claude Code ends the turn with an error that carries the same text, so an `ErrorEncountered` and a retry or pause follow. A host shows one line for the failure and shows those as a state, without repeating a message that holds the text of a `ServiceWarning` of the same turn. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual. A host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
 | `ModelRequestStarted { model, subagent, sizes, bytes_per_token }` | A model request is going out, reported just before each request (each attempt, a retry and a refusal fallback's included), or for a Claude Code model when its response starts. `sizes` is its `arko_ai::RequestSizes` (`None` for a Claude Code subagent's request, named by `subagent`), and `bytes_per_token` the ratio calibrated from the conversation's earlier requests (`calibrated_bytes_per_token`, `DEFAULT_BYTES_PER_TOKEN`, 3, before one was answered), which turns the sizes into tokens. A host times a prompt cache's lifetime from the latest one. |
@@ -1529,17 +1530,21 @@ it runs in the new directory, where the command guard and the path policy judge 
 command starts with a `cd` into the directory (`Set-Location` for `PowerShell`), a `Glob` or
 `Grep` without a `path` searches it, and a relative `path` is made absolute from it. The
 change travels in the answer to Claude Code's `PreToolUse` hook (`updatedInput`), or in the
-approval for a call that waits for one, and the host still sees the call as the model wrote
-it. A relative `file_path` of `Read`, `Edit` or `Write` reaches the runtime already made
-absolute from the session's directory, so the path policy refuses it as outside the
-workspace and the model has to give the full path.
+approval for a call that waits for one, and the host still sees those calls as the model
+wrote them. Claude Code makes the `file_path` of `Read`, `Edit` and `Write` (and the
+`notebook_path` of `NotebookEdit`) absolute from the session's directory before the hook runs.
+The runtime maps a path under that directory and outside the task's workspace to the same path
+under the task's directory, and the path policy, the host and the CLI all see the mapped path.
+A path inside the workspace stays as it is. On Windows the match ignores case and a `\\?\`
+prefix, as the path policy does.
 
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
 handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
 compacts at the threshold instead). `examples/claude_code_move.rs` moves a task after its
-first run and prints where `Bash`, `Glob`, `Grep` and `Read` run (with `--ask`, each call
-waits for an approval). They use the CLI's login and count against its plan
-usage. The tests run a scripted fake CLI
+first run and prints where `Bash`, `Glob`, `Grep` and `Read` run, then where the framework's
+`terminal_start` runs. On Windows it adds `PowerShell` and runs `terminal_start` with cmd.exe
+and with PowerShell. With `--ask`, each call waits for an approval. They use the CLI's login
+and count against its plan usage. The tests run a scripted fake CLI
 (`tests/fixtures/fake_claude_agent.py`) and need Python 3 (`ARKO_TEST_PYTHON` selects the
 interpreter).
 
