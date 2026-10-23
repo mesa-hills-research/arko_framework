@@ -963,6 +963,56 @@ async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
     )));
 }
 
+/// A request that fails mid-response is reported as a message of Claude
+/// Code's own. Its text reaches the host as a warning, apart from the reply
+/// before it, and the conversation doesn't keep it as reply text.
+#[tokio::test]
+async fn a_failed_requests_message_is_a_warning_and_not_part_of_the_reply() {
+    let note = "API Error: Connection lost mid-response. The response above may be incomplete.";
+    let fake = Fake::new(json!([[
+        {"text": "The answer is"},
+        {"api_error": "unknown", "text": note},
+    ]]));
+    let task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let mut events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: true,
+                    ..
+                }
+            )
+        })
+        .await;
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let (task, rest) = run.finish().await;
+    events.extend(rest);
+    let warnings: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ServiceWarning { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings, [note]);
+    let reply: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AssistantResponseChunk(chunk) => Some(chunk.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reply, ["The answer is"]);
+    assert_eq!(texts(&task)[1..], ["The answer is"]);
+}
+
 /// Claude Code sends a response as one assistant message per block, each
 /// with the response's id: its thinking, its text, then its call. Streamed,
 /// each block's text comes once, as it streams, and the complete messages

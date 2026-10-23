@@ -3178,6 +3178,13 @@ impl ClaudeCodeRun {
                 let mut calls = Vec::new();
                 for block in &assistant.content {
                     match block {
+                        // Claude Code's note about a failed request is a
+                        // warning for the host, and not part of the reply or
+                        // the conversation.
+                        cc::ContentBlock::Text(note) if self.api_error.is_some() => {
+                            self.emit(AgentEvent::ServiceWarning { text: note.clone() })
+                                .await?;
+                        }
                         cc::ContentBlock::Text(chunk) => {
                             if !streamed {
                                 self.emit(AgentEvent::AssistantResponseChunk(chunk.clone()))
