@@ -730,7 +730,46 @@ whether one account accepts another's encrypted reasoning is not known (Codex ne
 switches accounts within a conversation). So each request carries only the reasoning
 items, and the turn-state token, of the account serving it. The conversation itself keeps
 everything. Items from before this process (a resumed conversation) count as the first
-account's. The `prompt_cache_key` stays the same. Each account has its own prompt cache.
+account's of the list as it was built, so an edit never hands them to another account. The
+`prompt_cache_key` stays the same. Each account has its own prompt cache.
+
+#### Editing the list
+
+`ChatGptAccounts::set_accounts` edits the list in place, and every clone of it, such as
+the one an `LLMClient` holds, uses the new list from its next request. A host can add an
+account, remove one or put another first while agents run. It takes the whole new list in
+order of preference. An account stays as it is, with its state (set aside, usage, credits,
+and which reasoning items and turn-state tokens are its), when the new list has one with
+the same label that signs in as the same ChatGPT account. The other accounts are added
+with a clean state, and an account the new list lacks is removed. A request under way on
+a removed account finishes, and the reasoning it produced is not replayed to another
+account, as after any switch. `accounts()` returns the list as it is now. The clients of
+added accounts are used as given, without the `LLMClient`'s OpenAI settings.
+
+#### Following a Codex file
+
+```rust,no_run
+# use arko_ai::{ChatGptAccounts, CodexAuthFile};
+# fn main() -> Result<(), arko_ai::Error> {
+let file = CodexAuthFile::load("/home/me/.codex/auth.json")?;
+let accounts = ChatGptAccounts::from_codex_auth_files([("main", &file)])?.with_file_following();
+# Ok(()) }
+```
+
+With `with_file_following`, an account loaded from a Codex `auth.json` (or given its file
+with `ChatGptAccount::with_file`) follows its file to another ChatGPT account, as when the
+operator runs `codex login` again. The file is read before a request goes to the account,
+and again when the backend rejects the request with an authentication error (a revoked
+token, say). The file of an entry that is set aside is read too, because signing in again
+as another account is the usual way out of a used-up plan. When the file holds another
+ChatGPT account than the one the entry signs in as, the entry signs in as that one from
+then on, with the same label and place and a clean state, and
+`ChatGptAccountEvent::SignInChanged` is sent. The reasoning and turn-state token of the
+account it replaced are not replayed to it, as after a switch. A rejection sends the
+request once more to the new sign-in, once per request. A file that cannot be read, holds
+no ChatGPT login, or holds an account another entry already signs in as changes nothing,
+and the error stands. New tokens of the same account in the file are adopted without this
+setting, by the account's own client.
 
 #### Usage
 

@@ -46,7 +46,9 @@ These defaults change what an agent sees of its tool results, in arko's own runt
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
 installs an ordered list. The list fails over only when the backend refuses an account (a usage limit, or
 credits or quota run out, while credits keep an account serving), checks the accounts above the
-serving one at most every 5 minutes, and never runs in the background. See
+serving one at most every 5 minutes, and never runs in the background. An account follows its
+Codex file to another ChatGPT account only after `with_file_following`, and `set_accounts` edits
+the list in place. See
 [Client and credentials](reference-map.md#client-and-credentials-arko_ai).
 
 Operator notes and graceful stops have these defaults:

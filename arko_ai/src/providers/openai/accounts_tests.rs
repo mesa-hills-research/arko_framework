@@ -1670,3 +1670,449 @@ async fn check_now_and_mark_usable_end_drawing_on_credits() {
     })
     .await;
 }
+
+const THIRD: &str = "acct-third";
+
+/// How many snapshots of the list there are.
+fn snapshots(accounts: &ChatGptAccounts) -> usize {
+    let mut count = 1;
+    let mut snapshot = &*accounts.snapshots;
+    while let Some(next) = snapshot.next.get() {
+        count += 1;
+        snapshot = next;
+    }
+    count
+}
+
+#[test]
+fn a_long_history_of_snapshots_is_dropped_without_recursing() {
+    let head = Snapshot::new([]);
+    let mut tail = &head;
+    for _ in 0..300_000 {
+        let _ = tail.next.set(Box::new(Snapshot::new([])));
+        tail = tail.next.get().unwrap();
+    }
+    drop(head);
+}
+
+fn labels(accounts: &ChatGptAccounts) -> Vec<String> {
+    accounts.statuses().into_iter().map(|s| s.label).collect()
+}
+
+#[tokio::test]
+async fn an_edited_list_serves_the_next_request_and_each_account_keeps_its_state() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, _events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        // A clone, as the agents' clients are, sees the edit.
+        let editor = accounts.clone();
+        let config = GenerationConfig::default();
+        let mut conversation = conversation();
+
+        // The primary is set aside, and the secondary serves.
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "one")),
+        ]);
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        conversation.add_assistant_message_from_response(response);
+        mock.take();
+
+        // The secondary goes first, the primary second, and a third joins.
+        let url = &mock.url;
+        editor
+            .set_accounts([
+                account("secondary", SECONDARY, url),
+                account("primary", PRIMARY, url),
+                account("third", THIRD, url),
+            ])
+            .unwrap();
+        assert_eq!(labels(&accounts), ["secondary", "primary", "third"]);
+        assert_eq!(
+            accounts
+                .accounts()
+                .iter()
+                .map(|a| a.label())
+                .collect::<Vec<_>>(),
+            ["secondary", "primary", "third"]
+        );
+        // The primary is still set aside, the secondary is still the one in use.
+        let statuses = accounts.statuses();
+        assert!(statuses[1].exhausted && !statuses[0].exhausted && !statuses[2].exhausted);
+        assert_eq!(accounts.active_account().as_deref(), Some("secondary"));
+        // An edit that changes nothing adds no snapshot.
+        let before = snapshots(&accounts);
+        editor
+            .set_accounts([
+                account("secondary", SECONDARY, url),
+                account("primary", PRIMARY, url),
+                account("third", THIRD, url),
+            ])
+            .unwrap();
+        assert_eq!(snapshots(&accounts), before);
+        // A list that fails to build changes nothing.
+        assert!(editor.set_accounts([]).is_err());
+        assert!(
+            editor
+                .set_accounts([account("a", "one", url), account("b", "one", url)])
+                .is_err()
+        );
+        assert_eq!(labels(&accounts), ["secondary", "primary", "third"]);
+
+        // The secondary still gets the reasoning it produced.
+        conversation.add_user_message("Go on.");
+        mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_b2", "two"))]);
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        conversation.add_assistant_message_from_response(response);
+        assert_eq!(replayed(&mock.take()[0]), (vec!["enc_b".to_string()], None));
+
+        // Without the secondary, the next account serves, and gets none of
+        // its reasoning. The primary is still aside, so it is the third.
+        editor
+            .set_accounts([
+                account("primary", PRIMARY, url),
+                account("third", THIRD, url),
+            ])
+            .unwrap();
+        assert_eq!(labels(&accounts), ["primary", "third"]);
+        assert_eq!(accounts.active_account(), None);
+        conversation.add_user_message("And then?");
+        mock.expect([answer(THIRD, "/responses", 200, &turn("enc_c", "three"))]);
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        assert_eq!(response.model_call_usage.account.as_deref(), Some("third"));
+        assert_eq!(replayed(&mock.take()[0]), (vec![], None));
+
+        // The same label signing in as another account starts clean.
+        editor
+            .set_accounts([
+                account("primary", "acct-other", url),
+                account("third", THIRD, url),
+            ])
+            .unwrap();
+        assert!(!accounts.statuses()[0].exhausted);
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
+/// Writes a Codex `auth.json` for `account_id` at `path`.
+fn write_auth(path: &std::path::Path, account_id: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let auth = json!({"auth_mode": "chatgpt", "tokens": {
+        "access_token": fresh_jwt(),
+        "refresh_token": format!("refresh-{account_id}"),
+        "account_id": account_id,
+    }});
+    std::fs::write(path, auth.to_string()).unwrap();
+}
+
+/// An account loaded from the Codex file at `path`, sending to `url`.
+fn file_account(label: &str, path: &std::path::Path, url: &str) -> ChatGptAccount {
+    let file = CodexAuthFile::load(path).unwrap();
+    let mut client = file
+        .openai_client()
+        .unwrap()
+        .with_base_url(url)
+        .with_oauth_token_url(format!("{url}/token"));
+    client.http_client = crate::providers::http_client_builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    ChatGptAccount::new(label, client).with_file(&file)
+}
+
+fn token_revoked() -> String {
+    json!({"error": {"code": "token_revoked", "message": "Your authentication token has been invalidated."}})
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_list_that_follows_files_signs_in_as_the_account_a_file_now_holds() {
+    within(async {
+        let mock = Mock::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("login").join("auth.json");
+        write_auth(&path, PRIMARY);
+        let events: Events = Arc::default();
+        let recorded = events.clone();
+        let accounts = ChatGptAccounts::new([file_account("login", &path, &mock.url)])
+            .unwrap()
+            .with_file_following()
+            .with_observer(move |event| recorded.lock().unwrap().push(event.clone()));
+        let config = GenerationConfig::default();
+        let mut conversation = conversation();
+
+        mock.expect([answer(PRIMARY, "/responses", 200, &turn("enc_a", "one"))]);
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        conversation.add_assistant_message_from_response(response);
+        conversation.add_user_message("Go on.");
+        mock.take();
+
+        // `codex login` to another account, between two requests: the next
+        // request signs in as that one, without the first one's reasoning.
+        write_auth(&path, SECONDARY);
+        mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_b", "two"))]);
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        conversation.add_assistant_message_from_response(response);
+        let seen = mock.take();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].account, SECONDARY);
+        assert_eq!(replayed(&seen[0]), (vec![], None));
+        assert_eq!(
+            take(&events),
+            [ChatGptAccountEvent::SignInChanged {
+                account: "login".into()
+            }]
+        );
+        assert_eq!(labels(&accounts), ["login"]);
+        assert_eq!(accounts.active_account().as_deref(), Some("login"));
+
+        // The request in flight when the login changes is rejected with a
+        // revoked token, and goes once more to the account the file holds.
+        conversation.add_user_message("And then?");
+        mock.expect([
+            answer(SECONDARY, "/responses", 401, &token_revoked())
+                .after(Duration::from_millis(300)),
+            answer(PRIMARY, "/responses", 200, &turn("enc_a2", "three")),
+        ]);
+        let changing = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                write_auth(&path, PRIMARY);
+            })
+        };
+        let response = accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        changing.await.unwrap();
+        assert_eq!(text(&response), "three");
+        let seen = mock.take();
+        let tried: Vec<&str> = seen.iter().map(|seen| seen.account.as_str()).collect();
+        assert_eq!(tried, [SECONDARY, PRIMARY]);
+        assert_eq!(replayed(&seen[1]), (vec![], None));
+        assert_eq!(
+            take(&events),
+            [ChatGptAccountEvent::SignInChanged {
+                account: "login".into()
+            }]
+        );
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_rejection_stands_unless_the_file_holds_another_account_the_list_may_use() {
+    within(async {
+        let mock = Mock::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (
+            dir.path().join("a/auth.json"),
+            dir.path().join("b/auth.json"),
+        );
+        write_auth(&first, PRIMARY);
+        write_auth(&second, SECONDARY);
+        let config = GenerationConfig::default();
+
+        // Not asked to follow: the file changes, the rejection is the error.
+        let accounts = ChatGptAccounts::new([file_account("login", &first, &mock.url)]).unwrap();
+        write_auth(&first, THIRD);
+        mock.expect([answer(PRIMARY, "/responses", 401, &token_revoked())]);
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Authentication);
+        assert_eq!(mock.take().len(), 1);
+
+        // Following, but the file holds the account of another entry of the
+        // list: it is not used, and the rejection is the error.
+        write_auth(&first, PRIMARY);
+        let accounts = ChatGptAccounts::new([
+            file_account("first", &first, &mock.url),
+            file_account("second", &second, &mock.url),
+        ])
+        .unwrap()
+        .with_file_following();
+        write_auth(&first, SECONDARY);
+        mock.expect([answer(PRIMARY, "/responses", 401, &token_revoked())]);
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Authentication);
+        assert_eq!(mock.take().len(), 1);
+        assert_eq!(labels(&accounts), ["first", "second"]);
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn two_requests_rejected_together_replace_the_sign_in_once() {
+    within(async {
+        let mock = Mock::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("login").join("auth.json");
+        write_auth(&path, PRIMARY);
+        let events: Events = Arc::default();
+        let recorded = events.clone();
+        let accounts = ChatGptAccounts::new([file_account("login", &path, &mock.url)])
+            .unwrap()
+            .with_file_following()
+            .with_observer(move |event| recorded.lock().unwrap().push(event.clone()));
+        let config = GenerationConfig::default();
+        let conversation = conversation();
+        let slow = Duration::from_millis(300);
+        mock.expect([
+            answer(PRIMARY, "/responses", 401, &token_revoked()).after(slow),
+            answer(PRIMARY, "/responses", 401, &token_revoked()).after(slow),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "one")),
+            answer(SECONDARY, "/responses", 200, &turn("enc_c", "two")),
+        ]);
+        let login_again = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            write_auth(&path, SECONDARY);
+        };
+        let (first, second, ()) = tokio::join!(
+            accounts.generate_text(&conversation, &config),
+            accounts.generate_text(&conversation, &config),
+            login_again
+        );
+        first.unwrap();
+        second.unwrap();
+        // Both went on to the account the file holds, which replaced the
+        // entry once.
+        let tried: Vec<String> = mock.take().into_iter().map(|seen| seen.account).collect();
+        assert_eq!(tried, [PRIMARY, PRIMARY, SECONDARY, SECONDARY]);
+        assert_eq!(
+            take(&events),
+            [ChatGptAccountEvent::SignInChanged {
+                account: "login".into()
+            }]
+        );
+        assert_eq!(labels(&accounts), ["login"]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_file_is_read_once_per_rejected_request_and_when_its_entry_is_set_aside() {
+    within(async {
+        let mock = Mock::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("login").join("auth.json");
+        write_auth(&path, PRIMARY);
+        let accounts = ChatGptAccounts::new([file_account("login", &path, &mock.url)])
+            .unwrap()
+            .with_file_following();
+        let config = GenerationConfig::default();
+
+        // A file that flips while a request is rejected sends it once more,
+        // not once for each flip.
+        let slow = Duration::from_millis(250);
+        mock.expect([
+            answer(PRIMARY, "/responses", 401, &token_revoked()).after(slow),
+            answer(SECONDARY, "/responses", 401, &token_revoked()).after(slow),
+            answer(PRIMARY, "/responses", 200, &turn("enc_a", "unused")),
+        ]);
+        let flipping = async {
+            for (wait, account) in [(80, SECONDARY), (300, PRIMARY)] {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                write_auth(&path, account);
+            }
+        };
+        let asking = conversation();
+        let (result, ()) = tokio::join!(accounts.generate_text(&asking, &config), flipping);
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Authentication);
+        let tried: Vec<String> = mock.take().into_iter().map(|seen| seen.account).collect();
+        assert_eq!(tried, [PRIMARY, SECONDARY]);
+        mock.script.lock().unwrap().clear();
+
+        // The entry is used up, and the operator signs in as another
+        // account: the next request goes to it, with no wait for a reset.
+        write_auth(&path, PRIMARY);
+        mock.expect([answer(
+            PRIMARY,
+            "/responses",
+            429,
+            &usage_limit(unix_now() + 3600),
+        )]);
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit());
+        mock.take();
+        write_auth(&path, THIRD);
+        mock.expect([answer(THIRD, "/responses", 200, &turn("enc_c", "back"))]);
+        let response = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        assert_eq!(text(&response), "back");
+        assert!(!accounts.statuses()[0].exhausted);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reasoning_from_before_the_process_is_never_handed_to_another_account() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, _events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let config = GenerationConfig::default();
+        let mut conversation = conversation();
+        conversation.add_assistant_message_with_reasoning(
+            "Earlier.",
+            ReasoningArtifact::OpenAIEncryptedReasoning {
+                items: vec![crate::reasoning::OpenAIReasoningItem {
+                    encrypted_content: "enc_old".into(),
+                    summaries: None,
+                    id: None,
+                }],
+            },
+        );
+        conversation.add_user_message("Go on.");
+
+        // It belongs to the primary, which gets it.
+        mock.expect([answer(PRIMARY, "/responses", 200, &turn("enc_a", "one"))]);
+        accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        assert_eq!(replayed(&mock.take()[0]).0, ["enc_old"]);
+
+        // Without the primary, no account gets it.
+        let url = &mock.url;
+        accounts
+            .set_accounts([account("secondary", SECONDARY, url)])
+            .unwrap();
+        mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_b", "two"))]);
+        accounts
+            .generate_text(&conversation, &config)
+            .await
+            .unwrap();
+        assert_eq!(replayed(&mock.take()[0]).0, Vec::<String>::new());
+    })
+    .await;
+}

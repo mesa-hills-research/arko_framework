@@ -53,7 +53,8 @@ use std::{
     collections::{BTreeSet, HashMap},
     fmt,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
     time::{Duration, SystemTime},
 };
 
@@ -83,6 +84,9 @@ const MAX_ORIGINS: usize = 1 << 20;
 pub struct ChatGptAccount {
     label: String,
     client: OpenAIClient,
+    /// The Codex `auth.json` the sign-in came from, which a list that
+    /// [follows files](ChatGptAccounts::with_file_following) reads again.
+    file: Option<PathBuf>,
 }
 
 impl fmt::Debug for ChatGptAccount {
@@ -100,6 +104,7 @@ impl ChatGptAccount {
         Self {
             label: label.into(),
             client,
+            file: None,
         }
     }
 
@@ -109,7 +114,16 @@ impl ChatGptAccount {
         label: impl Into<String>,
         file: &CodexAuthFile,
     ) -> Result<Self, Error> {
-        Ok(Self::new(label, file.openai_client()?))
+        Ok(Self::new(label, file.openai_client()?).with_file(file))
+    }
+
+    /// Names the Codex `auth.json` this account's client signs in with, for
+    /// a list that [follows files](ChatGptAccounts::with_file_following).
+    /// [`from_codex_auth_file`](Self::from_codex_auth_file) does it already,
+    /// so this is for an account made from a client configured further.
+    pub fn with_file(mut self, file: &CodexAuthFile) -> Self {
+        self.file = Some(file.path().to_path_buf());
+        self
     }
 
     pub fn label(&self) -> &str {
@@ -169,6 +183,11 @@ pub enum ChatGptAccountEvent {
         account: String,
         balance: Option<String>,
     },
+    /// The Codex file of `account` holds another ChatGPT account than the
+    /// one the list signed in with (the operator ran `codex login` again),
+    /// so the entry signs in as that one from now on. Only a list that
+    /// [follows files](ChatGptAccounts::with_file_following) sends it.
+    SignInChanged { account: String },
 }
 
 /// Why requests moved to another account.
@@ -254,6 +273,10 @@ impl fmt::Display for ChatGptAccountEvent {
                 formatter,
                 "ChatGPT account `{account}` used up a plan window and is drawing on its credits (balance {})",
                 balance.as_deref().unwrap_or("unknown")
+            ),
+            Self::SignInChanged { account } => write!(
+                formatter,
+                "ChatGPT account `{account}` signs in as another account now, because its Codex file changed"
             ),
         }
     }
@@ -529,12 +552,23 @@ impl AccountState {
 
 #[derive(Debug)]
 struct PoolState {
+    /// Every account the list has had, in the order they were added. An
+    /// account's place here is its identity and never changes, so the
+    /// requests under way, the origins and the states below keep meaning
+    /// what they did when the list is edited. The accounts in the list now,
+    /// preferred first, are `order`.
+    list: Vec<ChatGptAccount>,
+    /// The state of each account in `list`.
     accounts: Vec<AccountState>,
+    /// The places in `list` of the accounts in the list now, preferred
+    /// first. Never empty.
+    order: Vec<usize>,
     /// The account the last request went to.
     active: Option<usize>,
     /// The account each reasoning item (by `encrypted_content`) and
     /// turn-state token came from, by fingerprint. Ones not here are taken
-    /// to be the first account's.
+    /// to be the first account's of the list as it was built (`list[0]`),
+    /// whatever edits followed.
     origins: HashMap<u64, usize>,
     /// Accounts that served a response in this process.
     served: BTreeSet<usize>,
@@ -546,6 +580,41 @@ struct PoolState {
 }
 
 impl PoolState {
+    /// The first account of the list now.
+    fn first(&self) -> usize {
+        self.order[0]
+    }
+
+    /// Whether the account at `index` of `list` is in the list now.
+    fn is_listed(&self, index: usize) -> bool {
+        self.order.contains(&index)
+    }
+
+    /// Adds `account` to `list`, with a clean state, without putting it in
+    /// the list now. Returns its place.
+    fn add(&mut self, account: ChatGptAccount) -> usize {
+        self.list.push(account);
+        self.accounts.push(AccountState::default());
+        self.list.len() - 1
+    }
+
+    /// Makes `order` the list now. The last request is no longer the
+    /// active one's when its account left the list.
+    fn set_order(&mut self, order: Vec<usize>) {
+        self.order = order;
+        if self.active.is_some_and(|index| !self.is_listed(index)) {
+            self.active = None;
+        }
+    }
+
+    /// The account in the list now with `label`.
+    fn labelled(&self, label: &str) -> Option<usize> {
+        self.order
+            .iter()
+            .copied()
+            .find(|index| self.list[*index].label == label)
+    }
+
     /// A number larger than every one handed out before: the order in which
     /// reports about the accounts arrived. A response is stamped when the
     /// backend accepts its request (its head, which carries the usage
@@ -609,31 +678,124 @@ type Observer = Arc<dyn Fn(&ChatGptAccountEvent) + Send + Sync>;
 /// - A request replays only the encrypted reasoning, and the
 ///   `x-codex-turn-state` token, of the account serving it. See the module
 ///   documentation. Reasoning from before this process (a resumed
-///   conversation) counts as the first account's.
+///   conversation) counts as the first account's of the list as it was
+///   built, so an edit never hands it to another account.
 /// - [`ModelCallUsage::account`](crate::usage::ModelCallUsage::account)
 ///   names the account that served each call.
 ///
 /// Clones share the accounts and their state.
+///
+/// The list can be [edited](Self::set_accounts) while requests use it, and
+/// it can [follow the Codex files](Self::with_file_following) its accounts
+/// were loaded from.
 #[derive(Clone)]
 pub struct ChatGptAccounts {
-    accounts: Arc<[ChatGptAccount]>,
+    /// Snapshots of the list, one for each edit. See [`accounts`](Self::accounts).
+    snapshots: Arc<Snapshot>,
     state: Arc<Mutex<PoolState>>,
     /// Held while status checks run, so concurrent requests check once.
     check_lock: Arc<tokio::sync::Mutex<()>>,
     status_check_interval: Duration,
     usage_url: String,
+    follow_files: bool,
     observer: Option<Observer>,
     #[cfg(test)]
     clock: Option<Arc<Mutex<SystemTime>>>,
+}
+
+/// The accounts of the list as it was after an edit. Snapshots are only
+/// added, so that [`ChatGptAccounts::accounts`] can lend the newest.
+struct Snapshot {
+    accounts: Box<[ChatGptAccount]>,
+    next: OnceLock<Box<Snapshot>>,
+}
+
+impl Drop for Snapshot {
+    /// Drops the newer snapshots one at a time, so that a long history
+    /// doesn't recurse.
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(mut snapshot) = next {
+            next = snapshot.next.take();
+        }
+    }
+}
+
+impl Snapshot {
+    fn new(accounts: impl IntoIterator<Item = ChatGptAccount>) -> Self {
+        Self {
+            accounts: accounts.into_iter().collect(),
+            next: OnceLock::new(),
+        }
+    }
+
+    fn newest(&self) -> &Snapshot {
+        let mut newest = self;
+        while let Some(next) = newest.next.get() {
+            newest = next;
+        }
+        newest
+    }
 }
 
 impl fmt::Debug for ChatGptAccounts {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ChatGptAccounts")
-            .field("accounts", &self.accounts)
+            .field("accounts", &self.accounts())
             .field("status_check_interval", &self.status_check_interval)
             .finish_non_exhaustive()
+    }
+}
+
+/// Checks a list of accounts as [`ChatGptAccounts::new`] says.
+fn validate(accounts: &[ChatGptAccount]) -> Result<(), Error> {
+    if accounts.is_empty() {
+        return Err(Error::InvalidRequest(
+            "ChatGptAccounts needs at least one account".into(),
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    let mut account_ids: HashMap<String, &str> = HashMap::new();
+    for account in accounts {
+        if account.label.trim().is_empty() || !labels.insert(account.label.as_str()) {
+            return Err(Error::InvalidRequest(format!(
+                "ChatGPT account labels must be distinct and non-empty. `{}` is not",
+                account.label
+            )));
+        }
+        // Credentials being refreshed right now are not checked.
+        let Ok(auth) = account.client.auth.try_read() else {
+            continue;
+        };
+        match &*auth {
+            OpenAIAuth::ApiKey(_) => {
+                return Err(Error::InvalidRequest(format!(
+                    "ChatGPT account `{}` uses an API key. Every account must use ChatGPT OAuth",
+                    account.label
+                )));
+            }
+            OpenAIAuth::ChatGptOAuth(credentials) => {
+                if let Some(other) =
+                    account_ids.insert(credentials.account_id.clone(), &account.label)
+                {
+                    return Err(Error::InvalidRequest(format!(
+                        "ChatGPT accounts `{other}` and `{}` are the same account",
+                        account.label
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The ChatGPT account `account` signs in as, when its credentials can be
+/// read now (not while they are being refreshed).
+fn chatgpt_account_id(account: &ChatGptAccount) -> Option<String> {
+    match &*account.client.auth.try_read().ok()? {
+        OpenAIAuth::ChatGptOAuth(credentials) => Some(credentials.account_id.clone()),
+        OpenAIAuth::ApiKey(_) => None,
     }
 }
 
@@ -644,45 +806,11 @@ impl ChatGptAccounts {
     /// account.
     pub fn new(accounts: impl IntoIterator<Item = ChatGptAccount>) -> Result<Self, Error> {
         let accounts: Vec<ChatGptAccount> = accounts.into_iter().collect();
-        if accounts.is_empty() {
-            return Err(Error::InvalidRequest(
-                "ChatGptAccounts needs at least one account".into(),
-            ));
-        }
-        let mut labels = BTreeSet::new();
-        let mut account_ids: HashMap<String, &str> = HashMap::new();
-        for account in &accounts {
-            if account.label.trim().is_empty() || !labels.insert(account.label.as_str()) {
-                return Err(Error::InvalidRequest(format!(
-                    "ChatGPT account labels must be distinct and non-empty. `{}` is not",
-                    account.label
-                )));
-            }
-            // Credentials being refreshed right now are not checked.
-            let Ok(auth) = account.client.auth.try_read() else {
-                continue;
-            };
-            match &*auth {
-                OpenAIAuth::ApiKey(_) => {
-                    return Err(Error::InvalidRequest(format!(
-                        "ChatGPT account `{}` uses an API key. Every account must use ChatGPT OAuth",
-                        account.label
-                    )));
-                }
-                OpenAIAuth::ChatGptOAuth(credentials) => {
-                    if let Some(other) =
-                        account_ids.insert(credentials.account_id.clone(), &account.label)
-                    {
-                        return Err(Error::InvalidRequest(format!(
-                            "ChatGPT accounts `{other}` and `{}` are the same account",
-                            account.label
-                        )));
-                    }
-                }
-            }
-        }
+        validate(&accounts)?;
         let state = PoolState {
             accounts: accounts.iter().map(|_| AccountState::default()).collect(),
+            order: (0..accounts.len()).collect(),
+            list: accounts.clone(),
             active: None,
             origins: HashMap::new(),
             served: BTreeSet::new(),
@@ -690,11 +818,12 @@ impl ChatGptAccounts {
             stamps: 0,
         };
         Ok(Self {
-            accounts: accounts.into(),
+            snapshots: Arc::new(Snapshot::new(accounts)),
             state: Arc::new(Mutex::new(state)),
             check_lock: Arc::new(tokio::sync::Mutex::new(())),
             status_check_interval: DEFAULT_STATUS_CHECK_INTERVAL,
             usage_url: CHATGPT_USAGE_URL.into(),
+            follow_files: false,
             observer: None,
             #[cfg(test)]
             clock: None,
@@ -728,6 +857,31 @@ impl ChatGptAccounts {
         self
     }
 
+    /// Lets the accounts loaded from a Codex `auth.json`
+    /// ([`ChatGptAccount::from_codex_auth_file`]) follow their file to
+    /// another ChatGPT account, as when the operator runs `codex login` to
+    /// sign in to a different one. Off by default.
+    ///
+    /// Before a request goes to such an account, and again when the backend
+    /// rejects it with an authentication error (a revoked token, say), the
+    /// file is read. So is the file of an entry set aside, because signing
+    /// in again as another account is the usual way out of a used-up plan.
+    /// When the file holds another ChatGPT account than the one the entry
+    /// signs in as, the entry signs in as the file's account from then on,
+    /// with the same label and place. It starts with a clean state, the
+    /// reasoning and turn-state token of the account it replaced are not
+    /// replayed to it (as after a switch between accounts), and
+    /// [`ChatGptAccountEvent::SignInChanged`] is sent. A rejection sends the
+    /// request once more to the new sign-in, once per request. A file that
+    /// cannot be read, holds no ChatGPT login, or holds an account another
+    /// entry already signs in as changes nothing, and the error stands. New
+    /// tokens of the same account in the file are adopted by the account's
+    /// own client, with or without this.
+    pub fn with_file_following(mut self) -> Self {
+        self.follow_files = true;
+        self
+    }
+
     /// Calls `observer` with every [`ChatGptAccountEvent`] (they are logged
     /// either way), for example to tell an operator that the first account
     /// is exhausted. It is called after the state changed, from the task
@@ -742,26 +896,90 @@ impl ChatGptAccounts {
 
     /// Applies `configure` to every account's client (the `LLMClient`'s
     /// OpenAI settings). The clients keep their credentials.
-    pub(crate) fn map_clients(mut self, configure: impl Fn(OpenAIClient) -> OpenAIClient) -> Self {
-        self.accounts = self
-            .accounts
-            .iter()
-            .map(|account| ChatGptAccount {
-                label: account.label.clone(),
-                client: configure(account.client.clone()),
-            })
-            .collect();
+    pub(crate) fn map_clients(self, configure: impl Fn(OpenAIClient) -> OpenAIClient) -> Self {
+        {
+            let mut state = self.lock();
+            for account in &mut state.list {
+                account.client = configure(account.client.clone());
+            }
+            self.publish(&state);
+        }
         self
     }
 
+    /// Edits the list in place, for the clones of this list and the
+    /// requests that start from now on. `accounts` is the new list, in order
+    /// of preference. An account of the list now stays, with its state (set
+    /// aside, usage, credits, and which reasoning items and turn-state
+    /// tokens are its) and its own client, when `accounts` has an account
+    /// with the same label that signs in as the same ChatGPT account (the
+    /// given one is dropped). The other accounts of `accounts` are added, with a
+    /// clean state, and an account of the list now that `accounts` lacks is
+    /// removed (its requests under way finish, and its reasoning items are
+    /// not replayed to another account, as after a switch). So adding,
+    /// removing, putting an account first and replacing an account's sign-in
+    /// are all edits of the list.
+    ///
+    /// The new accounts' clients are used as given, without the settings
+    /// made on the `LLMClient` that holds the list. Fails as
+    /// [`new`](Self::new) does, for the list `accounts`, and then changes
+    /// nothing.
+    pub fn set_accounts(
+        &self,
+        accounts: impl IntoIterator<Item = ChatGptAccount>,
+    ) -> Result<(), Error> {
+        let accounts: Vec<ChatGptAccount> = accounts.into_iter().collect();
+        validate(&accounts)?;
+        let mut state = self.lock();
+        let mut order = Vec::with_capacity(accounts.len());
+        let mut added = false;
+        for account in accounts {
+            // (Credentials being refreshed right now count as the same.)
+            let kept = state.order.iter().copied().find(|index| {
+                let listed = &state.list[*index];
+                listed.label == account.label
+                    && chatgpt_account_id(listed)
+                        .zip(chatgpt_account_id(&account))
+                        .is_none_or(|(listed, given)| listed == given)
+            });
+            order.push(match kept {
+                Some(index) => index,
+                None => {
+                    added = true;
+                    state.add(account)
+                }
+            });
+        }
+        if order == state.order && !added {
+            return Ok(());
+        }
+        state.set_order(order);
+        self.publish(&state);
+        Ok(())
+    }
+
+    /// The accounts in the list, in order of preference, as the list was
+    /// built or last [edited](Self::set_accounts).
     pub fn accounts(&self) -> &[ChatGptAccount] {
-        &self.accounts
+        &self.snapshots.newest().accounts
+    }
+
+    /// Records the list as it is now, for [`accounts`](Self::accounts).
+    fn publish(&self, state: &PoolState) {
+        let snapshot = Box::new(Snapshot::new(
+            state.order.iter().map(|index| state.list[*index].clone()),
+        ));
+        // (Under the state's lock, so one edit at a time adds a snapshot.)
+        let _ = self.snapshots.newest().next.set(snapshot);
     }
 
     /// The label of the account the last request went to.
     pub fn active_account(&self) -> Option<String> {
         let state = self.lock();
-        state.active.map(|index| self.accounts[index].label.clone())
+        state
+            .active
+            .filter(|index| state.is_listed(*index))
+            .map(|index| state.list[index].label.clone())
     }
 
     /// Every account's state, in order of preference.
@@ -771,15 +989,15 @@ impl ChatGptAccounts {
     }
 
     fn statuses_of(&self, state: &PoolState) -> Vec<ChatGptAccountStatus> {
-        self.accounts
+        state
+            .order
             .iter()
-            .zip(&state.accounts)
-            .enumerate()
-            .map(|(index, (account, account_state))| {
+            .map(|index| {
+                let account_state = &state.accounts[*index];
                 let block = account_state.block.as_ref();
                 ChatGptAccountStatus {
-                    label: account.label.clone(),
-                    active: state.active == Some(index),
+                    label: state.list[*index].label.clone(),
+                    active: state.active == Some(*index),
                     exhausted: block.is_some(),
                     retry: block.and_then(|block| block.retry),
                     exhausted_since: block.map(|block| block.since),
@@ -804,7 +1022,10 @@ impl ChatGptAccounts {
         let _checking = self.check_lock.lock().await;
         let checked: Vec<usize> = {
             let state = self.lock();
-            (0..self.accounts.len())
+            state
+                .order
+                .iter()
+                .copied()
                 .filter(|index| {
                     let account = &state.accounts[*index];
                     account.block.is_some() || account.drawing_credits
@@ -823,7 +1044,7 @@ impl ChatGptAccounts {
     /// the endpoint's error.
     pub async fn read_usage(&self, label: &str) -> Result<ChatGptUsageStatus, Error> {
         let index = self.index_of(label)?;
-        let status = fetch_usage(&self.accounts[index].client, &self.usage_url).await?;
+        let status = fetch_usage(&self.account(index).client, &self.usage_url).await?;
         let events = self.record_check(index, &status);
         self.emit(events);
         Ok(status)
@@ -835,14 +1056,14 @@ impl ChatGptAccounts {
         let now = self.now();
         let mut state = self.lock();
         let stamp = state.stamp();
+        let label = state.list[index].label.clone();
         let account = &mut state.accounts[index];
         account.usage = Some(status.clone());
         account.checked_at = Some(now);
-        let label = &self.accounts[index].label;
-        let (_, started) = account.apply(label, stamp, Report::of_check(status));
+        let (_, started) = account.apply(&label, stamp, Report::of_check(status));
         started
             .then(|| ChatGptAccountEvent::UsingCredits {
-                account: label.clone(),
+                account: label,
                 balance: account
                     .credits
                     .as_ref()
@@ -853,10 +1074,19 @@ impl ChatGptAccounts {
     }
 
     fn index_of(&self, label: &str) -> Result<usize, Error> {
-        self.accounts
-            .iter()
-            .position(|account| account.label == label)
+        self.lock()
+            .labelled(label)
             .ok_or_else(|| Error::InvalidRequest(format!("no ChatGPT account `{label}`")))
+    }
+
+    /// The account at `index` of the list's history (see
+    /// [`PoolState::list`]).
+    fn account(&self, index: usize) -> ChatGptAccount {
+        self.lock().list[index].clone()
+    }
+
+    fn label(&self, index: usize) -> String {
+        self.lock().list[index].label.clone()
     }
 
     /// Takes the account labelled `label` back now, without a check (for
@@ -891,10 +1121,13 @@ impl ChatGptAccounts {
     /// The client of the account the next request would go to (the first
     /// usable one, else the first): what the `LLMClient`'s OAuth methods
     /// (refreshing, reading credentials) act on.
-    pub(crate) fn preferred_client(&self) -> &OpenAIClient {
+    pub(crate) fn preferred_client(&self) -> OpenAIClient {
         let now = self.now();
         let state = self.lock();
-        let index = (0..self.accounts.len())
+        let index = state
+            .order
+            .iter()
+            .copied()
             .find(|index| {
                 let account = &state.accounts[*index];
                 account.takes_requests()
@@ -904,8 +1137,8 @@ impl ChatGptAccounts {
                         .and_then(|block| block.until)
                         .is_some_and(|until| until <= now)
             })
-            .unwrap_or(0);
-        &self.accounts[index].client
+            .unwrap_or(state.first());
+        state.list[index].client.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, PoolState> {
@@ -954,10 +1187,14 @@ impl ChatGptAccounts {
         let due: Vec<usize> = {
             let mut state = self.lock();
             Self::expire(&mut state, now);
-            let first_usable = (0..self.accounts.len())
-                .find(|index| state.accounts[*index].takes_requests())
-                .unwrap_or(self.accounts.len());
-            (0..first_usable)
+            let first_usable = state
+                .order
+                .iter()
+                .position(|index| state.accounts[*index].takes_requests())
+                .unwrap_or(state.order.len());
+            state.order[..first_usable]
+                .iter()
+                .copied()
                 .filter(|index| {
                     state.accounts[*index]
                         .block
@@ -979,7 +1216,7 @@ impl ChatGptAccounts {
     /// check allows, or can't decide on, is tried by the next request.
     async fn check(&self, indices: &[usize]) {
         for &index in indices {
-            let account = &self.accounts[index];
+            let account = self.account(index);
             let result = fetch_usage(&account.client, &self.usage_url).await;
             let now = self.now();
             let mut events = Vec::new();
@@ -1022,7 +1259,10 @@ impl ChatGptAccounts {
     fn choose(&self, tried: &BTreeSet<usize>) -> Option<usize> {
         let mut state = self.lock();
         Self::expire(&mut state, self.now());
-        (0..self.accounts.len())
+        state
+            .order
+            .iter()
+            .copied()
             .find(|index| !tried.contains(index) && state.accounts[*index].takes_requests())
     }
 
@@ -1032,6 +1272,9 @@ impl ChatGptAccounts {
         let mut events = Vec::new();
         {
             let mut state = self.lock();
+            let label = state.list[index].label.clone();
+            // (An account removed or replaced meanwhile is not reported.)
+            let listed = state.is_listed(index);
             let account = &mut state.accounts[index];
             let previous = account.block.take();
             let until = error
@@ -1042,9 +1285,9 @@ impl ChatGptAccounts {
             let code = error_code(error);
             // Already set aside (a retry refused again, or another request
             // refused at the same time): nothing new to report.
-            if previous.is_none() {
+            if previous.is_none() && listed {
                 events.push(ChatGptAccountEvent::Exhausted {
-                    account: self.accounts[index].label.clone(),
+                    account: label,
                     resets_at: until,
                     code: code.clone(),
                 });
@@ -1069,9 +1312,9 @@ impl ChatGptAccounts {
         let (earliest, summary) = {
             let mut state = self.lock();
             let earliest = state
-                .accounts
+                .order
                 .iter()
-                .filter_map(|account| account.block.as_ref()?.until)
+                .filter_map(|index| state.accounts[*index].block.as_ref()?.until)
                 .min();
             if !state.all_exhausted_sent {
                 state.all_exhausted_sent = true;
@@ -1079,13 +1322,19 @@ impl ChatGptAccounts {
                     resets_at: earliest,
                 });
             }
-            let summary = self
-                .accounts
+            let summary = state
+                .order
                 .iter()
-                .zip(&state.accounts)
-                .map(|(account, account_state)| {
-                    let until = account_state.block.as_ref().and_then(|block| block.until);
-                    format!("`{}` resets {}", account.label, reset_phrase(until))
+                .map(|index| {
+                    let until = state.accounts[*index]
+                        .block
+                        .as_ref()
+                        .and_then(|block| block.until);
+                    format!(
+                        "`{}` resets {}",
+                        state.list[*index].label,
+                        reset_phrase(until)
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1114,23 +1363,30 @@ impl ChatGptAccounts {
         let mut events = Vec::new();
         {
             let mut state = self.lock();
+            // (A request to an account removed meanwhile.)
+            if !state.is_listed(index) {
+                return;
+            }
+            let label = state.list[index].label.clone();
             let block = &mut state.accounts[index].block;
             if block.as_ref().is_some_and(|block| block.retry.is_none()) {
                 return;
             }
             if let Some(block) = block.take() {
                 events.push(ChatGptAccountEvent::Usable {
-                    account: self.accounts[index].label.clone(),
+                    account: label.clone(),
                     reason: block.retry.unwrap_or(UsableReason::Retried),
                 });
             }
             // Before the first request, the first account is the one in use.
-            let previous = state.active.replace(index).unwrap_or(0);
+            let first = state.first();
+            let previous = state.active.replace(index).unwrap_or(first);
             if previous != index {
+                let position = |wanted: usize| state.order.iter().position(|i| *i == wanted);
                 events.push(ChatGptAccountEvent::Switched {
-                    from: self.accounts[previous].label.clone(),
-                    to: self.accounts[index].label.clone(),
-                    reason: if index < previous {
+                    from: state.list[previous].label.clone(),
+                    to: label,
+                    reason: if position(index) < position(previous) {
                         SwitchReason::Restored
                     } else {
                         SwitchReason::Exhausted
@@ -1144,7 +1400,7 @@ impl ChatGptAccounts {
     /// Records a response `index` served, whose request was accepted at
     /// `stamp`, and labels it.
     fn served(&self, index: usize, stamp: u64, response: &mut GenerationResponse) {
-        let label = &self.accounts[index].label;
+        let label = &self.label(index);
         response.model_call_usage.account = Some(label.clone());
         let mut events = Vec::new();
         {
@@ -1173,22 +1429,21 @@ impl ChatGptAccounts {
                     });
                 }
             }
-            if self.accounts.len() > 1 {
-                if state.origins.len() > MAX_ORIGINS {
-                    log::info!(
-                        "arko_ai: forgetting which ChatGPT account produced older reasoning items"
-                    );
-                    state.origins.clear();
-                }
-                let mut record = |text: &str| {
-                    state.origins.insert(fingerprint(text), index);
-                };
-                for text in encrypted_reasoning(&response.message.reasoning_artifact) {
-                    record(text);
-                }
-                if let Some(token) = &response.openai_turn_state {
-                    record(token);
-                }
+            // (Also with one account, which the list may come to replace.)
+            if state.origins.len() > MAX_ORIGINS {
+                log::info!(
+                    "arko_ai: forgetting which ChatGPT account produced older reasoning items"
+                );
+                state.origins.clear();
+            }
+            let mut record = |text: &str| {
+                state.origins.insert(fingerprint(text), index);
+            };
+            for text in encrypted_reasoning(&response.message.reasoning_artifact) {
+                record(text);
+            }
+            if let Some(token) = &response.openai_turn_state {
+                record(token);
             }
         }
         self.emit(events);
@@ -1198,11 +1453,9 @@ impl ChatGptAccounts {
     /// reasoning, and the turn-state token, of other accounts. Borrowed when
     /// nothing is removed.
     fn prepare<'a>(&self, conversation: &'a Conversation, index: usize) -> Cow<'a, Conversation> {
-        if self.accounts.len() < 2 {
-            return Cow::Borrowed(conversation);
-        }
         let state = self.lock();
-        // Unknown items count as the first account's.
+        // Unknown items count as the first account's of the list as it was
+        // built, which an edit does not change.
         if index == 0 && state.served.iter().all(|served| *served == 0) {
             return Cow::Borrowed(conversation);
         }
@@ -1257,13 +1510,13 @@ impl ChatGptAccounts {
         if error.is_retryable() {
             log::info!(
                 "arko_ai: trying ChatGPT account `{}` again failed ({error}). The next request tries it again",
-                self.accounts[index].label
+                self.label(index)
             );
             return;
         }
         log::info!(
             "arko_ai: trying ChatGPT account `{}` again failed ({error}). It stays set aside",
-            self.accounts[index].label
+            self.label(index)
         );
         let now = self.now();
         if let Some(block) = self.lock().accounts[index].block.as_mut() {
@@ -1271,6 +1524,80 @@ impl ChatGptAccounts {
             block.next_check = now + self.status_check_interval;
             block.until = block.until.filter(|until| *until > now);
         }
+    }
+
+    /// The entries set aside that have a Codex file to follow, when the list
+    /// [follows files](Self::with_file_following).
+    fn set_aside_with_files(&self) -> Vec<usize> {
+        if !self.follow_files {
+            return Vec::new();
+        }
+        let state = self.lock();
+        state
+            .order
+            .iter()
+            .copied()
+            .filter(|index| {
+                state.accounts[*index].block.is_some() && state.list[*index].file.is_some()
+            })
+            .collect()
+    }
+
+    /// When the list [follows files](Self::with_file_following) and the Codex
+    /// file of the account at `index` holds another ChatGPT account than the
+    /// one it signs in as, replaces that entry (same label and place) with
+    /// the file's account, which starts clean. Returns the new account's
+    /// place. Also returns the replacement another request already made.
+    async fn follow_file(&self, index: usize) -> Option<usize> {
+        if !self.follow_files {
+            return None;
+        }
+        let account = self.account(index);
+        // (A file that cannot be read, or holds an API key, changes nothing.)
+        let file = CodexAuthFile::load(account.file.as_ref()?).ok()?;
+        let stored = file.credentials().ok()?;
+        let held = account.client.chatgpt_oauth_credentials().await?;
+        if stored.account_id == held.account_id {
+            return None;
+        }
+        let signed_in = file.openai_client().ok()?;
+        let replacement = ChatGptAccount {
+            client: account.client.with_sign_in_of(&signed_in),
+            ..account.clone()
+        };
+        let new_index = {
+            let mut state = self.lock();
+            let Some(position) = state.order.iter().position(|listed| *listed == index) else {
+                // Replaced or removed since the request chose it.
+                return state.labelled(&account.label);
+            };
+            let taken = state.order.iter().any(|listed| {
+                *listed != index
+                    && chatgpt_account_id(&state.list[*listed]).as_deref()
+                        == Some(stored.account_id.as_str())
+            });
+            if taken {
+                log::warn!(
+                    "arko_ai: the file of ChatGPT account `{}` holds an account that another entry of the list already signs in as. Not using it",
+                    account.label
+                );
+                return None;
+            }
+            let new_index = state.add(replacement);
+            let mut order = state.order.clone();
+            order[position] = new_index;
+            let was_active = state.active == Some(index);
+            state.set_order(order);
+            if was_active {
+                state.active = Some(new_index);
+            }
+            self.publish(&state);
+            new_index
+        };
+        self.emit(vec![ChatGptAccountEvent::SignInChanged {
+            account: account.label,
+        }]);
+        Some(new_index)
     }
 
     /// Opens a stream on the first account not in `tried` that accepts the
@@ -1282,11 +1609,18 @@ impl ChatGptAccounts {
         mut tried: BTreeSet<usize>,
     ) -> BoxFuture<'a, Result<BoxStream<'static, Result<StreamEvent, Error>>, Error>> {
         Box::pin(async move {
+            // An entry set aside whose file now holds another account (the
+            // usual reason to sign in again) is a new sign-in, usable at once.
+            for index in self.set_aside_with_files() {
+                self.follow_file(index).await;
+            }
             self.run_due_checks().await;
             let mut last_error = None;
             let mut retry_error = None;
+            // A rejection has the file read again once per request.
+            let mut reread = false;
             loop {
-                let Some(index) = self.choose(&tried) else {
+                let Some(mut index) = self.choose(&tried) else {
                     // An account tried again failed for another reason than
                     // its limit: that failure is the request's, as with one
                     // account, not a usage limit until another account's
@@ -1296,9 +1630,14 @@ impl ChatGptAccounts {
                     }
                     return Err(self.all_exhausted(last_error));
                 };
+                // A file that holds another account since the last request
+                // is followed before this one.
+                if let Some(replacement) = self.follow_file(index).await {
+                    index = replacement;
+                }
                 tried.insert(index);
                 let retrying = self.retrying(index);
-                let client = &self.accounts[index].client;
+                let client = self.account(index).client;
                 let opened = async {
                     client
                         .refresh_oauth_token_if_expiring(REFRESH_MARGIN)
@@ -1318,13 +1657,23 @@ impl ChatGptAccounts {
                         self.exhaust(index, &error);
                         last_error = Some(error);
                     }
-                    // Trying an account set aside is a guess; another
-                    // account serves when it fails.
-                    Err(error) if retrying => {
+                    Err(error) => {
+                        // The file may hold another account now (a revoked
+                        // token is the sign): the request goes to it.
+                        if error.kind() == ErrorKind::Authentication
+                            && !std::mem::replace(&mut reread, true)
+                            && self.follow_file(index).await.is_some()
+                        {
+                            continue;
+                        }
+                        // Trying an account set aside is a guess; another
+                        // account serves when it fails.
+                        if !retrying {
+                            return Err(error);
+                        }
                         self.retry_failed(index, &error);
                         retry_error = Some(error);
                     }
-                    Err(error) => return Err(error),
                 }
             }
         })
@@ -1391,7 +1740,8 @@ impl ChatGptAccounts {
                                 let error = match next_usable {
                                     Some(next) => Error::StreamTruncated(format!(
                                         "ChatGPT account `{}` was refused during the response. A retry goes to `{}` ({error})",
-                                        pool.accounts[index].label, pool.accounts[next].label
+                                        pool.label(index),
+                                        pool.label(next)
                                     )),
                                     None => error,
                                 };
