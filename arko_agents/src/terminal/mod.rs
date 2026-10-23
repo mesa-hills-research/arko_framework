@@ -580,6 +580,8 @@ impl TerminalManager {
                     std::time::Instant::now(),
                 ));
             }
+            // Only a record this open changes is saved again.
+            let changed = record.state == JobState::Running || record.stopped_by_close;
             // Listed once.
             record.stopped_by_close = false;
             record.generation = generation;
@@ -592,7 +594,9 @@ impl TerminalManager {
                         .into(),
                 );
             }
-            persist(&manager.config, &record)?;
+            if changed {
+                persist(&manager.config, &record)?;
+            }
             let data = Arc::new(Mutex::new(JobData::new(record)));
             let id = data.lock().unwrap().record.job_id;
             manager.jobs.lock().unwrap().insert(id, completed_job(data));

@@ -1574,6 +1574,28 @@ async fn the_jobs_a_restart_interrupted_are_listed() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// An open saves again only the records it changes, so a directory of
+/// thousands of ended jobs isn't rewritten, and a field a newer version added
+/// to one stays.
+#[tokio::test]
+async fn an_open_leaves_an_ended_record_as_it_is() {
+    let root = std::env::temp_dir().join(format!("arko-terminal-ended-{}", Uuid::new_v4()));
+    let id = Uuid::new_v4();
+    std::fs::create_dir_all(root.join(id.to_string())).unwrap();
+    let record = format!(
+        r#"{{"job_id":"{id}","owner":"{}","revision":4,"state":"succeeded","input":null,"exit_code":0,"error":null,"terminal":true,"output_end":0,"log_truncated":false,"added_later":1}}"#,
+        Uuid::new_v4()
+    );
+    let path = root.join(id.to_string()).join("job.json");
+    std::fs::write(&path, &record).unwrap();
+
+    let manager = TerminalManager::new(TerminalConfig::new(&root)).unwrap();
+    assert!(manager.interrupted_at_open().is_empty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), record);
+    drop(manager);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// The background jobs a shutdown stops are listed when the directory is
 /// opened again, by that open only. The shutdown waits for a moved call
 /// that ignores its stop to have its record. A held job and a job that
