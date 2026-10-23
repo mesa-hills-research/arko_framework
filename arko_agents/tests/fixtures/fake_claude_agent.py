@@ -89,7 +89,10 @@ that plays a turn, as a CLI without the command would pass it to the model.
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages (each with the conversation before it, as
-"history"), hook and permission answers, tool results.
+"history"), user messages sent during a turn ("midturn", with their "origin"
+and "uuid"), hook and permission answers, tool results. A message sent during a
+turn is not delivered. It only gets a command_lifecycle message when the turn
+ends.
 """
 import json
 import time
@@ -526,7 +529,24 @@ def handle(message):
             reply(message["request_id"], {})
     elif message.get("type") == "user":
         content = message["message"]["content"]
-        turn(content if isinstance(content, str) else json.dumps(content), message.get("uuid"))
+        text = content if isinstance(content, str) else json.dumps(content)
+        if state.get("working"):
+            # Like Claude Code, a message sent during a turn doesn't start
+            # one. The fake only logs it and settles it when the turn ends.
+            log("midturn", text=text, origin=message.get("origin"), uuid=message.get("uuid"))
+            state.setdefault("notes", []).append(message.get("uuid"))
+            return
+        state["working"] = True
+        try:
+            turn(text, message.get("uuid"))
+        finally:
+            state["working"] = False
+            # What became of the messages sent during the turn, as the CLI
+            # reports it: completed, or cancelled when the turn was interrupted.
+            for note in state.pop("notes", []):
+                send({"type": "command_lifecycle", "command_uuid": note, "session_id": SESSION,
+                      "state": "cancelled" if state["interrupted"] else "completed",
+                      "uuid": str(uuid.uuid4())})
 
 
 while True:

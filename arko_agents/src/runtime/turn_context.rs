@@ -11,8 +11,15 @@ use uuid::Uuid;
 pub struct TurnContext {
     /// The text added to the conversation.
     pub content: String,
-    /// The host's identifiers of the items in `content` (such as note
-    /// numbers or message ids), in any form it chooses. May be empty.
+    /// The part of the update the user typed themselves, such as the
+    /// operator's notes, which follows `content`. Only a Claude Code agent
+    /// treats it apart: during a turn it gets this text as a message from the
+    /// user, at the next tool boundary, and `content` in a hook. Every other
+    /// agent gets it after `content` in the same update. May be empty.
+    pub user_content: String,
+    /// The host's identifiers of the items in `content` and `user_content`
+    /// (such as note numbers or message ids), in any form it chooses. May be
+    /// empty.
     pub ids: Vec<String>,
     /// Images that go with `content`, each after its label, following the
     /// text in the same message. A Claude Code agent gets them with its
@@ -25,6 +32,7 @@ impl From<String> for TurnContext {
     fn from(content: String) -> Self {
         Self {
             content,
+            user_content: String::new(),
             ids: Vec::new(),
             images: Vec::new(),
         }
@@ -73,6 +81,17 @@ pub trait TurnContextSource: Send + Sync {
     /// identifiers.
     fn context_update(&self, task_id: Uuid) -> Option<TurnContext> {
         self.turn_context(task_id).map(TurnContext::from)
+    }
+
+    /// [`context_update`](Self::context_update) for an update that has to be
+    /// short: a Claude Code agent gets it in a hook, and Claude Code replaces
+    /// a hook's text of over 10,000 characters with a short preview and a file
+    /// name. `content` should be at most `max_chars` characters, and what
+    /// doesn't fit should stay for the next call (whole items, in order,
+    /// except an item that is alone over the limit, which is cut). The
+    /// default ignores the limit.
+    fn context_update_within(&self, task_id: Uuid, _max_chars: usize) -> Option<TurnContext> {
+        self.context_update(task_id)
     }
 
     /// The host's identifier of `content`, a payload it sent with

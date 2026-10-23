@@ -878,13 +878,25 @@ Besides answers to the waiting states, a running task accepts:
   A workflow holds agents over their budget this way. A Claude Code agent is asked before
   each turn and at each message of a turn, and a turn it holds is interrupted.
   Each update that goes into the conversation is reported with `ContextInjected`. Its
-  `ids` come from the source. `context_update` returns a `TurnContext { content, ids }`
+  `ids` come from the source. `context_update` returns a `TurnContext { content, user_content, ids, images }`
   (by default `turn_context` with no ids), and `identify` gives an id for each queued
   `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
   read. `wakes_calls` says whether a queued `InjectContext` fires the running calls'
   `TaskContext::context_arrived` (by default it does). A workflow's context notices
-  don't, so they wait for the turn boundary. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  don't, so they wait for the turn boundary. `TurnContext::user_content` is the part of
+  an update the user typed themselves (a workflow's operator notes), which follows
+  `content` in the same message. During a turn, a Claude Code agent gets it as a message
+  from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
+  the hook. It counts as delivered once it is written. The CLI reports each message by its
+  UUID, and one it cancels (the turn stopped before the model's next request) goes with the
+  task's next input. A hook's text is limited, since Claude Code replaces over 10,000
+  characters with a preview and a file name. The runtime asks the source for at most 9,500
+  (`TurnContextSource::context_update_within`, which by default is `context_update`), and
+  the queued `InjectContext` content that doesn't fit, whole and in order, waits for the
+  next result or input. A workflow's source holds back the notes and mail that don't fit,
+  and cuts a mail item that alone is over the limit. An injection or note that alone is
+  over it is not split. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying
@@ -1403,8 +1415,9 @@ didn't recover from, the error policy decides. The pausing policies pause (`Retr
 ### Context and usage
 
 `InjectContext` and the turn-context source's context reach the
-model with the next tool result (`PostToolUse`), or with the next message. The task's
-conversation records them after that result, as a `# Workflow context update`. The
+model with the next tool result (`PostToolUse`), or with the next message. What the user
+typed (`TurnContext::user_content`) reaches it at the same point as a message from the
+user. The task's conversation records them after that result, as a `# Workflow context update`. The
 conversation mirrors the session's (the task's messages, the model's text and calls, and
 their results) as a record for hosts. Subagents' messages aren't included. Usage is
 recorded per request from Claude Code's stream events (its final `message_delta`), with the

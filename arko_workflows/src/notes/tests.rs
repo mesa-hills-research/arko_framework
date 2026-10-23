@@ -1420,6 +1420,30 @@ fn posted(seq: u64, text: &str) -> PostedNote {
     }
 }
 
+/// An update for a hook counts the characters of the host's notes only. The
+/// operator's notes reach the agent apart from the hook.
+#[test]
+fn an_update_for_a_hook_limits_the_notes_that_are_not_the_operators() {
+    let text = "n".repeat(4_000);
+    let by = |source: NoteSource| {
+        (1..=4)
+            .map(|seq| {
+                let mut note = posted(seq, &text);
+                note.note.source = source.clone();
+                note
+            })
+            .collect::<Vec<_>>()
+    };
+    let host = by(NoteSource::Host);
+    let host = host.iter().collect::<Vec<_>>();
+    assert_eq!(fitting(&host, 9_000), 2);
+    // The first always comes.
+    assert_eq!(fitting(&host, 100), 1);
+    let operator = by(NoteSource::Operator);
+    let operator = operator.iter().collect::<Vec<_>>();
+    assert_eq!(fitting(&operator, 100), 4);
+}
+
 /// A prompt shows the newest notes within the caps, the newest always in
 /// full, and says how many older ones it leaves out.
 #[test]
@@ -1874,8 +1898,9 @@ async fn told_after(
 }
 
 /// An update that gives an agent a note from the operator ends with the
-/// host's reply hint, once however many notes it holds. The hint comes
-/// after the notes, as a paragraph of its own.
+/// host's reply hint, once however many notes it holds. The operator's
+/// notes come after the host's, and the hint after them, as a paragraph of
+/// its own.
 #[tokio::test]
 async fn an_update_with_the_operators_notes_ends_with_the_reply_hint_once() {
     let workspace = Workspace::new();
@@ -1890,10 +1915,12 @@ async fn an_update_with_the_operators_notes_ends_with_the_reply_hint_once() {
     ];
     let told = told_after(&workflow, &server, "worker", notes).await;
     assert_eq!(told.matches(HINT).count(), 1, "{told}");
-    let notes_end = told.find("The build is slow.").unwrap();
-    assert!(told.find("Use the orbit method.").unwrap() < notes_end);
+    assert_eq!(told.matches(NOTES_RULE).count(), 1, "{told}");
+    let operator = told.find("Use the orbit method.").unwrap();
+    assert!(told.find("The build is slow.").unwrap() < operator);
+    assert!(told.find("Check the units.").unwrap() > operator);
     assert!(
-        told[notes_end..]
+        told[operator..]
             .trim_end()
             .ends_with(&format!("\n\n{HINT}")),
         "{told}"
@@ -1977,8 +2004,8 @@ async fn a_reply_hint_names_a_registered_agent() {
 fn an_update_places_the_hint_after_its_notes_and_the_count_of_more() {
     let notes = [posted(1, "One."), posted(2, "Two.")];
     let refs = notes.iter().collect::<Vec<_>>();
-    let none = update(&refs, 0, &HashMap::new(), None);
-    let hinted = update(&refs, 3, &HashMap::new(), Some(HINT));
+    let none = update(&refs, 0, &HashMap::new(), None, true);
+    let hinted = update(&refs, 3, &HashMap::new(), Some(HINT), true);
     assert!(!none.contains(HINT));
     assert!(
         hinted.ends_with(&format!(
@@ -1989,11 +2016,12 @@ fn an_update_places_the_hint_after_its_notes_and_the_count_of_more() {
     assert_eq!(hinted.matches(HINT).count(), 1);
 }
 
-/// A note posted while a Claude Code agent works reaches it in the context
-/// of the next tool result, with the reply hint after the notes (against
-/// the scripted fake CLI of arko_agents' tests).
+/// A note posted while a Claude Code agent works reaches it at the next
+/// tool result. The operator's notes come as a message from the user, with
+/// the reply hint after them, and the workflow's note in the context of the
+/// result (against the scripted fake CLI of arko_agents' tests).
 #[tokio::test]
-async fn a_claude_code_agent_gets_the_reply_hint_mid_turn() {
+async fn a_claude_code_agent_gets_the_operators_notes_as_a_user_message_mid_turn() {
     let workspace = Workspace::new();
     let fake = std::env::temp_dir().join(format!("arko-notes-fake-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&fake).unwrap();
@@ -2060,6 +2088,9 @@ async fn a_claude_code_agent_gets_the_reply_hint_mid_turn() {
         .post_note(Note::new("Skip the vendor folder."))
         .unwrap();
     workflow
+        .post_note(Note::new("Tests are slow.").source(NoteSource::Host))
+        .unwrap();
+    workflow
         .post_note(Note::new("Prefer small files."))
         .unwrap();
 
@@ -2082,12 +2113,24 @@ async fn a_claude_code_agent_gets_the_reply_hint_mid_turn() {
     let [context] = contexts.as_slice() else {
         panic!("{contexts:#?}");
     };
-    assert!(context.contains("Skip the vendor folder."), "{context}");
-    assert!(context.contains("Prefer small files."), "{context}");
-    assert_eq!(context.matches(HINT).count(), 1, "{context}");
-    assert!(
-        context.trim_end().ends_with(&format!("\n\n{HINT}")),
-        "{context}"
-    );
+    assert!(context.contains("Tests are slow."), "{context}");
+    assert!(context.contains(NOTES_RULE), "{context}");
+    assert!(!context.contains("Skip the vendor folder."), "{context}");
+    assert!(!context.contains(HINT), "{context}");
+    let sent: Vec<Value> = logged()
+        .into_iter()
+        .filter(|entry| entry["event"] == "midturn")
+        .collect();
+    let [sent] = sent.as_slice() else {
+        panic!("{sent:#?}");
+    };
+    assert_eq!(sent["origin"], json!({"kind": "human"}));
+    let text = sent["text"].as_str().unwrap();
+    assert!(text.contains("Skip the vendor folder."), "{text}");
+    assert!(text.contains("Prefer small files."), "{text}");
+    assert!(!text.contains("Tests are slow."), "{text}");
+    assert!(!text.contains(NOTES_RULE), "{text}");
+    assert_eq!(text.matches(HINT).count(), 1, "{text}");
+    assert!(text.trim_end().ends_with(&format!("\n\n{HINT}")), "{text}");
     let _ = std::fs::remove_dir_all(&fake);
 }

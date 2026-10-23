@@ -634,6 +634,142 @@ async fn context_arrives_with_the_next_result() {
     assert!(task.pending_context_injections.is_empty());
 }
 
+/// The notes the user typed, which a source gives apart from the rest of
+/// its update, once it has been asked for context before.
+struct TypedSecondUpdate {
+    content: &'static str,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+const TYPED_NOTE: &str = "A new note on your task.\n- Note 3 from the operator (the person running this workflow), 2026-10-23 08:00 UTC:\n  Use tabs.";
+
+impl crate::runtime::TurnContextSource for TypedSecondUpdate {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| crate::runtime::TurnContext {
+            content: self.content.into(),
+            user_content: TYPED_NOTE.into(),
+            ids: vec!["message:7".into(), "note:3".into()],
+            ..Default::default()
+        })
+    }
+}
+
+/// Runs a task whose first call gets a context update of `content` and the
+/// typed note.
+async fn run_with_typed_note(content: &'static str) -> (Fake, Task, Vec<AgentEvent>) {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "todo"}},
+        complete("Found them"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content,
+            asked: Default::default(),
+        }),
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    (fake, task, events)
+}
+
+/// What the user typed reaches Claude Code during a turn as a message from
+/// the user (not in the hook), while the rest of the update (a worker's
+/// mail) stays in the hook. Both count as delivered and are recorded after
+/// the result, in one update.
+#[tokio::test]
+async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() {
+    let (fake, task, events) =
+        run_with_typed_note("Message from agent 'lead': skip vendor/.").await;
+    let sent = fake.logged("midturn");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["text"], TYPED_NOTE);
+    assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
+    // The message is no input of the session: no entry of the transcript
+    // stands for it, and the CLI completed it.
+    assert_eq!(fake.logged("user").len(), 1);
+    let uuid = sent[0]["uuid"].as_str().unwrap();
+    assert!(
+        !task.claude_code_entries.values().any(|entry| entry == uuid),
+        "{:?}",
+        task.claude_code_entries
+    );
+    assert!(task.pending_context_injections.is_empty());
+    let posts = fake.logged("post");
+    let hooked = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(hooked.contains("skip vendor/"), "{hooked}");
+    assert!(!hooked.contains("Use tabs."), "{hooked}");
+    let recorded = texts(&task)
+        .into_iter()
+        .find(|text| text.starts_with("# Workflow context update"))
+        .unwrap();
+    assert!(
+        recorded.ends_with(&format!("skip vendor/.\n\n{TYPED_NOTE}")),
+        "{recorded}"
+    );
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected[0], ["message:7", "note:3"]);
+}
+
+/// A note alone leaves the hook empty, and is recorded under the update's
+/// heading.
+#[tokio::test]
+async fn a_note_the_user_typed_alone_leaves_the_hook_empty() {
+    let (fake, task, _) = run_with_typed_note("").await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let posts = fake.logged("post");
+    assert!(posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null());
+    assert!(texts(&task).contains(&format!("# Workflow context update\n\n{TYPED_NOTE}")));
+}
+
+/// A note the CLI cancels (the turn stopped before the model's next request)
+/// never reached the model, so it goes with the task's next input.
+#[tokio::test]
+async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"sleep": 0.5},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content: "",
+            asked: Default::default(),
+        }),
+    );
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+        .await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
+}
+
 /// A completed task continued with a new configuration resumes its session
 /// with the new tools and system prompt, telling Claude Code not to reuse
 /// the prompt it recorded.
@@ -1544,6 +1680,8 @@ async fn the_task_s_images_go_with_its_first_input() {
 /// before.
 struct SecondUpdateWithImage {
     asked: std::sync::atomic::AtomicUsize,
+    /// The note is the part of the update the user typed.
+    typed: bool,
 }
 
 impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
@@ -1553,8 +1691,15 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
 
     fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
         let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let note = String::from("A new note: look at this.");
+        let (content, user_content) = if self.typed {
+            (String::new(), note)
+        } else {
+            (note, String::new())
+        };
         (asked == 1).then(|| crate::runtime::TurnContext {
-            content: "A new note: look at this.".into(),
+            content,
+            user_content,
             ids: vec!["note:3".into()],
             images: vec![crate::runtime::ContextImage::new(
                 "The image of note 3:",
@@ -1583,6 +1728,7 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
         Arc::new(SecondUpdateWithImage {
             asked: Default::default(),
+            typed: false,
         }),
     );
     let (task, events) = start_with(task, runtime).finish().await;
@@ -1616,6 +1762,73 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     );
     assert!(task.pending_context_images.is_empty());
     // The note counts as given with its text.
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected[0], ["note:3"]);
+}
+
+/// The same for a note the user typed: its text goes at once as their
+/// message, with the line saying the image follows, and the image goes with
+/// the next input.
+#[tokio::test]
+async fn a_note_the_user_typed_with_an_image_sends_its_text_at_once_and_the_image_next() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "todo"}}, {"text": "Looked."}],
+        [complete("Seen")],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(SecondUpdateWithImage {
+            asked: Default::default(),
+            typed: true,
+        }),
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let sent = fake.logged("midturn");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
+    assert_eq!(
+        sent[0]["text"],
+        "A new note: look at this.\n\n(The image of this update can't come during a turn. It comes with your next input.)"
+    );
+    let posts = fake.logged("post");
+    assert!(posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null());
+    let recorded = texts(&task)
+        .into_iter()
+        .filter(|text| text.contains("look at this"))
+        .collect::<Vec<_>>();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].starts_with("# Workflow context update\n\nA new note"));
+    let next: Value = serde_json::from_str(&user_texts(&fake)[1]).unwrap();
+    let blocks = next
+        .as_array()
+        .expect("an input with an image is sent as blocks");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("The images an earlier update said would follow."),
+        "{next}"
+    );
+    assert_eq!(
+        &blocks[1..],
+        [
+            json!({"type": "text", "text": "The image of note 3:"}),
+            image_block()
+        ]
+    );
+    assert!(task.pending_context_images.is_empty());
     let injected: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -4381,6 +4594,149 @@ async fn context_sent_while_an_arko_call_waits_ends_the_wait() {
         .as_str()
         .unwrap();
     assert!(context.contains("The build finished."), "{context}");
+}
+
+/// Three items of 6,000 characters that a source gives as many at a time as
+/// the limit it is asked with allows, whole and in order.
+struct Items {
+    left: std::sync::Mutex<Vec<String>>,
+    limits: std::sync::Mutex<Vec<usize>>,
+}
+
+impl crate::runtime::TurnContextSource for Items {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update_within(
+        &self,
+        _task_id: uuid::Uuid,
+        max_chars: usize,
+    ) -> Option<crate::runtime::TurnContext> {
+        self.limits.lock().unwrap().push(max_chars);
+        let mut left = self.left.lock().unwrap();
+        let mut content = String::new();
+        while let Some(item) = left.first() {
+            let chars = content.chars().count() + item.chars().count() + 2;
+            if !content.is_empty() && chars > max_chars {
+                break;
+            }
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(&left.remove(0));
+        }
+        (!content.is_empty()).then(|| content.into())
+    }
+}
+
+/// Claude Code replaces the text of a hook over 10,000 characters with a
+/// preview, so the runtime asks a source for at most 9,500 and what doesn't
+/// fit comes with the next result, in order.
+#[tokio::test]
+async fn context_over_the_hooks_limit_comes_with_the_next_results() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let items = Arc::new(Items {
+        left: std::sync::Mutex::new(["a", "b", "c"].map(|letter| letter.repeat(6_000)).to_vec()),
+        limits: Default::default(),
+    });
+    let runtime =
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(items.clone());
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let hooked: Vec<String> = fake
+        .logged("post")
+        .iter()
+        .filter_map(|post| {
+            post["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(hooked.len(), 3, "{}", hooked.len());
+    for (hook, letter) in hooked.iter().zip(["a", "b", "c"]) {
+        assert!(hook.chars().count() <= 10_000, "{}", hook.chars().count());
+        assert!(hook.contains(&letter.repeat(6_000)));
+    }
+    assert!(items.left.lock().unwrap().is_empty());
+    assert!(items.limits.lock().unwrap().iter().all(|max| *max <= 9_500));
+}
+
+/// The same for context sent to the agent (messages, terminal updates): the
+/// injections that don't fit wait for the next result, in order.
+#[tokio::test]
+async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["waits_for_context", "Grep"]),
+        "Wait for news.".into(),
+        fake.workspace(),
+        None,
+    );
+    let tool = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    tokio::time::timeout(Duration::from_secs(20), tool.started.notified())
+        .await
+        .expect("the call runs");
+    for letter in ["a", "b", "c"] {
+        run.commands
+            .send(UserCommand::InjectContext {
+                content: letter.repeat(6_000),
+            })
+            .await
+            .unwrap();
+    }
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.pending_context_injections.is_empty());
+    let hooked: Vec<String> = fake
+        .logged("post")
+        .iter()
+        .filter_map(|post| {
+            post["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(hooked.iter().all(|hook| hook.chars().count() <= 10_000));
+    // Each reached the agent whole, in order, and none with another.
+    let order = ["a", "b", "c"].map(|letter| {
+        let whole = letter.repeat(6_000);
+        let at: Vec<_> = hooked
+            .iter()
+            .enumerate()
+            .filter(|(_, hook)| hook.contains(&whole))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(at.len(), 1, "{letter}: {at:?}");
+        at[0]
+    });
+    assert!(order[0] < order[1] && order[1] < order[2], "{order:?}");
 }
 
 /// An arko tool that runs until the test releases it.

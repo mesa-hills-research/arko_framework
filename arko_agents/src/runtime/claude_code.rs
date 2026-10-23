@@ -41,7 +41,9 @@ use crate::handover::{
 use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
 use crate::snapshot::TaskSnapshots;
-use crate::task::{ApprovalReason, ErrorRecoveryCause, RunningToolCall, Task, TaskState};
+use crate::task::{
+    ApprovalReason, CONTEXT_UPDATE, ErrorRecoveryCause, RunningToolCall, Task, TaskState,
+};
 use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME, message_user};
 use crate::tool::{
     InterceptorConfig, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
@@ -83,6 +85,16 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
+
+/// The most characters of context a hook carries. Claude Code replaces a
+/// hook's text of over 10,000 characters with a preview of 2 KB and the name
+/// of a file, so what doesn't fit waits for the next hook (or the next
+/// input).
+const HOOK_MAX_CHARS: usize = 9_500;
+
+/// How long a stopped session waits for the CLI to say what became of a note
+/// sent just before.
+const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
 
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
@@ -761,6 +773,9 @@ pub(super) struct ClaudeCodeRun {
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
     delivered_context: Vec<String>,
+    /// The notes the user typed that were sent as messages, by the UUID of the
+    /// message, until the CLI reports what became of them.
+    sent_notes: HashMap<String, String>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -893,6 +908,7 @@ impl ClaudeCodeRun {
             approval: None,
             after_result: HashMap::new(),
             delivered_context: Vec::new(),
+            sent_notes: HashMap::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
             api_error: None,
@@ -1615,8 +1631,12 @@ impl ClaudeCodeRun {
     /// conversation, and during a compaction, when it waits for the agent's
     /// next input. Where images can't go (`with_images` false: a hook's
     /// context is text), the text goes now, saying that the update's images
-    /// come with the next input, and only the images wait.
-    fn take_context(&mut self, with_images: bool) -> Option<(String, Vec<ContextImage>)> {
+    /// come with the next input, and only the images wait. There the part
+    /// of the update the user typed ([`TurnContext::user_content`]) comes
+    /// apart from the rest, as the second text, to go as their message
+    /// (the update's text is empty when only that part is waiting). With
+    /// images, it is part of the update.
+    fn take_context(&mut self, with_images: bool) -> Option<(String, String, Vec<ContextImage>)> {
         if self.handover_due() || self.compaction.is_some() {
             // It waits for a later input, and arko calls that start meanwhile
             // count newer context only.
@@ -1625,25 +1645,57 @@ impl ClaudeCodeRun {
         }
         let mut update_ids = Vec::new();
         let mut arrived = 0;
-        if let Some(update) = self
-            .turn_context
-            .as_ref()
-            .and_then(|source| source.context_update(self.task.id))
-        {
-            if !update.content.trim().is_empty() || !update.images.is_empty() {
+        let mut typed = String::new();
+        // A hook's text is limited. The injections that don't fit, and the
+        // source's update when little room is left, wait for the next one.
+        let mut deferred = Vec::new();
+        let mut room = HOOK_MAX_CHARS;
+        if !with_images {
+            let (mut used, mut fit) = (0, 0);
+            for content in &self.task.pending_context_injections {
+                let chars = content.chars().count() + 2;
+                if fit > 0 && used + chars > HOOK_MAX_CHARS {
+                    break;
+                }
+                used += chars;
+                fit += 1;
+            }
+            deferred = self.task.pending_context_injections.split_off(fit);
+            room = HOOK_MAX_CHARS.saturating_sub(used);
+        }
+        let update = self.turn_context.as_ref().and_then(|source| {
+            if with_images {
+                source.context_update(self.task.id)
+            } else if deferred.is_empty() && room >= HOOK_MAX_CHARS / 2 {
+                source.context_update_within(self.task.id, room)
+            } else {
+                None
+            }
+        });
+        if let Some(update) = update {
+            if !update.content.trim().is_empty()
+                || !update.user_content.trim().is_empty()
+                || !update.images.is_empty()
+            {
                 update_ids = update.ids;
             }
             arrived = update.images.len();
             self.queue_context(update.content, false);
+            if with_images {
+                self.queue_context(update.user_content, false);
+            } else if !update.user_content.trim().is_empty() {
+                typed = update.user_content;
+            }
             self.task.pending_context_images.extend(update.images);
         }
         if self.task.pending_context_injections.is_empty()
             && self.task.pending_context_images.is_empty()
+            && typed.is_empty()
         {
             return None;
         }
         let hold_images = !with_images && !self.task.pending_context_images.is_empty();
-        if hold_images && self.task.pending_context_injections.is_empty() {
+        if hold_images && self.task.pending_context_injections.is_empty() && typed.is_empty() {
             // Only images wait, said already: nothing goes until they can.
             self.held_context_ids.append(&mut update_ids);
             return None;
@@ -1662,29 +1714,40 @@ impl ClaudeCodeRun {
             .unwrap_or_default();
         ids.append(&mut self.held_context_ids);
         ids.append(&mut update_ids);
-        self.task.pending_context_injections.clear();
+        self.task.pending_context_injections = deferred;
         // Claude Code has it, so arko calls that start from now on count
         // newer context.
         self.context_arrivals.caught_up();
         let images = if hold_images {
             if arrived > 0 {
-                content.push_str(&match arrived {
+                // With the user's notes, which the images belong to.
+                let text = if typed.is_empty() {
+                    &mut content
+                } else {
+                    &mut typed
+                };
+                text.push_str(&match arrived {
                     1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
                     count => format!("\n\n(The {count} images of this update can't come during a turn. They come with your next input.)"),
                 });
             }
             Vec::new()
         } else {
-            if content.is_empty() {
+            if content.is_empty() && typed.is_empty() {
                 content = "The images an earlier update said would follow.".to_string();
             }
             std::mem::take(&mut self.task.pending_context_images)
         };
         self.context_receipts.push(AgentEvent::ContextInjected {
             ids,
-            bytes: content.len(),
+            bytes: content.len() + typed.len(),
         });
-        Some((format!("# Workflow context update\n\n{content}"), images))
+        let content = if content.is_empty() {
+            content
+        } else {
+            format!("{CONTEXT_UPDATE}\n\n{content}")
+        };
+        Some((content, typed, images))
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -1953,7 +2016,7 @@ impl ClaudeCodeRun {
                     .unwrap_or_default(),
             );
         }
-        if let Some((context, images)) = self.take_context(true) {
+        if let Some((context, _, images)) = self.take_context(true) {
             self.task.conversation.add_user_message_with_contents(
                 crate::task::with_context_images(context.clone(), images),
             );
@@ -2198,6 +2261,17 @@ impl ClaudeCodeRun {
                 .reply
                 .send(cc::PermissionDecision::deny("The agent is stopping."));
         }
+        // A note written just before the turn stopped is cancelled after the
+        // turn's result.
+        while !self.sent_notes.is_empty()
+            && let Ok(Some(message)) =
+                tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
+        {
+            if let cc::Message::Other(raw) = message {
+                self.note_settled(&raw);
+            }
+        }
+        self.sent_notes.clear();
         match session.close().await {
             // Claude Code saved the session as it closed: its transcript
             // holds every call's outcome.
@@ -2349,7 +2423,9 @@ impl ClaudeCodeRun {
             } => {
                 self.record_output(tool_use_id.as_ref(), &response);
                 self.report(false).await;
-                let answer = self.after_tool(tool_use_id, &tool_name, response).await?;
+                let answer = self
+                    .after_tool(tool_use_id, &tool_name, response, session)
+                    .await?;
                 let _ = reply.send(answer);
             }
         }
@@ -2835,6 +2911,7 @@ impl ClaudeCodeRun {
         tool_use_id: Option<String>,
         _served: &str,
         response: Value,
+        session: &cc::ClaudeSession,
     ) -> Result<Value, ArkoAgentsError> {
         let call = tool_use_id.as_ref().and_then(|id| self.calls.get(id));
         if let (Some(call), Some(middleware)) = (call, self.middleware.clone())
@@ -2870,17 +2947,64 @@ impl ClaudeCodeRun {
         if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
             texts.push(message);
         }
-        // A hook's context is text: its images wait for the next input.
-        if let Some((context, _)) = self.take_context(false) {
+        // A hook's context is text: its images wait for the next input. What
+        // the user typed goes as their own message instead.
+        let (context, typed, _) = self.take_context(false).unwrap_or_default();
+        let headed = !context.is_empty();
+        if headed {
             texts.push(context);
         }
+        if texts.is_empty() && typed.is_empty() {
+            return Ok(cc::Hook::proceed());
+        }
+        let mut recorded = texts.clone();
+        if !typed.is_empty() {
+            // A note alone has the update's heading in the record and the hook.
+            let shown = if headed {
+                typed.clone()
+            } else {
+                format!("{CONTEXT_UPDATE}\n\n{typed}")
+            };
+            // It counts as delivered once it is written, and goes with the
+            // next input if the CLI cancels it (see `note_settled`). Where
+            // the write fails, the hook has it.
+            match session.send_human(&typed).await {
+                Ok(uuid) => {
+                    self.sent_notes.insert(uuid, typed);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Task {}: could not send the user's notes as a message ({error}). They go in the hook.",
+                        self.task.id
+                    );
+                    texts.push(shown.clone());
+                }
+            }
+            recorded.push(shown);
+        }
+        self.delivered_context.push(recorded.join("\n\n"));
+        self.emit_context_receipts().await?;
         if texts.is_empty() {
             return Ok(cc::Hook::proceed());
         }
-        let text = texts.join("\n\n");
-        self.delivered_context.push(text.clone());
-        self.emit_context_receipts().await?;
-        Ok(add_context(&text))
+        Ok(add_context(&texts.join("\n\n")))
+    }
+
+    /// The CLI reports each message it is sent by its UUID, from `queued` to
+    /// `completed`, or `cancelled` when the turn stopped before the model's
+    /// next request. A note it cancelled never reached the model, so it goes
+    /// with the next input.
+    fn note_settled(&mut self, raw: &Value) {
+        let state = raw["state"].as_str();
+        if raw["type"] == "command_lifecycle"
+            && matches!(state, Some("completed" | "cancelled"))
+            && let Some(text) = raw["command_uuid"]
+                .as_str()
+                .and_then(|uuid| self.sent_notes.remove(uuid))
+            && state == Some("cancelled")
+        {
+            self.queue_context(text, false);
+        }
     }
 
     /// A message the session reported.
@@ -3208,6 +3332,7 @@ impl ClaudeCodeRun {
                 _ => {}
             },
             cc::Message::RateLimit { info, .. } => self.plan_usage_reported(&info, session).await?,
+            cc::Message::Other(raw) => self.note_settled(&raw),
             cc::Message::System(system) if system.subtype == "model_refusal_fallback" => {
                 // Claude Code retried the refused request on its fallback
                 // model.
@@ -4246,7 +4371,7 @@ impl ClaudeCodeRun {
             note = OPEN_TURN_MESSAGE_NOTE.to_string();
         }
         let mut images = Vec::new();
-        if let Some((context, context_images)) = self.take_context(true) {
+        if let Some((context, _, context_images)) = self.take_context(true) {
             note.push_str("\n\n");
             note.push_str(&context);
             images = context_images;

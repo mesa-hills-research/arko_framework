@@ -50,6 +50,10 @@ pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 /// notes, the rest come at the next turn boundary).
 pub const PROMPT_MAX_NOTES: usize = 20;
 
+/// The characters of an update of notes besides the notes: its introduction,
+/// the rule of notes and the count of notes that follow.
+const NOTES_FRAME: usize = 500;
+
 /// About this many bytes of notes are shown in a prompt or a context update,
 /// as [`PROMPT_MAX_NOTES`] says. No further note is added once it would pass
 /// this. The first note is always shown in full.
@@ -553,13 +557,17 @@ impl NoteBoard {
     /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown and their
     /// images, each labelled with its note, or `None` when there are none. Only
     /// the notes shown count as given: the rest come at the next boundary.
+    /// The update comes in two texts, the operator's notes (empty without
+    /// one) and the others', each its own update. The others' texts take at
+    /// most `max_chars` characters, besides the first note.
     pub(crate) fn update_with_seqs(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> Option<(String, Vec<u64>, Vec<arko_agents::ContextImage>)> {
+        max_chars: usize,
+    ) -> Option<NotesUpdate> {
         self.poll(ctx);
         let mut state = self.state.lock();
         let newest = state.notes.last()?.seq;
@@ -576,7 +584,7 @@ impl NoteBoard {
                     && !skipped(&state, task_id, posted)
             })
             .collect::<Vec<_>>();
-        let shown = fitting(&notes);
+        let shown = fitting(&notes, max_chars.saturating_sub(NOTES_FRAME));
         let given = match notes.get(shown) {
             // The newest shown: the notes after it wait for the next update.
             Some(_) => notes[shown - 1].seq,
@@ -605,19 +613,32 @@ impl NoteBoard {
                 .map(|posted| (posted.seq, posted.images.clone()))
                 .collect::<Vec<_>>();
             let (images, lost) = self.context_images(&with_images, model);
-            let notes = taken.iter().collect::<Vec<_>>();
             let seqs = taken.iter().map(|posted| posted.seq).collect();
-            // Once per update, after the notes, when one is the operator's.
-            let hint = self
-                .reply_hints
-                .get(agent)
-                .filter(|_| {
-                    taken
-                        .iter()
-                        .any(|posted| posted.note.source == NoteSource::Operator)
-                })
-                .map(String::as_str);
-            (update(&notes, more, &lost, hint), seqs, images)
+            let (operator, others): (Vec<_>, Vec<_>) = taken
+                .iter()
+                .partition(|posted| posted.note.source == NoteSource::Operator);
+            // The count of notes that follow and the host's reply hint end
+            // the operator's update, which comes last, or the only one.
+            let (others, operator) = if operator.is_empty() {
+                (update(&others, more, &lost, None, true), String::new())
+            } else {
+                // Once per update, after the notes. The rule of notes is in
+                // the first of the two updates.
+                let hint = self.reply_hints.get(agent).map(String::as_str);
+                let others = if others.is_empty() {
+                    String::new()
+                } else {
+                    update(&others, 0, &lost, None, true)
+                };
+                let rule = others.is_empty();
+                (others, update(&operator, more, &lost, hint, rule))
+            };
+            NotesUpdate {
+                others,
+                operator,
+                seqs,
+                images,
+            }
         })
     }
 
@@ -1069,17 +1090,26 @@ fn item(posted: &PostedNote) -> String {
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
 /// most [`PROMPT_MAX_NOTES`], and no further note once it would pass
-/// [`PROMPT_MAX_BYTES`]. The first always (at least one, when there are
+/// [`PROMPT_MAX_BYTES`], nor once the notes that don't come from the
+/// operator pass `max_chars` characters (the operator's reach the agent
+/// apart from the others). The first always (at least one, when there are
 /// any).
-fn fitting(notes: &[&PostedNote]) -> usize {
-    let mut bytes = 0;
+fn fitting(notes: &[&PostedNote], max_chars: usize) -> usize {
+    let (mut bytes, mut chars) = (0, 0);
     let mut shown = 0;
     for posted in notes.iter().take(PROMPT_MAX_NOTES) {
-        let len = item(posted).len();
-        if shown > 0 && bytes + len > PROMPT_MAX_BYTES {
+        let text = item(posted);
+        let len = text.len();
+        let hooked = if posted.note.source == NoteSource::Operator {
+            0
+        } else {
+            text.chars().count()
+        };
+        if shown > 0 && (bytes + len > PROMPT_MAX_BYTES || chars + hooked > max_chars) {
             break;
         }
         bytes += len;
+        chars += hooked;
         shown += 1;
     }
     shown
@@ -1098,7 +1128,7 @@ fn section(notes: &[&PostedNote]) -> String {
     if notes.is_empty() {
         return String::new();
     }
-    let shown = fitting(notes);
+    let shown = fitting(notes, usize::MAX);
     let left = match notes.len() - shown {
         0 => String::new(),
         1 => "\n- (1 earlier note is not shown.)".to_string(),
@@ -1113,12 +1143,14 @@ fn section(notes: &[&PostedNote]) -> String {
 /// New notes for a running agent's context update, oldest first, and how
 /// many more come at its next turn boundary. `lost` counts, by note number,
 /// the images that can't be given. `hint` is the host's line that ends the
-/// update, as its own paragraph.
+/// update, as its own paragraph. `rule` says whether the update states the
+/// rule of notes (the update that comes with another one doesn't repeat it).
 fn update(
     notes: &[&PostedNote],
     more: usize,
     lost: &HashMap<u64, usize>,
     hint: Option<&str>,
+    rule: bool,
 ) -> String {
     let intro = if notes.len() == 1 {
         "A new note on your task."
@@ -1131,7 +1163,12 @@ fn update(
         more => format!("\n- ({more} more notes follow at your next turn.)"),
     };
     let hint = hint.map(|hint| format!("\n\n{hint}")).unwrap_or_default();
-    format!("{intro} {NOTES_RULE}{}{more}{hint}", items(notes, lost))
+    let rule = if rule {
+        format!(" {NOTES_RULE}")
+    } else {
+        String::new()
+    };
+    format!("{intro}{rule}{}{more}{hint}", items(notes, lost))
 }
 
 /// Posts notes to a running workflow from any task or thread.
@@ -1221,6 +1258,18 @@ impl std::fmt::Debug for NotesHandle {
     }
 }
 
+/// The notes a run is given at a turn boundary (see
+/// [`NoteBoard::update_with_seqs`]).
+pub(crate) struct NotesUpdate {
+    /// The update of the notes the host and agents wrote, empty without one.
+    pub others: String,
+    /// The update of the operator's notes, empty without one.
+    pub operator: String,
+    /// The numbers of the notes shown.
+    pub seqs: Vec<u64>,
+    pub images: Vec<arko_agents::ContextImage>,
+}
+
 /// A turn context source that adds the notes an agent run hasn't been given
 /// to `inner`'s context, and holds requests as `inner` does.
 pub(crate) struct WithNotes<S> {
@@ -1234,38 +1283,75 @@ pub(crate) struct WithNotes<S> {
 
 impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithNotes<S> {
     fn turn_context(&self, task_id: Uuid) -> Option<String> {
-        self.context_update(task_id).map(|update| update.content)
+        self.context_update(task_id).map(|update| {
+            [update.content, update.user_content]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
     }
 
     /// The inner source's context, the notes the run hasn't been given
     /// (`note:<number>`), and its subagent mail (`mail:<id>`).
     fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
+        self.context_update_within(task_id, usize::MAX)
+    }
+
+    /// As `context_update`, with the text of `content` limited to `max_chars`
+    /// characters: the notes and the mail that don't fit wait for the next
+    /// call, whole items in order, and a mail item alone over the limit is
+    /// cut. The mail waits when the others took half of the limit.
+    fn context_update_within(
+        &self,
+        task_id: Uuid,
+        max_chars: usize,
+    ) -> Option<arko_agents::TurnContext> {
         let mut parts = Vec::new();
+        let mut user_content = String::new();
         let mut ids = Vec::new();
         let mut images = Vec::new();
-        if let Some(inner) = self.inner.context_update(task_id) {
+        let mut used = 0;
+        if let Some(inner) = self.inner.context_update_within(task_id, max_chars) {
+            used += inner.content.chars().count();
             parts.push(inner.content);
+            user_content = inner.user_content;
             ids.extend(inner.ids);
             images.extend(inner.images);
         }
-        if let Some((notes, seqs, note_images)) = self.context.notes.update_with_seqs(
+        if let Some(notes) = self.context.notes.update_with_seqs(
             &self.context,
             &self.agent_name,
             task_id,
             self.review,
+            max_chars.saturating_sub(used),
         ) {
-            parts.push(notes);
-            ids.extend(seqs.into_iter().map(|seq| format!("note:{seq}")));
-            images.extend(note_images);
+            used += notes.others.chars().count();
+            if !notes.others.is_empty() {
+                parts.push(notes.others);
+            }
+            if !notes.operator.is_empty() {
+                if !user_content.is_empty() {
+                    user_content.push_str("\n\n");
+                }
+                user_content.push_str(&notes.operator);
+            }
+            ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
+            images.extend(notes.images);
         }
         if !self.review
-            && let Some((mail, mail_ids)) = self.context.subagents.update(task_id)
+            && max_chars.saturating_sub(used) >= max_chars / 2
+            && let Some((mail, mail_ids)) = self
+                .context
+                .subagents
+                .update(task_id, max_chars.saturating_sub(used))
         {
             parts.push(mail);
             ids.extend(mail_ids);
         }
-        (!parts.is_empty()).then(|| arko_agents::TurnContext {
+        (!parts.is_empty() || !user_content.is_empty()).then(|| arko_agents::TurnContext {
             content: parts.join("\n\n"),
+            user_content,
             ids,
             images,
         })
