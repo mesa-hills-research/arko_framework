@@ -224,8 +224,8 @@ impl AgentRegistry {
             let newer = latest
                 .get(result.agent_name.as_str())
                 .is_none_or(|current| {
-                    (result.task.end_time, result.task.start_time)
-                        >= (current.task.end_time, current.task.start_time)
+                    (result.info().end_time, result.info().start_time)
+                        >= (current.info().end_time, current.info().start_time)
                 });
             if newer {
                 latest.insert(&result.agent_name, result);

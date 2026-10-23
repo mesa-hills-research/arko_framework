@@ -249,8 +249,11 @@ async fn a_run_that_crashed_mid_tool_is_recovered_where_it_was() {
     let saved = &interrupted[0];
     assert_eq!(saved.agent_name, "coder");
     assert_eq!(saved.status, AgentRunStatus::Interrupted);
-    assert_eq!(saved.task.running_tool_calls.len(), 1);
-    assert_eq!(saved.task.running_tool_calls[0].tool_name, "probe");
+    assert_eq!(saved.task().unwrap().running_tool_calls.len(), 1);
+    assert_eq!(
+        saved.task().unwrap().running_tool_calls[0].tool_name,
+        "probe"
+    );
     assert!(live_file(&workspace, saved.agent_run_id).is_file());
 
     let result = within(resumed.recover_agent(saved)).await.unwrap();
@@ -275,7 +278,7 @@ async fn a_run_that_crashed_mid_tool_is_recovered_where_it_was() {
     assert!(record.usage_charged.is_none());
     assert_eq!(
         resumed.cost_ledger().entries.len(),
-        result.task.usage_history.len(),
+        result.task().unwrap().usage_history.len(),
         "each model call is charged once"
     );
 
@@ -449,7 +452,7 @@ async fn usage_the_ledger_lacked_is_charged_on_resume() {
         .build()
         .unwrap();
     let saved = resumed.interrupted_runs().remove(0);
-    assert_eq!(saved.task.usage_history.len(), 1);
+    assert_eq!(saved.task().unwrap().usage_history.len(), 1);
     assert_eq!(resumed.cost_ledger().entries.len(), 1);
 }
 
@@ -672,11 +675,11 @@ async fn a_delegated_run_is_recovered_through_its_parent() {
     assert_eq!(coder.agent_name, "coder");
     let reviewer = result_of(&resumed, "reviewer");
     assert_eq!(reviewer.status, AgentRunStatus::Interrupted);
-    let parent = reviewer.task.parent.unwrap();
+    let parent = reviewer.task().unwrap().parent.unwrap();
     assert_eq!(parent.task_id, coder.agent_run_id);
     assert_eq!(
         parent.tool_call_id,
-        coder.task.running_tool_calls[0].tool_call_id
+        coder.task().unwrap().running_tool_calls[0].tool_call_id
     );
     let error = resumed.recover_agent(&reviewer).await.unwrap_err();
     assert!(
@@ -798,7 +801,10 @@ async fn a_delegated_run_never_saved_runs_when_its_parent_is_recovered() {
     assert_eq!(result.summary, "coder done");
     let reviewer = result_of(&resumed, "reviewer");
     assert_eq!(reviewer.status, AgentRunStatus::Completed);
-    assert_eq!(reviewer.task.parent.unwrap().task_id, coder.agent_run_id);
+    assert_eq!(
+        reviewer.task().unwrap().parent.unwrap().task_id,
+        coder.agent_run_id
+    );
 }
 
 /// Parallel runs that crashed are recovered together, each with its
@@ -1022,7 +1028,7 @@ async fn an_approval_wait_is_decided_again_on_recovery() {
     let resumed = approving(probe.clone()).resume_from(&path).build().unwrap();
     let saved = resumed.interrupted_runs().remove(0);
     assert!(matches!(
-        saved.task.current_state,
+        saved.task().unwrap().current_state,
         arko_agents::TaskState::AwaitingToolApproval { .. }
     ));
     let result = within(resumed.recover_agent(&saved)).await.unwrap();
@@ -1242,7 +1248,7 @@ async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
     assert!(server.requests() <= 3, "{}", server.requests());
     assert_eq!(
         resumed.cost_ledger().entries.len(),
-        result.task.usage_history.len()
+        result.task().unwrap().usage_history.len()
     );
     assert!(!live_file(&workspace, result.agent_run_id).exists());
     assert!(resumed.interrupted_runs().is_empty());
@@ -1797,7 +1803,7 @@ async fn a_claude_code_agent_its_verifier_cant_review_is_returned_and_continued(
     };
     let paused = workflow.agent_result(task_id).unwrap();
     assert!(matches!(
-        paused.task.current_state,
+        paused.task().unwrap().current_state,
         arko_agents::TaskState::AwaitingErrorRecoveryApproval {
             cause: arko_agents::ErrorRecoveryCause::Middleware,
             ..
@@ -1846,8 +1852,8 @@ async fn a_claude_code_agent_is_recovered_after_a_crash() {
         .build()
         .unwrap();
     let saved = resumed.interrupted_runs().remove(0);
-    assert!(saved.task.claude_code_session.is_some());
-    assert_eq!(saved.task.running_tool_calls.len(), 1);
+    assert!(saved.task().unwrap().claude_code_session.is_some());
+    assert_eq!(saved.task().unwrap().running_tool_calls.len(), 1);
     let sent_before = fake.logged("user").len();
     let result = within(resumed.recover_agent(&saved)).await.unwrap();
     assert_eq!(
@@ -1988,7 +1994,10 @@ async fn orphan_delegation(
     let orphans = resumed.interrupted_runs();
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].agent_run_id, reviewer.agent_run_id);
-    assert_eq!(orphans[0].task.parent, reviewer.task.parent);
+    assert_eq!(
+        orphans[0].task().unwrap().parent,
+        reviewer.task().unwrap().parent
+    );
     let error = resumed.recover_agent(&orphans[0]).await.unwrap_err();
     assert!(
         matches!(error, WorkflowError::AgentBudgetExceeded { .. }),
@@ -2016,11 +2025,14 @@ async fn a_delegation_that_cannot_be_recovered_is_named_and_left_to_the_host() {
         .unwrap();
     let orphans = resumed.interrupted_runs();
     assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].task.parent, reviewer.task.parent);
+    assert_eq!(
+        orphans[0].task().unwrap().parent,
+        reviewer.task().unwrap().parent
+    );
     let result = within(resumed.recover_agent(&orphans[0])).await.unwrap();
     assert_eq!(result.summary, "reviewed");
     assert_eq!(result.agent_run_id, reviewer.agent_run_id);
-    assert_eq!(result.task.parent, None, "the host's own now");
+    assert_eq!(result.task().unwrap().parent, None, "the host's own now");
     assert_eq!(block.calls(), 0, "in doubt");
     assert!(resumed.interrupted_runs().is_empty());
 }
@@ -2064,7 +2076,7 @@ async fn an_agent_resumes_an_orphaned_run_and_a_later_crash_finds_it_there() {
     )
     .unwrap();
     let link: arko_agents::TaskParent = serde_json::from_value(saved["parent"].clone()).unwrap();
-    assert_ne!(Some(link), reviewer.task.parent);
+    assert_ne!(Some(link), reviewer.task().unwrap().parent);
     assert!(running_call_saved(&workspace));
     let path = latest(&workspace);
     crash(workflow, vec![planner]).await;
@@ -2082,7 +2094,8 @@ async fn an_agent_resumes_an_orphaned_run_and_a_later_crash_finds_it_there() {
         resumed
             .agent_result(reviewer.agent_run_id)
             .unwrap()
-            .task
+            .task()
+            .unwrap()
             .parent,
         Some(link)
     );
@@ -2092,7 +2105,7 @@ async fn an_agent_resumes_an_orphaned_run_and_a_later_crash_finds_it_there() {
     assert_eq!(result.summary, "planner done");
     let recovered = resumed.agent_result(reviewer.agent_run_id).unwrap();
     assert_eq!(recovered.status, AgentRunStatus::Completed);
-    assert_eq!(recovered.task.parent, Some(link));
+    assert_eq!(recovered.task().unwrap().parent, Some(link));
     assert_eq!(block.calls(), 0, "in doubt");
     assert!(resumed.interrupted_runs().is_empty());
 }
@@ -2150,9 +2163,13 @@ async fn a_run_whose_call_was_answered_stays_for_its_parent_to_resume() {
     assert_eq!(result.summary, "coder done");
     let resumed_reviewer = resumed.agent_result(reviewer.agent_run_id).unwrap();
     assert_eq!(resumed_reviewer.status, AgentRunStatus::Completed);
-    let link = resumed_reviewer.task.parent.unwrap();
+    let link = resumed_reviewer.task().unwrap().parent.unwrap();
     assert_eq!(link.task_id, coder.agent_run_id);
-    assert_ne!(Some(link), reviewer.task.parent, "the resuming call");
+    assert_ne!(
+        Some(link),
+        reviewer.task().unwrap().parent,
+        "the resuming call"
+    );
     assert!(resumed.interrupted_runs().is_empty());
     // A host recovering the runs it listed before gets the outcome of the
     // run its parent resumed meanwhile.
@@ -2250,7 +2267,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
     }
     // A run that failed can't be resumed (a cancelled one is reopened: see
     // `budget_tests`).
-    let mut cancelled = reviewer.task.clone();
+    let mut cancelled = reviewer.task().unwrap().clone();
     cancelled.id = uuid::Uuid::new_v4();
     cancelled.set_state(arko_agents::TaskState::Failed {
         reason: "stopped".to_string(),
@@ -2272,7 +2289,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
     .await;
     assert!(error.contains("it ended failed (stopped)"), "{error}");
     // Nor can a run another replaced after a restart (superseded).
-    let mut superseded = reviewer.task.clone();
+    let mut superseded = reviewer.task().unwrap().clone();
     superseded.id = uuid::Uuid::new_v4();
     superseded.set_state(arko_agents::TaskState::Cancelled {
         reason: crate::workflow::engine::SUPERSEDED_AFTER_RESTART.to_string(),
@@ -2322,7 +2339,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
     .unwrap();
     assert_eq!(result.summary, "reviewed");
     assert_eq!(result.agent_run_id, reviewer.agent_run_id);
-    assert_eq!(result.task.parent, Some(call));
+    assert_eq!(result.task().unwrap().parent, Some(call));
     let body = server.bodies().pop().unwrap();
     assert!(body.contains("Finish the review."), "{body}");
     assert!(body.contains(RESTARTED), "{body}");

@@ -2793,7 +2793,10 @@ async fn run(
                 }
                 AgentRunStatus::Paused
                     if matches!(
-                        AgentPause::of(&previous.task.current_state),
+                        previous
+                            .task()
+                            .ok()
+                            .and_then(|task| AgentPause::of(&task.current_state)),
                         Some(AgentPause::ErrorRecovery { .. })
                     ) =>
                 {
@@ -2835,7 +2838,10 @@ fn resumable(result: &AgentResult) -> bool {
                     .is_some_and(StopRecord::is_retired)
         }
         AgentRunStatus::Paused => matches!(
-            AgentPause::of(&result.task.current_state),
+            result
+                .task()
+                .ok()
+                .and_then(|task| AgentPause::of(&task.current_state)),
             Some(AgentPause::ErrorRecovery { .. })
         ),
         AgentRunStatus::Failed => false,

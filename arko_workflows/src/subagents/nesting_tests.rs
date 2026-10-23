@@ -559,7 +559,8 @@ async fn a_cut_back_stops_the_subagents_it_detaches_with_their_own() {
         .unwrap();
     within(gate.started.notified()).await;
     let index = delegated
-        .task
+        .task()
+        .unwrap()
         .user_turns()
         .iter()
         .find(|turn| turn.text.starts_with("Delegate."))
@@ -988,7 +989,7 @@ async fn a_handover_restates_the_subagents_that_still_work() {
     let result = within(workflow.run_agent("lead", "Delegate the count."))
         .await
         .unwrap();
-    assert_eq!(result.task.handovers.len(), 1);
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
     let after = bodies_of(&server, "lead")
         .into_iter()
         .find(|body| body.contains(REPORT))

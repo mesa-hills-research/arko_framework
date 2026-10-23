@@ -199,7 +199,8 @@ async fn a_wrap_up_lets_agents_finish_then_the_run_is_cancelled_and_checkpointed
     assert_eq!(coded.summary, "Stopped at step 3.");
     drain_record(&coded);
     let saved = coded
-        .task
+        .task()
+        .unwrap()
         .conversation
         .messages
         .iter()
@@ -565,7 +566,8 @@ const VERIFIER: &str = "You are a completion verifier";
 /// The output of call `call_id` in `result`'s conversation.
 fn tool_output(result: &AgentResult, call_id: &str) -> Option<String> {
     result
-        .task
+        .task()
+        .unwrap()
         .conversation
         .messages
         .iter()

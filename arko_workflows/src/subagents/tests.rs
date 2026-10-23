@@ -1105,7 +1105,7 @@ async fn runs_work_in_their_own_directories() {
             .await
             .unwrap();
     let a = workspace.0.join("a");
-    assert_eq!(result.task.current_working_directory, a);
+    assert_eq!(result.task().unwrap().current_working_directory, a);
     let lead = bodies_of(&server, "lead");
     assert_eq!(
         result_of(&lead[1], "lead", 0),
@@ -1505,6 +1505,78 @@ async fn subagents_survive_a_stop_and_a_resume() {
     assert_eq!(bodies, ["Done at last."]);
 }
 
+/// A subagent that finished before a resume goes on from its own task when
+/// it is messaged after it, though the resume didn't read that task, and its
+/// next report reaches its lead.
+#[tokio::test]
+async fn a_finished_subagent_goes_on_from_its_task_after_a_resume() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![(
+                "start_agent",
+                json!({ "agent": "worker", "task": "Count the files." }),
+            )],
+        ),
+        (
+            "r1",
+            vec![("complete_task", json!({ "summary": "First report." }))],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let build = |resume: Option<std::path::PathBuf>| {
+        let builder = builder(&server, &workspace, SubagentsConfig::default())
+            .persistence(PersistenceConfig::new(&run_dir));
+        match resume {
+            Some(checkpoint) => builder.resume_from(checkpoint),
+            None => builder,
+        }
+        .build()
+        .unwrap()
+    };
+    let workflow = build(None);
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let checkpoint = run_dir.join(latest.trim());
+    let resumed = build(Some(checkpoint.clone()));
+    let records = resumed.subagents();
+    assert_eq!(records[0].state, SubagentState::Finished);
+    assert_eq!(records[0].report.as_deref(), Some("First report."));
+    // Changed after the build: its continuation has the change.
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&checkpoint).unwrap()).unwrap();
+    let record = state["agent_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["agent_name"] == "worker")
+        .unwrap();
+    let file = run_dir.join(record["task_file"].as_str().unwrap());
+    let task = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        task.replace("Count the files.", "Count the files lazily."),
+    )
+    .unwrap();
+    resumed
+        .message_subagent("r1", "Once more.", "Your lead sent you a message:", "")
+        .unwrap();
+    until(|| resumed.subagents()[0].report.as_deref() == Some("r1 done")).await;
+    let requests = bodies_of(&server, "r1");
+    let last = requests.last().unwrap();
+    assert!(last.contains("Count the files lazily.") && last.contains("Once more."));
+    let news = resumed.pending_news(lead.agent_run_id);
+    assert!(news.iter().any(|item| item.body == "r1 done"), "{news:?}");
+}
+
 /// Background runs need workflow services, and host parameters may not
 /// take `start_agent`'s own names; a host tool may not take a subagent
 /// tool's name.
@@ -1619,7 +1691,8 @@ async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
     })
     .await;
     let index = delegated
-        .task
+        .task()
+        .unwrap()
         .user_turns()
         .iter()
         .find(|turn| turn.text.starts_with("Delegate the count."))
@@ -1777,7 +1850,7 @@ async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {
         .build()
         .unwrap();
     let first = within(workflow.run_agent("lead", "First.")).await.unwrap();
-    assert_eq!(first.task.handovers.len(), 1);
+    assert_eq!(first.task().unwrap().handovers.len(), 1);
     let second = within(workflow.continue_agent(&first, "Second."))
         .await
         .unwrap();
@@ -1789,7 +1862,8 @@ async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {
     })
     .await;
     let index = second
-        .task
+        .task()
+        .unwrap()
         .user_turns()
         .iter()
         .find(|turn| turn.text.starts_with("Second."))

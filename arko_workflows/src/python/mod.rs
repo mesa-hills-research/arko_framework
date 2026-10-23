@@ -524,7 +524,12 @@ impl PyWorkflow {
         note: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         use arko_agents::runtime::command::ToolApprovalDecision;
-        let calls = match crate::policy::AgentPause::of(&previous.inner.task.current_state) {
+        let pause = previous
+            .inner
+            .task()
+            .ok()
+            .and_then(|task| crate::policy::AgentPause::of(&task.current_state));
+        let calls = match pause {
             Some(crate::policy::AgentPause::ToolApproval { calls }) => calls,
             _ => Vec::new(),
         };

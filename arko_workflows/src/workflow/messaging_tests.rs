@@ -688,7 +688,7 @@ async fn a_continued_run_gets_the_context_its_task_kept_once() {
     let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
         .build()
         .unwrap();
-    let mut lead = workflow.run_agent("lead", "Lead the work.").await.unwrap();
+    let lead = workflow.run_agent("lead", "Lead the work.").await.unwrap();
     // Taken in the lead's final turn, too late for the model to read.
     let message = workflow
         .context()
@@ -696,10 +696,12 @@ async fn a_continued_run_gets_the_context_its_task_kept_once() {
         .send("worker", None, "lead", "Check the parser.".into(), vec![])
         .await
         .unwrap();
-    lead.task.pending_context_injections = vec![
+    let mut task = lead.task().unwrap().clone();
+    task.pending_context_injections = vec![
         crate::messaging::injection(&message),
         "Terminal 3 finished.".into(),
     ];
+    let lead = AgentResult::of_task(lead.agent_name, task);
     let continued = workflow.continue_agent(&lead, "Carry on.").await.unwrap();
     let bodies = server.bodies();
     let request = user_text(bodies.last().unwrap());
@@ -710,7 +712,13 @@ async fn a_continued_run_gets_the_context_its_task_kept_once() {
         1,
         "{request}"
     );
-    assert!(continued.task.pending_context_injections.is_empty());
+    assert!(
+        continued
+            .task()
+            .unwrap()
+            .pending_context_injections
+            .is_empty()
+    );
     // Acknowledged with the continuation prompt's messages.
     assert!(workflow.context().messages.pending("lead").is_empty());
 }
@@ -901,7 +909,7 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
 
     let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
     assert_eq!(result.status, AgentRunStatus::Completed);
-    assert_eq!(result.task.handovers.len(), 1);
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
     let writer_bodies = server
         .bodies()
         .into_iter()

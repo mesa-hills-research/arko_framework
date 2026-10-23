@@ -69,8 +69,8 @@ async fn an_idle_run_s_prompt_cache_is_kept_warm() {
     assert_eq!(workflow.cost_ledger().entries.len(), ledger_before + 1);
     let unchanged = workflow.agent_result(first.agent_run_id).unwrap();
     assert_eq!(
-        unchanged.task.conversation.messages.len(),
-        first.task.conversation.messages.len()
+        unchanged.task().unwrap().conversation.messages.len(),
+        first.task().unwrap().conversation.messages.len()
     );
 }
 

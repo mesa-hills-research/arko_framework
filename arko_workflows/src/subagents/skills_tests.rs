@@ -362,7 +362,7 @@ async fn a_reconfigured_run_has_embedded_skills_across_a_save_and_a_resume() {
     ))
     .await
     .unwrap();
-    assert!(second.task.reconfigured);
+    assert!(second.task().unwrap().reconfigured);
 
     // The skills the host gave stay, and the registered agent's don't replace them.
     within(workflow.continue_agent(&second, "Go on."))
@@ -384,7 +384,7 @@ async fn a_reconfigured_run_has_embedded_skills_across_a_save_and_a_resume() {
         .build()
         .unwrap();
     let restored = resumed.agent_result(first.agent_run_id).unwrap();
-    assert!(restored.task.reconfigured);
+    assert!(restored.task().unwrap().reconfigured);
     within(resumed.continue_agent(&restored, "Load it two."))
         .await
         .unwrap();
@@ -533,11 +533,15 @@ async fn load_after_a_resumed_pause(set_since: Option<&str>) -> String {
         workflow.set_agent_skills("lead", review(version)).unwrap();
     }
     // As if loaded from a save, which leaves the embedded skills out.
-    let mut paused = workflow.agent_result(task_id).unwrap();
-    paused.task = serde_json::from_value(serde_json::to_value(&paused.task).unwrap()).unwrap();
+    let paused = workflow.agent_result(task_id).unwrap();
+    let paused = crate::AgentResult::of_task(
+        paused.agent_name.clone(),
+        serde_json::from_value(serde_json::to_value(paused.task().unwrap()).unwrap()).unwrap(),
+    );
     assert!(
         paused
-            .task
+            .task()
+            .unwrap()
             .agent_config
             .skills_config
             .as_ref()

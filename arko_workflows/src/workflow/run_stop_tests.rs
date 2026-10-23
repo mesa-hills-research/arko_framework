@@ -207,7 +207,8 @@ fn checks_coder(builder: WorkflowBuilder) -> WorkflowBuilder {
 /// The output of call `call_id` in `result`'s conversation.
 fn tool_output(result: &AgentResult, call_id: &str) -> Option<String> {
     result
-        .task
+        .task()
+        .unwrap()
         .conversation
         .messages
         .iter()
@@ -1225,7 +1226,7 @@ async fn a_recovered_run_waiting_out_a_pause_is_stopped_at_once() {
     let resumed = Arc::new(build(Some(&path)));
     let saved = resumed.agent_result(id).unwrap();
     assert!(matches!(
-        saved.task.current_state,
+        saved.task().unwrap().current_state,
         arko_agents::TaskState::AwaitingErrorRecoveryApproval { .. }
     ));
     let recovering = tokio::spawn({

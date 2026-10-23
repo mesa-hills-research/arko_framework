@@ -606,8 +606,12 @@ async fn an_aborted_agent_keeps_its_latest_saved_task() {
         "{:?}",
         aborted.error
     );
-    assert_eq!(aborted.task.running_tool_calls.len(), 1, "saved mid-call");
-    assert!(aborted.task.conversation.messages.len() >= 2);
+    assert_eq!(
+        aborted.task().unwrap().running_tool_calls.len(),
+        1,
+        "saved mid-call"
+    );
+    assert!(aborted.task().unwrap().conversation.messages.len() >= 2);
 
     // The call may have been aborted before the tool itself started: its
     // write-ahead save comes first.

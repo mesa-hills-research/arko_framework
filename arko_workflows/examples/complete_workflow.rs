@@ -564,7 +564,7 @@ async fn follow_up(workflow: &Workflow, paused: &AgentResult, owner: &str) -> Ex
             let answer = format!("The follow-up actions are owned by {owner}.");
             workflow.continue_agent(paused, &answer).await
         }
-        _ => match AgentPause::of(&paused.task.current_state) {
+        _ => match AgentPause::of(&paused.task()?.current_state) {
             // The reviewer could not review a completion
             // (WorkflowError::VerifierFailed): the prompt is the writer's
             // next message, and its next complete_task is reviewed again.

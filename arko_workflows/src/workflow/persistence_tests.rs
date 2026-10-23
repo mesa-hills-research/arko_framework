@@ -95,9 +95,11 @@ async fn checkpoints_refer_to_task_files_and_resume_reads_them() {
         std::slice::from_ref(&task_file)
     );
     assert!(
-        !checkpoint.to_string().contains("Write it."),
+        !checkpoint.to_string().contains("\"conversation\""),
         "no conversation"
     );
+    // What lists and checks read of the run, without its task file.
+    assert_eq!(runs[0]["info"]["initial_task_prompt"], "Write it.");
     assert!(
         std::fs::read_to_string(&path)
             .unwrap()
@@ -114,13 +116,131 @@ async fn checkpoints_refer_to_task_files_and_resume_reads_them() {
     let restored = resumed.agent_result(result.agent_run_id).unwrap();
     assert_eq!(restored.status, AgentRunStatus::Completed);
     assert_eq!(
-        restored.task.conversation.messages.len(),
-        result.task.conversation.messages.len()
+        restored.task().unwrap().conversation.messages.len(),
+        result.task().unwrap().conversation.messages.len()
     );
-    // A missing task file is a clear error.
+    // A missing task file is a clear error, at once for a checkpoint that
+    // doesn't describe its runs' tasks (from before it did).
     std::fs::remove_file(run_dir(&workspace).join(&task_file)).unwrap();
+    let mut older = checkpoint.clone();
+    older["agent_runs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("info");
+    std::fs::write(&path, older.to_string()).unwrap();
     let error = builder(&server, &workspace)
         .persistence(config())
+        .resume_from(&path)
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, WorkflowError::Persistence(message) if message.contains("task file")),
+        "{error}"
+    );
+}
+
+/// A resume reads the task of a run that completed only when it is needed,
+/// each from its own file and once for every clone and thread, and a task
+/// file that can't be read fails where the task is needed.
+#[tokio::test]
+async fn a_resume_reads_a_completed_runs_task_when_it_is_needed() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = || PersistenceConfig::new(run_dir(&workspace));
+    let workflow = builder(&server, &workspace)
+        .persistence(config())
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("coder", "Write one.").await.unwrap();
+    let second = workflow.run_agent("coder", "Write two.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    let (path, checkpoint) = latest(&workspace);
+    drop(workflow);
+    let file_of = |run: &AgentResult| {
+        let record = checkpoint["agent_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["agent_run_id"] == run.agent_run_id.to_string())
+            .unwrap();
+        run_dir(&workspace).join(record["task_file"].as_str().unwrap())
+    };
+
+    let resumed = builder(&server, &workspace)
+        .persistence(config())
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    // Changed after the build: the task read now has the change.
+    let mut task: arko_agents::Task =
+        serde_json::from_str(&std::fs::read_to_string(file_of(&first)).unwrap()).unwrap();
+    task.initial_task_prompt = "Changed after the build.".into();
+    std::fs::write(file_of(&first), serde_json::to_string(&task).unwrap()).unwrap();
+    std::fs::remove_file(file_of(&second)).unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.info().initial_task_prompt, "Write one.");
+    assert_eq!(restored.total_cost(), first.total_cost());
+    let clones = vec![restored.clone(); 4];
+    let read = std::thread::scope(|scope| {
+        let threads = clones
+            .iter()
+            .map(|clone| scope.spawn(move || std::ptr::from_ref(clone.task().unwrap()) as usize))
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(read.iter().all(|task| *task == read[0]), "read once");
+    std::fs::remove_file(file_of(&first)).unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(
+        restored.task().unwrap().initial_task_prompt,
+        "Changed after the build."
+    );
+    let continued = resumed.continue_agent(&restored, "More.").await.unwrap();
+    let continued = continued.task().unwrap();
+    assert_eq!(continued.initial_task_prompt, "Changed after the build.");
+    assert!(
+        continued.conversation.messages.len() > first.task().unwrap().conversation.messages.len()
+    );
+
+    // The other run's task file is gone: its result lists as before, and
+    // going on with it fails.
+    let other = resumed.agent_result(second.agent_run_id).unwrap();
+    assert_eq!(
+        (&other.status, &other.summary),
+        (&second.status, &second.summary)
+    );
+    let error = resumed.continue_agent(&other, "More.").await.unwrap_err();
+    assert!(
+        matches!(&error, WorkflowError::Persistence(message) if message.contains("task file")),
+        "{error}"
+    );
+}
+
+/// Resumed into another run directory, every task is read at once, since
+/// the next checkpoint writes them all there. A task file that can't be read
+/// fails the resume.
+#[tokio::test]
+async fn a_resume_into_another_run_directory_reads_every_task() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = builder(&server, &workspace)
+        .persistence(PersistenceConfig::new(run_dir(&workspace)))
+        .build()
+        .unwrap();
+    workflow.run_agent("coder", "Write it.").await.unwrap();
+    let (path, checkpoint) = latest(&workspace);
+    drop(workflow);
+    let other = workspace.0.join(".other");
+    std::fs::create_dir_all(&other).unwrap();
+    let run_id = run_dir(&workspace).join("workflow-run-id");
+    std::fs::copy(run_id, other.join("workflow-run-id")).unwrap();
+    std::fs::remove_file(run_dir(&workspace).join(task_file_of(&checkpoint))).unwrap();
+    let error = builder(&server, &workspace)
+        .persistence(PersistenceConfig::new(&other))
         .resume_from(&path)
         .build()
         .err()
@@ -256,11 +376,11 @@ async fn an_older_checkpoint_reads_the_task_as_it_was() {
             .unwrap();
         let restored = resumed.agent_result(first.agent_run_id).unwrap();
         assert_eq!(
-            restored.task.conversation.messages.len(),
-            expected.task.conversation.messages.len()
+            restored.task().unwrap().conversation.messages.len(),
+            expected.task().unwrap().conversation.messages.len()
         );
         assert_eq!(
-            serde_json::to_string(&restored.task.conversation.messages)
+            serde_json::to_string(&restored.task().unwrap().conversation.messages)
                 .unwrap()
                 .contains("Now test it."),
             std::ptr::eq(expected, &second)
@@ -388,8 +508,8 @@ async fn a_task_state_that_cant_be_saved_is_retried_and_reported() {
         .agent_results_with_warnings(&run_dir(&workspace))
         .unwrap();
     assert_eq!(
-        results[0].task.conversation.messages.len(),
-        first.task.conversation.messages.len(),
+        results[0].task().unwrap().conversation.messages.len(),
+        first.task().unwrap().conversation.messages.len(),
         "restored as last saved"
     );
     assert_eq!(warnings.len(), 1, "{warnings:?}");

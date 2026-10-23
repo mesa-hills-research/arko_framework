@@ -64,7 +64,7 @@ async fn an_edited_message_replaces_it_and_what_came_after() {
         .continue_agent(&first, "Tell me a joke.")
         .await
         .unwrap();
-    assert_eq!(second.task.user_turns()[1].index, 2);
+    assert_eq!(second.task().unwrap().user_turns()[1].index, 2);
 
     let edited = workflow
         .continue_agent_with(
@@ -81,7 +81,7 @@ async fn an_edited_message_replaces_it_and_what_came_after() {
     assert_eq!(sent[1], "Reply 0.");
     assert!(sent[2].starts_with("Tell me a riddle."));
     assert!(!sent.iter().any(|text| text.contains("joke")));
-    assert_eq!(edited.task.conversation.messages.len(), 4);
+    assert_eq!(edited.task().unwrap().conversation.messages.len(), 4);
 
     // Not a message the host sent: refused, nothing sent.
     let requests = server.requests();
@@ -159,7 +159,7 @@ async fn a_branch_goes_on_apart_from_the_original() {
     let original = workflow.continue_agent(&first, "Plan A.").await.unwrap();
 
     let branch = workflow
-        .import_agent_run("main", original.task.branch(2).unwrap())
+        .import_agent_run("main", original.task().unwrap().branch(2).unwrap())
         .unwrap();
     assert_ne!(branch.agent_run_id, original.agent_run_id);
     workflow.continue_agent(&branch, "Plan B.").await.unwrap();
@@ -179,12 +179,15 @@ async fn a_branch_goes_on_apart_from_the_original() {
 
     // What can't be imported.
     let error = |result: Result<AgentResult, WorkflowError>| result.unwrap_err().to_string();
-    assert!(error(workflow.import_agent_run("main", original.task.clone())).contains("already"));
+    assert!(
+        error(workflow.import_agent_run("main", original.task().unwrap().clone()))
+            .contains("already")
+    );
     assert!(matches!(
-        workflow.import_agent_run("ghost", original.task.branch(2).unwrap()),
+        workflow.import_agent_run("ghost", original.task().unwrap().branch(2).unwrap()),
         Err(WorkflowError::AgentNotFound(_))
     ));
-    let mut running = original.task.branch(2).unwrap();
+    let mut running = original.task().unwrap().branch(2).unwrap();
     running.set_state(arko_agents::TaskState::InProgress);
     assert!(error(workflow.import_agent_run("main", running)).contains("only a completed task"));
 }
@@ -201,9 +204,9 @@ async fn a_branch_at_the_first_message_starts_over_from_the_next() {
     let original = workflow.continue_agent(&first, "Plan A.").await.unwrap();
 
     let branch = workflow
-        .import_agent_run("main", original.task.branch(0).unwrap())
+        .import_agent_run("main", original.task().unwrap().branch(0).unwrap())
         .unwrap();
-    assert!(branch.task.conversation.messages.is_empty());
+    assert!(branch.task().unwrap().conversation.messages.is_empty());
     let answered = workflow
         .continue_agent_with(
             &branch,
@@ -216,8 +219,8 @@ async fn a_branch_at_the_first_message_starts_over_from_the_next() {
     let sent = input_texts(server.bodies().last().unwrap());
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(sent[0].starts_with("Good evening."));
-    assert_eq!(answered.task.conversation.messages.len(), 2);
-    assert_eq!(original.task.conversation.messages.len(), 4);
+    assert_eq!(answered.task().unwrap().conversation.messages.len(), 2);
+    assert_eq!(original.task().unwrap().conversation.messages.len(), 4);
 }
 
 /// A cut back is reported as the run goes on: `ConversationCutBack` names
@@ -320,7 +323,7 @@ async fn a_run_goes_on_in_another_directory() {
         .await
         .unwrap();
     assert_eq!(
-        moved.task.current_working_directory,
+        moved.task().unwrap().current_working_directory,
         std::path::absolute(workspace.0.join("project")).unwrap()
     );
     let refused = workflow
@@ -368,13 +371,21 @@ async fn a_claude_code_run_moves_while_its_session_stays() {
         .unwrap();
     assert_eq!(moved.summary, "Read it.");
     let project = std::path::absolute(&project).unwrap();
-    assert_eq!(moved.task.current_working_directory, project);
-    assert!(moved.task.conversation.messages.iter().any(|message| {
-        message.content.iter().any(|content| {
-            matches!(content, arko_ai::Content::ToolResult(result)
+    assert_eq!(moved.task().unwrap().current_working_directory, project);
+    assert!(
+        moved
+            .task()
+            .unwrap()
+            .conversation
+            .messages
+            .iter()
+            .any(|message| {
+                message.content.iter().any(|content| {
+                    matches!(content, arko_ai::Content::ToolResult(result)
                 if result.output.contains("the project's own file"))
-        })
-    }));
+                })
+            })
+    );
     let launches = fake.logged("argv");
     let canonical = |path: &str| std::fs::canonicalize(path).unwrap();
     let original = std::fs::canonicalize(&workspace.0).unwrap();
