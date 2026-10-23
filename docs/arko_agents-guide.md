@@ -1537,9 +1537,10 @@ inside the workspace stays as it is.
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
 handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
 compacts at the threshold instead). `examples/claude_code_move.rs` moves a task after its
-first run and prints where `Bash`, `Glob`, `Grep` and `Read` run (with `--ask`, each call
-waits for an approval). They use the CLI's login and count against its plan
-usage. The tests run a scripted fake CLI
+first run and prints where `Bash`, `Glob`, `Grep` and `Read` run, then where the framework's
+`terminal_start` runs. On Windows it adds `PowerShell` and runs `terminal_start` with cmd.exe
+and with PowerShell. With `--ask`, each call waits for an approval. They use the CLI's login
+and count against its plan usage. The tests run a scripted fake CLI
 (`tests/fixtures/fake_claude_agent.py`) and need Python 3 (`ARKO_TEST_PYTHON` selects the
 interpreter).
 
