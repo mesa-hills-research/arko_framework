@@ -462,6 +462,7 @@ impl TerminalManager {
                 label: Some(label.clone()),
                 call: None,
                 stopped_by_close: false,
+                generation: self.generation,
                 monitor: Some(watching.record.clone()),
             };
             persist(&self.config, &record)?;

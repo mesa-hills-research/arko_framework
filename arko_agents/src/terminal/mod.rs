@@ -29,7 +29,7 @@ pub use outbox::note_wakes;
 pub use tools::TerminalTool;
 pub use warnings::DEFAULT_WARNINGS_WAKE_WITHIN;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -314,6 +314,10 @@ struct Record {
     /// before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stopped_by_close: bool,
+    /// The open of the directory this record was made or loaded under (see
+    /// `OPENS`). Not saved.
+    #[serde(skip)]
+    generation: u64,
     /// What a monitor watches, for a job that is one. A monitor of a kind
     /// this version doesn't know reads as `None`.
     #[serde(
@@ -484,6 +488,8 @@ pub struct TerminalManager {
     /// Changes when monitors should plan their timed events again.
     monitor_timing: watch::Sender<u64>,
     _directory_lock: Arc<std::fs::File>,
+    /// Which open of the directory this manager is (see `OPENS`).
+    generation: u64,
 }
 impl std::fmt::Debug for TerminalManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -522,6 +528,12 @@ impl TerminalManager {
         lock.try_lock().map_err(|error| {
             TerminalError::Invalid(format!("terminal directory is already in use: {error}"))
         })?;
+        let generation = {
+            let mut opens = OPENS.lock().unwrap();
+            let open = opens.entry(config.directory.clone()).or_insert(0);
+            *open += 1;
+            *open
+        };
         let manager = Arc::new(Self {
             allow_outside_workspace: config.command_guard.allow_outside_workspace.into(),
             config,
@@ -540,6 +552,7 @@ impl TerminalManager {
             wake_rules: Mutex::default(),
             monitor_timing: watch::Sender::new(0),
             _directory_lock: Arc::new(lock),
+            generation,
         });
         let mut interrupted = Vec::new();
         for entry in std::fs::read_dir(&manager.config.directory)? {
@@ -569,6 +582,7 @@ impl TerminalManager {
             }
             // Listed once.
             record.stopped_by_close = false;
+            record.generation = generation;
             if record.state == JobState::Running {
                 record.state = JobState::Interrupted;
                 record.input = None;
@@ -810,6 +824,7 @@ impl TerminalManager {
             label: Some(label.clone()),
             call: None,
             stopped_by_close: false,
+            generation: self.generation,
             monitor: monitor.as_ref().map(|watching| watching.record.clone()),
         };
         let mut data = JobData::new(record);
@@ -1061,9 +1076,9 @@ impl TerminalManager {
     /// call, which gets 3 seconds after its stop. The background jobs it
     /// stops are listed by [`interrupted_at_open`](Self::interrupted_at_open)
     /// when the directory is opened again, which works as soon as this
-    /// returns. A job that is still ending then finishes its own record,
-    /// which can replace what a newer manager wrote for it. Dropping the
-    /// manager stops its jobs the same way, without waiting.
+    /// returns. A job that is still ending then saves no record once a
+    /// newer manager has opened the directory. Dropping the manager stops its
+    /// jobs the same way, without waiting.
     pub async fn shutdown(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1098,7 +1113,8 @@ impl TerminalManager {
         }
         // A job's task lets go of its clone of the lock only when it next
         // runs, which can be after the waits above ended. The directory
-        // opens again now, and a late task only finishes its own record.
+        // opens again now, and a late task saves no record once a newer
+        // manager has opened it.
         let _ = self._directory_lock.unlock();
     }
 }
@@ -1146,20 +1162,44 @@ fn background(jobs: &HashMap<Uuid, Arc<Job>>) -> Vec<BackgroundJob> {
     running
 }
 
+/// The latest open of each directory in this process, counted from 1. A
+/// record made under an earlier open is no longer saved, because the newer
+/// manager owns its job (see [`persist`]).
+static OPENS: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+/// Saves the record, unless a newer open of the directory owns its job. That
+/// is the case for a task that outlived its manager's
+/// [`shutdown`](TerminalManager::shutdown) and ends after the directory
+/// opened again. It must not replace what the new manager wrote.
 fn persist(config: &TerminalConfig, record: &Record) -> Result<()> {
+    let bytes = serde_json::to_vec(record)?;
+    // Under the lock to the rename, so no open comes between the check and it.
+    let opens = OPENS.lock().unwrap();
+    if opens
+        .get(&config.directory)
+        .is_some_and(|open| *open > record.generation)
+    {
+        return Ok(());
+    }
     let directory = config.directory.join(record.job_id.to_string());
-    // A name of its own, so a late task of a closed manager and a new manager
-    // of the directory never write one file.
+    // A name of its own, so two writes of one record never share a file.
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = directory.join(format!(
         "job.json.{}.tmp",
         WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::write(&temporary, serde_json::to_vec(record)?)?;
-    std::fs::rename(&temporary, directory.join("job.json")).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })?;
+    replace_file(&temporary, &directory.join("job.json"), &bytes)?;
     Ok(())
+}
+
+/// Writes `bytes` to `temporary` and moves it over `target`. The temporary
+/// file is gone afterwards, also when the write or the move fails.
+fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(temporary, bytes)
+        .and_then(|()| std::fs::rename(temporary, target))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(temporary);
+        })
 }
 
 #[cfg(test)]

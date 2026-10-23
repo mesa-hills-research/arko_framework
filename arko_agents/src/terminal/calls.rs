@@ -403,6 +403,7 @@ impl TerminalManager {
                 tool_name: tool_name.to_string(),
             }),
             stopped_by_close: false,
+            generation: self.generation,
             monitor: None,
         };
         persist(&self.config, &record)?;
