@@ -223,6 +223,20 @@ fn stopped(reason: &str, by_caller: bool) -> (String, bool) {
     (reason.to_string(), by_caller)
 }
 
+/// A subagent started by a subagent is told its lead by handle, and one
+/// started by the host's run by that run's agent.
+#[tokio::test]
+async fn a_nested_subagent_is_told_its_lead_by_handle() {
+    let tree = Tree::grow_waiting().await;
+    for (handle, lead) in [("r1", "agent `lead`"), ("r2", "r1"), ("r3", "r2")] {
+        let first = &bodies_of(&tree.server, handle)[0];
+        assert!(
+            first.contains(&format!("started by {lead} (your lead)")),
+            "{handle}"
+        );
+    }
+}
+
 /// Stopping the run at the top of a tree stops the runs under it, with a
 /// wrap-up or without one. Each is told which run's stop reached it.
 #[tokio::test]
