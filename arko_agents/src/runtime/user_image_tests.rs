@@ -59,6 +59,7 @@ async fn a_context_update_s_images_follow_its_text_each_after_its_label() {
             content: content.into(),
             ids: vec!["note:3".into()],
             images: vec![ContextImage::new("The image of note 3:", pixels())],
+            ..Default::default()
         })))));
         push(&mut agent, &["Seen."]);
         let (task, events) = run(agent, &mut events).await;
@@ -152,6 +153,7 @@ async fn a_context_update_s_image_past_the_request_s_room_is_left_out() {
         content: "A new note on your task.".into(),
         ids: vec!["note:3".into()],
         images: vec![ContextImage::new("The image of note 3:", pixels())],
+        ..Default::default()
     })))));
     push(&mut agent, &["Noted."]);
     let (task, _) = run(agent, &mut events).await;

@@ -977,6 +977,7 @@ impl crate::runtime::TurnContextSource for Identified {
     fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
         Some(crate::runtime::TurnContext {
             content: "From the source.".into(),
+            user_content: "Typed by the user.".into(),
             ids: vec!["note:1".into()],
             ..Default::default()
         })
@@ -992,7 +993,8 @@ impl crate::runtime::TurnContextSource for Identified {
 
 /// Each context update is reported once it is in the conversation, with
 /// the identifiers of what it holds: the injected content the source
-/// identifies, then the source's own.
+/// identifies, then the source's own. The part of the update the user typed
+/// follows the rest in the same message.
 #[tokio::test]
 async fn a_context_update_is_reported_with_its_identifiers() {
     let (mut agent, mut events, commands) = harness();
@@ -1006,7 +1008,10 @@ async fn a_context_update_is_reported_with_its_identifiers() {
     rest(&mut events, &mut seen).await;
     let task = joined(run).await;
     let update = update_texts(&task.conversation).remove(0);
-    assert_eq!(update, "id:m7 Hello.\n\nUnidentified.\n\nFrom the source.");
+    assert_eq!(
+        update,
+        "id:m7 Hello.\n\nUnidentified.\n\nFrom the source.\n\nTyped by the user."
+    );
     let receipts = seen
         .iter()
         .filter_map(|event| match event {

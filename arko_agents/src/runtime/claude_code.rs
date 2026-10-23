@@ -84,6 +84,9 @@ const ASKED: &str = "Your questions were sent to the user. End your turn now wit
 
 const CONTINUE: &str = "Continue the task from where you left off.";
 
+/// The heading of a context update.
+const CONTEXT_HEADING: &str = "# Workflow context update";
+
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
 const COMPACT_COMMAND: &str = "/compact";
@@ -1615,8 +1618,12 @@ impl ClaudeCodeRun {
     /// conversation, and during a compaction, when it waits for the agent's
     /// next input. Where images can't go (`with_images` false: a hook's
     /// context is text), the text goes now, saying that the update's images
-    /// come with the next input, and only the images wait.
-    fn take_context(&mut self, with_images: bool) -> Option<(String, Vec<ContextImage>)> {
+    /// come with the next input, and only the images wait. There the part
+    /// of the update the user typed ([`TurnContext::user_content`]) comes
+    /// apart from the rest, as the second text, to go as their message
+    /// (the update's text is empty when only that part is waiting). With
+    /// images, it is part of the update.
+    fn take_context(&mut self, with_images: bool) -> Option<(String, String, Vec<ContextImage>)> {
         if self.handover_due() || self.compaction.is_some() {
             // It waits for a later input, and arko calls that start meanwhile
             // count newer context only.
@@ -1625,25 +1632,35 @@ impl ClaudeCodeRun {
         }
         let mut update_ids = Vec::new();
         let mut arrived = 0;
+        let mut typed = String::new();
         if let Some(update) = self
             .turn_context
             .as_ref()
             .and_then(|source| source.context_update(self.task.id))
         {
-            if !update.content.trim().is_empty() || !update.images.is_empty() {
+            if !update.content.trim().is_empty()
+                || !update.user_content.trim().is_empty()
+                || !update.images.is_empty()
+            {
                 update_ids = update.ids;
             }
             arrived = update.images.len();
             self.queue_context(update.content, false);
+            if with_images {
+                self.queue_context(update.user_content, false);
+            } else if !update.user_content.trim().is_empty() {
+                typed = update.user_content;
+            }
             self.task.pending_context_images.extend(update.images);
         }
         if self.task.pending_context_injections.is_empty()
             && self.task.pending_context_images.is_empty()
+            && typed.is_empty()
         {
             return None;
         }
         let hold_images = !with_images && !self.task.pending_context_images.is_empty();
-        if hold_images && self.task.pending_context_injections.is_empty() {
+        if hold_images && self.task.pending_context_injections.is_empty() && typed.is_empty() {
             // Only images wait, said already: nothing goes until they can.
             self.held_context_ids.append(&mut update_ids);
             return None;
@@ -1668,23 +1685,34 @@ impl ClaudeCodeRun {
         self.context_arrivals.caught_up();
         let images = if hold_images {
             if arrived > 0 {
-                content.push_str(&match arrived {
+                // With the user's notes, which the images belong to.
+                let text = if typed.is_empty() {
+                    &mut content
+                } else {
+                    &mut typed
+                };
+                text.push_str(&match arrived {
                     1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
                     count => format!("\n\n(The {count} images of this update can't come during a turn. They come with your next input.)"),
                 });
             }
             Vec::new()
         } else {
-            if content.is_empty() {
+            if content.is_empty() && typed.is_empty() {
                 content = "The images an earlier update said would follow.".to_string();
             }
             std::mem::take(&mut self.task.pending_context_images)
         };
         self.context_receipts.push(AgentEvent::ContextInjected {
             ids,
-            bytes: content.len(),
+            bytes: content.len() + typed.len(),
         });
-        Some((format!("# Workflow context update\n\n{content}"), images))
+        let content = if content.is_empty() {
+            content
+        } else {
+            format!("{CONTEXT_HEADING}\n\n{content}")
+        };
+        Some((content, typed, images))
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -1953,7 +1981,7 @@ impl ClaudeCodeRun {
                     .unwrap_or_default(),
             );
         }
-        if let Some((context, images)) = self.take_context(true) {
+        if let Some((context, _, images)) = self.take_context(true) {
             self.task.conversation.add_user_message_with_contents(
                 crate::task::with_context_images(context.clone(), images),
             );
@@ -2349,7 +2377,9 @@ impl ClaudeCodeRun {
             } => {
                 self.record_output(tool_use_id.as_ref(), &response);
                 self.report(false).await;
-                let answer = self.after_tool(tool_use_id, &tool_name, response).await?;
+                let answer = self
+                    .after_tool(tool_use_id, &tool_name, response, session)
+                    .await?;
                 let _ = reply.send(answer);
             }
         }
@@ -2835,6 +2865,7 @@ impl ClaudeCodeRun {
         tool_use_id: Option<String>,
         _served: &str,
         response: Value,
+        session: &cc::ClaudeSession,
     ) -> Result<Value, ArkoAgentsError> {
         let call = tool_use_id.as_ref().and_then(|id| self.calls.get(id));
         if let (Some(call), Some(middleware)) = (call, self.middleware.clone())
@@ -2870,17 +2901,40 @@ impl ClaudeCodeRun {
         if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
             texts.push(message);
         }
-        // A hook's context is text: its images wait for the next input.
-        if let Some((context, _)) = self.take_context(false) {
+        // A hook's context is text: its images wait for the next input. What
+        // the user typed goes as their own message instead.
+        let (context, typed, _) = self.take_context(false).unwrap_or_default();
+        let headed = !context.is_empty();
+        if headed {
             texts.push(context);
         }
+        if texts.is_empty() && typed.is_empty() {
+            return Ok(cc::Hook::proceed());
+        }
+        let mut recorded = texts.clone();
+        if !typed.is_empty() {
+            // It reaches the model at this tool boundary. The runtime can't
+            // see when, so it counts as delivered once it is written. Where
+            // that fails, the hook has it.
+            if let Err(error) = session.send_human(&typed).await {
+                log::warn!(
+                    "Task {}: could not send the user's notes as a message ({error}). They go in the hook.",
+                    self.task.id
+                );
+                texts.push(typed.clone());
+            }
+            recorded.push(if headed {
+                typed
+            } else {
+                format!("{CONTEXT_HEADING}\n\n{typed}")
+            });
+        }
+        self.delivered_context.push(recorded.join("\n\n"));
+        self.emit_context_receipts().await?;
         if texts.is_empty() {
             return Ok(cc::Hook::proceed());
         }
-        let text = texts.join("\n\n");
-        self.delivered_context.push(text.clone());
-        self.emit_context_receipts().await?;
-        Ok(add_context(&text))
+        Ok(add_context(&texts.join("\n\n")))
     }
 
     /// A message the session reported.
@@ -4246,7 +4300,7 @@ impl ClaudeCodeRun {
             note = OPEN_TURN_MESSAGE_NOTE.to_string();
         }
         let mut images = Vec::new();
-        if let Some((context, context_images)) = self.take_context(true) {
+        if let Some((context, _, context_images)) = self.take_context(true) {
             note.push_str("\n\n");
             note.push_str(&context);
             images = context_images;

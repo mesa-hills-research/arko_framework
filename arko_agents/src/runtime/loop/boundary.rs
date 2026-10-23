@@ -107,10 +107,14 @@ impl AgentLoop {
             .as_ref()
             .and_then(|source| source.context_update(self.task.id))
         {
-            if !update.content.trim().is_empty() || !update.images.is_empty() {
+            if !update.content.trim().is_empty()
+                || !update.user_content.trim().is_empty()
+                || !update.images.is_empty()
+            {
                 self.context_ids.extend(update.ids);
             }
             self.queue_context_injection(update.content);
+            self.queue_context_injection(update.user_content);
             self.task.pending_context_images.extend(update.images);
         }
         self.add_taken_context()

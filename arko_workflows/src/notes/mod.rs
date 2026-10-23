@@ -553,13 +553,15 @@ impl NoteBoard {
     /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown and their
     /// images, each labelled with its note, or `None` when there are none. Only
     /// the notes shown count as given: the rest come at the next boundary.
+    /// The update comes in two texts, the operator's notes (empty without
+    /// one) and the others', each its own update.
     pub(crate) fn update_with_seqs(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> Option<(String, Vec<u64>, Vec<arko_agents::ContextImage>)> {
+    ) -> Option<NotesUpdate> {
         self.poll(ctx);
         let mut state = self.state.lock();
         let newest = state.notes.last()?.seq;
@@ -605,19 +607,30 @@ impl NoteBoard {
                 .map(|posted| (posted.seq, posted.images.clone()))
                 .collect::<Vec<_>>();
             let (images, lost) = self.context_images(&with_images, model);
-            let notes = taken.iter().collect::<Vec<_>>();
             let seqs = taken.iter().map(|posted| posted.seq).collect();
-            // Once per update, after the notes, when one is the operator's.
-            let hint = self
-                .reply_hints
-                .get(agent)
-                .filter(|_| {
-                    taken
-                        .iter()
-                        .any(|posted| posted.note.source == NoteSource::Operator)
-                })
-                .map(String::as_str);
-            (update(&notes, more, &lost, hint), seqs, images)
+            let (operator, others): (Vec<_>, Vec<_>) = taken
+                .iter()
+                .partition(|posted| posted.note.source == NoteSource::Operator);
+            // The count of notes that follow and the host's reply hint end
+            // the operator's update, which comes last, or the only one.
+            let (others, operator) = if operator.is_empty() {
+                (update(&others, more, &lost, None), String::new())
+            } else {
+                // Once per update, after the notes.
+                let hint = self.reply_hints.get(agent).map(String::as_str);
+                let others = if others.is_empty() {
+                    String::new()
+                } else {
+                    update(&others, 0, &lost, None)
+                };
+                (others, update(&operator, more, &lost, hint))
+            };
+            NotesUpdate {
+                others,
+                operator,
+                seqs,
+                images,
+            }
         })
     }
 
@@ -1221,6 +1234,18 @@ impl std::fmt::Debug for NotesHandle {
     }
 }
 
+/// The notes a run is given at a turn boundary (see
+/// [`NoteBoard::update_with_seqs`]).
+pub(crate) struct NotesUpdate {
+    /// The update of the notes the host and agents wrote, empty without one.
+    pub others: String,
+    /// The update of the operator's notes, empty without one.
+    pub operator: String,
+    /// The numbers of the notes shown.
+    pub seqs: Vec<u64>,
+    pub images: Vec<arko_agents::ContextImage>,
+}
+
 /// A turn context source that adds the notes an agent run hasn't been given
 /// to `inner`'s context, and holds requests as `inner` does.
 pub(crate) struct WithNotes<S> {
@@ -1234,29 +1259,45 @@ pub(crate) struct WithNotes<S> {
 
 impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithNotes<S> {
     fn turn_context(&self, task_id: Uuid) -> Option<String> {
-        self.context_update(task_id).map(|update| update.content)
+        self.context_update(task_id).map(|update| {
+            [update.content, update.user_content]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
     }
 
     /// The inner source's context, the notes the run hasn't been given
     /// (`note:<number>`), and its subagent mail (`mail:<id>`).
     fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
         let mut parts = Vec::new();
+        let mut user_content = String::new();
         let mut ids = Vec::new();
         let mut images = Vec::new();
         if let Some(inner) = self.inner.context_update(task_id) {
             parts.push(inner.content);
+            user_content = inner.user_content;
             ids.extend(inner.ids);
             images.extend(inner.images);
         }
-        if let Some((notes, seqs, note_images)) = self.context.notes.update_with_seqs(
+        if let Some(notes) = self.context.notes.update_with_seqs(
             &self.context,
             &self.agent_name,
             task_id,
             self.review,
         ) {
-            parts.push(notes);
-            ids.extend(seqs.into_iter().map(|seq| format!("note:{seq}")));
-            images.extend(note_images);
+            if !notes.others.is_empty() {
+                parts.push(notes.others);
+            }
+            if !notes.operator.is_empty() {
+                if !user_content.is_empty() {
+                    user_content.push_str("\n\n");
+                }
+                user_content.push_str(&notes.operator);
+            }
+            ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
+            images.extend(notes.images);
         }
         if !self.review
             && let Some((mail, mail_ids)) = self.context.subagents.update(task_id)
@@ -1264,8 +1305,9 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             parts.push(mail);
             ids.extend(mail_ids);
         }
-        (!parts.is_empty()).then(|| arko_agents::TurnContext {
+        (!parts.is_empty() || !user_content.is_empty()).then(|| arko_agents::TurnContext {
             content: parts.join("\n\n"),
+            user_content,
             ids,
             images,
         })

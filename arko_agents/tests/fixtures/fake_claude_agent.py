@@ -89,7 +89,8 @@ that plays a turn, as a CLI without the command would pass it to the model.
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages (each with the conversation before it, as
-"history"), hook and permission answers, tool results.
+"history"), user messages sent during a turn ("midturn", with their "origin"),
+hook and permission answers, tool results.
 """
 import json
 import time
@@ -526,7 +527,17 @@ def handle(message):
             reply(message["request_id"], {})
     elif message.get("type") == "user":
         content = message["message"]["content"]
-        turn(content if isinstance(content, str) else json.dumps(content), message.get("uuid"))
+        text = content if isinstance(content, str) else json.dumps(content)
+        if state.get("working"):
+            # Like Claude Code, a message sent during a turn waits for the
+            # next tool boundary, and the turn doesn't split.
+            log("midturn", text=text, origin=message.get("origin"))
+            return
+        state["working"] = True
+        try:
+            turn(text, message.get("uuid"))
+        finally:
+            state["working"] = False
 
 
 while True:

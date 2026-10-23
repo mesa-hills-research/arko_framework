@@ -625,6 +625,101 @@ async fn context_arrives_with_the_next_result() {
     assert!(task.pending_context_injections.is_empty());
 }
 
+/// The notes the user typed, which a source gives apart from the rest of
+/// its update, once it has been asked for context before.
+struct TypedSecondUpdate {
+    content: &'static str,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+const TYPED_NOTE: &str = "A new note on your task.\n- Note 3 from the operator (the person running this workflow), 2026-10-23 08:00 UTC:\n  Use tabs.";
+
+impl crate::runtime::TurnContextSource for TypedSecondUpdate {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| crate::runtime::TurnContext {
+            content: self.content.into(),
+            user_content: TYPED_NOTE.into(),
+            ids: vec!["message:7".into(), "note:3".into()],
+            ..Default::default()
+        })
+    }
+}
+
+/// Runs a task whose first call gets a context update of `content` and the
+/// typed note.
+async fn run_with_typed_note(content: &'static str) -> (Fake, Task, Vec<AgentEvent>) {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "todo"}},
+        complete("Found them"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content,
+            asked: Default::default(),
+        }),
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    (fake, task, events)
+}
+
+/// What the user typed reaches Claude Code during a turn as a message from
+/// the user (not in the hook), while the rest of the update (a worker's
+/// mail) stays in the hook. Both count as delivered and are recorded after
+/// the result, in one update.
+#[tokio::test]
+async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() {
+    let (fake, task, events) =
+        run_with_typed_note("Message from agent 'lead': skip vendor/.").await;
+    let sent = fake.logged("midturn");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["text"], TYPED_NOTE);
+    assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
+    let posts = fake.logged("post");
+    let hooked = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(hooked.contains("skip vendor/"), "{hooked}");
+    assert!(!hooked.contains("Use tabs."), "{hooked}");
+    let recorded = texts(&task)
+        .into_iter()
+        .find(|text| text.starts_with("# Workflow context update"))
+        .unwrap();
+    assert!(
+        recorded.ends_with(&format!("skip vendor/.\n\n{TYPED_NOTE}")),
+        "{recorded}"
+    );
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected[0], ["message:7", "note:3"]);
+}
+
+/// A note alone leaves the hook empty, and is recorded under the update's
+/// heading.
+#[tokio::test]
+async fn a_note_the_user_typed_alone_leaves_the_hook_empty() {
+    let (fake, task, _) = run_with_typed_note("").await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let posts = fake.logged("post");
+    assert!(posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null());
+    assert!(texts(&task).contains(&format!("# Workflow context update\n\n{TYPED_NOTE}")));
+}
+
 /// A completed task continued with a new configuration resumes its session
 /// with the new tools and system prompt, telling Claude Code not to reuse
 /// the prompt it recorded.
@@ -1551,6 +1646,7 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
                 "The image of note 3:",
                 pixels(),
             )],
+            ..Default::default()
         })
     }
 }
