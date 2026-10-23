@@ -1,5 +1,7 @@
 //! The opt-in stream idle timeout against a local server that streams on a
-//! real clock (a paused clock doesn't mix well with real sockets).
+//! real clock (a paused clock jumps ahead whenever the runtime waits on a
+//! real socket, so it can't pace one). A test that depends on how the data is
+//! paced feeds an in-memory body on a paused clock instead.
 
 use crate::{
     client::LLMClient,
@@ -8,8 +10,8 @@ use crate::{
     error::Error,
     model::Model,
     providers::{
-        StreamEvent, anthropic::AnthropicClient, google::GoogleClient, openai::OpenAIClient,
-        openrouter::OpenRouterClient,
+        StreamEvent, anthropic::AnthropicClient, google::GoogleClient,
+        idle::parse_with_idle_timeout, openai::OpenAIClient, openrouter::OpenRouterClient,
     },
 };
 use futures::StreamExt;
@@ -213,24 +215,28 @@ async fn a_stream_quiet_past_the_timeout_fails_with_a_transient_error_on_every_p
     drop(holds);
 }
 
-/// The timeout is the longest wait between data: a response that keeps
-/// sending (here keep-alive comments) runs longer than the timeout.
-#[tokio::test]
+/// The timeout is the longest wait between data: a body that keeps sending
+/// (here keep-alive comments) runs longer than the timeout. The body is in
+/// memory and the clock is paused, so how fast the machine is can't matter.
+#[tokio::test(start_paused = true)]
 async fn data_arriving_in_time_restarts_the_timeout() {
-    let mut steps = Vec::new();
-    for _ in 0..10 {
-        steps.push(Step::Pause(Duration::from_millis(100)));
-        steps.push(Step::Send(": keep-alive\n\n".into()));
-    }
-    steps.push(Step::Send(completed()));
-    let url = serve(steps, "text/event-stream").await;
-    let started = Instant::now();
-    let client = openai(&url).with_stream_idle_timeout(Duration::from_millis(400));
-    let event = last_event(&client, Model::openai_gpt_6_astra())
-        .await
-        .unwrap();
-    assert!(matches!(event, StreamEvent::End(_)), "{event:?}");
-    assert!(started.elapsed() >= Duration::from_millis(900));
+    let body = async_stream::stream! {
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            yield Ok::<_, Error>(": keep-alive\n\n");
+        }
+    };
+    let started = tokio::time::Instant::now();
+    let events: Vec<_> = parse_with_idle_timeout(body, Some(Duration::from_millis(400)), |bytes| {
+        bytes
+            .map(|data| data.map(|data| StreamEvent::TextChunk(data.into())))
+            .boxed()
+    })
+    .collect()
+    .await;
+    assert_eq!(events.len(), 10, "{events:?}");
+    assert!(events.iter().all(Result::is_ok), "{events:?}");
+    assert!(started.elapsed() >= Duration::from_millis(1000));
 }
 
 /// A response that doesn't stream is unaffected, however long its body takes.
