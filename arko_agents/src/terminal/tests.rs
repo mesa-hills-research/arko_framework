@@ -1664,6 +1664,32 @@ async fn the_jobs_a_shutdown_stopped_are_listed_at_the_next_open() {
     assert!(again.interrupted_at_open().is_empty(), "listed once");
 }
 
+/// The directory opens again as soon as a shutdown returns, also when a
+/// job's task hadn't run to its end by then (here the clock jumps past the
+/// shutdown's waits before a call that ignores its stop is dropped).
+#[tokio::test(start_paused = true)]
+async fn the_directory_opens_again_as_soon_as_a_shutdown_returns() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("closed");
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    manager
+        .adopt_call(
+            f.owner,
+            Uuid::new_v4(),
+            "fetch",
+            "fetch".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending()),
+        )
+        .unwrap();
+    tokio::join!(
+        manager.shutdown(),
+        tokio::time::advance(Duration::from_secs(10))
+    );
+    drop(manager);
+    TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+}
+
 /// Calls in the foreground are listed until they move or end, and move
 /// once. A closed manager moves none.
 #[tokio::test]

@@ -1060,8 +1060,9 @@ impl TerminalManager {
     /// Waits up to 3 seconds for the jobs to end, and up to 4 for a moved
     /// call, which gets 3 seconds after its stop. The background jobs it
     /// stops are listed by [`interrupted_at_open`](Self::interrupted_at_open)
-    /// when the directory is opened again. Dropping the manager stops its
-    /// jobs the same way, without waiting.
+    /// when the directory is opened again, which works as soon as this
+    /// returns. Dropping the manager stops its jobs the same way, without
+    /// waiting.
     pub async fn shutdown(&self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1094,6 +1095,10 @@ impl TerminalManager {
             })
             .await;
         }
+        // A job's task lets go of its clone of the lock only when it next
+        // runs, which can be after the waits above ended. The directory
+        // opens again now, and a late task only finishes its own record.
+        let _ = self._directory_lock.unlock();
     }
 }
 impl Drop for TerminalManager {
