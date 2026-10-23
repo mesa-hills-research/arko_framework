@@ -742,7 +742,18 @@ impl Workflow {
             .into_iter()
             .map(|result| result.agent_run_id)
             .collect::<HashSet<_>>();
-        let results = self.context.agent_results.read().clone();
+        // Only the runs that may be listed are copied: interrupted ones, and
+        // those a stop ended.
+        let results = self
+            .context
+            .agent_results
+            .read()
+            .iter()
+            .filter(|result| {
+                result.stopped_by.is_some() || interrupted.contains(&result.agent_run_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let candidates = results
             .into_iter()
             .filter_map(|result| {
@@ -2554,7 +2565,7 @@ impl WorkflowBuilder {
             }
         }
 
-        let resume_state = match &self.resume_from {
+        let mut resume_state = match &self.resume_from {
             Some(path) => {
                 let json = std::fs::read_to_string(path)?;
                 let images = crate::persistence::images::ImageFiles::in_run_dir(
@@ -2584,8 +2595,8 @@ impl WorkflowBuilder {
         // A subagent's saved configuration is its agent's as the host's hook
         // changes it.
         let restored_subagents = resume_state
-            .as_ref()
-            .and_then(|state| state.subagents.clone());
+            .as_mut()
+            .and_then(|state| state.subagents.take());
         let mut prepared = HashMap::new();
         if let (Some(snapshot), Some(hook)) = (
             &restored_subagents,
@@ -2705,11 +2716,11 @@ impl WorkflowBuilder {
                 }
             }
         }
-        let budget = if let Some(state) = &resume_state {
+        let budget = if let Some(state) = &mut resume_state {
             let budget = BudgetManager::from_ledger(
                 budget_limit,
                 self.budget_warning,
-                state.cost_ledger.clone(),
+                std::mem::take(&mut state.cost_ledger),
             );
             // A run that was running may have reported usage the ledger
             // didn't record yet.
@@ -2804,7 +2815,6 @@ impl WorkflowBuilder {
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
-            agent_results: parking_lot::RwLock::new(resumed_results.clone()),
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
             handover_thresholds: self.handover_thresholds,
@@ -2870,6 +2880,9 @@ impl WorkflowBuilder {
             voters: self.voters.clone().unwrap_or_default(),
             event_tx,
             event_hub: Default::default(),
+            // Last: the registry and the subagents above read the results
+            // first, and then they move in instead of being copied.
+            agent_results: parking_lot::RwLock::new(resumed_results),
         });
 
         if let Some(services_config) = self.services_config {
