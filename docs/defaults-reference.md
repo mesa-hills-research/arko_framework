@@ -84,6 +84,8 @@ Defaults of background subagents (`WorkflowBuilder::subagents`, off until set), 
   between two of the lead's (`max_peer_messages`). The lead gets no copies unless
   `copy_peer_messages_to_lead` is set.
 - A subagent's `ask_user` goes to its lead (`questions_to_lead`).
+- A subagent recovers from failed model requests without a limit, like the run the host
+  drives. `max_failed_requests` makes it fail once that many requests have failed in a row.
 - A `workspace` must be inside the caller's directory (`workspaces_anywhere` lifts this),
   and `isolated` is offered only with a `WorkspaceProvider`.
 - Workflow-service calls over `max_active_calls` (4) fail at once unless

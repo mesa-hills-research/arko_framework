@@ -833,6 +833,7 @@ A subagent is an ordinary run of the workflow, with its own run ID (`SubagentRec
 | `workspace_provider` | `Option<Arc<dyn WorkspaceProvider>>` | None. Creates and removes isolated workspaces. With one, `start_agent` offers `isolated` and `stop_agent` offers `remove_workspace`. |
 | `hook` | `Option<Arc<dyn SubagentHook>>` | None. Adjusts a subagent's `AgentConfig` as it starts. |
 | `start_parameters` | `Vec<arko_agents::ToolParameterDefinition>` | Empty. The host's own `start_agent` parameters, whose values reach the hook. |
+| `max_failed_requests` | `Option<u32>` | `None`, no cap. A subagent fails as soon as this many of its model requests have failed in a row. The agent's own retries count, and so do its waits for rate limits and overloaded errors. A model response resets the count, and it starts again when the run is resumed or continued. The subagents of a failed subagent stop with it. It never applies to a run the host drives. |
 
 ```rust
 // SubagentsConfig
@@ -845,6 +846,7 @@ fn copy_peer_messages_to_lead(self, enabled: bool) -> Self;
 fn workspaces_anywhere(self) -> Self;
 fn offer_blocking_tool(self, enabled: bool) -> Self;
 fn questions_to_lead(self, enabled: bool) -> Self;
+fn max_failed_requests(self, max: u32) -> Self;
 fn workspace_provider(self, provider: Arc<dyn WorkspaceProvider>) -> Self;
 fn hook(self, hook: Arc<dyn SubagentHook>) -> Self;
 fn start_parameter(self, parameter: ToolParameterDefinition) -> Self;
