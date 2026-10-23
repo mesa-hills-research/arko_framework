@@ -1525,6 +1525,7 @@ fn a_snapshot_loads_with_defaults() {
     let excerpt = long.excerpt();
     assert!(excerpt.len() < MAX_MAIL_BYTES);
     assert!(excerpt.contains("the whole text is in /tmp/mail-3.md"));
+    assert!(excerpt.find("[end of mail 3]") > excerpt.find("cut here"));
     let _ = AgentRunStatus::Completed;
 }
 
