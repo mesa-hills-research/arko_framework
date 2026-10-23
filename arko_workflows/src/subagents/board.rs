@@ -70,6 +70,30 @@ enum StopOrigin {
     Lead(String),
 }
 
+/// A handle taken for a start that may still be refused. It is given back
+/// when the claim is dropped, unless a later start has taken one since, so a
+/// refused start doesn't use up a handle.
+struct HandleClaim<'a> {
+    board: &'a Board,
+    number: u32,
+}
+
+impl HandleClaim<'_> {
+    /// The start went through: the handle stays taken.
+    fn keep(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for HandleClaim<'_> {
+    fn drop(&mut self) {
+        let mut state = self.board.state.lock();
+        if state.last_handle == self.number {
+            state.last_handle -= 1;
+        }
+    }
+}
+
 pub(crate) struct Board {
     config: Option<SubagentsConfig>,
     state: Mutex<SubagentsSnapshot>,
@@ -691,10 +715,16 @@ impl Board {
             }
         };
         let run_id = Uuid::new_v4();
-        let handle = {
+        let (handle, claim) = {
             let mut state = self.state.lock();
             state.last_handle += 1;
-            format!("r{}", state.last_handle)
+            (
+                format!("r{}", state.last_handle),
+                HandleClaim {
+                    board: self,
+                    number: state.last_handle,
+                },
+            )
         };
         let now = Utc::now();
         let mut record = SubagentRecord {
@@ -774,6 +804,7 @@ impl Board {
         record.isolated = isolated.clone();
         let prompt = subagent_prompt(config, self.workflow_run_id, &record);
         self.prepared.lock().insert(run_id, prepared);
+        claim.keep();
         self.state.lock().runs.push(record.clone());
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
         let latest = self.record(run_id).unwrap_or(record);
