@@ -555,10 +555,34 @@ impl TerminalManager {
             generation,
         });
         let mut interrupted = Vec::new();
+        // Forgotten jobs leave folders without a record, and a long-lived
+        // directory holds thousands. A folder the last open found so isn't
+        // looked into again. One that isn't listed is read, as is every
+        // folder when the list is missing or isn't this version's.
+        let listed = std::fs::read_to_string(manager.config.directory.join(NO_RECORD_FILE))
+            .unwrap_or_default();
+        let mut lines = listed.lines();
+        let known: HashSet<&str> = if lines.next() == Some(NO_RECORD_HEADER) {
+            lines.collect()
+        } else {
+            HashSet::new()
+        };
+        let mut without_record = Vec::new();
         for entry in std::fs::read_dir(&manager.config.directory)? {
-            let path = entry?.path().join("job.json");
-            if !path.is_file() {
+            let entry = entry?;
+            let name = entry.file_name();
+            if let Some(name) = name.to_str().filter(|name| known.contains(name)) {
+                without_record.push(name.to_string());
                 continue;
+            }
+            let path = entry.path().join("job.json");
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    without_record.extend(name.to_str().map(str::to_string));
+                    continue;
+                }
+                _ => continue,
             }
             let mut record: Record = serde_json::from_slice(&std::fs::read(&path)?)?;
             if path
@@ -580,6 +604,8 @@ impl TerminalManager {
                     std::time::Instant::now(),
                 ));
             }
+            // Only a record this open changes is saved again.
+            let changed = record.state == JobState::Running || record.stopped_by_close;
             // Listed once.
             record.stopped_by_close = false;
             record.generation = generation;
@@ -592,10 +618,28 @@ impl TerminalManager {
                         .into(),
                 );
             }
-            persist(&manager.config, &record)?;
+            if changed {
+                persist(&manager.config, &record)?;
+            }
             let data = Arc::new(Mutex::new(JobData::new(record)));
             let id = data.lock().unwrap().record.job_id;
             manager.jobs.lock().unwrap().insert(id, completed_job(data));
+        }
+        if without_record.len() != known.len()
+            || without_record
+                .iter()
+                .any(|name| !known.contains(name.as_str()))
+        {
+            let directory = &manager.config.directory;
+            let text = format!("{NO_RECORD_HEADER}\n{}", without_record.join("\n"));
+            // Only a cache, so a failed save costs the next open a look into each folder.
+            if let Err(error) = replace_file(
+                &directory.join(format!("{NO_RECORD_FILE}.tmp")),
+                &directory.join(NO_RECORD_FILE),
+                text.as_bytes(),
+            ) {
+                log::warn!("Could not save the list of job folders without a record: {error}");
+            }
         }
         *manager.interrupted.lock().unwrap() = interrupted;
         Ok(manager)
@@ -1161,6 +1205,14 @@ fn background(jobs: &HashMap<Uuid, Arc<Job>>) -> Vec<BackgroundJob> {
     running.sort_by_key(|job| job.started);
     running
 }
+
+/// The file in the jobs directory that lists, one name per line after
+/// `NO_RECORD_HEADER`, the folders found without a `job.json` at the last
+/// open that changed the list. The directory is exclusive, so only an open
+/// writes it. To bring a forgotten job back, rename its `finished.json` to
+/// `job.json` and delete this file.
+const NO_RECORD_FILE: &str = "no-record.index";
+const NO_RECORD_HEADER: &str = "arko job folders without a record, version 1";
 
 /// The latest open of each directory in this process, counted from 1. A
 /// record made under an earlier open is no longer saved, because the newer
