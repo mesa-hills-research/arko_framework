@@ -94,7 +94,8 @@ pub const DEFAULT_MAX_PEER_MESSAGES: u32 = 20;
 
 /// The longest mailbox item a context update shows whole, 16 KiB in bytes.
 /// A longer one is shown as an excerpt, with the file that holds all of it
-/// (`wait_for_agents` returns it whole, up to the limit of its own result).
+/// (`wait_for_agents` returns it whole, up to the limit of its result for an
+/// agent in Claude Code).
 pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 
 /// About this many bytes of mail go into one context update. The rest come

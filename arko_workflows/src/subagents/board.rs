@@ -1660,7 +1660,14 @@ impl Board {
             stop,
             moved,
             context_arrived,
+            claude_code,
         } = signals;
+        // Only a caller in Claude Code has a limit on its result.
+        let budget = if *claude_code {
+            WAIT_MAIL_BYTES
+        } else {
+            usize::MAX
+        };
         // The runs waited for, by id.
         let wanted = match &runs {
             None => None,
@@ -1725,11 +1732,11 @@ impl Board {
                     let size = item.text().len() + MAIL_SEPARATOR.len();
                     // The first item always goes, cut if it must be. After
                     // one that didn't fit, none goes, to keep the order.
-                    if !left.is_empty() || (bytes > 0 && bytes + size > WAIT_MAIL_BYTES) {
+                    if !left.is_empty() || (bytes > 0 && bytes + size > budget) {
                         left.push(item.from);
                         continue;
                     }
-                    bytes += size.min(WAIT_MAIL_BYTES);
+                    bytes += size.min(budget);
                     item.delivered_at = Some(now);
                     taken.push(item.clone());
                 }
@@ -1762,7 +1769,7 @@ impl Board {
                     woken
                 };
             if done && !collected.is_empty() {
-                return Ok(wait_result(None, &collected, &still, &left));
+                return Ok(wait_result(None, &collected, &still, &left, budget));
             }
             if still.is_empty() && lead.is_none() {
                 let state = self.state.lock();
@@ -1779,7 +1786,10 @@ impl Board {
                     "Nothing to wait for: {which}. Reports that came earlier reached you already."
                 );
                 if !collected.is_empty() {
-                    result = format!("{result}\n\n{}", wait_result(None, &collected, &still, &[]));
+                    result = format!(
+                        "{result}\n\n{}",
+                        wait_result(None, &collected, &still, &[], budget)
+                    );
                 }
                 return Ok(result);
             }
@@ -1789,10 +1799,17 @@ impl Board {
                     &collected,
                     &still,
                     &[],
+                    budget,
                 ));
             }
             if *stopping.borrow_and_update() || stop.is_stopping() {
-                return Ok(wait_result(Some("Run stopping."), &collected, &still, &[]));
+                return Ok(wait_result(
+                    Some("Run stopping."),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
             }
             if ctx.notes.has_update(agent_name, me) {
                 return Ok(wait_result(
@@ -1802,13 +1819,26 @@ impl Board {
                     &collected,
                     &still,
                     &[],
+                    budget,
                 ));
             }
             if moved.is_moved() {
-                return Ok(wait_result(Some(WAIT_MOVED), &collected, &still, &[]));
+                return Ok(wait_result(
+                    Some(WAIT_MOVED),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
             }
             if context_arrived.has_arrived() {
-                return Ok(wait_result(Some(CONTEXT_ARRIVED), &collected, &still, &[]));
+                return Ok(wait_result(
+                    Some(CONTEXT_ARRIVED),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
             }
             if lead.is_some() {
                 self.waits_for(ctx, me, &still);
@@ -1835,7 +1865,7 @@ impl Board {
                         "Nothing new in {} s.",
                         timeout.as_secs_f64().round() as u64
                     );
-                    return Ok(wait_result(Some(&waited), &collected, &still, &[]));
+                    return Ok(wait_result(Some(&waited), &collected, &still, &[], budget));
                 }
             }
         }
@@ -2982,11 +3012,13 @@ fn subagent_prompt(
 
 /// What ends `wait_for_agents` early, from its call's
 /// [`TaskContext`](arko_agents::TaskContext): a stop, a move to the
-/// background, and context arriving.
+/// background, and context arriving. Also whether the caller runs in Claude
+/// Code, whose result then has a size limit ([`WAIT_MAIL_BYTES`]).
 pub(crate) struct WaitSignals<'a> {
     pub(crate) stop: &'a arko_agents::stop::StopSignal,
     pub(crate) moved: &'a arko_agents::MoveSignal,
     pub(crate) context_arrived: &'a arko_agents::ContextSignal,
+    pub(crate) claude_code: bool,
 }
 
 /// How a wait that the user moved to the background ends.
@@ -2996,11 +3028,11 @@ pub(crate) const WAIT_MOVED: &str = "The user ended this wait so you can go on w
 pub(crate) const CONTEXT_ARRIVED: &str =
     "An update for you arrived while you waited. It follows. Wait again if you still need to.";
 
-/// A wait's items, in bytes. With the status lines before them and the line
-/// after them that names the senders of the mail left, a result stays under
-/// 40,000 bytes. Claude Code replaces an MCP result of over 50,000 characters
-/// with a 2 KB preview, and the bytes of a text never count fewer than its
-/// characters.
+/// A wait's items, in bytes, for a caller in Claude Code. With the status
+/// lines before them and the line after them that names the senders of the
+/// mail left, a result stays under 40,000 bytes. Claude Code replaces an MCP
+/// result of over 50,000 characters with a 2 KB preview, and the bytes of a
+/// text never count fewer than its characters. Other callers have no limit.
 const WAIT_MAIL_BYTES: usize = 39_000;
 
 /// Between a wait's status and its items.
@@ -3008,13 +3040,14 @@ const MAIL_SEPARATOR: &str = "\n\n---\n\n";
 
 /// A wait's result: the status first (`lead`, if any, and the runs still
 /// active), then the items that came, whole, in the order they came. An item
-/// that alone is over [`WAIT_MAIL_BYTES`] is cut. It ends with who else has
+/// that alone is over the `budget` is cut. It ends with who else has
 /// mail (`left`) that didn't fit, which stays in the mailbox.
 fn wait_result(
     lead: Option<&str>,
     items: &[MailItem],
     still: &[String],
     left: &[String],
+    budget: usize,
 ) -> String {
     let mut text = match lead {
         Some(lead) => format!("{lead} {}", still_running(still)),
@@ -3022,7 +3055,7 @@ fn wait_result(
     };
     for item in items {
         text.push_str(MAIL_SEPARATOR);
-        text.push_str(&item.text_within(WAIT_MAIL_BYTES));
+        text.push_str(&item.text_within(budget));
     }
     if !left.is_empty() {
         text.push_str(&format!(

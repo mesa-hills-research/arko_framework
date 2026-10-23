@@ -336,6 +336,11 @@ pub struct TaskContext<'a> {
     /// reads it. Context that arrived after the request the call came from
     /// (while an earlier call of the turn ran, say) fires it at once.
     pub context_arrived: ContextSignal,
+    /// The task's model runs in Claude Code
+    /// ([`Provider::ClaudeCode`](arko_ai::Provider::ClaudeCode)), which
+    /// shows the model only a short preview of a very long tool result. A
+    /// tool with long results can keep them short for it.
+    pub runs_in_claude_code: bool,
 }
 
 impl<'a> TaskContext<'a> {
@@ -358,6 +363,7 @@ impl<'a> TaskContext<'a> {
             stop: crate::stop::StopSignal::never(),
             moved: MoveSignal::never(),
             context_arrived: ContextSignal::never(),
+            runs_in_claude_code: false,
         }
     }
 

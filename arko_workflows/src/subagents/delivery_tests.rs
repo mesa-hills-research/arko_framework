@@ -54,8 +54,6 @@ fn report(who: &str, chars: usize) -> String {
 struct Outcome {
     /// The results of the lead's waits, as its conversation holds them.
     waits: Vec<String>,
-    /// What the model was sent last.
-    last_request: String,
     /// The mail the host is told is waiting once the lead's run ended.
     news: Vec<u64>,
     pending: Vec<MailItem>,
@@ -97,7 +95,6 @@ async fn delegate(reports: &[String], waits: usize, all: bool, over: usize) -> O
     }
     Outcome {
         waits,
-        last_request: bodies.last().unwrap().clone(),
         news,
         pending: workflow.pending_news(lead.agent_run_id),
     }
@@ -131,80 +128,128 @@ async fn start_run(
     started.unwrap();
 }
 
-/// Two reports that don't fit one result don't come in one. The first is
-/// whole in the wait, the other comes in the context update at the lead's
-/// next step, and nothing is given again at the end.
-#[tokio::test]
-async fn reports_that_do_not_fit_one_wait_reach_the_lead_in_the_next_update() {
-    let reports = [report("A", 30_000), report("B", 30_000)];
-    let outcome = delegate(&reports, 1, true, 50_000).await;
-    let waited = &outcome.waits[0];
-    assert!(waited.len() < 40_000, "{}", waited.len());
-    assert!(waited.contains("[mail 1]") && waited.contains("[end of mail 1]"));
-    assert!(!waited.contains("[mail 2]"), "{waited}");
-    assert!(
-        waited.ends_with("didn't fit here and follows next."),
-        "{waited}"
-    );
-    let next = &outcome.last_request;
-    assert!(next.contains("New mail from the agent runs you work with"));
-    assert!(next.contains("[mail 2]") && next.contains("[end of mail 2]"));
-    assert!(outcome.news.is_empty(), "{:?}", outcome.news);
-    assert!(outcome.pending.is_empty());
+/// A lead (a run id that is no run of the workflow) whose subagents have
+/// finished with these reports.
+struct Waiter {
+    server: crate::test_support::ResponsesServer,
+    workspace: Workspace,
+    workflow: crate::Workflow,
+    lead: uuid::Uuid,
 }
 
-/// The mail that didn't fit stays in the mailbox, and the next wait returns
-/// it whole.
-#[tokio::test]
-async fn a_wait_leaves_the_mail_that_does_not_fit_for_the_next() {
-    let (a, b) = (report("A", 30_000), report("B", 30_000));
-    let server = serve(vec![("r1", vec![complete(&a)]), ("r2", vec![complete(&b)])]).await;
-    let workspace = Workspace::new();
-    let workflow = builder(&server, &workspace, SubagentsConfig::default())
-        .build()
-        .unwrap();
-    let ctx = workflow.context();
-    let lead = uuid::Uuid::new_v4();
-    for task in ["Task 1.", "Task 2."] {
-        start_run(&workflow, &workspace, lead, task).await;
+impl Waiter {
+    async fn new(reports: &[String]) -> Self {
+        let scripts = ["r1", "r2"]
+            .into_iter()
+            .zip(reports)
+            .map(|(worker, report)| (worker, vec![complete(report)]))
+            .collect();
+        let server = serve(scripts).await;
+        let workspace = Workspace::new();
+        let workflow = builder(&server, &workspace, SubagentsConfig::default())
+            .build()
+            .unwrap();
+        let lead = uuid::Uuid::new_v4();
+        for n in 1..=reports.len() {
+            start_run(&workflow, &workspace, lead, &format!("Task {n}.")).await;
+        }
+        until(|| {
+            workflow
+                .subagents()
+                .iter()
+                .all(|run| run.state == SubagentState::Finished)
+        })
+        .await;
+        Self {
+            server,
+            workspace,
+            workflow,
+            lead,
+        }
     }
-    until(|| {
-        workflow
-            .subagents()
-            .iter()
-            .all(|run| run.state == SubagentState::Finished)
-    })
-    .await;
-    let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
-    let task_context = TaskContext::new(lead, "lead", "", &workspace.0);
-    let all = HashMap::from([("all".to_string(), json!(true))]);
-    let first = within(tool.execute(&task_context, all.clone()))
-        .await
-        .unwrap();
+
+    /// A call of `wait_for_agents` by the lead, in Claude Code or not.
+    async fn wait(&self, claude_code: bool, all: bool) -> String {
+        let ctx = self.workflow.context();
+        let tool =
+            WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(self.server.client()));
+        let mut task_context = TaskContext::new(self.lead, "lead", "", &self.workspace.0);
+        task_context.runs_in_claude_code = claude_code;
+        let params = HashMap::from([("all".to_string(), json!(all))]);
+        within(tool.execute(&task_context, params)).await.unwrap()
+    }
+}
+
+/// A caller that doesn't run in Claude Code has no limit on the result of a
+/// wait, so reports come whole and together, whatever their size.
+#[tokio::test]
+async fn a_wait_of_a_native_caller_returns_every_report_whole() {
+    let (a, b) = (report("A", 30_000), report("B", 30_000));
+    let waiter = Waiter::new(&[a.clone(), b.clone()]).await;
+    let waited = waiter.wait(false, true).await;
+    assert!(waited.len() > 60_000, "{}", waited.len());
+    assert!(waited.contains(a.trim()) && waited.contains(b.trim()));
+    assert!(waited.contains("[end of mail 1]") && waited.contains("[end of mail 2]"));
+    assert!(!waited.contains("follows next"), "{waited}");
+    assert!(waiter.workflow.pending_news(waiter.lead).is_empty());
+    let big = report("C", 60_000);
+    let waiter = Waiter::new(std::slice::from_ref(&big)).await;
+    let waited = waiter.wait(false, false).await;
+    assert!(waited.contains(big.trim()) && !waited.contains("cut here"));
+}
+
+/// Reports that don't fit the result of a wait in Claude Code don't come in
+/// one. The mail that didn't fit stays in the mailbox, and the next wait
+/// returns it whole.
+#[tokio::test]
+async fn a_claude_code_wait_leaves_the_mail_that_does_not_fit_for_the_next() {
+    let (a, b) = (report("A", 30_000), report("B", 30_000));
+    let waiter = Waiter::new(&[a.clone(), b.clone()]).await;
+    let first = waiter.wait(true, true).await;
+    assert!(first.len() < 40_000, "{}", first.len());
+    assert!(first.contains("[mail 1]") && first.contains("[end of mail 1]"));
+    assert!(!first.contains("[mail 2]"), "{first}");
     assert!(
-        first.len() < 40_000 && first.contains("[end of mail 1]"),
+        first.ends_with("didn't fit here and follows next."),
         "{first}"
     );
-    assert_eq!(workflow.pending_news(lead).len(), 1);
-    let second = within(tool.execute(&task_context, all)).await.unwrap();
+    assert_eq!(waiter.workflow.pending_news(waiter.lead).len(), 1);
+    let second = waiter.wait(true, true).await;
     assert!(second.contains("[mail 2]") && second.contains("[end of mail 2]"));
     assert!(!second.contains("follows next"), "{second}");
     let both = format!("{first}{second}");
     assert!(both.contains(a.trim()) && both.contains(b.trim()));
-    assert!(workflow.pending_news(lead).is_empty());
+    assert!(waiter.workflow.pending_news(waiter.lead).is_empty());
 }
 
-/// One report over the limit comes as its first part, with its file and the
-/// line to read on from, and is not given again.
+/// The mail a wait in Claude Code leaves comes in the lead's next context
+/// update, with both its markers.
 #[tokio::test]
-async fn a_report_over_the_limit_comes_cut_with_its_file() {
+async fn the_mail_a_claude_code_wait_leaves_comes_in_the_next_update() {
+    let waiter = Waiter::new(&[report("A", 30_000), report("B", 30_000)]).await;
+    waiter.wait(true, true).await;
+    let (update, ids) = waiter
+        .workflow
+        .context()
+        .subagents
+        .update(waiter.lead)
+        .unwrap();
+    assert_eq!(ids, ["mail:2"]);
+    assert!(update.contains("[mail 2]") && update.contains("[end of mail 2]"));
+    assert!(waiter.workflow.pending_news(waiter.lead).is_empty());
+}
+
+/// One report over the limit of a wait in Claude Code comes as its first
+/// part, with its file and the line to read on from.
+#[tokio::test]
+async fn a_claude_code_wait_cuts_a_report_over_the_limit_with_its_file() {
     let big = report("A", 60_000);
-    let outcome = delegate(std::slice::from_ref(&big), 1, false, 50_000).await;
-    let waited = &outcome.waits[0];
+    let waiter = Waiter::new(std::slice::from_ref(&big)).await;
+    let waited = waiter.wait(true, false).await;
     assert!(waited.len() < 40_000, "{}", waited.len());
     let notice = waited
         .find("[... cut here. All of it is in ")
-        .expect(waited);
+        .expect(&waited);
     assert!(waited.find("[end of mail 1]").unwrap() > notice);
     let rest = &waited[notice + "[... cut here. All of it is in ".len()..];
     let (file, rest) = rest.split_once(". Read on from line ").unwrap();
@@ -214,8 +259,7 @@ async fn a_report_over_the_limit_comes_cut_with_its_file() {
     // The part shown ends where the file's line `line` begins.
     let shown = waited[..notice].trim_end().lines().last().unwrap();
     assert_eq!(saved.lines().nth(line - 2), Some(shown));
-    assert!(outcome.news.is_empty(), "{:?}", outcome.news);
-    assert!(outcome.pending.is_empty());
+    assert!(waiter.workflow.pending_news(waiter.lead).is_empty());
 }
 
 /// Two reports that fit still come together, whole.
@@ -246,9 +290,9 @@ async fn a_report_cut_short_in_the_conversation_is_given_again() {
     assert!(outcome.pending[0].resent);
 }
 
-/// A small report behind one that doesn't fit stays behind it, and a wait
-/// for all returns when its result is full though a run still works. The
-/// mail left comes in order with the next wait.
+/// In Claude Code, a small report behind one that doesn't fit stays behind
+/// it, and a wait for all returns when its result is full though a run still
+/// works. The mail left comes in order with the next wait.
 #[tokio::test]
 async fn a_full_wait_returns_while_runs_go_on_and_keeps_the_order() {
     let (a, b) = (report("A", 30_000), report("B", 30_000));
@@ -286,7 +330,8 @@ async fn a_full_wait_returns_while_runs_go_on_and_keeps_the_order() {
     within(gate.started.notified()).await;
     let ctx = workflow.context();
     let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
-    let task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    task_context.runs_in_claude_code = true;
     let all = HashMap::from([("all".to_string(), json!(true))]);
     let first = within(tool.execute(&task_context, all)).await.unwrap();
     assert!(first.starts_with("Still running: r4."), "{first}");

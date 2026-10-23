@@ -73,6 +73,7 @@ impl RunEnvironment {
             stop: signals.stop.clone(),
             moved: signals.moved.clone(),
             context_arrived: signals.context_arrived.clone(),
+            runs_in_claude_code: self.model.provider == arko_ai::Provider::ClaudeCode,
         }
     }
 
