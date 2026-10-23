@@ -557,6 +557,14 @@ impl Workflow {
         self.context.subagents.transfer(from, to)
     }
 
+    /// Changes [`SubagentsConfig::max_failed_requests`](crate::subagents::SubagentsConfig::max_failed_requests)
+    /// while the workflow runs (`None` sets no cap). A subagent that is
+    /// running gets the new cap at its next failed request, counting the
+    /// ones it has had in a row already.
+    pub fn set_max_failed_requests(&self, max: Option<u32>) {
+        self.context.subagents.set_max_failed_requests(max);
+    }
+
     /// The number of the newest note agent run `agent_run_id` has been
     /// given. See [`NotesHandle::given`](crate::notes::NotesHandle::given).
     pub fn notes_given(&self, agent_run_id: uuid::Uuid) -> u64 {

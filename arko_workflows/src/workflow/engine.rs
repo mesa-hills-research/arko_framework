@@ -745,7 +745,7 @@ fn failed_requests_cap_reached(
     failed: u32,
     error: &str,
 ) -> Option<String> {
-    let cap = ctx.subagents.config()?.max_failed_requests?;
+    let cap = ctx.subagents.max_failed_requests()?;
     (failed >= cap && ctx.subagents.is_subagent(agent_run_id)).then(|| {
         let requests = if failed == 1 { "request" } else { "requests" };
         format!("It stopped after {failed} failed {requests} in a row. The last error was {error}")
