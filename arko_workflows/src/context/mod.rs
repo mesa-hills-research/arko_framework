@@ -32,8 +32,7 @@ pub struct SharedContext {
     pub resource_tracker: Option<ResourceTracker>,
     pub hooks: Arc<HookRegistry>,
     /// The agents' configurations as registered. `Workflow::set_agent_skills`
-    /// changes an agent's skills after that, so read them through
-    /// [`registered_config`](Self::registered_config).
+    /// changes an agent's skills after that, which this map doesn't show.
     pub agent_configs: HashMap<String, AgentConfig>,
     /// The skills configurations the host set after the build, by agent.
     /// `None` is no skills.
