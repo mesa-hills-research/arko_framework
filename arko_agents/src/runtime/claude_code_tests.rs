@@ -2415,7 +2415,14 @@ async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
     // The task moves into a directory under the one the session started in.
     let session = fake.workspace();
     let project = session.join("project");
-    let path = |directory: &Path, name: &str| directory.join(name).display().to_string();
+    // Joined a component at a time, so the separators are the platform's
+    // (`\` on Windows), as in the path the mapping builds.
+    let path = |directory: &Path, name: &str| {
+        name.split('/')
+            .fold(directory.to_path_buf(), |joined, part| joined.join(part))
+            .display()
+            .to_string()
+    };
     let elsewhere = path(&std::env::temp_dir(), "arko-elsewhere.txt");
     let up = path(&session, "../up.txt");
     let script = json!([[complete("First")], [
