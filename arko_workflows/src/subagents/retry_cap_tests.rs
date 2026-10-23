@@ -8,7 +8,9 @@ use std::time::Duration;
 use arko_agents::LLMErrorPolicy;
 use serde_json::json;
 
-use super::tests::{bodies_of, builder_with, result_of, role, start, turn, until, wait, within};
+use super::tests::{
+    Noting, bodies_of, builder_with, result_of, role, start, turn, until, wait, within,
+};
 use super::*;
 use crate::policy::RecoveryWaits;
 use crate::test_support::{Reply, ResponsesServer, Workspace, agent_config, tool_call_turn};
@@ -141,7 +143,7 @@ async fn a_worker_fails_after_its_failed_requests_in_a_row() {
 /// A worker that waits out overloaded errors never pauses, since the agent
 /// retries those on its own. The cap fails it at the third failed request,
 /// and its run ends failed, as at a pause, so its lead isn't offered to
-/// continue it.
+/// continue it. The host's line ends its news.
 #[tokio::test]
 async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -156,7 +158,9 @@ async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
     let workflow = builder_with(
         &server,
         &workspace,
-        SubagentsConfig::default().max_failed_requests(3),
+        SubagentsConfig::default()
+            .max_failed_requests(3)
+            .hook(Arc::new(Noting)),
         worker,
     )
     .recovery_waits(instant())
@@ -183,6 +187,10 @@ async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
         "{told}"
     );
     assert!(!told.contains("message_agent continues it"), "{told}");
+    assert!(
+        told.contains("start a new one if the work is still needed.\n\nr1 used 12 tokens (Failed, its result)."),
+        "{told}"
+    );
 }
 
 /// The host sets the cap while a worker, under none, keeps failing. The worker
