@@ -724,7 +724,7 @@ fn load_image(path: &PathBuf) -> Result<Image, Box<Error>> {
     };
 
     Ok(Image::Base64 {
-        data: encoded,
+        data: encoded.into(),
         mime_type: mime_type.to_string(),
     })
 }

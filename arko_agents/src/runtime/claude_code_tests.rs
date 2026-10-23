@@ -2674,12 +2674,52 @@ async fn the_event_of_a_chat_turn_has_the_amounts_asked_at_its_start() {
     run.finish().await;
 
     let usage = plan_usage_events(&events);
-    assert_eq!(usage.len(), 1, "{usage:#?}");
+    assert_eq!(usage.len(), 2, "{usage:#?}");
     let extra = usage[0].extra_usage.as_ref().unwrap();
     assert_eq!(extra.used_credits, Some(271_400.0));
     assert_eq!(extra.currency.as_deref(), Some("JPY"));
     assert_eq!(extra.decimal_places, Some(0));
-    assert_eq!(fake.logged("get_usage").len(), 1);
+    assert_eq!(fake.logged("get_usage").len(), 2);
+}
+
+/// The amounts are asked for again as a turn ends, so the plan usage after
+/// the turn has what the turn used.
+#[tokio::test]
+async fn the_amounts_are_asked_again_as_a_turn_ends() {
+    let fake = Fake::new(json!([[
+        {"serve": 1},
+        {"rate_limit": {"status": "allowed_warning", "rateLimitType": "five_hour",
+                        "overageStatus": "allowed", "unifiedWindows": windows(0.5, 0.4)}},
+        {"text": "hello"},
+    ]]));
+    let used = |credits: u64| {
+        json!({"rate_limits": {"extra_usage": {"is_enabled": true, "monthly_limit": 50000,
+                                               "used_credits": credits, "currency": "USD"}}})
+    };
+    fake.answer_usage(json!([used(27_140), used(27_390)]));
+    let task = Task::new(chat_config(&fake), "Hello.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run.events_until(|_| false).await;
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+
+    let usage = plan_usage_events(&events);
+    let used: Vec<_> = usage
+        .iter()
+        .map(|usage| usage.extra_usage.as_ref().unwrap().used_credits)
+        .collect();
+    assert_eq!(used, [Some(27_140.0), Some(27_390.0)], "{usage:#?}");
+    assert_eq!(fake.logged("get_usage").len(), 2);
+    // The last report comes before the state that ends the task.
+    let position = |wanted: fn(&AgentEvent) -> bool| events.iter().rposition(wanted).unwrap();
+    assert!(
+        position(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+            < position(|event| matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::Completed { .. })
+            )),
+        "{events:#?}"
+    );
 }
 
 /// Claude Code's own decimal places are kept, and the others are two, or none
@@ -3605,9 +3645,9 @@ async fn completed_tool_images_survive_a_stop_before_claude_code_records_the_res
     let call = &saved.running_tool_calls[0];
     assert_eq!(call.output_images.len(), 1);
     assert_eq!(call.output_images[0].image, image);
-    assert!(!call.output.as_ref().unwrap().contains(data));
+    assert!(!call.output.as_ref().unwrap().contains(&**data));
     assert!(
-        !format!("{call:?}").contains(data),
+        !format!("{call:?}").contains(&**data),
         "debug must omit pixels"
     );
     // The CLI's hook in this fixture returns text only. The host must have

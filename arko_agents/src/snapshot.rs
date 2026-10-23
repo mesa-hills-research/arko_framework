@@ -170,9 +170,13 @@ mod tests {
         let last = task.conversation.messages.last_mut().unwrap();
         last.content.push(Content::Image(image(2)));
         assert_ne!(fingerprint(&task).unwrap(), second);
-        // A copy of the task, its images elsewhere, counts as changed: at
+        // A copy of the task shares its images, so it counts as the same. A
+        // task whose images are the same bytes elsewhere counts as changed: at
         // worst it is reported once more.
-        let copy = task.clone();
+        let mut copy = task.clone();
+        assert_eq!(fingerprint(&copy), fingerprint(&task));
+        let last = copy.conversation.messages.last_mut().unwrap();
+        last.content = vec![Content::Image(image(2)), Content::Image(image(2))];
         assert_ne!(fingerprint(&copy), fingerprint(&task));
     }
 }

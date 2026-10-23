@@ -158,7 +158,7 @@ impl Model {
         let Image::Base64 { data, mime_type } = image else {
             return Ok(());
         };
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) else {
             return unreadable_as_is(data, mime_type, &limits).map(|_| ());
         };
         let header = Header::read(&bytes, mime_type, image.dimensions());
@@ -193,7 +193,7 @@ pub fn fit_image(image: &Image, limits: &ImageLimits) -> Result<Option<Image>, S
     let Image::Base64 { data, mime_type } = image else {
         return Ok(None);
     };
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) else {
         return unreadable_as_is(data, mime_type, limits);
     };
     let header = Header::read(&bytes, mime_type, image.dimensions());
@@ -563,7 +563,7 @@ mod tests {
             unreachable!()
         };
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
+            .decode(data.as_bytes())
             .unwrap();
         image::load_from_memory(&bytes).unwrap()
     }

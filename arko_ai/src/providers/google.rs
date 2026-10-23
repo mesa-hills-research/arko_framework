@@ -1151,7 +1151,7 @@ impl GoogleClient {
             )),
             Image::Base64 { data, mime_type } => Ok(InteractionContentBlock::Image {
                 mime_type: mime_type.clone(),
-                data: data.clone(),
+                data: data.to_string(),
             }),
         }
     }

@@ -1961,8 +1961,8 @@ fn stop_deadline(ctx: &SharedContext, depth: u32) -> tokio::time::Instant {
 
 /// Waits for an agent that is being stopped to end: sends it `CancelTask`,
 /// records its last events and usage meanwhile (its generic cancellation
-/// reason replaced by `reason`), and aborts it at `deadline`. `None` means
-/// the agent was aborted.
+/// replaced by `ended`), and aborts it at `deadline`. `None` means the agent
+/// was aborted.
 #[allow(clippy::too_many_arguments)]
 async fn wind_down(
     agent_name: &str,
@@ -1971,7 +1971,7 @@ async fn wind_down(
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
     join_handle: &mut AbortOnDrop,
     deadline: tokio::time::Instant,
-    reason: &str,
+    ended: &TaskState,
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Option<Joined> {
@@ -1993,9 +1993,7 @@ async fn wind_down(
                         AgentEvent::TaskStateChanged(TaskState::Cancelled { reason: generic })
                             if generic == CANCELLED_BY_USER =>
                         {
-                            AgentEvent::TaskStateChanged(TaskState::Cancelled {
-                                reason: reason.to_string(),
-                            })
+                            AgentEvent::TaskStateChanged(ended.clone())
                         }
                         event => event,
                     };
@@ -2121,7 +2119,9 @@ async fn drive_run_to_result(
     };
 
     let stopping = drive_result.as_ref().is_err_and(|error| !is_pause(error));
-    let wound_down = if stopping {
+    // Once, so what is published is what is recorded.
+    let ended = stopping.then(|| stopped_state(ctx, &drive_result));
+    let wound_down = if let Some(ended) = &ended {
         let deadline = stop_deadline(ctx, depth);
         wind_down(
             &agent_name,
@@ -2130,7 +2130,7 @@ async fn drive_run_to_result(
             &cmd_tx,
             &mut join_handle,
             deadline,
-            &stop_reason(ctx, &drive_result),
+            ended,
             ctx,
             persistence,
         )
@@ -2185,12 +2185,10 @@ async fn drive_run_to_result(
         Ok(mut task) => {
             // The runtime records its generic reason for a CancelTask; the
             // workflow knows why it sent it.
-            if stopping
+            if let Some(ended) = ended
                 && matches!(&task.current_state, TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER)
             {
-                task.set_state(TaskState::Cancelled {
-                    reason: stop_reason(ctx, &drive_result),
-                });
+                task.set_state(ended);
             }
             finalize_agent_task(
                 agent_name.clone(),
@@ -2489,6 +2487,25 @@ fn stop_reason(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) ->
         | (None, Err(WorkflowError::AgentStopped { reason, .. })) => reason.clone(),
         (None, Err(error)) => format!("Stopped by the workflow: {error}"),
         (None, Ok(())) => "Stopped by the workflow.".to_string(),
+    }
+}
+
+/// The state a stopped agent's generic cancellation becomes. It is a failure
+/// when a subagent's cap on failed requests stopped it, as at a pause.
+fn stopped_state(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) -> TaskState {
+    match drive_result {
+        Err(WorkflowError::Agent(arko_agents::ArkoAgentsError::TaskExecution(reason)))
+            if ctx.run_control.cancellation().is_none() =>
+        {
+            TaskState::Failed {
+                reason: reason.clone(),
+                cause: None,
+                error_kind: None,
+            }
+        }
+        _ => TaskState::Cancelled {
+            reason: stop_reason(ctx, drive_result),
+        },
     }
 }
 

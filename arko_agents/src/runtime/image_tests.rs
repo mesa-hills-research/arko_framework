@@ -121,7 +121,7 @@ pub(super) fn call(id: &str, name: &str) -> ai::ToolCall {
 
 fn assert_image(content: &ai::Content) {
     assert!(
-        matches!(content, ai::Content::Image(ai::Image::Base64 { data, mime_type }) if data == IMAGE_DATA && mime_type == "image/png")
+        matches!(content, ai::Content::Image(ai::Image::Base64 { data, mime_type }) if &**data == IMAGE_DATA && mime_type == "image/png")
     );
 }
 
@@ -129,7 +129,7 @@ fn assert_result_image(result: &ai::ToolResult) {
     assert_eq!(result.images.len(), 1, "{result:?}");
     assert_eq!(result.images[0].label, "fixture.png, 12 × 8");
     assert!(
-        matches!(&result.images[0].image, ai::Image::Base64 { data, mime_type } if data == IMAGE_DATA && mime_type == "image/png")
+        matches!(&result.images[0].image, ai::Image::Base64 { data, mime_type } if &**data == IMAGE_DATA && mime_type == "image/png")
     );
 }
 

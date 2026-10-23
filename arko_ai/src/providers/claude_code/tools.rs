@@ -61,7 +61,7 @@ impl ToolOutput {
         for image in &self.images {
             content.push(match image {
                 crate::Image::Base64 { data, mime_type } => {
-                    json!({"type": "image", "data": data, "mimeType": mime_type})
+                    json!({"type": "image", "data": &**data, "mimeType": mime_type})
                 }
                 crate::Image::Url(url) => json!({"type": "text", "text": format!("Image: {url}")}),
             });

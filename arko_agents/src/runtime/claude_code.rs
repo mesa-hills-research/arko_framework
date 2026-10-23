@@ -98,6 +98,8 @@ const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
 /// How long what Claude Code's usage data says about extra usage stands
 /// before an event asks for it again.
 const USAGE_READ_EVERY: Duration = Duration::from_secs(300);
+/// How long the end of a turn waits for Claude Code's answer about its usage.
+const USAGE_END_WAIT: Duration = Duration::from_secs(1);
 
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
@@ -338,7 +340,7 @@ fn input_blocks<'a>(contents: impl Iterator<Item = &'a ai::Content>) -> Value {
                 ai::Content::Text(text) => Some(json!({"type": "text", "text": text})),
                 ai::Content::Image(ai::Image::Base64 { data, mime_type }) => Some(json!({
                     "type": "image",
-                    "source": {"type": "base64", "data": data, "media_type": mime_type},
+                    "source": {"type": "base64", "data": &**data, "media_type": mime_type},
                 })),
                 ai::Content::Image(ai::Image::Url(url)) => {
                     Some(json!({"type": "text", "text": format!("Image: {url}")}))
@@ -3921,14 +3923,35 @@ impl ClaudeCodeRun {
         {
             return;
         }
+        self.ask_usage(session).await;
+    }
+
+    async fn ask_usage(&mut self, session: &cc::ClaudeSession) {
         self.usage_asked = Some(std::time::Instant::now());
-        match session.request_usage().await {
-            Ok(reply) => self.usage_reply = Some(reply),
-            Err(error) => log::debug!(
-                "Task {}: asking Claude Code for usage: {error}",
-                self.task.id
-            ),
-        }
+        self.usage_reply = match session.request_usage().await {
+            Ok(reply) => Some(reply),
+            Err(error) => {
+                log::debug!(
+                    "Task {}: asking Claude Code for usage: {error}",
+                    self.task.id
+                );
+                None
+            }
+        };
+    }
+
+    /// Waits for the answer to the latest ask, up to [`USAGE_END_WAIT`], and
+    /// reports what it shows. A session closes right after its last turn,
+    /// so the answer to the ask as a turn ends is taken here.
+    async fn take_usage_answer(&mut self) -> Result<(), ArkoAgentsError> {
+        let Some(reply) = self.usage_reply.take() else {
+            return Ok(());
+        };
+        let answer = tokio::time::timeout(USAGE_END_WAIT, reply)
+            .await
+            .ok()
+            .and_then(Result::ok);
+        self.extra_usage_read(answer).await
     }
 
     async fn usage_answer(
@@ -4192,6 +4215,17 @@ impl ClaudeCodeRun {
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
+        // The amounts of extra usage after this turn are asked for as it
+        // ends, so the plan usage is current once the turn is over. A task
+        // that already ended has no reader for a report, and without a plan
+        // usage there is nothing to add the amounts to.
+        if self.stopping.is_none()
+            && !self.task.current_state.is_terminal()
+            && self.plan_usage.is_some()
+        {
+            self.ask_usage(session).await;
+            self.take_usage_answer().await?;
+        }
         // A retry series ends with its turn, also one that failed, and so
         // does a response that streamed without finishing.
         self.retrying_since = None;
