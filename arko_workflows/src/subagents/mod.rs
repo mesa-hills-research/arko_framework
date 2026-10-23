@@ -53,6 +53,8 @@
 mod board;
 pub(crate) use board::CONTEXT_ARRIVED;
 #[cfg(test)]
+mod delivery_tests;
+#[cfg(test)]
 mod nesting_tests;
 #[cfg(test)]
 mod retry_cap_tests;
@@ -94,7 +96,8 @@ pub const DEFAULT_MAX_PEER_MESSAGES: u32 = 20;
 
 /// The longest mailbox item a context update shows whole, 16 KiB in bytes.
 /// A longer one is shown as an excerpt, with the file that holds all of it
-/// (`wait_for_agents` returns it whole).
+/// (`wait_for_agents` returns it whole, up to the limit of its result for an
+/// agent in Claude Code).
 pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 
 /// About this many bytes of mail go into one context update. The rest come
@@ -588,6 +591,11 @@ pub struct MailItem {
     /// [`MAX_MAIL_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
+    /// It was given before, but its recipient's conversation didn't hold it
+    /// when the run ended (a result the runtime shortened, say), so it goes
+    /// out again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resent: bool,
     /// Not given to its recipient. It is from a subagent the recipient's
     /// conversation no longer started ([`SubagentRecord::detached`]). It
     /// stays in the records for the host to show, and `delivered_at` is when
@@ -603,14 +611,70 @@ impl MailItem {
         format!("[mail {}]", self.id)
     }
 
-    /// The whole item with its marker, heading and body.
+    /// The marker the item ends with. It doesn't start with `[mail `, which
+    /// views of a conversation count the items by.
+    pub(crate) fn end_marker(&self) -> String {
+        format!("[end of mail {}]", self.id)
+    }
+
+    /// Whether `text` holds the item: its marker and its end marker, so an
+    /// item cut short doesn't count.
+    pub(crate) fn held_in(&self, text: &str) -> bool {
+        text.contains(&self.marker()) && text.contains(&self.end_marker())
+    }
+
+    /// The whole item with its marker, heading and body, and its end marker.
     pub fn text(&self) -> String {
-        format!("{} {}\n\n{}", self.marker(), self.heading, self.body.trim())
+        format!(
+            "{} {}\n\n{}\n\n{}",
+            self.marker(),
+            self.heading,
+            self.body.trim(),
+            self.end_marker()
+        )
+    }
+
+    /// [`Self::text`] if it is at most `max` bytes. Otherwise its first
+    /// part, cut at a line, with the file that holds all of it and the line
+    /// to read on from.
+    pub(crate) fn text_within(&self, max: usize) -> String {
+        let text = self.text();
+        if text.len() <= max {
+            return text;
+        }
+        let body = self.body.trim();
+        let head = format!("{} {}\n\n", self.marker(), self.heading);
+        let room = match &self.file {
+            Some(file) => 400 + file.as_os_str().len(),
+            None => 400,
+        };
+        let mut end = max.saturating_sub(head.len() + room).min(body.len());
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        // The file is the heading, a blank line and the body.
+        let mut line = self.heading.matches('\n').count() + 3;
+        if let Some(newline) = body[..end].rfind('\n') {
+            line += body[..newline].matches('\n').count() + 1;
+            end = newline;
+        }
+        let rest = match &self.file {
+            Some(file) => format!(
+                "All of it is in {}. Read on from line {line} (read_file with start_line {line}).",
+                file.display()
+            ),
+            None => "The rest couldn't be saved to a file.".to_string(),
+        };
+        format!(
+            "{head}{}\n\n[... cut here. {rest} ...]\n\n{}",
+            &body[..end],
+            self.end_marker()
+        )
     }
 
     /// The item as a context update shows it: whole, or for a long body an
-    /// excerpt with the file holding all of it. Every line after the first
-    /// indented.
+    /// excerpt with the file holding all of it, then its end marker. Every
+    /// line after the first indented.
     pub(crate) fn excerpt(&self) -> String {
         let body = self.body.trim();
         let body = if body.len() <= MAX_MAIL_BYTES {
@@ -629,7 +693,14 @@ impl MailItem {
             };
             format!("{}\n\n[... cut here: {rest} ...]", &body[..end])
         };
-        format!("{} {}\n{}", self.marker(), self.heading, body).replace('\n', "\n  ")
+        format!(
+            "{} {}\n{}\n{}",
+            self.marker(),
+            self.heading,
+            body,
+            self.end_marker()
+        )
+        .replace('\n', "\n  ")
     }
 
     /// The item as a context update shows it when it alone is longer than
@@ -736,7 +807,8 @@ pub enum SubagentEventKind {
     /// The lead (`caller_run_id`) isn't running and has news waiting, and
     /// mailbox items `mail_ids` are for it. Start a turn of it (continue
     /// or restart its run), and the news arrives at its first turn
-    /// boundary. It may come more than once for the same news. Check
+    /// boundary. It may come more than once for the same news, and an item
+    /// that goes out again has [`MailItem::resent`]. Check
     /// [`Workflow::pending_news`](crate::Workflow::pending_news).
     NewsWaiting { mail_ids: Vec<u64> },
     /// Its isolated workspace was removed.

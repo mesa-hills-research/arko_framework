@@ -445,6 +445,7 @@ impl Tool for WaitForAgentsTool {
                     stop: &context.stop,
                     moved: &context.moved,
                     context_arrived: &context.context_arrived,
+                    claude_code: context.runs_in_claude_code,
                 },
             )
             .await

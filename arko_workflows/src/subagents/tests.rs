@@ -259,6 +259,7 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     let worker = &bodies_of(&server, "r1")[0];
     assert!(worker.contains("Count the files."));
     assert!(worker.contains("started by agent `lead` (your lead)"));
+    assert!(worker.contains("Keep it under about 16 KB, and put long detail in a file"));
     // The lead may start runs and use the blocking tool; the subagent
     // talks with its lead only.
     let lead_tools = offered(&lead[0]);
@@ -1562,7 +1563,7 @@ fn a_snapshot_loads_with_defaults() {
     }))
     .unwrap();
     assert_eq!(item.delivered_at, None);
-    assert_eq!(item.text(), "[mail 3] h\n\nb");
+    assert_eq!(item.text(), "[mail 3] h\n\nb\n\n[end of mail 3]");
     let long = MailItem {
         body: "x".repeat(MAX_MAIL_BYTES + 10),
         file: Some("/tmp/mail-3.md".into()),
@@ -1571,6 +1572,7 @@ fn a_snapshot_loads_with_defaults() {
     let excerpt = long.excerpt();
     assert!(excerpt.len() < MAX_MAIL_BYTES);
     assert!(excerpt.contains("the whole text is in /tmp/mail-3.md"));
+    assert!(excerpt.find("[end of mail 3]") > excerpt.find("cut here"));
     let _ = AgentRunStatus::Completed;
 }
 
@@ -1637,6 +1639,9 @@ async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
     let records = workflow.subagents();
     assert!(records[0].detached);
     assert_eq!(records[0].report.as_deref(), Some("There are 3 files."));
+    // The check at the end of the lead's run leaves the report set aside.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(workflow.pending_news(again.agent_run_id).is_empty());
 }
 
 /// A subagent's prompt cache is refreshed with the tools of its own
@@ -1862,7 +1867,7 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
     let result = result.unwrap();
     assert!(result.contains("r2 found it"), "{result}");
     assert!(
-        result.ends_with(&format!("Still running: r1.\n\n{}", board::WAIT_MOVED)),
+        result.starts_with(&format!("{} Still running: r1.", board::WAIT_MOVED)),
         "{result}"
     );
 

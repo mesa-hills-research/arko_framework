@@ -4739,6 +4739,57 @@ async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
     assert!(order[0] < order[1] && order[1] < order[2], "{order:?}");
 }
 
+/// A tool that returns whether its call says the task runs in Claude Code.
+#[derive(Debug)]
+struct SaysRuntime;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for SaysRuntime {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "says_runtime".into(),
+            description: "Says where the task runs".into(),
+            ..WaitsForContext::default().definition()
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        Ok(context.runs_in_claude_code.to_string())
+    }
+}
+
+/// The arko tools of a Claude Code agent see that its task runs in Claude
+/// Code.
+#[tokio::test]
+async fn an_arko_call_of_a_claude_code_agent_sees_that_it_runs_in_claude_code() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__says_runtime", "input": {}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["says_runtime"]),
+        "Say where you run.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SaysRuntime));
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("post")[0]["output"], "true");
+}
+
 /// An arko tool that runs until the test releases it.
 #[derive(Debug, Default)]
 struct Slow {

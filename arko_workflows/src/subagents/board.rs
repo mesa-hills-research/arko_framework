@@ -381,6 +381,7 @@ impl Board {
             at: now,
             delivered_at: withheld.then_some(now),
             file,
+            resent: false,
             withheld,
         };
         state.mail.push(item.clone());
@@ -553,15 +554,16 @@ impl Board {
 
     /// Run `task.id` ended as `task`: the mail it was given that its task
     /// holds leaves the mailbox, and the mail its task doesn't hold (given
-    /// as it ended, or after its last save) is given again. A run the host
-    /// drives with mail waiting gets `NewsWaiting`.
+    /// as it ended, or after its last save) is given again, except mail
+    /// withheld from it. A run the host drives with mail waiting gets
+    /// `NewsWaiting`.
     pub(crate) fn settle_run(&self, ctx: &Arc<SharedContext>, task: &Task) {
         let delivered = {
             let state = self.state.lock();
             state
                 .mail
                 .iter()
-                .filter(|item| item.to == task.id && item.delivered_at.is_some())
+                .filter(|item| item.to == task.id && item.delivered_at.is_some() && !item.withheld)
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -577,13 +579,14 @@ impl Board {
         {
             let mut state = self.state.lock();
             state.mail.retain_mut(|item| {
-                if item.to != task.id || item.delivered_at.is_none() {
+                if item.to != task.id || item.delivered_at.is_none() || item.withheld {
                     return true;
                 }
                 if held.contains(&item.id) {
                     return false;
                 }
                 item.delivered_at = None;
+                item.resent = true;
                 true
             });
         }
@@ -652,7 +655,7 @@ impl Board {
             state
                 .mail
                 .iter()
-                .filter(|item| item.to == task.id && item.delivered_at.is_some())
+                .filter(|item| item.to == task.id && item.delivered_at.is_some() && !item.withheld)
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -1714,7 +1717,14 @@ impl Board {
             stop,
             moved,
             context_arrived,
+            claude_code,
         } = signals;
+        // Only a caller in Claude Code has a limit on its result.
+        let budget = if *claude_code {
+            WAIT_MAIL_BYTES
+        } else {
+            usize::MAX
+        };
         // The runs waited for, by id.
         let wanted = match &runs {
             None => None,
@@ -1749,15 +1759,19 @@ impl Board {
         let mut notes = ctx.notes.watch();
         let deadline = tokio::time::Instant::now() + timeout;
         let mut collected: Vec<MailItem> = Vec::new();
+        // What the items collected take of the result's room.
+        let mut bytes = 0;
         let mut stopping = ctx.run_control.agent_stopping(me);
         loop {
             version.borrow_and_update();
             notes.borrow_and_update();
-            // What came for it, of what it waits for.
-            let (taken, still) = {
+            // What came for it, of what it waits for, as far as the result
+            // has room. The rest stays in the mailbox.
+            let (taken, still, left) = {
                 let mut state = self.state.lock();
                 let now = Utc::now();
                 let mut taken = Vec::new();
+                let mut left = Vec::new();
                 for item in &mut state.mail {
                     if item.to != me || item.delivered_at.is_some() {
                         continue;
@@ -1769,11 +1783,21 @@ impl Board {
                         }
                         (Some(_), MailSender::Host) => true,
                     };
-                    if from_wanted {
-                        item.delivered_at = Some(now);
-                        taken.push(item.clone());
+                    if !from_wanted {
+                        continue;
                     }
+                    let size = item.text().len() + MAIL_SEPARATOR.len();
+                    // The first item always goes, cut if it must be. After
+                    // one that didn't fit, none goes, to keep the order.
+                    if !left.is_empty() || (bytes > 0 && bytes + size > budget) {
+                        left.push(item.from);
+                        continue;
+                    }
+                    bytes += size.min(budget);
+                    item.delivered_at = Some(now);
+                    taken.push(item.clone());
                 }
+                let left = sender_names(&state, &left);
                 let still = state
                     .runs
                     .iter()
@@ -1786,7 +1810,7 @@ impl Board {
                     })
                     .map(|run| run.handle.clone())
                     .collect::<Vec<_>>();
-                (taken, still)
+                (taken, still, left)
             };
             self.delivered(me, &taken);
             collected.extend(taken);
@@ -1794,13 +1818,15 @@ impl Board {
                 .iter()
                 .any(|item| matches!(item.kind, MailKind::Message | MailKind::Question));
             let woken = collected.iter().any(|item| item.kind.wakes());
-            let done = if all {
-                still.is_empty() || message
-            } else {
-                woken
-            };
+            // A result with no room left is returned as it is.
+            let done = !left.is_empty()
+                || if all {
+                    still.is_empty() || message
+                } else {
+                    woken
+                };
             if done && !collected.is_empty() {
-                return Ok(wait_result(&collected, &still));
+                return Ok(wait_result(None, &collected, &still, &left, budget));
             }
             if still.is_empty() && lead.is_none() {
                 let state = self.state.lock();
@@ -1817,28 +1843,59 @@ impl Board {
                     "Nothing to wait for: {which}. Reports that came earlier reached you already."
                 );
                 if !collected.is_empty() {
-                    result = format!("{}\n\n{result}", wait_result(&collected, &still));
+                    result = format!(
+                        "{result}\n\n{}",
+                        wait_result(None, &collected, &still, &[], budget)
+                    );
                 }
                 return Ok(result);
             }
             if ctx.run_control.is_stopped() || ctx.run_control.is_wrapping_up() {
-                return Ok(with_collected("Workflow stopping.", &collected, &still));
-            }
-            if *stopping.borrow_and_update() || stop.is_stopping() {
-                return Ok(with_collected("Run stopping.", &collected, &still));
-            }
-            if ctx.notes.has_update(agent_name, me) {
-                return Ok(with_collected(
-                    "A note for you arrived while you waited: it follows. Wait again if you still need to.",
+                return Ok(wait_result(
+                    Some("Workflow stopping."),
                     &collected,
                     &still,
+                    &[],
+                    budget,
+                ));
+            }
+            if *stopping.borrow_and_update() || stop.is_stopping() {
+                return Ok(wait_result(
+                    Some("Run stopping."),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
+            }
+            if ctx.notes.has_update(agent_name, me) {
+                return Ok(wait_result(
+                    Some(
+                        "A note for you arrived while you waited: it follows. Wait again if you still need to.",
+                    ),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
                 ));
             }
             if moved.is_moved() {
-                return Ok(with_collected(WAIT_MOVED, &collected, &still));
+                return Ok(wait_result(
+                    Some(WAIT_MOVED),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
             }
             if context_arrived.has_arrived() {
-                return Ok(with_collected(CONTEXT_ARRIVED, &collected, &still));
+                return Ok(wait_result(
+                    Some(CONTEXT_ARRIVED),
+                    &collected,
+                    &still,
+                    &[],
+                    budget,
+                ));
             }
             if lead.is_some() {
                 self.waits_for(ctx, me, &still);
@@ -1865,7 +1922,7 @@ impl Board {
                         "Nothing new in {} s.",
                         timeout.as_secs_f64().round() as u64
                     );
-                    return Ok(with_collected(&waited, &collected, &still));
+                    return Ok(wait_result(Some(&waited), &collected, &still, &[], budget));
                 }
             }
         }
@@ -2858,6 +2915,7 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             at: Utc::now(),
             delivered_at: None,
             file: None,
+            resent: false,
             withheld: false,
         });
     }
@@ -2965,16 +3023,15 @@ fn task_holds(task: &Task, item: &MailItem) -> bool {
     {
         return true;
     }
-    let marker = item.marker();
     task.pending_context_injections
         .iter()
-        .any(|content| content.contains(&marker))
+        .any(|content| item.held_in(content))
         || task.conversation.messages.iter().any(|message| {
             message.content.iter().any(|content| match content {
                 arko_ai::Content::Text(text) => {
-                    message.role == arko_ai::Role::User && text.contains(&marker)
+                    message.role == arko_ai::Role::User && item.held_in(text)
                 }
-                arko_ai::Content::ToolResult(result) => result.output.contains(&marker),
+                arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
                 arko_ai::Content::Image(_) => false,
             })
         })
@@ -3019,7 +3076,7 @@ fn subagent_prompt(
         None => format!("agent `{}`", record.caller_agent),
     };
     text.push_str(&format!(
-        "\n\n# Working as an agent run\nYou are agent run {}, started by {} (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
+        "\n\n# Working as an agent run\nYou are agent run {}, started by {} (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. Keep it under about 16 KB, and put long detail in a file and give its path. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
         record.handle, lead
     ));
     if config.questions_to_lead {
@@ -3055,11 +3112,13 @@ fn subagent_prompt(
 
 /// What ends `wait_for_agents` early, from its call's
 /// [`TaskContext`](arko_agents::TaskContext): a stop, a move to the
-/// background, and context arriving.
+/// background, and context arriving. Also whether the caller runs in Claude
+/// Code, whose result then has a size limit ([`WAIT_MAIL_BYTES`]).
 pub(crate) struct WaitSignals<'a> {
     pub(crate) stop: &'a arko_agents::stop::StopSignal,
     pub(crate) moved: &'a arko_agents::MoveSignal,
     pub(crate) context_arrived: &'a arko_agents::ContextSignal,
+    pub(crate) claude_code: bool,
 }
 
 /// How a wait that the user moved to the background ends.
@@ -3069,24 +3128,62 @@ pub(crate) const WAIT_MOVED: &str = "The user ended this wait so you can go on w
 pub(crate) const CONTEXT_ARRIVED: &str =
     "An update for you arrived while you waited. It follows. Wait again if you still need to.";
 
-/// A wait's result: the items that came, whole, and the runs still active.
-fn wait_result(items: &[MailItem], still: &[String]) -> String {
-    let mut text = items
-        .iter()
-        .map(MailItem::text)
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
-    text.push_str("\n\n");
-    text.push_str(&still_running(still));
+/// A wait's items, in bytes, for a caller in Claude Code. With the status
+/// lines before them and the line after them that names the senders of the
+/// mail left, a result stays under 40,000 bytes. Claude Code replaces an MCP
+/// result of over 50,000 characters with a 2 KB preview, and the bytes of a
+/// text never count fewer than its characters. Other callers have no limit.
+const WAIT_MAIL_BYTES: usize = 39_000;
+
+/// Between a wait's status and its items.
+const MAIL_SEPARATOR: &str = "\n\n---\n\n";
+
+/// A wait's result: the status first (`lead`, if any, and the runs still
+/// active), then the items that came, whole, in the order they came. An item
+/// that alone is over the `budget` is cut. It ends with who else has
+/// mail (`left`) that didn't fit, which stays in the mailbox.
+fn wait_result(
+    lead: Option<&str>,
+    items: &[MailItem],
+    still: &[String],
+    left: &[String],
+    budget: usize,
+) -> String {
+    let mut text = match lead {
+        Some(lead) => format!("{lead} {}", still_running(still)),
+        None => still_running(still),
+    };
+    for item in items {
+        text.push_str(MAIL_SEPARATOR);
+        text.push_str(&item.text_within(budget));
+    }
+    if !left.is_empty() {
+        text.push_str(&format!(
+            "\n\nMail from {} didn't fit here and follows next.",
+            handles_in_words(left)
+        ));
+    }
     text
 }
 
-fn with_collected(lead: &str, items: &[MailItem], still: &[String]) -> String {
-    if items.is_empty() {
-        format!("{lead} {}", still_running(still))
-    } else {
-        format!("{}\n\n{lead}", wait_result(items, still))
+/// Who sent `senders`, once each, in order: a run by its id, `your lead` if
+/// it isn't one of the subagents, or `the host`.
+fn sender_names(state: &SubagentsSnapshot, senders: &[MailSender]) -> Vec<String> {
+    let mut names = Vec::new();
+    for sender in senders {
+        let name = match sender {
+            MailSender::Run(from) => state
+                .runs
+                .iter()
+                .find(|run| run.run_id == *from)
+                .map_or("your lead".to_string(), |run| run.handle.clone()),
+            MailSender::Host => "the host".to_string(),
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
     }
+    names
 }
 
 fn still_running(still: &[String]) -> String {
