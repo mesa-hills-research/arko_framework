@@ -8,10 +8,11 @@ use std::time::Duration;
 use arko_agents::LLMErrorPolicy;
 use serde_json::json;
 
-use super::tests::{builder_with, role, start, turn, until, wait, within};
+use super::tests::{bodies_of, builder_with, result_of, role, start, turn, until, wait, within};
 use super::*;
 use crate::policy::RecoveryWaits;
 use crate::test_support::{Reply, ResponsesServer, Workspace, agent_config, tool_call_turn};
+use crate::workflow::result::AgentRunStatus;
 
 fn failure() -> Reply {
     Reply::Status {
@@ -138,7 +139,9 @@ async fn a_worker_fails_after_its_failed_requests_in_a_row() {
 }
 
 /// A worker that waits out overloaded errors never pauses, since the agent
-/// retries those on its own. The cap fails it at the third failed request.
+/// retries those on its own. The cap fails it at the third failed request,
+/// and its run ends failed, as at a pause, so its lead isn't offered to
+/// continue it.
 #[tokio::test]
 async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -169,6 +172,17 @@ async fn a_worker_waiting_out_overloaded_errors_fails_at_the_cap() {
         error.contains("It stopped after 3 failed requests in a row."),
         "{error}"
     );
+    let run = workflow
+        .agent_result(workflow.subagents()[0].run_id)
+        .unwrap();
+    assert_eq!(run.status, AgentRunStatus::Failed);
+    let lead = bodies_of(&server, "lead");
+    let told = result_of(&lead[2], "lead", 1);
+    assert!(
+        told.contains("stopped with an error:") && told.contains("Its run can't go on"),
+        "{told}"
+    );
+    assert!(!told.contains("message_agent continues it"), "{told}");
 }
 
 /// The host sets the cap while a worker, under none, keeps failing. The worker
