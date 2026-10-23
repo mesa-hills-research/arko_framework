@@ -833,6 +833,7 @@ A subagent is an ordinary run of the workflow, with its own run ID (`SubagentRec
 | `workspace_provider` | `Option<Arc<dyn WorkspaceProvider>>` | None. Creates and removes isolated workspaces. With one, `start_agent` offers `isolated` and `stop_agent` offers `remove_workspace`. |
 | `hook` | `Option<Arc<dyn SubagentHook>>` | None. Adjusts a subagent's `AgentConfig` as it starts. |
 | `start_parameters` | `Vec<arko_agents::ToolParameterDefinition>` | Empty. The host's own `start_agent` parameters, whose values reach the hook. |
+| `max_failed_requests` | `Option<u32>` | `None`, no cap. A subagent fails as soon as this many of its model requests have failed in a row. The agent's own retries count, and so do its waits for rate limits and overloaded errors. A model response resets the count, and it starts again when the run is resumed or continued. The subagents of a failed subagent stop with it. It never applies to a run the host drives. |
 
 ```rust
 // SubagentsConfig
@@ -845,6 +846,7 @@ fn copy_peer_messages_to_lead(self, enabled: bool) -> Self;
 fn workspaces_anywhere(self) -> Self;
 fn offer_blocking_tool(self, enabled: bool) -> Self;
 fn questions_to_lead(self, enabled: bool) -> Self;
+fn max_failed_requests(self, max: u32) -> Self;
 fn workspace_provider(self, provider: Arc<dyn WorkspaceProvider>) -> Self;
 fn hook(self, hook: Arc<dyn SubagentHook>) -> Self;
 fn start_parameter(self, parameter: ToolParameterDefinition) -> Self;
@@ -884,7 +886,7 @@ Reports, failures, stops, messages and questions go through a mailbox kept per r
 2. While the recipient runs, its next turn boundary adds it to the `# Workflow context update`, oldest first, up to about `UPDATE_MAX_MAIL_BYTES` (48 KiB) per update, with the rest at the next boundary. An item over `MAX_MAIL_BYTES` (16 KiB) is shown as an excerpt with the path of the file that holds all of it (`<checkpoint_dir>/subagents/mail-N.md` with persistence, else under the temp directory).
 3. Otherwise it waits. A subagent that finished is continued with its conversation, and gets the item at its first turn boundary. A subagent that was stopped, failed or interrupted is restarted only by its lead's mail. For a run the host drives, the workflow sends `SubagentEventKind::NewsWaiting`, and the host continues that run (`continue_agent`, say), which then gets the news at its first turn boundary, or takes it with `take_news`.
 
-Mail given to a run that ends before its task holds it is given again, at the run's next turn or to the host. Mail that reaches a subagent as it completes continues it, and its new report follows. When a subagent is stopped, its lead is told which run stopped and why. The wording is `you stopped it: <reason>` for the lead's `stop_agent`, `the workflow's host stopped it (<reason>)` for the host (a `Workflow::stop_run`), and `it was stopped with the workflow (<reason>)`. A run that stopped because of its own lead says so instead, `its lead r1 was stopped`, `its lead r1 ended`, `its lead's conversation was cut back to before it started`, or, after a resume that did not relaunch it, `its lead r1 isn't running`. That news doesn't start a turn of a lead that isn't running. A run the host retired (`RunStopIntent::Retire`) can't be restarted.
+Mail given to a run that ends before its task holds it is given again, at the run's next turn or to the host. Mail that reaches a subagent as it completes continues it, and its new report follows. When a subagent is stopped, its lead is told which run stopped and why. The wording is `you stopped it: <reason>` for the lead's `stop_agent`, `the workflow's host stopped it (<reason>)` for the host (a `Workflow::stop_run`), and `it was stopped with the workflow (<reason>)`. A run that stopped because of its own lead says so instead, `its lead r1 was stopped`, `its lead r1 ended`, `its lead's conversation was cut back to before it started`, or, after a resume that did not relaunch it, `its lead r1 isn't running`. That news doesn't start a turn of a lead that isn't running. The news of a subagent that stopped or failed names the subagents that stopped with it (`Its workers r2 and r3 stopped with it.`). A run the host retired (`RunStopIntent::Retire`) can't be restarted.
 
 ### Workspaces and isolation
 

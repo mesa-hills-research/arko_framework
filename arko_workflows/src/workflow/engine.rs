@@ -493,6 +493,12 @@ struct RecoveryState {
     recovered: u32,
     /// Pauses in a row without a model response in between.
     repeat: u32,
+    /// Failed model requests in a row without a model response in between
+    /// (for `SubagentsConfig::max_failed_requests`). The agent's own retries
+    /// count, and so does the request that ended a round of them.
+    failed_requests: u32,
+    /// The error of the latest failed request the agent retried.
+    last_error: String,
 }
 
 /// Suspends the agent for its caller's decision: the run call returns
@@ -730,6 +736,44 @@ async fn send_tool_decisions(
     let _ = cmd_tx.send(command).await;
 }
 
+/// Why subagent `agent_run_id` fails when `failed` model requests have failed
+/// in a row, if that reaches its cap
+/// ([`SubagentsConfig::max_failed_requests`](crate::subagents::SubagentsConfig::max_failed_requests)).
+fn failed_requests_cap_reached(
+    ctx: &SharedContext,
+    agent_run_id: uuid::Uuid,
+    failed: u32,
+    error: &str,
+) -> Option<String> {
+    let cap = ctx.subagents.config()?.max_failed_requests?;
+    (failed >= cap && ctx.subagents.is_subagent(agent_run_id)).then(|| {
+        let requests = if failed == 1 { "request" } else { "requests" };
+        format!("It stopped after {failed} failed {requests} in a row. The last error was {error}")
+    })
+}
+
+/// Counts a failed request that the agent retries or waits out on its own. A
+/// subagent over its cap is cancelled (it is waiting and would never pause)
+/// and fails with the cap's reason.
+fn count_failed_request(
+    recovery: &mut RecoveryState,
+    agent_run_id: uuid::Uuid,
+    error: &str,
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    ctx: &SharedContext,
+) -> Result<(), WorkflowError> {
+    recovery.failed_requests = recovery.failed_requests.saturating_add(1);
+    match failed_requests_cap_reached(ctx, agent_run_id, recovery.failed_requests, error) {
+        Some(reason) => {
+            let _ = cmd_tx.try_send(UserCommand::CancelTask);
+            Err(WorkflowError::Agent(
+                arko_agents::ArkoAgentsError::TaskExecution(reason),
+            ))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Answers `error`, reported at an error-recovery pause, under the
 /// workflow's error recovery policy and the pause's cause: continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
@@ -751,15 +795,33 @@ async fn answer_recovery_pause(
         return answer_budget_hold(agent_name, agent_run_id, error, nested, cmd_tx, ctx).await;
     }
     recovery.repeat = recovery.repeat.saturating_add(1);
+    // The request that ended this round of the agent's retries failed too.
+    let request_failed = matches!(
+        cause,
+        arko_agents::ErrorRecoveryCause::RetriesExhausted { .. }
+            | arko_agents::ErrorRecoveryCause::UsageLimit { .. }
+    );
+    if request_failed {
+        recovery.failed_requests = recovery.failed_requests.saturating_add(1);
+    }
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
-    match ctx.error_recovery_policy.action(
+    let mut action = ctx.error_recovery_policy.action(
         &cause,
         &error,
         recovery.recovered,
         recovery.repeat,
         &ctx.recovery_waits,
         now_unix_ms,
-    ) {
+    );
+    // A subagent's own cap on failed requests in a row.
+    if request_failed
+        && matches!(action, RecoveryAction::ContinueAfter(_))
+        && let Some(reason) =
+            failed_requests_cap_reached(ctx, agent_run_id, recovery.failed_requests, &error)
+    {
+        action = RecoveryAction::Fail(reason);
+    }
+    match action {
         RecoveryAction::ContinueAfter(wait) => {
             let wait = ctx
                 .recovery_waits
@@ -1023,6 +1085,7 @@ async fn drive_events(
                 // A model call went through: the next pause starts a new
                 // series of automatic waits.
                 recovery.repeat = 0;
+                recovery.failed_requests = 0;
                 let cost_result = charge_usage(agent_name, agent_run_id, usage, ctx, persistence);
                 // Under `Pause`, the agent's next request is held instead
                 // (see `answer_budget_hold`).
@@ -1165,6 +1228,24 @@ async fn drive_events(
             }
 
             AgentEvent::TaskStreamEnd => break,
+
+            // A failed request the agent retries (or waits out) on its own.
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: false,
+                error_message,
+                ..
+            } => recovery.last_error = error_message,
+
+            AgentEvent::RetryScheduled { .. } => {
+                let error = recovery.last_error.clone();
+                count_failed_request(recovery, agent_run_id, &error, cmd_tx, ctx)?;
+            }
+
+            AgentEvent::UsageLimitReached {
+                waiting_until_unix_ms: Some(_),
+                error_message,
+                ..
+            } => count_failed_request(recovery, agent_run_id, &error_message, cmd_tx, ctx)?,
 
             _ => {}
         }

@@ -70,6 +70,30 @@ enum StopOrigin {
     Lead(String),
 }
 
+/// A handle taken for a start that may still be refused. It is given back
+/// when the claim is dropped, unless a later start has taken one since, so a
+/// refused start doesn't use up a handle.
+struct HandleClaim<'a> {
+    board: &'a Board,
+    number: u32,
+}
+
+impl HandleClaim<'_> {
+    /// The start went through: the handle stays taken.
+    fn keep(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for HandleClaim<'_> {
+    fn drop(&mut self) {
+        let mut state = self.board.state.lock();
+        if state.last_handle == self.number {
+            state.last_handle -= 1;
+        }
+    }
+}
+
 pub(crate) struct Board {
     config: Option<SubagentsConfig>,
     state: Mutex<SubagentsSnapshot>,
@@ -691,10 +715,16 @@ impl Board {
             }
         };
         let run_id = Uuid::new_v4();
-        let handle = {
+        let (handle, claim) = {
             let mut state = self.state.lock();
             state.last_handle += 1;
-            format!("r{}", state.last_handle)
+            (
+                format!("r{}", state.last_handle),
+                HandleClaim {
+                    board: self,
+                    number: state.last_handle,
+                },
+            )
         };
         let now = Utc::now();
         let mut record = SubagentRecord {
@@ -772,8 +802,9 @@ impl Board {
         };
         record.workspace = workspace.clone();
         record.isolated = isolated.clone();
-        let prompt = subagent_prompt(config, self.workflow_run_id, &record);
+        let prompt = subagent_prompt(self, config, self.workflow_run_id, &record);
         self.prepared.lock().insert(run_id, prepared);
+        claim.keep();
         self.state.lock().runs.push(record.clone());
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
         let latest = self.record(run_id).unwrap_or(record);
@@ -958,6 +989,8 @@ impl Board {
             .map_or(StopKind::Operator, |stop| stop.kind);
         let handle = &record.handle;
         let agent = &record.agent;
+        // Its subagents are stopped when it ends (below), and its news says so.
+        let stops_workers = !workflow_stopped && !ctx.run_control.is_wrapping_up();
         let (state, kind, heading, body, event) = match &outcome {
             Ok(result)
                 if result.status == AgentRunStatus::Completed
@@ -1059,11 +1092,15 @@ impl Board {
                     } else {
                         "message_agent restarts it where it stopped."
                     };
+                    let workers = self
+                        .stopped_workers_news(&record, stops_workers)
+                        .map(|news| format!("{news}\n\n"))
+                        .unwrap_or_default();
                     (
                         SubagentState::Stopped,
                         MailKind::Stopped,
                         format!("{handle} (agent `{agent}`) stopped before it finished: {who}."),
-                        format!("{progress}{next}"),
+                        format!("{progress}{workers}{next}"),
                         SubagentEventKind::Stopped {
                             reason: by_caller.unwrap_or(reason),
                             by_caller: record.stopped_by_caller.is_some(),
@@ -1083,11 +1120,15 @@ impl Board {
                     } else {
                         "\n\nIts run can't go on: start a new one if the work is still needed."
                     };
+                    let workers = self
+                        .stopped_workers_news(&record, stops_workers)
+                        .map(|news| format!("\n\n{news}"))
+                        .unwrap_or_default();
                     (
                         SubagentState::Failed,
                         MailKind::Failed,
                         format!("{handle} (agent `{agent}`) stopped with an error:"),
-                        format!("{error}{next}"),
+                        format!("{error}{workers}{next}"),
                         SubagentEventKind::Failed { error },
                     )
                 }
@@ -1140,7 +1181,7 @@ impl Board {
         }
         // Its subagents would report to a run that is gone, and spend on
         // work no one reads. When the workflow stops, all runs stop anyway.
-        if !workflow_stopped && !ctx.run_control.is_wrapping_up() {
+        if stops_workers {
             self.stop_workers_of(
                 ctx,
                 &record,
@@ -2115,6 +2156,43 @@ impl Board {
         }
     }
 
+    /// For the news that run `lead` stopped or failed, the sentence naming
+    /// the subagents that stop with it (`stops` says they do), if it has any.
+    /// They are the ones still active, which stop as it ends, and the ones
+    /// that stopped when its own stop reached them, which may have ended
+    /// first.
+    fn stopped_workers_news(&self, lead: &SubagentRecord, stops: bool) -> Option<String> {
+        if !stops {
+            return None;
+        }
+        let because = format!("its lead {} ", lead.handle);
+        let handles = self
+            .state
+            .lock()
+            .runs
+            .iter()
+            .filter(|run| {
+                run.caller_run_id == lead.run_id
+                    && (run.state.is_active()
+                        || (run.state == SubagentState::Stopped
+                            && run.since >= lead.since
+                            && run
+                                .error
+                                .as_deref()
+                                .is_some_and(|why| why.starts_with(&because))))
+            })
+            .map(|run| run.handle.clone())
+            .collect::<Vec<_>>();
+        match handles.as_slice() {
+            [] => None,
+            [one] => Some(format!("Its worker {one} stopped with it.")),
+            many => Some(format!(
+                "Its workers {} stopped with it.",
+                handles_in_words(many)
+            )),
+        }
+    }
+
     /// The subagents that run, or wait to run, for run `lead`.
     fn active_workers_of(&self, lead: Uuid) -> Vec<SubagentRecord> {
         self.state
@@ -2562,7 +2640,7 @@ async fn run(
         // A run stopped before it started starts now, from its task.
         (PendingLaunch::Resume { .. }, Some(config)) if recorded_result(ctx, run_id).is_none() => {
             PendingLaunch::Start {
-                prompt: subagent_prompt(config, ctx.workflow_run_id, &record),
+                prompt: subagent_prompt(&ctx.subagents, config, ctx.workflow_run_id, &record),
             }
         }
         (launch, _) => launch,
@@ -2903,8 +2981,10 @@ fn start_request(workflow_run_id: Uuid, record: &SubagentRecord) -> StartRequest
 
 /// A subagent's initial prompt: its task, then who it works for and where,
 /// after the host's context when it gives one
-/// ([`SubagentsConfig::start_context`]).
+/// ([`SubagentsConfig::start_context`]). A lead that is a subagent itself is
+/// named by its handle.
 fn subagent_prompt(
+    board: &Board,
     config: &SubagentsConfig,
     workflow_run_id: Uuid,
     record: &SubagentRecord,
@@ -2918,9 +2998,13 @@ fn subagent_prompt(
         Some(context) => format!("{}\n\n# Your task\n\n{}", context.trim(), record.task),
         None => record.task.clone(),
     };
+    let lead = match board.record(record.caller_run_id) {
+        Some(lead) => lead.handle,
+        None => format!("agent `{}`", record.caller_agent),
+    };
     text.push_str(&format!(
-        "\n\n# Working as an agent run\nYou are agent run {}, started by agent `{}` (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
-        record.handle, record.caller_agent
+        "\n\n# Working as an agent run\nYou are agent run {}, started by {} (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
+        record.handle, lead
     ));
     if config.questions_to_lead {
         text.push_str(" A question you ask goes to your lead, which asks the user if it needs to.");

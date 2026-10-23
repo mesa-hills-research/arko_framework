@@ -273,8 +273,8 @@ async fn a_native_path_check_error_answers_the_call_once_without_running_it() {
 
 #[tokio::test]
 async fn native_paths_outside_the_workspace_are_judged_as_the_tools_open_them() {
-    // `~` is a directory name, not the home directory: `~/../../x` leaves
-    // the workspace, and `~/notes.txt` stays in it.
+    // `~/notes.txt` names a file in a directory called `~`, but a path from
+    // `~` counts as outside the workspace, like `~/../../x` that leaves it.
     let root = workspace();
     let workspace = root.join("ws");
     std::fs::create_dir_all(workspace.join("~")).unwrap();
@@ -302,18 +302,16 @@ async fn native_paths_outside_the_workspace_are_judged_as_the_tools_open_them() 
         .await
         .unwrap()
         .unwrap();
-    let escape = result_for(&task.conversation, "escape");
-    assert!(escape[0].is_error && escape[0].output.contains("outside the workspace"));
-    assert!(
-        !serde_json::to_string(&task.conversation)
-            .unwrap()
-            .contains("OUTSIDE-SECRET")
-    );
-    assert!(
-        result_for(&task.conversation, "notes")[0]
-            .output
-            .contains("TILDE-NOTES")
-    );
+    for id in ["escape", "notes"] {
+        let result = result_for(&task.conversation, id);
+        assert!(
+            result[0].is_error && result[0].output.contains("outside the workspace"),
+            "{id}"
+        );
+    }
+    let conversation = serde_json::to_string(&task.conversation).unwrap();
+    assert!(!conversation.contains("OUTSIDE-SECRET"));
+    assert!(!conversation.contains("TILDE-NOTES"));
     std::fs::remove_dir_all(root).unwrap();
 }
 

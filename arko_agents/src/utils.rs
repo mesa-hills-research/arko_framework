@@ -126,15 +126,29 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 /// sensitivity turned on is still compared without regard to case. On other
 /// platforms the comparison is exact, also on macOS file systems that
 /// ignore case, so a path spelled in another case is judged outside.
+///
+/// A path that starts with `~` (`~` alone, or `~/`, and on Windows `~\` too)
+/// is always outside. [`resolve_path`] takes it as a directory name, but
+/// Claude Code's search tools and programs a tool starts may expand it to the
+/// home directory.
 pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
     let root = normalize_path(&absolute(workspace)?);
     let resolved = resolve_path(path, workspace)?;
+    if starts_with_home(path) {
+        return Ok(false);
+    }
     let mut components = resolved.components();
     Ok(root.components().all(|root_component| {
         components
             .next()
             .is_some_and(|c| same_component(c, root_component))
     }))
+}
+
+/// Whether the first component of `path` is `~`.
+fn starts_with_home(path: &str) -> bool {
+    let path = path.trim();
+    path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\"))
 }
 
 #[cfg(not(windows))]
@@ -290,12 +304,10 @@ mod tests {
             ("../outside", false),
             (" ../outside", false),
             ("/workspace/project-other/x", false),
-            // `$PWD`, `$HOME` and `~` are directory names, so two `..`
-            // leave the workspace whatever the variables hold.
+            // `$PWD` and `$HOME` are directory names, so two `..` leave the
+            // workspace whatever the variables hold.
             ("$PWD/../../outside", false),
             ("$HOME/..", true),
-            ("~/../../outside", false),
-            ("~/../inside", true),
         ] {
             assert_eq!(
                 is_path_in_workspace(path, workspace).unwrap(),
@@ -309,6 +321,30 @@ mod tests {
                 inside,
                 "{path}"
             );
+        }
+    }
+
+    /// `~` as the first component may be the home directory to Claude Code's
+    /// search tools and to programs, so it is outside though `resolve_path`
+    /// takes it as a directory name. Elsewhere it is an ordinary name.
+    #[test]
+    fn a_path_starting_with_tilde_is_outside_the_workspace() {
+        let workspace = std::env::temp_dir().join("arko-tilde-workspace");
+        let mut outside = vec!["~", " ~\n", "~/notes", "~/../notes"];
+        if cfg!(windows) {
+            outside.push(r"~\notes");
+        }
+        for path in outside {
+            assert!(!is_path_in_workspace(path, &workspace).unwrap(), "{path}");
+            assert!(
+                resolve_path(path, &workspace)
+                    .unwrap()
+                    .starts_with(&workspace),
+                "{path}"
+            );
+        }
+        for path in ["~user/notes", "~notes", "src/~/notes", "src/~"] {
+            assert!(is_path_in_workspace(path, &workspace).unwrap(), "{path}");
         }
     }
 

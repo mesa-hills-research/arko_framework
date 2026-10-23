@@ -55,6 +55,8 @@ pub(crate) use board::CONTEXT_ARRIVED;
 #[cfg(test)]
 mod nesting_tests;
 #[cfg(test)]
+mod retry_cap_tests;
+#[cfg(test)]
 mod skills_tests;
 #[cfg(test)]
 mod tests;
@@ -150,6 +152,13 @@ pub struct SubagentsConfig {
     /// The host's own `start_agent` parameters, whose values the
     /// [hook](Self::hook) receives.
     pub start_parameters: Vec<ToolParameterDefinition>,
+    /// A subagent fails as soon as this many of its model requests have
+    /// failed in a row. The agent's own retries count, and so do its waits
+    /// for rate limits and overloaded errors. A model response resets the
+    /// count, and it starts again when the run is resumed or continued. The
+    /// subagents of a failed subagent stop with it. It never applies to a
+    /// run the host drives. `None` sets no cap, which is the default.
+    pub max_failed_requests: Option<u32>,
 }
 
 impl Default for SubagentsConfig {
@@ -167,6 +176,7 @@ impl Default for SubagentsConfig {
             hook: None,
             start_context: None,
             start_parameters: Vec::new(),
+            max_failed_requests: None,
         }
     }
 }
@@ -197,6 +207,7 @@ impl std::fmt::Debug for SubagentsConfig {
                     .map(|parameter| &parameter.name)
                     .collect::<Vec<_>>(),
             )
+            .field("max_failed_requests", &self.max_failed_requests)
             .finish()
     }
 }
@@ -273,6 +284,12 @@ impl SubagentsConfig {
     /// Gives each run context in its first message. See [`StartContext`].
     pub fn start_context(mut self, context: StartContext) -> Self {
         self.start_context = Some(context);
+        self
+    }
+
+    /// See [`max_failed_requests`](Self::max_failed_requests).
+    pub fn max_failed_requests(mut self, max: u32) -> Self {
+        self.max_failed_requests = Some(max);
         self
     }
 

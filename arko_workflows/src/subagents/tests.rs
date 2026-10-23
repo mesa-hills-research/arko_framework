@@ -1133,6 +1133,53 @@ async fn runs_work_in_their_own_directories() {
     assert!(error.to_string().contains("does not exist"), "{error}");
 }
 
+/// A start that is refused, by the host's hook or for its workspace, doesn't
+/// use up a handle: the next one gets the handle the refused one would have had.
+#[tokio::test]
+async fn a_refused_start_does_not_use_up_a_handle() {
+    let workspace = Workspace::new();
+    let server = serve(vec![(
+        "lead",
+        vec![
+            start("Refuse this."),
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Escape.", "workspace": "../.." }),
+            ),
+            start("Count the files."),
+            wait(),
+        ],
+    )])
+    .await;
+    let config = SubagentsConfig::default().hook(Arc::new(
+        |request: &StartRequest, _config: &mut AgentConfig| {
+            if request.task.contains("Refuse") {
+                Err("not today".to_string())
+            } else {
+                Ok(())
+            }
+        },
+    ));
+    let workflow = builder(&server, &workspace, config).build().unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    assert!(result_of(&lead[1], "lead", 0).contains("not today"));
+    assert!(result_of(&lead[2], "lead", 1).contains("must be inside your working directory"));
+    let started = result_of(&lead[3], "lead", 2);
+    assert!(
+        started.starts_with("Started r1 (agent `worker`)."),
+        "{started}"
+    );
+    let handles: Vec<_> = workflow
+        .subagents()
+        .into_iter()
+        .map(|run| run.handle)
+        .collect();
+    assert_eq!(handles, ["r1"]);
+}
+
 /// A provider that makes a directory per run and counts removals.
 #[derive(Debug, Default)]
 struct Folders {

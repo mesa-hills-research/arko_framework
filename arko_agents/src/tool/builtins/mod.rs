@@ -75,15 +75,15 @@ mod tests {
     async fn file_tools_open_the_path_the_workspace_check_judges() {
         let root = temp_root();
         let workspace = root.join("ws");
-        for directory in ["~", "$HOME", "sub"] {
+        for directory in ["$HOME", "sub"] {
             std::fs::create_dir_all(workspace.join(directory)).unwrap();
         }
         let context = TaskContext::new(uuid::Uuid::new_v4(), "tester", "", &workspace);
         for (path, inside) in [
-            ("~/a.txt", true),
+            ("sub/a.txt", true),
             ("$HOME/b.txt", true),
             (" sub/../c.txt\n", true),
-            ("~/../../outside.txt", false),
+            ("$HOME/../../outside.txt", false),
         ] {
             let target = resolve_path(path, &workspace).unwrap();
             assert_eq!(target.starts_with(&workspace), inside, "{path}");
@@ -116,7 +116,7 @@ mod tests {
             assert_eq!(read, "1 | three", "{path}");
         }
         let listed = ListFilesTool
-            .execute(&context, params(json!({"directory": " ~/ "})))
+            .execute(&context, params(json!({"directory": " sub/ "})))
             .await
             .unwrap();
         assert!(

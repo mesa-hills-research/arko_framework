@@ -403,6 +403,7 @@ async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
     let fake = Fake::new(json!([[
         {"tool": "Read", "input": {"file_path": "notes.txt"}},
         {"tool": "Read", "input": {"file_path": outside}},
+        {"tool": "Grep", "input": {"pattern": "a", "path": "~/"}},
         {"tool": "Bash", "input": {"command": "ls"}},
         complete("Read it"),
     ]]));
@@ -424,10 +425,18 @@ async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
             .unwrap()
             .contains("outside the workspace")
     );
-    // Not listed: refused, though Claude Code has it.
+    // A search of `~`, which Claude Code may expand to the home directory.
     assert_eq!(posts[2]["is_error"], true);
     assert!(
         posts[2]["output"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace")
+    );
+    // Not listed: refused, though Claude Code has it.
+    assert_eq!(posts[3]["is_error"], true);
+    assert!(
+        posts[3]["output"]
             .as_str()
             .unwrap()
             .contains("not available")
@@ -436,7 +445,7 @@ async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
         .iter()
         .filter(|event| matches!(event, AgentEvent::ToolRejected { .. }))
         .count();
-    assert_eq!(rejected, 2);
+    assert_eq!(rejected, 3);
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::ToolResult { tool_name, output, .. } if tool_name == "Read" && output == "builtin Read ran"
