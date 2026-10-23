@@ -296,8 +296,56 @@ async fn a_stop_of_the_middle_of_a_tree_stops_what_is_below_it() {
         ),
         "{told}"
     );
-    // r3's stop is news for r2, which had ended already.
-    assert!(!told.contains("r3"), "{told}");
+    // It names r3, which stopped with it.
+    assert!(told.contains("Its worker r3 stopped with it."), "{told}");
+}
+
+/// The news of a run that failed names the subagents that stopped with it.
+#[tokio::test]
+async fn a_failed_run_s_news_names_the_subagents_that_stopped_with_it() {
+    use crate::test_support::Reply;
+    let server = ResponsesServer::start_async(|_, body| {
+        let (role, turn) = (role(&body), turn(&body));
+        let id = format!("{role}_{turn}");
+        let reply = match (role.as_str(), turn) {
+            ("lead", 0) => Reply::Stream(tool_call_turn(&id, "start_agent", start_args("One."))),
+            ("lead", 1) => Reply::Stream(tool_call_turn(&id, "wait_for_agents", json!({}))),
+            ("r1", 0) => Reply::Stream(tool_call_turn(&id, "start_agent", start_args("Two."))),
+            ("r1", _) => Reply::Status {
+                status: 401,
+                retry_after: None,
+                body: json!({"error": {"message": "synthetic 401", "type": "auth"}}).to_string(),
+            },
+            ("r2", _) => Reply::Stream(tool_call_turn(&id, "gate", json!({}))),
+            _ => Reply::Stream(tool_call_turn(
+                &id,
+                "complete_task",
+                json!({ "summary": format!("{role} done") }),
+            )),
+        };
+        Box::pin(async move { Some(reply) })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = nested_builder(&server, &workspace, SubagentsConfig::default().max_depth(3))
+        .agent_tool("worker", gate)
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let told = result_of(&lead[2], "lead", 1);
+    assert!(
+        told.contains("r1 (agent `worker`) stopped with an error:")
+            && told.contains("\n\nIts worker r2 stopped with it.\n\nIts run can't go on"),
+        "{told}"
+    );
+}
+
+fn start_args(task: &str) -> Value {
+    json!({ "agent": "worker", "task": task })
 }
 
 /// A run's `stop_agent` of its subagent stops that subagent's subagents too,
