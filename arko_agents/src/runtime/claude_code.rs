@@ -86,6 +86,12 @@ const ASKED: &str = "Your questions were sent to the user. End your turn now wit
 
 const CONTINUE: &str = "Continue the task from where you left off.";
 
+/// The most characters of context a hook carries. Claude Code replaces a
+/// hook's text of over 10,000 characters with a preview of 2 KB and the name
+/// of a file, so what doesn't fit waits for the next hook (or the next
+/// input).
+const HOOK_MAX_CHARS: usize = 9_500;
+
 /// How long a stopped session waits for the CLI to say what became of a note
 /// sent just before.
 const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
@@ -1640,11 +1646,33 @@ impl ClaudeCodeRun {
         let mut update_ids = Vec::new();
         let mut arrived = 0;
         let mut typed = String::new();
-        if let Some(update) = self
-            .turn_context
-            .as_ref()
-            .and_then(|source| source.context_update(self.task.id))
-        {
+        // A hook's text is limited. The injections that don't fit, and the
+        // source's update when little room is left, wait for the next one.
+        let mut deferred = Vec::new();
+        let mut room = HOOK_MAX_CHARS;
+        if !with_images {
+            let (mut used, mut fit) = (0, 0);
+            for content in &self.task.pending_context_injections {
+                let chars = content.chars().count() + 2;
+                if fit > 0 && used + chars > HOOK_MAX_CHARS {
+                    break;
+                }
+                used += chars;
+                fit += 1;
+            }
+            deferred = self.task.pending_context_injections.split_off(fit);
+            room = HOOK_MAX_CHARS.saturating_sub(used);
+        }
+        let update = self.turn_context.as_ref().and_then(|source| {
+            if with_images {
+                source.context_update(self.task.id)
+            } else if deferred.is_empty() && room >= HOOK_MAX_CHARS / 2 {
+                source.context_update_within(self.task.id, room)
+            } else {
+                None
+            }
+        });
+        if let Some(update) = update {
             if !update.content.trim().is_empty()
                 || !update.user_content.trim().is_empty()
                 || !update.images.is_empty()
@@ -1686,7 +1714,7 @@ impl ClaudeCodeRun {
             .unwrap_or_default();
         ids.append(&mut self.held_context_ids);
         ids.append(&mut update_ids);
-        self.task.pending_context_injections.clear();
+        self.task.pending_context_injections = deferred;
         // Claude Code has it, so arko calls that start from now on count
         // newer context.
         self.context_arrivals.caught_up();

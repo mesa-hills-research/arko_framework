@@ -1420,6 +1420,30 @@ fn posted(seq: u64, text: &str) -> PostedNote {
     }
 }
 
+/// An update for a hook counts the characters of the host's notes only. The
+/// operator's notes reach the agent apart from the hook.
+#[test]
+fn an_update_for_a_hook_limits_the_notes_that_are_not_the_operators() {
+    let text = "n".repeat(4_000);
+    let by = |source: NoteSource| {
+        (1..=4)
+            .map(|seq| {
+                let mut note = posted(seq, &text);
+                note.note.source = source.clone();
+                note
+            })
+            .collect::<Vec<_>>()
+    };
+    let host = by(NoteSource::Host);
+    let host = host.iter().collect::<Vec<_>>();
+    assert_eq!(fitting(&host, 9_000), 2);
+    // The first always comes.
+    assert_eq!(fitting(&host, 100), 1);
+    let operator = by(NoteSource::Operator);
+    let operator = operator.iter().collect::<Vec<_>>();
+    assert_eq!(fitting(&operator, 100), 4);
+}
+
 /// A prompt shows the newest notes within the caps, the newest always in
 /// full, and says how many older ones it leaves out.
 #[test]

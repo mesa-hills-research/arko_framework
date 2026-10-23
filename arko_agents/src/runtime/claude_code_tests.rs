@@ -4587,6 +4587,149 @@ async fn context_sent_while_an_arko_call_waits_ends_the_wait() {
     assert!(context.contains("The build finished."), "{context}");
 }
 
+/// Three items of 6,000 characters that a source gives as many at a time as
+/// the limit it is asked with allows, whole and in order.
+struct Items {
+    left: std::sync::Mutex<Vec<String>>,
+    limits: std::sync::Mutex<Vec<usize>>,
+}
+
+impl crate::runtime::TurnContextSource for Items {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update_within(
+        &self,
+        _task_id: uuid::Uuid,
+        max_chars: usize,
+    ) -> Option<crate::runtime::TurnContext> {
+        self.limits.lock().unwrap().push(max_chars);
+        let mut left = self.left.lock().unwrap();
+        let mut content = String::new();
+        while let Some(item) = left.first() {
+            let chars = content.chars().count() + item.chars().count() + 2;
+            if !content.is_empty() && chars > max_chars {
+                break;
+            }
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(&left.remove(0));
+        }
+        (!content.is_empty()).then(|| content.into())
+    }
+}
+
+/// Claude Code replaces the text of a hook over 10,000 characters with a
+/// preview, so the runtime asks a source for at most 9,500 and what doesn't
+/// fit comes with the next result, in order.
+#[tokio::test]
+async fn context_over_the_hooks_limit_comes_with_the_next_results() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let items = Arc::new(Items {
+        left: std::sync::Mutex::new(["a", "b", "c"].map(|letter| letter.repeat(6_000)).to_vec()),
+        limits: Default::default(),
+    });
+    let runtime =
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(items.clone());
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let hooked: Vec<String> = fake
+        .logged("post")
+        .iter()
+        .filter_map(|post| {
+            post["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(hooked.len(), 3, "{}", hooked.len());
+    for (hook, letter) in hooked.iter().zip(["a", "b", "c"]) {
+        assert!(hook.chars().count() <= 10_000, "{}", hook.chars().count());
+        assert!(hook.contains(&letter.repeat(6_000)));
+    }
+    assert!(items.left.lock().unwrap().is_empty());
+    assert!(items.limits.lock().unwrap().iter().all(|max| *max <= 9_500));
+}
+
+/// The same for context sent to the agent (messages, terminal updates): the
+/// injections that don't fit wait for the next result, in order.
+#[tokio::test]
+async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["waits_for_context", "Grep"]),
+        "Wait for news.".into(),
+        fake.workspace(),
+        None,
+    );
+    let tool = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    tokio::time::timeout(Duration::from_secs(20), tool.started.notified())
+        .await
+        .expect("the call runs");
+    for letter in ["a", "b", "c"] {
+        run.commands
+            .send(UserCommand::InjectContext {
+                content: letter.repeat(6_000),
+            })
+            .await
+            .unwrap();
+    }
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.pending_context_injections.is_empty());
+    let hooked: Vec<String> = fake
+        .logged("post")
+        .iter()
+        .filter_map(|post| {
+            post["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(hooked.iter().all(|hook| hook.chars().count() <= 10_000));
+    // Each reached the agent whole, in order, and none with another.
+    let order = ["a", "b", "c"].map(|letter| {
+        let whole = letter.repeat(6_000);
+        let at: Vec<_> = hooked
+            .iter()
+            .enumerate()
+            .filter(|(_, hook)| hook.contains(&whole))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(at.len(), 1, "{letter}: {at:?}");
+        at[0]
+    });
+    assert!(order[0] < order[1] && order[1] < order[2], "{order:?}");
+}
+
 /// An arko tool that runs until the test releases it.
 #[derive(Debug, Default)]
 struct Slow {

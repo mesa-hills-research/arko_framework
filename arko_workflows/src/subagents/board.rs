@@ -15,8 +15,8 @@ use arko_agents::{AgentConfig, Task};
 
 use super::{
     MailItem, MailKind, MailSender, PendingLaunch, StartRequest, SubagentEvent, SubagentEventKind,
-    SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot, UPDATE_MAX_MAIL_BYTES,
-    WorkspaceRequest,
+    SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot, UPDATE_MAIL_FRAME,
+    UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
 };
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
@@ -455,9 +455,11 @@ impl Board {
     }
 
     /// The mail for run `task_id`'s next turn boundary, oldest first, as
-    /// much as fits ([`UPDATE_MAX_MAIL_BYTES`]), with the items' ids
-    /// (`mail:<id>`): it counts as delivered.
-    pub(crate) fn update(&self, task_id: Uuid) -> Option<(String, Vec<String>)> {
+    /// much as fits ([`UPDATE_MAX_MAIL_BYTES`] and `max_chars` characters),
+    /// with the items' ids (`mail:<id>`): it counts as delivered. An item
+    /// that alone is over `max_chars` is cut, with the file that holds all
+    /// of it.
+    pub(crate) fn update(&self, task_id: Uuid, max_chars: usize) -> Option<(String, Vec<String>)> {
         let (text, taken) = {
             let mut state = self.state.lock();
             let indices = state
@@ -471,15 +473,29 @@ impl Board {
                 return None;
             }
             let now = Utc::now();
-            let mut bytes = 0;
+            let limit = max_chars.saturating_sub(UPDATE_MAIL_FRAME);
+            let (mut bytes, mut chars) = (0, 0);
             let mut parts = Vec::new();
             let mut taken = Vec::new();
             for &index in &indices {
-                let excerpt = state.mail[index].excerpt();
-                if !parts.is_empty() && bytes + excerpt.len() > UPDATE_MAX_MAIL_BYTES {
+                let mut excerpt = state.mail[index].excerpt();
+                // With the "- " before it and the line break after.
+                let mut len = excerpt.chars().count() + 3;
+                if parts.is_empty() && len > limit {
+                    let item = &mut state.mail[index];
+                    if item.file.is_none() {
+                        item.file = self.save_mail(item.id, &item.heading, &item.body);
+                    }
+                    excerpt = item.excerpt_within(limit);
+                    len = excerpt.chars().count() + 3;
+                }
+                if !parts.is_empty()
+                    && (bytes + excerpt.len() > UPDATE_MAX_MAIL_BYTES || chars + len > limit)
+                {
                     break;
                 }
                 bytes += excerpt.len();
+                chars += len;
                 parts.push(format!("- {excerpt}"));
                 state.mail[index].delivered_at = Some(now);
                 taken.push(state.mail[index].clone());
@@ -3252,5 +3268,88 @@ mod record_tests {
             .await;
         assert!(ctx.subagents.lead_stops.lock().is_empty());
         assert_eq!(workflow.subagents()[0].error.as_deref(), Some(words));
+    }
+}
+
+/// What a context update takes of the mail, within a limit of characters.
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    /// A board holding one unread message to `run` for each of `bodies`.
+    fn board_with(bodies: &[String], run: Uuid) -> Board {
+        let mail = bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| MailItem {
+                id: index as u64 + 1,
+                to: run,
+                from: MailSender::Host,
+                kind: MailKind::Message,
+                heading: "A message from the host:".into(),
+                body: body.clone(),
+                at: Utc::now(),
+                delivered_at: None,
+                file: None,
+                withheld: false,
+            })
+            .collect();
+        let snapshot = SubagentsSnapshot {
+            mail,
+            ..SubagentsSnapshot::default()
+        };
+        Board::new(None, Some(snapshot), &[], Uuid::new_v4(), None)
+    }
+
+    /// Within 9,500 characters, three items of 6,000 come one at a time, whole
+    /// and in order, each with the count of those that follow. Without a
+    /// limit they come together.
+    #[test]
+    fn items_that_dont_fit_the_limit_wait_for_the_next_update() {
+        let run = Uuid::new_v4();
+        let bodies = ["a", "b", "c"].map(|letter| letter.repeat(6_000)).to_vec();
+        let board = board_with(&bodies, run);
+        for (number, body) in bodies.iter().enumerate() {
+            let (text, ids) = board.update(run, 9_500).unwrap();
+            assert!(text.chars().count() < 9_500, "{}", text.chars().count());
+            assert!(text.contains(body), "item {number}");
+            assert_eq!(ids, [format!("mail:{}", number + 1)]);
+            let follows = 2 - number;
+            assert_eq!(
+                text.contains(&format!("({follows} more items follow")),
+                follows > 1
+            );
+            assert_eq!(text.contains("(1 more item follows"), follows == 1);
+        }
+        assert!(board.update(run, 9_500).is_none());
+        let (text, ids) = board_with(&bodies, run).update(run, usize::MAX).unwrap();
+        assert_eq!(ids.len(), 3);
+        assert!(bodies.iter().all(|body| text.contains(body)));
+    }
+
+    /// An item that alone is over the limit is cut at a line end. The update
+    /// names the file that holds all of it, saved for the purpose, and the
+    /// line to read on from.
+    #[test]
+    fn an_item_alone_over_the_limit_is_cut_with_its_file_and_the_line_to_read_on_from() {
+        let run = Uuid::new_v4();
+        let body = (1..=800)
+            .map(|number| format!("line {number} of the report"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let board = board_with(std::slice::from_ref(&body), run);
+        let (text, _) = board.update(run, 9_500).unwrap();
+        assert!(text.chars().count() < 9_500, "{}", text.chars().count());
+        let file = board.snapshot().unwrap().mail[0].file.clone().unwrap();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        let marker = "read on from line ";
+        let at = text.find(marker).unwrap() + marker.len();
+        let line: usize = text[at..].split(' ').next().unwrap().parse().unwrap();
+        assert!(text.contains(&file.display().to_string()));
+        // The last line shown is the one before it, and it is not shown.
+        let lines = saved.lines().collect::<Vec<_>>();
+        assert!(text.contains(lines[line - 2]), "{text}");
+        assert!(!text.contains(lines[line - 1]), "{text}");
+        let _ = std::fs::remove_file(file);
     }
 }

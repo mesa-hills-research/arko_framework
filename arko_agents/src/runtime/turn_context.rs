@@ -83,6 +83,17 @@ pub trait TurnContextSource: Send + Sync {
         self.turn_context(task_id).map(TurnContext::from)
     }
 
+    /// [`context_update`](Self::context_update) for an update that has to be
+    /// short: a Claude Code agent gets it in a hook, and Claude Code replaces
+    /// a hook's text of over 10,000 characters with a short preview and a file
+    /// name. `content` should be at most `max_chars` characters, and what
+    /// doesn't fit should stay for the next call (whole items, in order,
+    /// except an item that is alone over the limit, which is cut). The
+    /// default ignores the limit.
+    fn context_update_within(&self, task_id: Uuid, _max_chars: usize) -> Option<TurnContext> {
+        self.context_update(task_id)
+    }
+
     /// The host's identifier of `content`, a payload it sent with
     /// [`InjectContext`](crate::runtime::command::UserCommand::InjectContext),
     /// for [`AgentEvent::ContextInjected`](crate::runtime::event::AgentEvent::ContextInjected).

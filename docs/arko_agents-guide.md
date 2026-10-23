@@ -886,7 +886,13 @@ Besides answers to the waiting states, a running task accepts:
   from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
   the hook. It counts as delivered once it is written. The CLI reports each message by its
   UUID, and one it cancels (the turn stopped before the model's next request) goes with the
-  task's next input. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  task's next input. A hook's text is limited, since Claude Code replaces over 10,000
+  characters with a preview and a file name. The runtime asks the source for at most 9,500
+  (`TurnContextSource::context_update_within`, which by default is `context_update`), and
+  the queued `InjectContext` content that doesn't fit, whole and in order, waits for the
+  next result or input. A workflow's source holds back the notes and mail that don't fit,
+  and cuts a mail item that alone is over the limit. An injection or note that alone is
+  over it is not split. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying
