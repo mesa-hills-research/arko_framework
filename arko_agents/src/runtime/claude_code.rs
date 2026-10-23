@@ -41,7 +41,9 @@ use crate::handover::{
 use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
 use crate::snapshot::TaskSnapshots;
-use crate::task::{ApprovalReason, ErrorRecoveryCause, RunningToolCall, Task, TaskState};
+use crate::task::{
+    ApprovalReason, CONTEXT_UPDATE, ErrorRecoveryCause, RunningToolCall, Task, TaskState,
+};
 use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME, message_user};
 use crate::tool::{
     InterceptorConfig, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
@@ -84,8 +86,9 @@ const ASKED: &str = "Your questions were sent to the user. End your turn now wit
 
 const CONTINUE: &str = "Continue the task from where you left off.";
 
-/// The heading of a context update.
-const CONTEXT_HEADING: &str = "# Workflow context update";
+/// How long a stopped session waits for the CLI to say what became of a note
+/// sent just before.
+const NOTE_VERDICT_WAIT: Duration = Duration::from_secs(1);
 
 /// What the runtime sends to have Claude Code compact the session's
 /// conversation: Claude Code's own command, as a user message.
@@ -764,6 +767,9 @@ pub(super) struct ClaudeCodeRun {
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
     delivered_context: Vec<String>,
+    /// The notes the user typed that were sent as messages, by the UUID of the
+    /// message, until the CLI reports what became of them.
+    sent_notes: HashMap<String, String>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -896,6 +902,7 @@ impl ClaudeCodeRun {
             approval: None,
             after_result: HashMap::new(),
             delivered_context: Vec::new(),
+            sent_notes: HashMap::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
             api_error: None,
@@ -1710,7 +1717,7 @@ impl ClaudeCodeRun {
         let content = if content.is_empty() {
             content
         } else {
-            format!("{CONTEXT_HEADING}\n\n{content}")
+            format!("{CONTEXT_UPDATE}\n\n{content}")
         };
         Some((content, typed, images))
     }
@@ -2226,6 +2233,17 @@ impl ClaudeCodeRun {
                 .reply
                 .send(cc::PermissionDecision::deny("The agent is stopping."));
         }
+        // A note written just before the turn stopped is cancelled after the
+        // turn's result.
+        while !self.sent_notes.is_empty()
+            && let Ok(Some(message)) =
+                tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
+        {
+            if let cc::Message::Other(raw) = message {
+                self.note_settled(&raw);
+            }
+        }
+        self.sent_notes.clear();
         match session.close().await {
             // Claude Code saved the session as it closed: its transcript
             // holds every call's outcome.
@@ -2913,21 +2931,28 @@ impl ClaudeCodeRun {
         }
         let mut recorded = texts.clone();
         if !typed.is_empty() {
-            // It reaches the model at this tool boundary. The runtime can't
-            // see when, so it counts as delivered once it is written. Where
-            // that fails, the hook has it.
-            if let Err(error) = session.send_human(&typed).await {
-                log::warn!(
-                    "Task {}: could not send the user's notes as a message ({error}). They go in the hook.",
-                    self.task.id
-                );
-                texts.push(typed.clone());
-            }
-            recorded.push(if headed {
-                typed
+            // A note alone has the update's heading in the record and the hook.
+            let shown = if headed {
+                typed.clone()
             } else {
-                format!("{CONTEXT_HEADING}\n\n{typed}")
-            });
+                format!("{CONTEXT_UPDATE}\n\n{typed}")
+            };
+            // It counts as delivered once it is written, and goes with the
+            // next input if the CLI cancels it (see `note_settled`). Where
+            // the write fails, the hook has it.
+            match session.send_human(&typed).await {
+                Ok(uuid) => {
+                    self.sent_notes.insert(uuid, typed);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Task {}: could not send the user's notes as a message ({error}). They go in the hook.",
+                        self.task.id
+                    );
+                    texts.push(shown.clone());
+                }
+            }
+            recorded.push(shown);
         }
         self.delivered_context.push(recorded.join("\n\n"));
         self.emit_context_receipts().await?;
@@ -2935,6 +2960,23 @@ impl ClaudeCodeRun {
             return Ok(cc::Hook::proceed());
         }
         Ok(add_context(&texts.join("\n\n")))
+    }
+
+    /// The CLI reports each message it is sent by its UUID, from `queued` to
+    /// `completed`, or `cancelled` when the turn stopped before the model's
+    /// next request. A note it cancelled never reached the model, so it goes
+    /// with the next input.
+    fn note_settled(&mut self, raw: &Value) {
+        let state = raw["state"].as_str();
+        if raw["type"] == "command_lifecycle"
+            && matches!(state, Some("completed" | "cancelled"))
+            && let Some(text) = raw["command_uuid"]
+                .as_str()
+                .and_then(|uuid| self.sent_notes.remove(uuid))
+            && state == Some("cancelled")
+        {
+            self.queue_context(text, false);
+        }
     }
 
     /// A message the session reported.
@@ -3262,6 +3304,7 @@ impl ClaudeCodeRun {
                 _ => {}
             },
             cc::Message::RateLimit { info, .. } => self.plan_usage_reported(&info, session).await?,
+            cc::Message::Other(raw) => self.note_settled(&raw),
             cc::Message::System(system) if system.subtype == "model_refusal_fallback" => {
                 // Claude Code retried the refused request on its fallback
                 // model.

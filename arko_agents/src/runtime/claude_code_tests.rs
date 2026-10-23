@@ -685,6 +685,16 @@ async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() 
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["text"], TYPED_NOTE);
     assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
+    // The message is no input of the session: no entry of the transcript
+    // stands for it, and the CLI completed it.
+    assert_eq!(fake.logged("user").len(), 1);
+    let uuid = sent[0]["uuid"].as_str().unwrap();
+    assert!(
+        !task.claude_code_entries.values().any(|entry| entry == uuid),
+        "{:?}",
+        task.claude_code_entries
+    );
+    assert!(task.pending_context_injections.is_empty());
     let posts = fake.logged("post");
     let hooked = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -718,6 +728,37 @@ async fn a_note_the_user_typed_alone_leaves_the_hook_empty() {
     let posts = fake.logged("post");
     assert!(posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null());
     assert!(texts(&task).contains(&format!("# Workflow context update\n\n{TYPED_NOTE}")));
+}
+
+/// A note the CLI cancels (the turn stopped before the model's next request)
+/// never reached the model, so it goes with the task's next input.
+#[tokio::test]
+async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"sleep": 0.5},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content: "",
+            asked: Default::default(),
+        }),
+    );
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+        .await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
 }
 
 /// A completed task continued with a new configuration resumes its session
@@ -1630,6 +1671,8 @@ async fn the_task_s_images_go_with_its_first_input() {
 /// before.
 struct SecondUpdateWithImage {
     asked: std::sync::atomic::AtomicUsize,
+    /// The note is the part of the update the user typed.
+    typed: bool,
 }
 
 impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
@@ -1639,14 +1682,20 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
 
     fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
         let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let note = String::from("A new note: look at this.");
+        let (content, user_content) = if self.typed {
+            (String::new(), note)
+        } else {
+            (note, String::new())
+        };
         (asked == 1).then(|| crate::runtime::TurnContext {
-            content: "A new note: look at this.".into(),
+            content,
+            user_content,
             ids: vec!["note:3".into()],
             images: vec![crate::runtime::ContextImage::new(
                 "The image of note 3:",
                 pixels(),
             )],
-            ..Default::default()
         })
     }
 }
@@ -1670,6 +1719,7 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
         Arc::new(SecondUpdateWithImage {
             asked: Default::default(),
+            typed: false,
         }),
     );
     let (task, events) = start_with(task, runtime).finish().await;
@@ -1703,6 +1753,73 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     );
     assert!(task.pending_context_images.is_empty());
     // The note counts as given with its text.
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injected[0], ["note:3"]);
+}
+
+/// The same for a note the user typed: its text goes at once as their
+/// message, with the line saying the image follows, and the image goes with
+/// the next input.
+#[tokio::test]
+async fn a_note_the_user_typed_with_an_image_sends_its_text_at_once_and_the_image_next() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "todo"}}, {"text": "Looked."}],
+        [complete("Seen")],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(SecondUpdateWithImage {
+            asked: Default::default(),
+            typed: true,
+        }),
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let sent = fake.logged("midturn");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
+    assert_eq!(
+        sent[0]["text"],
+        "A new note: look at this.\n\n(The image of this update can't come during a turn. It comes with your next input.)"
+    );
+    let posts = fake.logged("post");
+    assert!(posts[0]["answer"]["hookSpecificOutput"]["additionalContext"].is_null());
+    let recorded = texts(&task)
+        .into_iter()
+        .filter(|text| text.contains("look at this"))
+        .collect::<Vec<_>>();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].starts_with("# Workflow context update\n\nA new note"));
+    let next: Value = serde_json::from_str(&user_texts(&fake)[1]).unwrap();
+    let blocks = next
+        .as_array()
+        .expect("an input with an image is sent as blocks");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("The images an earlier update said would follow."),
+        "{next}"
+    );
+    assert_eq!(
+        &blocks[1..],
+        [
+            json!({"type": "text", "text": "The image of note 3:"}),
+            image_block()
+        ]
+    );
+    assert!(task.pending_context_images.is_empty());
     let injected: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

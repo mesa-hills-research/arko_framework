@@ -884,7 +884,9 @@ Besides answers to the waiting states, a running task accepts:
   an update the user typed themselves (a workflow's operator notes), which follows
   `content` in the same message. During a turn, a Claude Code agent gets it as a message
   from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
-  the hook. It counts as delivered once it is written. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  the hook. It counts as delivered once it is written. The CLI reports each message by its
+  UUID, and one it cancels (the turn stopped before the model's next request) goes with the
+  task's next input. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying

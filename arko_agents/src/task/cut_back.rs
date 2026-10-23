@@ -45,7 +45,7 @@ pub struct UserTurn {
     pub images: usize,
 }
 
-const CONTEXT_UPDATE: &str = "# Workflow context update";
+pub(crate) const CONTEXT_UPDATE: &str = "# Workflow context update";
 
 impl Task {
     /// The messages of the current conversation the host sent, oldest
