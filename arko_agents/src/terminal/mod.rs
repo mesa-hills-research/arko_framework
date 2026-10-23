@@ -1188,11 +1188,18 @@ fn persist(config: &TerminalConfig, record: &Record) -> Result<()> {
         "job.json.{}.tmp",
         WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(&temporary, directory.join("job.json")).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })?;
+    replace_file(&temporary, &directory.join("job.json"), &bytes)?;
     Ok(())
+}
+
+/// Writes `bytes` to `temporary` and moves it over `target`. The temporary
+/// file is gone afterwards, also when the write or the move fails.
+fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(temporary, bytes)
+        .and_then(|()| std::fs::rename(temporary, target))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(temporary);
+        })
 }
 
 #[cfg(test)]

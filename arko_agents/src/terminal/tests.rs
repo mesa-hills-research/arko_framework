@@ -1760,6 +1760,23 @@ async fn records_written_at_once_all_succeed() {
     assert_eq!(files, ["job.json"]);
 }
 
+/// A write that fails partway, as on a full disk, leaves no temporary file.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_write_of_a_record_leaves_no_temporary_file() {
+    // Every write to /dev/full fails with "no space left on device".
+    if !Path::new("/dev/full").exists() {
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("arko-terminal-full-{}", Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let temporary = directory.join("job.json.0.tmp");
+    std::os::unix::fs::symlink("/dev/full", &temporary).unwrap();
+    assert!(replace_file(&temporary, &directory.join("job.json"), b"{}").is_err());
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    std::fs::remove_dir(&directory).unwrap();
+}
+
 /// Calls in the foreground are listed until they move or end, and move
 /// once. A closed manager moves none.
 #[tokio::test]
