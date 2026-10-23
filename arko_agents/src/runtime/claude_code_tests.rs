@@ -2406,7 +2406,9 @@ async fn a_moved_task_runs_claude_codes_tools_in_its_directory() {
 /// Claude Code makes a file tool's relative path absolute from the directory
 /// it runs in, so after a move the path arrives under the session's
 /// directory. It becomes the task's, for the path policy, the host and the
-/// CLI, unless it is inside the task's directory already.
+/// CLI, unless it is inside the task's directory already. A path outside the
+/// session's directory, also one that leaves it by `..`, stays as it is and
+/// is refused.
 #[tokio::test]
 async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
     let fake = Fake::new(json!([]));
@@ -2414,16 +2416,25 @@ async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
     let session = fake.workspace();
     let project = session.join("project");
     let path = |directory: &Path, name: &str| directory.join(name).display().to_string();
+    let elsewhere = path(&std::env::temp_dir(), "arko-elsewhere.txt");
+    let up = path(&session, "../up.txt");
     let script = json!([[complete("First")], [
         {"tool": "Read", "input": {"file_path": path(&session, "notes.txt")}},
         {"tool": "NotebookEdit", "input": {"notebook_path": path(&session, "n.ipynb"), "new_source": "x"}},
         {"tool": "Write", "input": {"file_path": path(&project, "kept.txt"), "content": "c"}},
+        {"tool": "MultiEdit", "input": {"file_path": path(&session, "m.txt"),
+                                        "edits": [{"old_string": "a", "new_string": "b"}]}},
         {"tool": "Edit", "input": {"file_path": path(&session, "src/lib.rs"),
                                    "old_string": "a", "new_string": "b"}},
+        {"tool": "Read", "input": {"file_path": elsewhere}},
+        {"tool": "Read", "input": {"file_path": up}},
         complete("Done"),
     ]]);
     std::fs::write(fake.dir.join("script.json"), script.to_string()).unwrap();
-    let mut config = config(&fake, &["Read", "NotebookEdit", "Write", "Edit"]);
+    let mut config = config(
+        &fake,
+        &["Read", "NotebookEdit", "Write", "MultiEdit", "Edit"],
+    );
     config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::AutoReject;
     config.tool_config.tool_specific_configs.insert(
         "Edit".into(),
@@ -2462,8 +2473,8 @@ async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
     assert!(matches!(&task.current_state, TaskState::Completed { summary } if summary == "Done"));
 
     let calls = executed_built_ins(&fake);
-    assert_eq!(calls.len(), 4);
-    for call in &calls {
+    assert_eq!(calls.len(), 7);
+    for call in &calls[..5] {
         assert_eq!(call["is_error"], false, "{call}");
     }
     assert_eq!(calls[0]["input"]["file_path"], path(&project, "notes.txt"));
@@ -2472,7 +2483,20 @@ async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
         path(&project, "n.ipynb")
     );
     assert_eq!(calls[2]["input"]["file_path"], path(&project, "kept.txt"));
-    assert_eq!(calls[3]["input"]["file_path"], path(&project, "src/lib.rs"));
+    assert_eq!(calls[3]["input"]["file_path"], path(&project, "m.txt"));
+    assert_eq!(calls[4]["input"]["file_path"], path(&project, "src/lib.rs"));
+    // Outside the session's directory, also by `..`: refused as written.
+    for (call, given) in calls[5..].iter().zip([&elsewhere, &up]) {
+        assert_eq!(call["is_error"], true, "{call}");
+        assert!(
+            call["output"]
+                .as_str()
+                .unwrap()
+                .contains("outside the workspace"),
+            "{call}"
+        );
+        assert_eq!(call["input"]["file_path"], *given);
+    }
 }
 
 /// A call that waits for approval runs in the task's directory too.

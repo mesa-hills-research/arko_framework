@@ -344,15 +344,11 @@ fn from_session_directory(
         _ => return None,
     };
     let path = input.get(parameter)?.as_str()?;
-    if crate::utils::is_path_in_workspace(path, directory).ok()?
-        || !crate::utils::is_path_in_workspace(path, from).ok()?
-    {
+    if crate::utils::is_path_in_workspace(path, directory).ok()? {
         return None;
     }
-    let relative = crate::utils::relative_to_working_directory(
-        &crate::utils::resolve_path(path, from).ok()?,
-        from,
-    );
+    // Below `from` by the rule the path policy uses (case and `\\?\` on Windows).
+    let relative = crate::utils::path_in_workspace(path, from).ok()??;
     let moved = crate::utils::resolve_path(&relative.to_string_lossy(), directory).ok()?;
     let mut mapped = input.clone();
     mapped[parameter] = Value::String(moved.to_string_lossy().into_owned());

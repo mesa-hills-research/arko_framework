@@ -132,17 +132,27 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 /// Claude Code's search tools and programs a tool starts may expand it to the
 /// home directory.
 pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
+    Ok(path_in_workspace(path, workspace)?.is_some())
+}
+
+/// The part of `path` below `workspace`, when [`is_path_in_workspace`] finds
+/// it inside (empty for the workspace itself), else `None`. It holds no `..`.
+pub(crate) fn path_in_workspace(
+    path: &str,
+    workspace: &Path,
+) -> Result<Option<PathBuf>, ArkoAgentsError> {
     let root = normalize_path(&absolute(workspace)?);
     let resolved = resolve_path(path, workspace)?;
     if starts_with_home(path) {
-        return Ok(false);
+        return Ok(None);
     }
     let mut components = resolved.components();
-    Ok(root.components().all(|root_component| {
+    let inside = root.components().all(|root_component| {
         components
             .next()
             .is_some_and(|c| same_component(c, root_component))
-    }))
+    });
+    Ok(inside.then(|| components.as_path().to_path_buf()))
 }
 
 /// Whether the first component of `path` is `~`.
@@ -345,6 +355,42 @@ mod tests {
         }
         for path in ["~user/notes", "~notes", "src/~/notes", "src/~"] {
             assert!(is_path_in_workspace(path, &workspace).unwrap(), "{path}");
+        }
+    }
+
+    /// The part below the workspace follows the rule of `is_path_in_workspace`.
+    #[test]
+    fn the_part_of_a_path_below_the_workspace() {
+        let workspace = std::env::temp_dir().join("arko-below-workspace");
+        let below = |path: &str| path_in_workspace(path, &workspace).unwrap();
+        assert_eq!(
+            below("src/./lib.rs"),
+            Some(PathBuf::from("src").join("lib.rs"))
+        );
+        let absolute = workspace.join("src").join("..").join("a.txt");
+        assert_eq!(
+            below(&absolute.to_string_lossy()),
+            Some(PathBuf::from("a.txt"))
+        );
+        assert_eq!(below("."), Some(PathBuf::new()));
+        for outside in ["../a.txt", "src/../../a.txt", "~/a.txt"] {
+            assert_eq!(below(outside), None, "{outside}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_part_below_a_windows_workspace_ignores_case_and_a_verbatim_prefix() {
+        let workspace = Path::new(r"C:\Work\Project");
+        for path in [
+            r"c:\work\project\src\lib.rs",
+            r"\\?\C:\Work\Project\src\lib.rs",
+        ] {
+            assert_eq!(
+                path_in_workspace(path, workspace).unwrap(),
+                Some(PathBuf::from(r"src\lib.rs")),
+                "{path}"
+            );
         }
     }
 

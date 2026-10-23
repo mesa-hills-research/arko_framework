@@ -1528,12 +1528,13 @@ it runs in the new directory, where the command guard and the path policy judge 
 command starts with a `cd` into the directory (`Set-Location` for `PowerShell`), a `Glob` or
 `Grep` without a `path` searches it, and a relative `path` is made absolute from it. The
 change travels in the answer to Claude Code's `PreToolUse` hook (`updatedInput`), or in the
-approval for a call that waits for one, and the host still sees the call as the model wrote
-it. Claude Code makes the `file_path` of `Read`, `Edit` and `Write` (and the `notebook_path`
-of `NotebookEdit`) absolute from the session's directory before the hook runs. The runtime
-maps a path under that directory and outside the task's workspace to the same path under the
-task's directory, and the path policy, the host and the CLI all see the mapped path. A path
-inside the workspace stays as it is.
+approval for a call that waits for one, and the host still sees those calls as the model
+wrote them. Claude Code makes the `file_path` of `Read`, `Edit` and `Write` (and the
+`notebook_path` of `NotebookEdit`) absolute from the session's directory before the hook runs.
+The runtime maps a path under that directory and outside the task's workspace to the same path
+under the task's directory, and the path policy, the host and the CLI all see the mapped path.
+A path inside the workspace stays as it is. On Windows the match ignores case and a `\\?\`
+prefix, as the path policy does.
 
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
 handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
