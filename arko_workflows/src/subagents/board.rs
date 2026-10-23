@@ -879,9 +879,7 @@ impl Board {
         record: &SubagentRecord,
     ) -> Result<AgentConfig, String> {
         let mut config = ctx
-            .agent_configs
-            .get(&record.agent)
-            .cloned()
+            .registered_config(&record.agent)
             .ok_or_else(|| format!("there is no agent `{}`", record.agent))?;
         if let Some(hook) = self.config.as_ref().and_then(|config| config.hook.as_ref()) {
             hook.prepare(&start_request(self.workflow_run_id, record), &mut config)?;

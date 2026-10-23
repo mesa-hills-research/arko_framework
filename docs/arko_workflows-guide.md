@@ -923,6 +923,13 @@ agent's configuration, not its lead's. A run keeps the system prompt it started 
 auto-loaded skill in the prompt and the list of on-demand skills stay as they were, and
 `load_skill` returns the current text.
 
+`Workflow::set_agent_skills(agent, skills)` replaces the skills configuration an agent is
+registered with while the workflow runs (`None` removes it). The runs that start after the
+call have the new skills, such as a new conversation of the agent and the subagents it
+starts later. A run already going keeps its prompt and skills, so its prompt cache holds. A
+run that is continued, resumed or recovered takes the new embedded skills as described above.
+The change isn't saved, so a resumed workflow has the skills its builder registers.
+
 The event log records every event, including each streamed text and reasoning
 fragment. `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least

@@ -879,6 +879,31 @@ impl Workflow {
             .then(|| self.context.recipient_status(agent_name))
     }
 
+    /// Replaces the skills configuration that registered agent `agent` starts
+    /// runs with, its embedded skills included (`None` removes it). Returns
+    /// `AgentNotFound` for an unregistered agent.
+    ///
+    /// The runs that start after the call have the new skills, such as a new
+    /// conversation of the agent and the subagents it starts later. A run
+    /// already going keeps its system prompt and skills, so its prompt cache
+    /// holds. A run that is continued, resumed or recovered takes the new
+    /// embedded skills as it takes registered ones. The change isn't saved
+    /// in checkpoints.
+    pub fn set_agent_skills(
+        &self,
+        agent: &str,
+        skills: Option<arko_agents::skill::SkillsConfig>,
+    ) -> Result<(), WorkflowError> {
+        if !self.context.agent_configs.contains_key(agent) {
+            return Err(WorkflowError::AgentNotFound(agent.to_string()));
+        }
+        self.context
+            .agent_skills
+            .write()
+            .insert(agent.to_string(), skills);
+        Ok(())
+    }
+
     /// Add a manual cost entry to the workflow budget.
     ///
     /// The cost is recorded in the cost ledger and counted toward the
@@ -2773,6 +2798,7 @@ impl WorkflowBuilder {
             resource_tracker,
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
+            agent_skills: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             agent_results: parking_lot::RwLock::new(resumed_results.clone()),

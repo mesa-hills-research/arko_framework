@@ -557,3 +557,95 @@ async fn a_resumed_pause_takes_the_registered_embedded_skills() {
         bodies.last().unwrap()
     );
 }
+
+/// The host replaces an agent's skills while a subagent of it runs. That
+/// subagent keeps its instructions and its `load_skill`, and the lead's
+/// conversation keeps its own. A subagent that starts after the change, and a
+/// new conversation of the lead, have the new skills.
+#[tokio::test]
+async fn skills_set_while_runs_go_reach_only_the_runs_that_start_after() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let server = ResponsesServer::start_async({
+        let gate = gate.clone();
+        move |_, body| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                let sent = |id: &str| body.contains(&format!("call_{id}"));
+                let (name, arguments) = match role(&body).as_str() {
+                    "r1" if !sent("w1") => {
+                        // The first subagent's first request waits for the change.
+                        gate.acquire().await.unwrap().forget();
+                        ("w1", load("worker-old-review"))
+                    }
+                    "r2" if !sent("w2") => ("w2", load("worker-new-review")),
+                    "r1" | "r2" => return Some(Reply::Stream(complete_turn("w", "worker done"))),
+                    _ if body.contains("Hello again.") => {
+                        return Some(Reply::Stream(complete_turn("again", "lead again")));
+                    }
+                    _ if body.contains("Go on.") && !sent("b1") => ("b1", start("Review again.")),
+                    _ if body.contains("Go on.") && !sent("b2") => ("b2", wait()),
+                    _ if !body.contains("Go on.") && !sent("a1") => ("a1", start("Review it.")),
+                    _ if !body.contains("Go on.") && !sent("a2") => ("a2", wait()),
+                    _ => return Some(Reply::Stream(complete_turn("lead", "lead done"))),
+                };
+                Some(Reply::Stream(tool_call_turn(
+                    name,
+                    arguments.0,
+                    arguments.1,
+                )))
+            })
+        }
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(
+        &server,
+        &workspace,
+        Some(skills("lead-old", "lead-old-review")),
+        Some(skills("worker-old", "worker-old-review")),
+    )
+    .build()
+    .unwrap();
+    let host = async {
+        super::tests::until(|| !bodies_of(&server, "r1").is_empty()).await;
+        workflow
+            .set_agent_skills("lead", Some(skills("lead-new", "lead-new-review")))
+            .unwrap();
+        workflow
+            .set_agent_skills("worker", Some(skills("worker-new", "worker-new-review")))
+            .unwrap();
+        gate.add_permits(1);
+    };
+    let (first, ()) = tokio::join!(within(workflow.run_agent("lead", "Hello.")), host);
+    within(workflow.continue_agent(&first.unwrap(), "Go on."))
+        .await
+        .unwrap();
+    within(workflow.run_agent("lead", "Hello again."))
+        .await
+        .unwrap();
+    assert!(matches!(
+        workflow.set_agent_skills("nobody", None),
+        Err(crate::WorkflowError::AgentNotFound(_))
+    ));
+
+    let old = bodies_of(&server, "r1");
+    assert!(old.iter().all(|body| body.contains("The worker-old text.")));
+    assert!(old.iter().all(|body| !body.contains("worker-new")));
+    assert!(output_of(&old[1], "w1").contains("The worker-old-review text."));
+    let new = bodies_of(&server, "r2");
+    assert!(new.iter().all(|body| body.contains("The worker-new text.")));
+    assert!(new.iter().all(|body| !body.contains("worker-old")));
+    assert!(output_of(&new[1], "w2").contains("The worker-new-review text."));
+
+    // The lead's conversation keeps its instructions, a new one has the new ones.
+    let bodies = server.bodies();
+    let continued = bodies.iter().rfind(|body| body.contains("Go on.")).unwrap();
+    assert!(continued.contains("The lead-old text."), "{continued}");
+    assert!(!continued.contains("lead-new"), "{continued}");
+    let again = bodies
+        .iter()
+        .find(|body| body.contains("Hello again."))
+        .unwrap();
+    assert!(again.contains("The lead-new text."), "{again}");
+    assert!(!again.contains("lead-old"), "{again}");
+}

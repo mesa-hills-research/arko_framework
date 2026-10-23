@@ -2691,11 +2691,7 @@ impl WorkflowEngine {
     /// embedded skills come from the registered configuration, and the
     /// invalid skill policy of a task that had no skills configuration.
     fn restore_embedded_skills(task: &mut Task, ctx: &SharedContext, agent_name: &str) {
-        let Some(current) = ctx
-            .agent_configs
-            .get(agent_name)
-            .and_then(|registered| registered.skills_config.as_ref())
-        else {
+        let Some(current) = ctx.registered_skills(agent_name) else {
             return;
         };
         if current.embedded.is_empty() {
@@ -2715,7 +2711,7 @@ impl WorkflowEngine {
             })
         };
         if skills.embedded.is_empty() {
-            skills.embedded = current.embedded.clone();
+            skills.embedded = current.embedded;
         }
     }
 
@@ -3092,12 +3088,15 @@ impl WorkflowEngine {
                     .is_none_or(|run_id| ctx.subagents.offers_start_tools(run_id)),
         };
         let prepared = admission.and_then(|()| {
+            let registered;
             let base_config = match &options.config {
                 Some(config) => config,
-                None => ctx
-                    .agent_configs
-                    .get(agent_name)
-                    .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?,
+                None => {
+                    registered = ctx
+                        .registered_config(agent_name)
+                        .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?;
+                    &registered
+                }
             };
             // A configuration given at the start (a subagent's) is checked
             // here. The builder checked the workflow's own.
