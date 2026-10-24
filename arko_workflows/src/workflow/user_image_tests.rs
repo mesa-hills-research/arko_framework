@@ -76,8 +76,8 @@ async fn a_run_and_its_continuation_send_their_images_with_their_prompts() {
         .await
         .unwrap();
     // Held once, in the first message.
-    assert!(first.task.initial_task_images.is_empty());
-    assert_eq!(first.task.initial_images(), [png("Zmlyc3Q=")]);
+    assert!(first.task().unwrap().initial_task_images.is_empty());
+    assert_eq!(first.task().unwrap().initial_images(), [png("Zmlyc3Q=")]);
     assert_text_then_image(
         &last_user_content(&server.bodies()[0]),
         "Describe this.",
@@ -258,7 +258,10 @@ async fn an_image_the_model_cant_take_as_it_is_is_fitted_before_it_is_sent() {
     let url = content[1]["image_url"].as_str().unwrap();
     let data = url.strip_prefix("data:image/png;base64,").unwrap();
     assert_eq!(png(data).dimensions(), Some((40, 30)));
-    assert_eq!(result.task.initial_images()[0].dimensions(), Some((40, 30)));
+    assert_eq!(
+        result.task().unwrap().initial_images()[0].dimensions(),
+        Some((40, 30))
+    );
 }
 
 /// A conversation that holds as many images, or as much image data, as a
@@ -359,7 +362,7 @@ async fn a_session_resumes_without_the_image_files_it_lost() {
             .build()
             .unwrap();
         let restored = resumed.agent_result(worker.agent_run_id).unwrap();
-        let first_message = &restored.task.conversation.messages[0];
+        let first_message = &restored.task().unwrap().conversation.messages[0];
         assert!(
             first_message.content.iter().any(|content| matches!(
                 content,

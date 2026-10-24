@@ -116,7 +116,7 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
     assert_eq!(agent.status, AgentRunStatus::Cancelled);
     // The runtime's generic reason is replaced by the workflow's.
     assert_eq!(
-        agent.task.current_state,
+        agent.task().unwrap().current_state,
         TaskState::Cancelled {
             reason: "Workflow cancelled.".to_string()
         }

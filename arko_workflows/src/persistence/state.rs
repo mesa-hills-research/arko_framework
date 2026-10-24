@@ -7,7 +7,7 @@ use crate::budget::CostLedger;
 use crate::freshness::FreshnessSnapshot;
 use crate::memory::MemoryTier;
 use crate::messaging::AgentMessage;
-use crate::workflow::result::{AgentResult, AgentRunStatus};
+use crate::workflow::result::{AgentResult, AgentRunStatus, RunTask, TaskInfo};
 
 /// A serializable snapshot of the entire workflow state.
 #[derive(Serialize, Deserialize)]
@@ -125,6 +125,13 @@ pub struct AgentRunRecord {
     /// Absent for other runs, and in checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by: Option<crate::workflow::stop::StopRecord>,
+    /// What the run's task holds besides its conversation
+    /// ([`AgentResult::info`]), so that a resume reads the task file of a
+    /// run that completed only when its task is needed. Absent for a run
+    /// that was running, and in checkpoints from before it existed, whose
+    /// task files are all read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<TaskInfo>,
 }
 
 impl AgentRunRecord {
@@ -138,9 +145,100 @@ impl AgentRunRecord {
             task_file,
             // A recorded interrupted run's usage is all in the ledger.
             usage_charged: (result.status == AgentRunStatus::Interrupted)
-                .then_some(result.task.usage_history.len()),
+                .then_some(result.info().model_calls),
             stopped_by: result.stopped_by.clone(),
+            info: Some(result.info().clone()),
         }
+    }
+
+    /// Whether a resume reads this run's task only when it is needed, for a
+    /// run that completed (not in a stop's wrap-up) whose task the
+    /// checkpoint describes. Every other run's task is read at once.
+    fn loads_on_demand(&self) -> bool {
+        self.info.is_some() && self.status == AgentRunStatus::Completed && self.stopped_by.is_none()
+    }
+}
+
+/// The task file of a checkpoint's agent run.
+pub(crate) struct TaskFile {
+    pub(crate) path: std::path::PathBuf,
+    images: std::sync::Arc<super::images::ImageFiles>,
+    agent_name: String,
+    agent_run_id: uuid::Uuid,
+    /// The status the checkpoint recorded, and whether it charged part of
+    /// the run's usage (a run that was running).
+    status: AgentRunStatus,
+    usage_charged: bool,
+}
+
+impl TaskFile {
+    fn of(
+        record: &AgentRunRecord,
+        run_dir: &std::path::Path,
+        images: &std::sync::Arc<super::images::ImageFiles>,
+    ) -> Self {
+        Self {
+            path: run_dir.join(&record.task_file),
+            images: images.clone(),
+            agent_name: record.agent_name.clone(),
+            agent_run_id: record.agent_run_id,
+            status: record.status.clone(),
+            usage_charged: record.usage_charged.is_some(),
+        }
+    }
+
+    /// Reads the task, with a warning in `warnings` for its images no longer
+    /// available. Fails with what a [`WorkflowError::Persistence`](crate::WorkflowError::Persistence)
+    /// says.
+    pub(crate) fn read(&self, warnings: &mut Vec<String>) -> Result<arko_agents::Task, String> {
+        std::fs::read_to_string(&self.path)
+            .map_err(crate::WorkflowError::from)
+            .and_then(|json| {
+                let mut task = self
+                    .images
+                    .with(|| serde_json::from_str::<arko_agents::Task>(&json))?;
+                // An image file gone or damaged doesn't keep the task from
+                // loading: the image becomes a line saying so.
+                let gone = task.settle_unavailable_images();
+                if !gone.is_empty() {
+                    warnings.push(format!(
+                        "{} image(s) of agent '{}' ({}) are no longer available, each replaced by a line saying so: {}",
+                        gone.len(),
+                        self.agent_name,
+                        self.agent_run_id,
+                        gone.join("; ")
+                    ));
+                }
+                Ok(task)
+            })
+            .map_err(|error: crate::WorkflowError| {
+                format!(
+                    "the checkpoint's task file {} for agent '{}' can't be loaded: {error}",
+                    self.path.display(),
+                    self.agent_name
+                )
+            })
+    }
+
+    /// The warning when `task` holds another state than the checkpoint
+    /// recorded.
+    pub(crate) fn state_warning(&self, task: &arko_agents::Task) -> Option<String> {
+        let now = AgentRunStatus::of_state(&task.current_state);
+        // A cancellation older versions recorded as a failure loads as
+        // cancelled: the same outcome. A run that was running is
+        // interrupted whatever state its task was saved in (a wait the
+        // workflow was answering, say).
+        let same = now == self.status
+            || (self.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled)
+            || (self.status == AgentRunStatus::Interrupted && self.usage_charged);
+        (!same).then(|| {
+            format!(
+                "The task file {} of agent '{}' holds another state ({now:?}) than the checkpoint recorded ({:?}).",
+                self.path.display(),
+                self.agent_name,
+                self.status
+            )
+        })
     }
 }
 
@@ -160,13 +258,15 @@ pub struct MissingTaskState {
 }
 
 impl WorkflowState {
-    /// The checkpoint's agent results, with their tasks, including those it holds (a
-    /// checkpoint written before task files were referenced), then those
-    /// whose tasks are in the task files of `run_dir`, the directory
-    /// holding the checkpoint. A run whose latest state the checkpoint
-    /// lacks ([`missing_task_states`](Self::missing_task_states)) is
-    /// restored as last saved, and one never saved isn't. Each is logged
-    /// as a warning.
+    /// The checkpoint's agent results, including those it holds with their
+    /// tasks (a checkpoint written before task files were referenced), then
+    /// those whose tasks are in the task files of `run_dir`, the directory
+    /// holding the checkpoint. The task of a run that completed is read
+    /// from its file when [`AgentResult::task`] is first called, when the
+    /// checkpoint describes it ([`AgentRunRecord::info`]), and every other
+    /// task now. A run whose latest state the checkpoint lacks
+    /// ([`missing_task_states`](Self::missing_task_states)) is restored as
+    /// last saved, and one never saved isn't. Each is logged as a warning.
     pub fn agent_results_in(
         &self,
         run_dir: &std::path::Path,
@@ -185,40 +285,32 @@ impl WorkflowState {
     ) -> Result<(Vec<AgentResult>, Vec<String>), crate::WorkflowError> {
         let mut results = self.agent_results.clone();
         let mut warnings = Vec::new();
+        // Absolute, as the tasks read on demand are read later, maybe after
+        // the process changed its working directory.
+        let run_dir = &std::path::absolute(if run_dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            run_dir
+        })?;
         // The tasks' images are in the run directory's image files.
         let images = super::images::ImageFiles::in_run_dir(run_dir);
         for record in &self.agent_runs {
-            let path = run_dir.join(&record.task_file);
-            let task = std::fs::read_to_string(&path)
-                .map_err(crate::WorkflowError::from)
-                .and_then(|json| {
-                    let mut task = images.with(|| serde_json::from_str::<arko_agents::Task>(&json))?;
-                    // An image file gone or damaged doesn't keep the task from
-                    // loading: the image becomes a line saying so.
-                    let gone = task.settle_unavailable_images();
-                    if !gone.is_empty() {
-                        warnings.push(format!(
-                            "{} image(s) of agent '{}' ({}) are no longer available, each replaced by a line saying so: {}",
-                            gone.len(),
-                            record.agent_name,
-                            record.agent_run_id,
-                            gone.join("; ")
-                        ));
-                    }
-                    Ok(task)
-                })
-                .map_err(|error| {
-                    crate::WorkflowError::Persistence(format!(
-                        "the checkpoint's task file {} for agent '{}' can't be loaded: {error}",
-                        path.display(),
-                        record.agent_name
-                    ))
-                })?;
-            if let Some(missing) = self
+            let file = TaskFile::of(record, run_dir, &images);
+            let missing = self
                 .missing_task_states
                 .iter()
-                .find(|missing| missing.agent_run_id == record.agent_run_id)
+                .find(|missing| missing.agent_run_id == record.agent_run_id);
+            if let (Some(info), None) = (&record.info, missing)
+                && record.loads_on_demand()
             {
+                let task = RunTask::in_file(info.clone(), file);
+                results.push(AgentResult::of_record(record, task));
+                continue;
+            }
+            let task = file
+                .read(&mut warnings)
+                .map_err(crate::WorkflowError::Persistence)?;
+            if let Some(missing) = missing {
                 let mut result = AgentResult::of_task(record.agent_name.clone(), task);
                 result.stopped_by = record.stopped_by.clone();
                 warnings.push(format!(
@@ -228,36 +320,13 @@ impl WorkflowState {
                     missing.reason,
                     missing.status,
                     result.status,
-                    path.display()
+                    file.path.display()
                 ));
                 results.push(result);
                 continue;
             }
-            let now = AgentRunStatus::of_state(&task.current_state);
-            // A cancellation older versions recorded as a failure loads as
-            // cancelled: the same outcome. A run that was running is
-            // interrupted whatever state its task was saved in (a wait the
-            // workflow was answering, say).
-            let same = now == record.status
-                || (record.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled)
-                || (record.status == AgentRunStatus::Interrupted && record.usage_charged.is_some());
-            if !same {
-                warnings.push(format!(
-                    "The task file {} of agent '{}' holds another state ({now:?}) than the checkpoint recorded ({:?}).",
-                    path.display(),
-                    record.agent_name,
-                    record.status
-                ));
-            }
-            results.push(AgentResult {
-                agent_run_id: record.agent_run_id,
-                agent_name: record.agent_name.clone(),
-                status: record.status.clone(),
-                summary: record.summary.clone(),
-                error: record.error.clone(),
-                task,
-                stopped_by: record.stopped_by.clone(),
-            });
+            warnings.extend(file.state_warning(&task));
+            results.push(AgentResult::of_record(record, RunTask::loaded(task)));
         }
         for missing in &self.missing_task_states {
             if missing.last_saved.is_none() {
@@ -433,7 +502,7 @@ mod tests {
         let (results, warnings) = state.agent_results_with_warnings(&workspace.0).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(results[0].status, AgentRunStatus::Completed);
-        assert!(results[0].task.parent.is_none());
+        assert!(results[0].task().unwrap().parent.is_none());
         assert_eq!(results[1].status, AgentRunStatus::Interrupted);
         assert_eq!(
             results[1].error.as_deref(),
@@ -486,9 +555,112 @@ mod tests {
             crate::workflow::result::AgentRunStatus::Cancelled
         );
         assert!(matches!(
-            result.task.current_state,
+            result.task().unwrap().current_state,
             arko_agents::TaskState::Cancelled { .. }
         ));
         assert!(state.cancellation.is_none());
+    }
+
+    /// A checkpoint of one completed run of agent `coder`, whose task file is
+    /// in `run_dir` and whose record describes its task (`info`) or not.
+    fn one_completed_run(run_dir: &std::path::Path, info: bool) -> WorkflowState {
+        let mut task = arko_agents::Task::new(
+            crate::test_support::agent_config("Coder"),
+            "prompt".into(),
+            run_dir.into(),
+            None,
+        );
+        task.set_state(arko_agents::TaskState::Completed {
+            summary: "done".into(),
+        });
+        let file = format!("agents/{}/version.json", task.id);
+        std::fs::create_dir_all(run_dir.join(&file).parent().unwrap()).unwrap();
+        std::fs::write(run_dir.join(&file), serde_json::to_string(&task).unwrap()).unwrap();
+        let mut record = AgentRunRecord::of(&AgentResult::of_task("coder".into(), task), file);
+        if !info {
+            record.info = None;
+        }
+        serde_json::from_value(serde_json::json!({
+            "workflow_name": "state-test",
+            "checkpoint_id": uuid::Uuid::new_v4(),
+            "timestamp": "2026-10-01T00:00:00Z",
+            "memory_snapshot": [],
+            "message_queues": {},
+            "budget_spent": 0.0,
+            "agent_runs": [record],
+        }))
+        .unwrap()
+    }
+
+    /// A task file that can't be read fails with the same error whether its
+    /// task is read at once (a record without `info`) or on demand.
+    #[test]
+    fn a_task_file_that_cant_be_read_fails_alike_at_once_and_on_demand() {
+        let workspace = crate::test_support::Workspace::new();
+        let described = one_completed_run(&workspace.0, true);
+        let older = one_completed_run(&workspace.0, false);
+        std::fs::remove_dir_all(workspace.0.join("agents")).unwrap();
+        let results = described.agent_results_in(&workspace.0).unwrap();
+        let on_demand = results[0].task().unwrap_err();
+        let at_once = older.agent_results_in(&workspace.0).unwrap_err();
+        let message = |error: &crate::WorkflowError| match error {
+            crate::WorkflowError::Persistence(message) => message
+                .replace(&described.agent_runs[0].task_file, "TASK FILE")
+                .replace(&older.agent_runs[0].task_file, "TASK FILE"),
+            error => panic!("{error}"),
+        };
+        assert_eq!(message(&on_demand), message(&at_once));
+        assert_eq!(
+            on_demand.to_string().matches("Persistence error").count(),
+            1
+        );
+    }
+
+    /// Set for [`the_child_of_the_directory_test`].
+    const DIRECTORY_CHILD: &str = "ARKO_TEST_DIRECTORY_CHILD";
+
+    /// A task read on demand is read from the run directory the checkpoint
+    /// was read from, also after the process changed its working directory.
+    /// The process here is a child of the test, which changes its directory.
+    #[test]
+    fn a_task_read_on_demand_is_read_from_the_run_directory_given() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let test = format!("{module}::the_child_of_the_directory_test");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(DIRECTORY_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(
+            report.contains("1 passed"),
+            "the child test didn't run: {report}"
+        );
+    }
+
+    /// The part of the test above that changes the working directory, in a
+    /// process of its own. Alone it does nothing.
+    #[test]
+    fn the_child_of_the_directory_test() {
+        if std::env::var_os(DIRECTORY_CHILD).is_none() {
+            return;
+        }
+        let workspace = crate::test_support::Workspace::new();
+        let state = one_completed_run(&workspace.0, true);
+        let start = std::env::current_dir().unwrap();
+        std::env::set_current_dir(workspace.0.parent().unwrap()).unwrap();
+        let relative = std::path::Path::new(workspace.0.file_name().unwrap());
+        let results = state.agent_results_in(relative).unwrap();
+        std::env::set_current_dir(&workspace.0).unwrap();
+        let read = results[0]
+            .task()
+            .map(|task| task.initial_task_prompt.clone());
+        std::env::set_current_dir(start).unwrap();
+        assert_eq!(read.unwrap(), "prompt");
     }
 }

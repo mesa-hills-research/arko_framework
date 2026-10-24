@@ -284,7 +284,7 @@ impl Workflow {
         interrupted
             .into_iter()
             .filter(|result| {
-                (result.task.parent.is_none() || engine::is_orphaned(&self.context, result))
+                (result.info().parent.is_none() || engine::is_orphaned(&self.context, result))
                     && !self.context.subagents.is_subagent(result.agent_run_id)
             })
             .collect()
@@ -389,7 +389,7 @@ impl Workflow {
         if !self.context.agent_configs.contains_key(agent_name) {
             return Err(WorkflowError::AgentNotFound(agent_name.to_string()));
         }
-        let arko_agents::TaskState::Completed { summary } = &task.current_state else {
+        let arko_agents::TaskState::Completed { .. } = &task.current_state else {
             return Err(WorkflowError::BuilderInvalid(format!(
                 "only a completed task (such as a branch) can be imported, not one {:?}",
                 task.current_state
@@ -401,16 +401,10 @@ impl Workflow {
                 task.id
             )));
         }
-        let result = AgentResult {
-            agent_run_id: task.id,
-            agent_name: agent_name.to_string(),
-            status: AgentRunStatus::Completed,
-            summary: summary.clone(),
-            error: None,
-            task,
-            stopped_by: None,
-        };
-        self.context.notes.adopted(&self.context, result.task.id);
+        let result = AgentResult::of_task(agent_name.to_string(), task);
+        self.context
+            .notes
+            .adopted(&self.context, result.agent_run_id);
         engine::record_result(&self.context, result.clone());
         Ok(result)
     }
@@ -742,7 +736,18 @@ impl Workflow {
             .into_iter()
             .map(|result| result.agent_run_id)
             .collect::<HashSet<_>>();
-        let results = self.context.agent_results.read().clone();
+        // Only the runs that may be listed are copied: interrupted ones, and
+        // those a stop ended.
+        let results = self
+            .context
+            .agent_results
+            .read()
+            .iter()
+            .filter(|result| {
+                result.stopped_by.is_some() || interrupted.contains(&result.agent_run_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let candidates = results
             .into_iter()
             .filter_map(|result| {
@@ -763,12 +768,12 @@ impl Workflow {
                 } else {
                     match result.status {
                         AgentRunStatus::Cancelled
-                            if result.task.parent.is_none()
+                            if result.info().parent.is_none()
                                 || engine::is_orphaned(&self.context, &result) =>
                         {
                             Restart::Reopen
                         }
-                        AgentRunStatus::Completed if result.task.parent.is_none() => {
+                        AgentRunStatus::Completed if result.info().parent.is_none() => {
                             Restart::Continue
                         }
                         _ => return None,
@@ -789,7 +794,7 @@ impl Workflow {
             .into_iter()
             .filter(|run| {
                 run.result
-                    .task
+                    .info()
                     .parent
                     .is_none_or(|parent| !listed.contains(&parent.task_id))
             })
@@ -2554,7 +2559,7 @@ impl WorkflowBuilder {
             }
         }
 
-        let resume_state = match &self.resume_from {
+        let mut resume_state = match &self.resume_from {
             Some(path) => {
                 let json = std::fs::read_to_string(path)?;
                 let images = crate::persistence::images::ImageFiles::in_run_dir(
@@ -2584,8 +2589,8 @@ impl WorkflowBuilder {
         // A subagent's saved configuration is its agent's as the host's hook
         // changes it.
         let restored_subagents = resume_state
-            .as_ref()
-            .and_then(|state| state.subagents.clone());
+            .as_mut()
+            .and_then(|state| state.subagents.take());
         let mut prepared = HashMap::new();
         if let (Some(snapshot), Some(hook)) = (
             &restored_subagents,
@@ -2676,6 +2681,12 @@ impl WorkflowBuilder {
                         .iter()
                         .map(|run| (run.agent_run_id, run.task_file.clone())),
                 );
+            } else {
+                // The next checkpoint writes every task into this other run
+                // directory, so a task that can't be read fails the resume.
+                for result in &resumed_results {
+                    result.task()?;
+                }
             }
         }
         let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
@@ -2705,11 +2716,11 @@ impl WorkflowBuilder {
                 }
             }
         }
-        let budget = if let Some(state) = &resume_state {
+        let budget = if let Some(state) = &mut resume_state {
             let budget = BudgetManager::from_ledger(
                 budget_limit,
                 self.budget_warning,
-                state.cost_ledger.clone(),
+                std::mem::take(&mut state.cost_ledger),
             );
             // A run that was running may have reported usage the ledger
             // didn't record yet.
@@ -2721,7 +2732,7 @@ impl WorkflowBuilder {
                     .iter()
                     .find(|result| result.agent_run_id == record.agent_run_id)
                 {
-                    for usage in result.task.usage_history.iter().skip(charged) {
+                    for usage in result.task()?.usage_history.iter().skip(charged) {
                         budget.add_agent_cost(&record.agent_name, usage);
                     }
                 }
@@ -2804,7 +2815,6 @@ impl WorkflowBuilder {
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
-            agent_results: parking_lot::RwLock::new(resumed_results.clone()),
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
             handover_thresholds: self.handover_thresholds,
@@ -2870,6 +2880,9 @@ impl WorkflowBuilder {
             voters: self.voters.clone().unwrap_or_default(),
             event_tx,
             event_hub: Default::default(),
+            // Last: the registry and the subagents above read the results
+            // first, and then they move in instead of being copied.
+            agent_results: parking_lot::RwLock::new(resumed_results),
         });
 
         if let Some(services_config) = self.services_config {
@@ -2997,7 +3010,7 @@ fn validate_resumed_agent_configs(
             && result.stopped_by.is_some()
             && !engine::is_superseded(result);
         // A run the host reconfigured keeps the configuration it gave it.
-        if (!continued && !stopped) || result.task.reconfigured {
+        if (!continued && !stopped) || result.info().reconfigured {
             continue;
         }
         let Some(current) = prepared
@@ -3013,7 +3026,7 @@ fn validate_resumed_agent_configs(
         }
         if keep_saved.contains(&result.agent_name) {
             // Its own configuration drives it: only its tools must be here.
-            let saved = &result.task.agent_config;
+            let saved = &result.info().agent_config;
             // A Claude Code agent's names of Claude Code's own tools are the
             // CLI's.
             let claude_code = saved.llm_config.model.provider == arko_ai::Provider::ClaudeCode;
@@ -3040,7 +3053,7 @@ fn validate_resumed_agent_configs(
             continue;
         }
         let current = normalized_resume_agent_config(current, &workflow_tools)?;
-        let saved = normalized_resume_agent_config(&result.task.agent_config, &workflow_tools)?;
+        let saved = normalized_resume_agent_config(&result.info().agent_config, &workflow_tools)?;
         if current != saved {
             let mut changed = Vec::new();
             changed_fields(&saved, &current, "", &mut changed);
@@ -3067,7 +3080,7 @@ fn superseded_on_recovery(
     verifier_agents: &HashSet<&str>,
     depth: usize,
 ) -> bool {
-    let Some(link) = result.task.parent else {
+    let Some(link) = result.info().parent else {
         return false;
     };
     let Some(parent) = by_id.get(&link.task_id) else {
@@ -3080,11 +3093,11 @@ fn superseded_on_recovery(
     if depth < 64 && superseded_on_recovery(parent, by_id, verifier_agents, depth + 1) {
         return true;
     }
-    let call = parent
-        .task
-        .running_tool_calls
-        .iter()
-        .find(|call| call.tool_call_id == link.tool_call_id && call.output.is_none());
+    let call = parent.task().ok().and_then(|task| {
+        task.running_tool_calls
+            .iter()
+            .find(|call| call.tool_call_id == link.tool_call_id && call.output.is_none())
+    });
     let resumed = call.is_some_and(|call| {
         call.tool_name == RUN_WORKFLOW_AGENT_TOOL_NAME && call.custom_output.is_none()
     });

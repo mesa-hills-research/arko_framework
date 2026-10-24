@@ -2298,7 +2298,7 @@ impl Deliberator<'_> {
                 // their outcomes at once.
                 None => {
                     let ids: Vec<String> = pending.iter().map(|d| d.id.clone()).collect();
-                    let at = (architect.agent_run_id, architect.task.usage_history.len());
+                    let at = (architect.agent_run_id, architect.info().model_calls);
                     self.store
                         .update(|ledger| {
                             for decision in &mut ledger.decisions {
@@ -2680,7 +2680,11 @@ impl Deliberator<'_> {
                         // A credential or the configuration, resumed once
                         // already in this process (agents in Claude Code
                         // pause for it rather than fail).
-                        None => match AgentPause::of(&run.task.current_state) {
+                        None => match run
+                            .task()
+                            .ok()
+                            .and_then(|task| AgentPause::of(&task.current_state))
+                        {
                             Some(AgentPause::ErrorRecovery {
                                 cause: ErrorRecoveryCause::NonRetryable,
                                 error,
@@ -2716,7 +2720,11 @@ impl Deliberator<'_> {
             AgentRunStatus::WaitingForInput => {
                 Call::Continue(run.clone(), prompts::NO_USER.to_string())
             }
-            AgentRunStatus::Paused => match AgentPause::of(&run.task.current_state) {
+            AgentRunStatus::Paused => match run
+                .task()
+                .ok()
+                .and_then(|task| AgentPause::of(&task.current_state))
+            {
                 Some(AgentPause::ErrorRecovery {
                     cause: ErrorRecoveryCause::Refusal,
                     ..
@@ -2772,7 +2780,7 @@ impl Deliberator<'_> {
 /// stopped giving it before the continuation was saved (the run has made
 /// no request since).
 fn to_deliver(ledger: &Ledger, architect: &AgentResult) -> Vec<Decision> {
-    let requests = architect.task.usage_history.len();
+    let requests = architect.info().model_calls;
     ledger
         .decisions
         .iter()
@@ -2817,7 +2825,7 @@ fn find_run(workflow: &Workflow, agent: &str, marker: &str) -> Option<AgentResul
         .read()
         .iter()
         .rev()
-        .find(|run| run.agent_name == agent && run.task.initial_task_prompt.starts_with(marker))
+        .find(|run| run.agent_name == agent && run.info().initial_task_prompt.starts_with(marker))
         .cloned()
 }
 
@@ -3130,32 +3138,28 @@ mod tests {
             std::env::temp_dir(),
             None,
         );
-        let mut architect = AgentResult {
-            agent_run_id: uuid::Uuid::new_v4(),
-            agent_name: "architect".into(),
-            status: AgentRunStatus::Completed,
-            summary: String::new(),
-            error: None,
-            task,
-            stopped_by: None,
+        // The architect's run `run_id` after `requests` model requests.
+        let architect = |run_id: uuid::Uuid, requests: usize| {
+            let mut task = task.clone();
+            task.usage_history = vec![Default::default(); requests];
+            let mut architect = AgentResult::of_task("architect".into(), task);
+            architect.agent_run_id = run_id;
+            architect
         };
-        architect.task.usage_history = vec![Default::default(); 7];
+        let run_id = uuid::Uuid::new_v4();
         let mut decision = decision();
         decision.delivered = true;
-        decision.delivered_at = Some((architect.agent_run_id, 7));
+        decision.delivered_at = Some((run_id, 7));
         let ledger = Ledger {
             decisions: vec![decision],
             active: None,
         };
         // Stopped before the continuation was saved: given again.
-        assert_eq!(to_deliver(&ledger, &architect).len(), 1);
+        assert_eq!(to_deliver(&ledger, &architect(run_id, 7)).len(), 1);
         // The continuation ran (it made requests): delivered.
-        architect.task.usage_history.push(Default::default());
-        assert!(to_deliver(&ledger, &architect).is_empty());
+        assert!(to_deliver(&ledger, &architect(run_id, 8)).is_empty());
         // Another architect run (a fresh start reads `decisions/` itself).
-        architect.task.usage_history.truncate(3);
-        architect.agent_run_id = uuid::Uuid::new_v4();
-        assert!(to_deliver(&ledger, &architect).is_empty());
+        assert!(to_deliver(&ledger, &architect(uuid::Uuid::new_v4(), 3)).is_empty());
     }
 
     #[test]
@@ -3612,7 +3616,7 @@ mod tests {
             .agent_results
             .read()
             .iter()
-            .filter(|run| run.task.initial_task_prompt.starts_with(&job.marker))
+            .filter(|run| run.info().initial_task_prompt.starts_with(&job.marker))
             .cloned()
             .collect()
     }
@@ -3626,19 +3630,29 @@ mod tests {
         );
         let paused = matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. });
         task.current_state = state;
-        AgentResult {
-            agent_run_id: uuid::Uuid::new_v4(),
-            agent_name: "proposer-1".into(),
-            status: if paused {
-                AgentRunStatus::Paused
-            } else {
-                AgentRunStatus::Failed
-            },
-            summary: String::new(),
-            error: Some("failed".into()),
-            task,
-            stopped_by: None,
-        }
+        let mut run = AgentResult::of_task("proposer-1".into(), task);
+        run.agent_run_id = uuid::Uuid::new_v4();
+        run.status = if paused {
+            AgentRunStatus::Paused
+        } else {
+            AgentRunStatus::Failed
+        };
+        run.summary = String::new();
+        run.error = Some("failed".into());
+        run
+    }
+
+    /// `run` with its task in `state`.
+    fn with_state(run: &AgentResult, state: TaskState) -> AgentResult {
+        let mut task = run.task().unwrap().clone();
+        task.current_state = state;
+        let mut changed = AgentResult::of_task(run.agent_name.clone(), task);
+        changed.agent_run_id = run.agent_run_id;
+        changed.status = run.status.clone();
+        changed.summary = run.summary.clone();
+        changed.error = run.error.clone();
+        changed.stopped_by = run.stopped_by.clone();
+        changed
     }
 
     #[tokio::test]
@@ -3799,15 +3813,7 @@ mod tests {
                 cause: Some(ErrorRecoveryCause::Refusal),
                 error_kind: None,
             };
-            AgentResult {
-                agent_run_id: task.id,
-                agent_name: crate::ARCHITECT.into(),
-                status: AgentRunStatus::Failed,
-                summary: String::new(),
-                error: Some("the model refused".into()),
-                task,
-                stopped_by: None,
-            }
+            AgentResult::of_task(crate::ARCHITECT.into(), task)
         };
         let outcome = other
             .attempt(async {
@@ -3882,11 +3888,14 @@ mod tests {
         // for runs saved before arko recorded it.
         run.status = AgentRunStatus::Failed;
         run.error = Some("can't succeed: 401".into());
-        run.task.current_state = TaskState::Failed {
-            reason: "can't succeed: 401".into(),
-            cause: Some(ErrorRecoveryCause::NonRetryable),
-            error_kind: None,
-        };
+        run = with_state(
+            &run,
+            TaskState::Failed {
+                reason: "can't succeed: 401".into(),
+                cause: Some(ErrorRecoveryCause::NonRetryable),
+                error_kind: None,
+            },
+        );
         std::fs::remove_file(fixture.state_dir.join("events.jsonl")).unwrap();
         assert_eq!(classify(&run).as_deref(), Some("can't succeed: 401"));
         // A recorded kind tells a lost login from a request too large for
@@ -3896,18 +3905,24 @@ mod tests {
             (ErrorKind::ContextOverflow, false),
             (ErrorKind::RequestTooLarge, false),
         ] {
-            run.task.current_state = TaskState::Failed {
-                reason: "can't succeed: 401".into(),
-                cause: Some(ErrorRecoveryCause::NonRetryable),
-                error_kind: Some(kind),
-            };
+            run = with_state(
+                &run,
+                TaskState::Failed {
+                    reason: "can't succeed: 401".into(),
+                    cause: Some(ErrorRecoveryCause::NonRetryable),
+                    error_kind: Some(kind),
+                },
+            );
             assert_eq!(classify(&run).is_some(), login, "{kind:?}");
         }
-        run.task.current_state = TaskState::Failed {
-            reason: "refused".into(),
-            cause: Some(ErrorRecoveryCause::Refusal),
-            error_kind: None,
-        };
+        run = with_state(
+            &run,
+            TaskState::Failed {
+                reason: "refused".into(),
+                cause: Some(ErrorRecoveryCause::Refusal),
+                error_kind: None,
+            },
+        );
         log(vec![
             line(run_id, pause("non_retryable")),
             line(run_id, json!({"Failed": {"reason": "x"}})),

@@ -73,7 +73,7 @@ async fn a_chat_continued_as_an_agent_keeps_its_conversation_and_gets_tools() {
         .await
         .unwrap();
     assert_eq!(second.agent_run_id, first.agent_run_id);
-    assert!(second.task.reconfigured);
+    assert!(second.task().unwrap().reconfigured);
     // Reported as the run goes on, before its own events.
     assert!(matches!(
         events.try_recv().unwrap().event,
@@ -110,7 +110,7 @@ async fn a_chat_continued_as_an_agent_keeps_its_conversation_and_gets_tools() {
         .build()
         .unwrap();
     let restored = resumed.agent_result(first.agent_run_id).unwrap();
-    assert!(restored.task.reconfigured);
+    assert!(restored.task().unwrap().reconfigured);
     resumed.continue_agent(&restored, "And now?").await.unwrap();
     let last: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
     assert_eq!(tool_names(&last), ["probe"]);

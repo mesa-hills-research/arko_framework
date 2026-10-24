@@ -572,7 +572,10 @@ impl PersistenceManager {
         result: crate::workflow::result::AgentResult,
     ) {
         let _guard = self.write_lock.lock().await;
-        let saved = self.write_task(&result.task).await;
+        let saved = match result.task() {
+            Ok(task) => self.write_task(task).await,
+            Err(error) => Err(error),
+        };
         if let Err(error) = &saved {
             log::warn!(
                 "Workflow '{}': could not save the task of agent '{}' ({}): {error}. Checkpoints refer to its last saved state until one saves it.",
@@ -666,8 +669,8 @@ impl PersistenceManager {
     /// checkpoint `latest-checkpoint` names holds this state already (see
     /// [`Built::fingerprint`]): the cost ledger isn't even copied then.
     async fn build_state(&self, ctx: &SharedContext, live: bool) -> Option<Built> {
-        // Results change only with the write lock held. Only the tasks
-        // whose versions must be written are cloned.
+        // Results change only with the write lock held. Only the results
+        // whose tasks must be written are taken (a clone shares the task).
         let pending = {
             let results = ctx.agent_results.read();
             let tasks = self.saved_tasks.lock();
@@ -678,13 +681,16 @@ impl PersistenceManager {
                         .get(&result.agent_run_id)
                         .is_none_or(|saved| saved.unsaved.is_some() || saved.file.is_none())
                 })
-                .map(|result| result.task.clone())
+                .cloned()
                 .collect::<Vec<_>>()
         };
-        for task in pending {
-            let saved = self.write_task(&task).await;
+        for result in pending {
+            let saved = match result.task() {
+                Ok(task) => self.write_task(task).await,
+                Err(error) => Err(error),
+            };
             let mut tasks = self.saved_tasks.lock();
-            let entry = tasks.entry(task.id).or_default();
+            let entry = tasks.entry(result.agent_run_id).or_default();
             match saved {
                 Ok(file) => {
                     entry.file = Some(file);
@@ -800,6 +806,8 @@ impl PersistenceManager {
                     // A stop of the run alone under way: a resume keeps the
                     // host's intent for it.
                     stopped_by: ctx.run_control.run_stop_record(*id),
+                    // Its task is read with the checkpoint (it is recovered).
+                    info: None,
                 });
             }
             for result in results.iter() {

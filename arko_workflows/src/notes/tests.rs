@@ -822,7 +822,7 @@ async fn a_handover_carries_the_standing_notes() {
         .unwrap();
 
     let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
-    assert_eq!(result.task.handovers.len(), 1);
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
     let requests = requests_of(&server, "Draft it.");
     assert_eq!(requests.len(), 4);
     let fresh = &requests[3];
@@ -903,7 +903,7 @@ async fn a_claude_code_compaction_gives_the_standing_notes_again() {
         "{:?}",
         result.error
     );
-    assert!(result.task.handovers.is_empty());
+    assert!(result.task().unwrap().handovers.is_empty());
     let users: Vec<String> = std::fs::read_to_string(fake.join("log.jsonl"))
         .unwrap()
         .lines()
@@ -1048,7 +1048,8 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     assert_eq!(body.matches(&**data).count(), 2, "{body}");
     // The conversation holds them now, and its saved versions name them.
     let held = continued
-        .task
+        .task()
+        .unwrap()
         .conversation
         .messages
         .iter()
@@ -1067,8 +1068,8 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
             .unwrap();
     let saved = state.agent_results_in(&run_dir(&workspace)).unwrap();
     assert_eq!(
-        serde_json::to_value(&saved[0].task.conversation.messages).unwrap(),
-        serde_json::to_value(&continued.task.conversation.messages).unwrap()
+        serde_json::to_value(&saved[0].task().unwrap().conversation.messages).unwrap(),
+        serde_json::to_value(&continued.task().unwrap().conversation.messages).unwrap()
     );
 }
 
@@ -1187,7 +1188,7 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         .unwrap();
     let saved = state.agent_results_in(&run_dir(&workspace)).unwrap();
     assert_eq!(saved[0].status, AgentRunStatus::Interrupted);
-    assert!(!holds(&saved[0].task, "Prefer the orbit method."));
+    assert!(!holds(saved[0].task().unwrap(), "Prefer the orbit method."));
     assert_eq!(
         state.notes.unwrap().seen.get(&saved[0].agent_run_id),
         Some(&1)
@@ -1209,7 +1210,7 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         "{resent}"
     );
     // Given once: the task holds it now.
-    assert!(holds(&result.task, "Prefer the orbit method."));
+    assert!(holds(result.task().unwrap(), "Prefer the orbit method."));
 }
 
 /// A note written to the control folder by another process while an agent
@@ -1585,7 +1586,9 @@ async fn new_notes_past_an_updates_cap_come_at_the_next_boundary() {
     );
     assert_eq!(count(&requests[2], "OLDER-NOTE"), 1);
     assert_eq!(count(&requests[2], "NEWER-NOTE"), 1);
-    assert!(holds(&result.task, "OLDER-NOTE") && holds(&result.task, "NEWER-NOTE"));
+    assert!(
+        holds(result.task().unwrap(), "OLDER-NOTE") && holds(result.task().unwrap(), "NEWER-NOTE")
+    );
     let snapshot = workflow.context().notes.snapshot().unwrap();
     assert_eq!(snapshot.seen.get(&result.agent_run_id), Some(&2));
 }
@@ -1774,7 +1777,7 @@ async fn a_note_posted_during_a_handover_report_is_given_once() {
     workflow.post_note(Note::new("MID-HANDOVER-NOTE")).unwrap();
     go.notify_one();
     let result = run.await.unwrap().unwrap();
-    assert_eq!(result.task.handovers.len(), 1);
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
     let last = user_text(server.bodies().last().unwrap());
     assert_eq!(last.matches("MID-HANDOVER-NOTE").count(), 1, "{last}");
 }

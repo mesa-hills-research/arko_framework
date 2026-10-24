@@ -821,7 +821,7 @@ async fn main() -> ForgeResult<()> {
     let recovered = match workflow
         .interrupted_runs()
         .into_iter()
-        .rfind(|run| run.agent_name == ARCHITECT && run.task.parent.is_none())
+        .rfind(|run| run.agent_name == ARCHITECT && run.info().parent.is_none())
     {
         Some(interrupted) => {
             eprintln!("forge: recovering the architect where it stopped");
@@ -1104,7 +1104,7 @@ impl Architect<'_> {
     }
 
     fn is_architects(run: &AgentResult) -> bool {
-        run.agent_name == ARCHITECT && run.task.parent.is_none()
+        run.agent_name == ARCHITECT && run.info().parent.is_none()
     }
 
     /// The architect's runs that failed.
@@ -1981,10 +1981,10 @@ fn report(
     text.push_str("| Agent | Runs | Requests | Input tokens | Output tokens | List-price estimate |\n|---|---|---|---|---|---|\n");
     let mut by_agent: BTreeMap<&str, (usize, usize, usize, usize, f64)> = BTreeMap::new();
     for run in &result.agent_results {
-        let usage = run.task.total_usage();
+        let usage = &run.info().usage;
         let entry = by_agent.entry(&run.agent_name).or_default();
         entry.0 += 1;
-        entry.1 += run.task.usage_history.len();
+        entry.1 += run.info().model_calls;
         entry.2 += usage.input_tokens;
         entry.3 += usage.output_tokens;
         entry.4 += usage.total_cost;

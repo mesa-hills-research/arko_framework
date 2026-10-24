@@ -1517,9 +1517,11 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
     record.failure_kind = failure_kind;
     record.wall_ms = wall.as_millis() as u64;
     record.active_ms = active.as_millis() as u64;
-    if let Some(result) = &result {
-        record.usage = UsageSummary::of_task(&result.task, &context.settings.model);
-        record.looked_outside = looked_outside(&result.task, &context.layout.out, &task.repo);
+    if let Some(result) = &result
+        && let Ok(run) = result.task()
+    {
+        record.usage = UsageSummary::of_task(run, &context.settings.model);
+        record.looked_outside = looked_outside(run, &context.layout.out, &task.repo);
         if outcome == Outcome::Answered {
             record.answer = Some(result.summary.clone());
         }
@@ -1527,7 +1529,7 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
     record.transcript = save_transcript(
         &context.run_dir,
         &format!("solve-{attempt_id}"),
-        result.as_ref().map(|result| &result.task),
+        result.as_ref().and_then(|result| result.task().ok()),
     );
     let _ = std::fs::remove_dir_all(&scratch);
     // A run cancelled by the operator's stop, or failed by a lost login, runs
@@ -1645,17 +1647,14 @@ async fn grade(context: &RunContext, attempt: AttemptRecord) -> GradeRecord {
     }
     let (wall, _) = session.finish();
     record.wall_ms = wall.as_millis() as u64;
-    if let Some(result) = &result {
-        usage.add(&UsageSummary::of_task(
-            &result.task,
-            &context.settings.model,
-        ));
+    if let Some(task) = result.as_ref().and_then(|result| result.task().ok()) {
+        usage.add(&UsageSummary::of_task(task, &context.settings.model));
     }
     record.usage = usage;
     record.transcript = save_transcript(
         &context.run_dir,
         &format!("grade-{grade_id}"),
-        result.as_ref().map(|result| &result.task),
+        result.as_ref().and_then(|result| result.task().ok()),
     );
     let _ = std::fs::remove_dir_all(&scratch);
     match verdict {

@@ -1759,10 +1759,12 @@ pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded because the workfl
 /// [`SUPERSEDED_AFTER_RESTART`]): it is not reopened, as that would do its
 /// work twice (a review's verdict would reach no one).
 pub(crate) fn is_superseded(run: &AgentResult) -> bool {
-    matches!(
-        &run.task.current_state,
-        TaskState::Cancelled { reason } if reason == SUPERSEDED_AFTER_RESTART
-    )
+    run.task().is_ok_and(|task| {
+        matches!(
+            &task.current_state,
+            TaskState::Cancelled { reason } if reason == SUPERSEDED_AFTER_RESTART
+        )
+    })
 }
 
 /// The heading of the initial prompt's list of the agents it may message.
@@ -2214,13 +2216,15 @@ async fn drive_run_to_result(
     let result = result?;
     // Paused, neither accepted nor rejected, for its caller.
     if let Some((verifier, reason)) = verifier_failure
-        && matches!(
-            result.task.current_state,
-            TaskState::AwaitingErrorRecoveryApproval {
-                cause: arko_agents::ErrorRecoveryCause::Middleware,
-                ..
-            }
-        )
+        && result.task().is_ok_and(|task| {
+            matches!(
+                task.current_state,
+                TaskState::AwaitingErrorRecoveryApproval {
+                    cause: arko_agents::ErrorRecoveryCause::Middleware,
+                    ..
+                }
+            )
+        })
     {
         return Err(WorkflowError::VerifierFailed {
             verifier,
@@ -2253,7 +2257,11 @@ pub(crate) fn run_outcome(result: AgentResult) -> Result<AgentResult, WorkflowEr
             task_id: result.agent_run_id,
             questions: result.error.clone().unwrap_or_default(),
         }),
-        AgentRunStatus::Paused => match AgentPause::of(&result.task.current_state) {
+        AgentRunStatus::Paused => match result
+            .task()
+            .ok()
+            .and_then(|task| AgentPause::of(&task.current_state))
+        {
             Some(pause) => Err(WorkflowError::AgentPaused {
                 agent,
                 task_id: result.agent_run_id,
@@ -2305,7 +2313,9 @@ fn settles_child(
     tool_call_id: uuid::Uuid,
 ) -> bool {
     parent.status == AgentRunStatus::Interrupted
-        && (holds_open_call(&parent.task, tool_call_id)
+        && (parent
+            .task()
+            .is_ok_and(|task| holds_open_call(task, tool_call_id))
             || is_verifier_agent(ctx, &child.agent_name))
 }
 
@@ -2323,7 +2333,7 @@ pub(crate) fn is_verifier_agent(ctx: &SharedContext, agent_name: &str) -> bool {
 /// and accepts it, releasing its parent link), and any caller permitted to
 /// run its agent may resume it (`run_workflow_agent` with `resume_run`).
 pub(crate) fn is_orphaned(ctx: &SharedContext, run: &AgentResult) -> bool {
-    let Some(parent) = run.task.parent else {
+    let Some(parent) = run.info().parent else {
         return false;
     };
     if ctx.registry.is_running(parent.task_id) {
@@ -2340,7 +2350,7 @@ pub(crate) fn is_orphaned(ctx: &SharedContext, run: &AgentResult) -> bool {
 /// call) is orphaned ([`is_orphaned`]): otherwise the run that started it
 /// resumes it, or recovering that run does.
 fn refuse_unless_orphaned(ctx: &SharedContext, run: &AgentResult) -> Result<(), WorkflowError> {
-    let Some(parent) = run.task.parent else {
+    let Some(parent) = run.info().parent else {
         return Ok(());
     };
     if is_orphaned(ctx, run) {
@@ -3616,7 +3626,7 @@ impl WorkflowEngine {
         if options.cut_back_to.is_none()
             && previous.status == AgentRunStatus::Paused
             && matches!(
-                previous.task.current_state,
+                previous.task()?.current_state,
                 TaskState::AwaitingErrorRecoveryApproval {
                     cause: arko_agents::ErrorRecoveryCause::Middleware,
                     ..
@@ -3662,15 +3672,16 @@ impl WorkflowEngine {
         review: bool,
     ) -> Result<AgentResult, WorkflowError> {
         let continuation_prompt = input.text;
+        let previous_task = previous.task()?;
         let resumable = match previous.status {
             // A cut back continues a run that isn't running, whatever its
             // status (`start_unless_running` below refuses a running one).
             _ if input.cut_back_to.is_some() => true,
             AgentRunStatus::Completed => {
-                matches!(previous.task.current_state, TaskState::Completed { .. })
+                matches!(previous_task.current_state, TaskState::Completed { .. })
             }
             AgentRunStatus::WaitingForInput => matches!(
-                previous.task.current_state,
+                previous_task.current_state,
                 TaskState::AwaitingUserResponse { .. }
             ),
             _ => false,
@@ -3681,7 +3692,7 @@ impl WorkflowEngine {
             ));
         }
         let agent_name = &previous.agent_name;
-        let mut task = previous.task.clone();
+        let mut task = previous_task.clone();
         task.parent = parent;
         // What changed in the task, reported as the run goes on.
         let mut lifecycle = Vec::new();
@@ -3762,7 +3773,7 @@ impl WorkflowEngine {
             if index > 0 {
                 ctx.notes.cut_back(agent_name, &task, review);
             }
-            let messages = &previous.task.conversation.messages;
+            let messages = &previous_task.conversation.messages;
             ctx.subagents
                 .cut_back(ctx, &task, &messages[index.min(messages.len())..]);
         }
@@ -3889,14 +3900,18 @@ impl WorkflowEngine {
         depth: u32,
         parent: Option<arko_agents::TaskParent>,
     ) -> Result<AgentResult, WorkflowError> {
-        let pause = (previous.status == AgentRunStatus::Paused)
-            .then(|| AgentPause::of(&previous.task.current_state))
-            .flatten()
-            .ok_or_else(|| {
-                WorkflowError::BuilderInvalid(
-                    "only a paused agent run can be resumed. Continue a completed or input-waiting run with continue_agent".to_string(),
-                )
-            })?;
+        let (pause, previous_task) = match previous.status {
+            AgentRunStatus::Paused => {
+                let task = previous.task()?;
+                AgentPause::of(&task.current_state).map(|pause| (pause, task))
+            }
+            _ => None,
+        }
+        .ok_or_else(|| {
+            WorkflowError::BuilderInvalid(
+                "only a paused agent run can be resumed. Continue a completed or input-waiting run with continue_agent".to_string(),
+            )
+        })?;
         enum Decision {
             Tools(Option<uuid::Uuid>, Vec<(uuid::Uuid, ToolApprovalDecision)>),
             Command(UserCommand),
@@ -3922,7 +3937,7 @@ impl WorkflowEngine {
                         )
                     })
                     .collect::<Vec<_>>();
-                let batch_id = match &previous.task.current_state {
+                let batch_id = match &previous_task.current_state {
                     TaskState::AwaitingBatchToolApproval { batch_id, .. } => Some(*batch_id),
                     _ => None,
                 };
@@ -3952,7 +3967,7 @@ impl WorkflowEngine {
                         "ResolveRefusal needs at least one change to the refused input".to_string(),
                     ));
                 }
-                if previous.task.agent_config.runs_in_claude_code() {
+                if previous_task.agent_config.runs_in_claude_code() {
                     return Err(WorkflowError::BuilderInvalid(
                         "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation). Continue or fail it".to_string(),
                     ));
@@ -3967,7 +3982,7 @@ impl WorkflowEngine {
         };
         let agent_name = &previous.agent_name;
         self.admit(agent_name, Some(previous.agent_run_id), false, ctx)?;
-        let mut task = previous.task.clone();
+        let mut task = previous_task.clone();
         if parent.is_some() {
             task.parent = parent;
         }
@@ -4054,7 +4069,7 @@ impl WorkflowEngine {
         let current = recorded_result(ctx, previous.agent_run_id);
         let current = current.as_ref().unwrap_or(previous);
         let mut recovery = Recovery::default();
-        if current.task.parent.is_some() {
+        if current.info().parent.is_some() {
             refuse_unless_orphaned(ctx, current)?;
             // Nobody consumes its result but the host: a later stop doesn't
             // look for it in its parent's call.
@@ -4080,8 +4095,8 @@ impl WorkflowEngine {
         }
         let current =
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
+        let mut task = current.task()?.clone();
         let agent_name = current.agent_name;
-        let mut task = current.task;
         // The depth its next request runs at, which decides its tools.
         let depth = match ctx.subagents.record(task.id) {
             Some(record) => record.depth,
@@ -4153,11 +4168,12 @@ impl WorkflowEngine {
                 "a reopened run keeps its configuration and conversation. Cut it back or reconfigure it with continue_agent_with instead".to_string(),
             ));
         }
+        let previous_task = previous.task()?;
         let images = sendable_images(
             &previous.agent_name,
-            &previous.task.agent_config,
+            &previous_task.agent_config,
             options.images,
-            Some(&previous.task.conversation),
+            Some(&previous_task.conversation),
         )?;
         let current =
             recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
@@ -4175,12 +4191,12 @@ impl WorkflowEngine {
         }
         // As for `recover_agent`: a run its parent still settles is left to
         // it (a completion verifier's review is done again by a new one).
-        if current.task.parent.is_some() {
+        if current.info().parent.is_some() {
             refuse_unless_orphaned(ctx, &current)?;
         }
         let message = reopened_message(prompt);
         let recovery = Recovery {
-            parent: current.task.parent.is_some().then_some(None),
+            parent: current.info().parent.is_some().then_some(None),
             message: Some(&message),
             images: &images,
             reopen: true,
@@ -4251,7 +4267,7 @@ impl WorkflowEngine {
             }
             let agent_name = &current.agent_name;
             self.admit(agent_name, Some(agent_run_id), false, ctx)?;
-            let mut task = current.task.clone();
+            let mut task = current.task()?.clone();
             let mut registry = self.build_tool_registry(
                 agent_name,
                 ctx,
@@ -4404,7 +4420,7 @@ impl WorkflowEngine {
                 .iter()
                 .filter(|result| {
                     result.status == AgentRunStatus::Interrupted
-                        && result.task.parent.is_some_and(|parent| {
+                        && result.info().parent.is_some_and(|parent| {
                             parent.task_id == task.id
                                 && resumed.is_none_or(|resumed| {
                                     !resumed.contains(&parent.tool_call_id)
@@ -4417,8 +4433,21 @@ impl WorkflowEngine {
                 .cloned()
                 .collect::<Vec<_>>();
             for child in superseded {
-                self.supersede_children(&child.task, None, ctx).await;
-                let mut child_task = child.task;
+                // Interrupted, so its task was read with the checkpoint.
+                let task = match child.task() {
+                    Ok(task) => task,
+                    Err(error) => {
+                        log::warn!(
+                            "Workflow '{}': agent run {} of agent '{}' can't be superseded: {error}",
+                            ctx.workflow_name,
+                            child.agent_run_id,
+                            child.agent_name
+                        );
+                        continue;
+                    }
+                };
+                self.supersede_children(task, None, ctx).await;
+                let mut child_task = task.clone();
                 child_task.set_state(TaskState::Cancelled {
                     reason: SUPERSEDED_AFTER_RESTART.to_string(),
                 });

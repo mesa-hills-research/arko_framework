@@ -432,7 +432,11 @@ async fn the_agents_command_timeout_does_not_cut_a_recovery_wait_short() {
     assert_eq!(server.bodies().len(), 2);
     // The saved task keeps its timeout.
     assert_eq!(
-        result.task.agent_config.user_command_timeout_seconds,
+        result
+            .task()
+            .unwrap()
+            .agent_config
+            .user_command_timeout_seconds,
         Some(1)
     );
 }
@@ -605,7 +609,7 @@ async fn a_failure_at_a_pause_records_its_cause() {
         Some(arko_ai::ErrorKind::Authentication)
     );
     assert!(matches!(
-        &result.task.current_state,
+        &result.task().unwrap().current_state,
         arko_agents::TaskState::Failed {
             cause: Some(ErrorRecoveryCause::NonRetryable),
             error_kind: Some(arko_ai::ErrorKind::Authentication),
@@ -946,7 +950,13 @@ async fn continuing_after_waiting_for_input_presents_no_message_twice() {
         1
     );
     let waiting = workflow.agent_result(task_id).unwrap();
-    assert!(waiting.task.pending_context_injections.is_empty());
+    assert!(
+        waiting
+            .task()
+            .unwrap()
+            .pending_context_injections
+            .is_empty()
+    );
     assert_eq!(
         workflow.context().messages.pending("lead")[0].held_by,
         [task_id]
@@ -1065,14 +1075,16 @@ async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
         .send("worker", None, "lead", "Check the parser.".into(), vec![])
         .await
         .unwrap();
-    let mut waiting = workflow.agent_result(task_id).unwrap();
-    waiting.task.pending_context_injections = vec![crate::messaging::injection(&message)];
+    let waiting = workflow.agent_result(task_id).unwrap();
+    let mut task = waiting.task().unwrap().clone();
+    task.pending_context_injections = vec![crate::messaging::injection(&message)];
+    let waiting = AgentResult::of_task(waiting.agent_name, task);
     context.messages.settle_run(
         "lead",
         task_id,
-        &waiting.task.conversation,
+        &waiting.task().unwrap().conversation,
         &[],
-        &waiting.task.pending_context_injections,
+        &waiting.task().unwrap().pending_context_injections,
         false,
     );
     assert!(context.messages.pending_for("lead", task_id).is_empty());
@@ -1576,7 +1588,14 @@ async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused(
     };
     assert_eq!(cause, ErrorRecoveryCause::Refusal);
     let paused = workflow.agent_result(task_id).unwrap();
-    let prompt = paused.task.refused_input.as_ref().unwrap().messages[0].message_index;
+    let prompt = paused
+        .task()
+        .unwrap()
+        .refused_input
+        .as_ref()
+        .unwrap()
+        .messages[0]
+        .message_index;
     let resume = AgentResume::ResolveRefusal(vec![]);
     let refused = within(workflow.resume_agent(&paused, resume))
         .await
@@ -1659,23 +1678,31 @@ async fn a_refusal_pause_saved_without_its_cause_can_be_resolved() {
         panic!("{error:?}");
     };
     // As an older version saved it.
-    let mut paused = workflow.agent_result(task_id).unwrap();
-    let TaskState::AwaitingErrorRecoveryApproval { error_message, .. } = &paused.task.current_state
-    else {
-        panic!("{:?}", paused.task.current_state);
+    let paused = workflow.agent_result(task_id).unwrap();
+    let mut task = paused.task().unwrap().clone();
+    let TaskState::AwaitingErrorRecoveryApproval { error_message, .. } = &task.current_state else {
+        panic!("{:?}", task.current_state);
     };
-    paused.task.current_state = serde_json::from_value(json!({
+    task.current_state = serde_json::from_value(json!({
         "AwaitingErrorRecoveryApproval": {"error_message": error_message},
     }))
     .unwrap();
+    let paused = AgentResult::of_task(paused.agent_name, task);
     assert!(matches!(
-        paused.task.current_state,
+        paused.task().unwrap().current_state,
         TaskState::AwaitingErrorRecoveryApproval {
             cause: ErrorRecoveryCause::Unknown,
             ..
         }
     ));
-    let prompt = paused.task.refused_input.as_ref().unwrap().messages[0].message_index;
+    let prompt = paused
+        .task()
+        .unwrap()
+        .refused_input
+        .as_ref()
+        .unwrap()
+        .messages[0]
+        .message_index;
     let unknown = RefusalResolution::RemoveUserMessage { message_index: 99 };
     let resume = AgentResume::ResolveRefusal(vec![unknown]);
     let error = within(workflow.resume_agent(&paused, resume))

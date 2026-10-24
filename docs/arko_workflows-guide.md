@@ -896,7 +896,7 @@ is orphaned silently. When a caller's call can't recover the run it started (a
 budget refuses it, say), the call's result names the run, and the caller can resume
 it with the tool's `resume_run` parameter and a message saying what happened. A run
 its caller can no longer resume (the caller ended) is listed by `interrupted_runs`
-too, with `task.parent` set, and `recover_agent` recovers it for the host.
+too, with `info().parent` set, and `recover_agent` recovers it for the host.
 
 By default a checkpoint is saved after every finalized agent run, and every
 checkpoint and task version is kept. `keep_last_checkpoints(n)` opts in to keeping only
@@ -941,6 +941,19 @@ error reports. A failed event-log write is logged as a warning and retried. It n
 stops an agent. `WorkflowBuilder::resume_from(path)` restores this state into a new
 workflow. See [persistence](../arko_workflows/INDEX.md#persistence-and-checkpoint-state) for what is
 restored and what must be configured again.
+
+A resume in its checkpoint's run directory reads the task file of a run that completed
+only when its task is needed, so a long session with many finished agents opens fast
+and keeps their conversations out of memory until one is used. Its result has what
+lists and notices need (`AgentResult::info`, with the configuration, first prompt,
+times, parent and usage totals), and `AgentResult::task()` reads the task, once, the
+first time it's called. Continuing the run reads it too. A task file that can't be
+read fails there with `WorkflowError::Persistence`, not at the resume. This needs a
+checkpoint that describes each run's task (`AgentRunRecord::info`). One saved before
+records described tasks reads every task at the resume until the next checkpoint is
+saved, and so does a resume into another run directory. Runs that failed, paused,
+were cancelled or interrupted, or completed in a stop's wrap-up are always read at the
+resume.
 
 ## Custom tools
 

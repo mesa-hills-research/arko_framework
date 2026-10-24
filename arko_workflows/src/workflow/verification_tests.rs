@@ -138,7 +138,7 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
         let coder = workflow.agent_result(task_id).unwrap();
         assert_eq!(coder.status, AgentRunStatus::Paused);
         assert!(matches!(
-            coder.task.current_state,
+            coder.task().unwrap().current_state,
             arko_agents::TaskState::AwaitingErrorRecoveryApproval {
                 cause: arko_agents::ErrorRecoveryCause::Middleware,
                 ..

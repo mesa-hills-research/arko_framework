@@ -1025,11 +1025,13 @@ async fn write(context: &GenerateContext, job: WriterJob) -> WriterRecord {
     record.failure_kind = failure_kind;
     record.wall_ms = wall.as_millis() as u64;
     record.accepted = submit.accepted();
-    if let Some(result) = &result {
-        record.usage = UsageSummary::of_task(&result.task, &context.options.model);
+    if let Some(task) = result.as_ref().and_then(|result| result.task().ok()) {
+        record.usage = UsageSummary::of_task(task, &context.options.model);
     }
-    record.transcript =
-        context.save_transcript(&run_id, result.as_ref().map(|result| &result.task));
+    record.transcript = context.save_transcript(
+        &run_id,
+        result.as_ref().and_then(|result| result.task().ok()),
+    );
     let _ = std::fs::remove_dir_all(&scratch);
     // A run cancelled by the operator, or failed by a lost login, isn't the
     // writer's: it isn't recorded. (Questions it submitted are kept.)
@@ -1154,8 +1156,8 @@ async fn verify(context: &GenerateContext, candidate: &Candidate) -> (Verificati
     }
     let (wall, _) = session.finish();
     record.wall_ms = wall.as_millis() as u64;
-    if let Some(result) = &result {
-        record.usage = UsageSummary::of_task(&result.task, &context.options.model);
+    if let Some(task) = result.as_ref().and_then(|result| result.task().ok()) {
+        record.usage = UsageSummary::of_task(task, &context.options.model);
     }
     if !record.ok {
         record.failure_kind = failure_kind_of(result.as_ref());
@@ -1167,7 +1169,8 @@ async fn verify(context: &GenerateContext, candidate: &Candidate) -> (Verificati
                 .unwrap_or_else(|| "no verdict".into()),
         );
     }
-    record.transcript = context.save_transcript(&name, result.as_ref().map(|result| &result.task));
+    record.transcript =
+        context.save_transcript(&name, result.as_ref().and_then(|result| result.task().ok()));
     let _ = std::fs::remove_dir_all(&scratch);
     // A verification cancelled by a stop, or failed by a lost login, isn't
     // the verifier's: it isn't recorded, and runs again later.

@@ -352,7 +352,7 @@ impl WorkflowServices {
             .read()
             .iter()
             .rev()
-            .find(|result| result.task.parent == Some(parent))
+            .find(|result| result.info().parent == Some(parent))
             .cloned();
         match started {
             // Retired by the host in its wrap-up when the workflow stopped:
@@ -462,7 +462,7 @@ impl WorkflowServices {
                 run.agent_name
             ));
         }
-        match run.task.parent {
+        match run.info().parent {
             None => {
                 return refuse(
                     "run_workflow_agent didn't start it; the workflow's host continues it"
@@ -514,7 +514,11 @@ impl WorkflowServices {
                     .continue_nested(&run, message, &context, depth, parent)
                     .await
             }
-            AgentRunStatus::Paused => match AgentPause::of(&run.task.current_state) {
+            AgentRunStatus::Paused => match run
+                .task()
+                .ok()
+                .and_then(|task| AgentPause::of(&task.current_state))
+            {
                 Some(AgentPause::ErrorRecovery { .. }) => {
                     let resume = AgentResume::ContinueAfterError {
                         note: Some(message.to_string()),
@@ -562,7 +566,9 @@ impl WorkflowServices {
             AgentRunStatus::Interrupted => "was interrupted and did not finish",
             AgentRunStatus::Paused
                 if matches!(
-                    AgentPause::of(&run.task.current_state),
+                    run.task()
+                        .ok()
+                        .and_then(|task| AgentPause::of(&task.current_state)),
                     Some(AgentPause::ErrorRecovery { .. })
                 ) =>
             {
@@ -851,7 +857,7 @@ impl Tool for RunWorkflowAgentTool {
                             .read()
                             .iter()
                             .rev()
-                            .find(|result| result.task.parent == Some(parent))
+                            .find(|result| result.info().parent == Some(parent))
                             .cloned(),
                         (None, None) => None,
                     });

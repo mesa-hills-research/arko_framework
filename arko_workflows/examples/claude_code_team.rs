@@ -131,11 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.agent_name,
             result.status,
             result.summary,
-            result.task.handovers.len(),
-            result.task.usage_history.len()
+            result.task()?.handovers.len(),
+            result.info().model_calls
         );
     }
-    let lead = &results[0].task;
+    let lead = results[0].task()?;
     let received = lead.conversation.messages.iter().any(|message| {
         message
             .content
