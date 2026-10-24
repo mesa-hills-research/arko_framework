@@ -77,6 +77,8 @@ use uuid::Uuid;
 
 use arko_agents::{AgentConfig, ToolParameterDefinition};
 
+use crate::workflow::result::AgentResult;
+
 pub(crate) use board::Board;
 pub use tools::{
     LINK_AGENTS_TOOL_NAME, LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, START_AGENT_TOOL_NAME,
@@ -375,6 +377,23 @@ pub trait SubagentHook: Send + Sync {
     /// and counts as no description.
     fn describe(&self, record: &SubagentRecord) -> Option<String> {
         let _ = record;
+        None
+    }
+
+    /// A line (or a few) that the lead's news of the run `record` ends with,
+    /// such as what the run used, or `None` (the default). It is added after a
+    /// blank line to the body of the news that the run finished, failed or
+    /// stopped, and to the news of a run a checkpoint restores that was
+    /// running. The text is trimmed, and a blank one counts as none.
+    /// `record` is the run as it ended. `result` is the run's recorded
+    /// result, if it has one (a run stopped before it started has none), so
+    /// a host reads the run's usage from it ([`AgentResult::info`]) without
+    /// reaching the workflow, which isn't built yet when a restore calls the
+    /// hook. The hook is called as the run ends, without any lock of the
+    /// workflow held, so it should be quick. A panic in it is logged and
+    /// counts as no line.
+    fn report_note(&self, record: &SubagentRecord, result: Option<&AgentResult>) -> Option<String> {
+        let _ = (record, result);
         None
     }
 

@@ -813,6 +813,115 @@ async fn a_host_stop_is_reported_to_the_lead() {
     assert_eq!(workflow.subagents()[0].state, SubagentState::Stopped);
 }
 
+/// A hook whose line for each run says how it ended and whether it was
+/// given the run's result.
+pub(super) struct Noting;
+
+impl SubagentHook for Noting {
+    fn prepare(&self, _: &StartRequest, _: &mut AgentConfig) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn report_note(&self, record: &SubagentRecord, result: Option<&AgentResult>) -> Option<String> {
+        let given = result.map_or("no result", |_| "its result");
+        Some(format!(
+            "{} used 12 tokens ({:?}, {given}).\n",
+            record.handle, record.state
+        ))
+    }
+}
+
+/// The host's line ends the news that a run finished and the news that the
+/// host stopped it, whose lead reads it with the rest.
+#[tokio::test]
+async fn the_hosts_line_ends_the_news_of_a_run_that_finished_or_stopped() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![start("Count."), start("Work."), wait(), wait()],
+        ),
+        ("r1", vec![complete("There are 3 files.")]),
+        ("r2", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = Arc::new(
+        builder(
+            &server,
+            &workspace,
+            SubagentsConfig::default().hook(Arc::new(Noting)),
+        )
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Delegate.").await }
+    });
+    within(gate.started.notified()).await;
+    let id = workflow.subagents()[1].run_id;
+    assert!(workflow.stop_subagent(id, crate::StopRequest::operator("maintenance")));
+    within(run).await.unwrap().unwrap();
+    let lead = bodies_of(&server, "lead");
+    let news = [
+        result_of(&lead[3], "lead", 2),
+        result_of(&lead[4], "lead", 3),
+    ]
+    .join("\n");
+    assert!(
+        news.contains(
+            "finished. Its report:\n\nThere are 3 files.\n\nr1 used 12 tokens (Finished, its result)."
+        ),
+        "{news}"
+    );
+    assert!(
+        news.contains(
+            "message_agent restarts it where it stopped.\n\nr2 used 12 tokens (Stopped, its result)."
+        ),
+        "{news}"
+    );
+}
+
+/// A hook whose `report_note` panics adds no line, and the lead still gets
+/// the report.
+#[tokio::test]
+async fn a_report_note_that_panics_leaves_the_news_alone() {
+    struct Panicking;
+    impl SubagentHook for Panicking {
+        fn prepare(&self, _: &StartRequest, _: &mut AgentConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn report_note(&self, _: &SubagentRecord, _: Option<&AgentResult>) -> Option<String> {
+            panic!("a bug in the host's note");
+        }
+    }
+    let server = serve(vec![
+        ("lead", vec![start("Count."), wait()]),
+        ("r1", vec![complete("There are 3 files.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().hook(Arc::new(Panicking)),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let waited = result_of(&bodies_of(&server, "lead")[2], "lead", 1);
+    assert!(
+        waited.contains("[mail 1] r1 (agent `worker`) finished. Its report:\n\nThere are 3 files."),
+        "{waited}"
+    );
+    assert!(!waited.contains("a bug in the host's note"), "{waited}");
+}
+
 async fn start_worker(workflow: &Workflow, caller: Uuid, task: &str) -> Uuid {
     let ctx = workflow.context();
     ctx.subagents

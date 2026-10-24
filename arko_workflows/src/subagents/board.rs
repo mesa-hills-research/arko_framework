@@ -15,8 +15,8 @@ use arko_agents::{AgentConfig, Task};
 
 use super::{
     MailItem, MailKind, MailSender, PendingLaunch, StartRequest, SubagentEvent, SubagentEventKind,
-    SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot, UPDATE_MAIL_FRAME,
-    UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
+    SubagentHook, SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot,
+    UPDATE_MAIL_FRAME, UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
 };
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
@@ -149,7 +149,7 @@ impl Board {
             |persistence| persistence.config().checkpoint_dir.join("subagents"),
         );
         let mut state = restored.unwrap_or_default();
-        settle_restored(&mut state, results);
+        settle_restored(&mut state, results, config.as_ref());
         Self {
             max_failed_requests: Mutex::new(
                 config
@@ -1176,6 +1176,13 @@ impl Board {
             SubagentEventKind::Stopped { reason, .. } => Some(reason.clone()),
             _ => None,
         };
+        // Asked before the board's lock is taken, of the run as it ended.
+        let note = {
+            let mut ended = record.clone();
+            settle_record(&mut ended, state, report.clone(), error.clone());
+            report_note(self.config(), &ended, result.as_ref())
+        };
+        let body = with_note(body, note);
         // Publish the terminal state and its news together, so a host
         // checking for idle workers cannot miss the final report.
         let (record, item) = {
@@ -2862,7 +2869,11 @@ fn stopped_with_workflow(ctx: &SharedContext, run_id: Uuid) -> bool {
 
 /// Settles the records a checkpoint saved running: by the outcome their
 /// runs recorded.
-fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
+fn settle_restored(
+    state: &mut SubagentsSnapshot,
+    results: &[AgentResult],
+    config: Option<&SubagentsConfig>,
+) {
     let mut news = Vec::new();
     for record in &mut state.runs {
         if record.state != SubagentState::Running {
@@ -2924,6 +2935,10 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
         if delivered {
             continue;
         }
+        let result = results
+            .iter()
+            .find(|result| result.agent_run_id == record.run_id);
+        let body = with_note(body, report_note(config, &record, result));
         state.last_mail += 1;
         state.mail.push(MailItem {
             id: state.last_mail,
@@ -2941,16 +2956,47 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
     }
 }
 
-/// What the host's hook says about `record`'s run, if anything. A hook that
-/// panics says nothing.
+/// What the host's hook says about `record`'s run, if anything.
 fn describe(config: &SubagentsConfig, record: &SubagentRecord) -> Option<String> {
+    hook_text(config, record, "describing", |hook| hook.describe(record))
+}
+
+/// The line the host's hook ends the news of `record`'s run with, if any.
+fn report_note(
+    config: Option<&SubagentsConfig>,
+    record: &SubagentRecord,
+    result: Option<&AgentResult>,
+) -> Option<String> {
+    hook_text(config?, record, "noting the end of", |hook| {
+        hook.report_note(record, result)
+    })
+}
+
+/// `body` with the host's `note` after a blank line, or the note alone when
+/// the body is blank.
+fn with_note(body: String, note: Option<String>) -> String {
+    match note {
+        Some(note) if body.trim().is_empty() => note,
+        Some(note) => format!("{}\n\n{note}", body.trim_end()),
+        None => body,
+    }
+}
+
+/// What the host's hook says about `record`'s run when `ask` puts the
+/// question, trimmed, if it says anything. A hook that panics says nothing.
+fn hook_text(
+    config: &SubagentsConfig,
+    record: &SubagentRecord,
+    doing: &str,
+    ask: impl FnOnce(&dyn SubagentHook) -> Option<String>,
+) -> Option<String> {
     let hook = config.hook.as_ref()?;
     // A bug in the host's text must not end the call that asks for it, such
     // as a start that has launched its run already.
-    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.describe(record)))
+    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ask(hook.as_ref())))
         .unwrap_or_else(|_| {
             log::warn!(
-                "The subagent hook panicked describing {}, so it is described by nothing.",
+                "The subagent hook panicked {doing} {}, so it adds nothing.",
                 record.handle
             );
             None
@@ -3469,6 +3515,73 @@ mod record_tests {
             .await;
         assert!(ctx.subagents.lead_stops.lock().is_empty());
         assert_eq!(workflow.subagents()[0].error.as_deref(), Some(words));
+    }
+}
+
+/// The news of a run a checkpoint saved running.
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    /// The host's line follows the body after a blank line, and stands alone
+    /// after a blank body.
+    #[test]
+    fn a_line_follows_a_body_after_a_blank_line() {
+        let note = || Some("r1 used 12 tokens.".to_string());
+        assert_eq!(
+            with_note("Done.\n".into(), note()),
+            "Done.\n\nr1 used 12 tokens."
+        );
+        assert_eq!(with_note(" \n".into(), note()), "r1 used 12 tokens.");
+        assert_eq!(with_note("Done.\n".into(), None), "Done.\n");
+    }
+
+    /// A run that was being stopped when the checkpoint was saved is
+    /// settled as stopped, and its news ends with the host's line.
+    #[test]
+    fn the_news_of_a_restored_run_ends_with_the_hosts_line() {
+        let now = Utc::now();
+        let record = SubagentRecord {
+            run_id: Uuid::new_v4(),
+            handle: "r1".into(),
+            agent: "worker".into(),
+            caller_run_id: Uuid::new_v4(),
+            caller_agent: "lead".into(),
+            depth: 1,
+            task: "Work.".into(),
+            workspace: PathBuf::new(),
+            isolated: None,
+            parameters: BTreeMap::new(),
+            peers: Vec::new(),
+            all_peers: false,
+            state: SubagentState::Running,
+            created: now,
+            since: now,
+            report: None,
+            error: None,
+            pending: None,
+            stopped_by_caller: None,
+            stop_requested: Some(StopRecord {
+                kind: StopKind::Operator,
+                reason: "maintenance".into(),
+                timestamp: now,
+                intent: None,
+            }),
+            asking: false,
+            detached: false,
+        };
+        let snapshot = SubagentsSnapshot {
+            runs: vec![record],
+            ..SubagentsSnapshot::default()
+        };
+        let config = SubagentsConfig::default().hook(Arc::new(crate::subagents::tests::Noting));
+        let board = Board::new(Some(config), Some(snapshot), &[], Uuid::new_v4(), None);
+        let mail = board.snapshot().unwrap().mail;
+        assert_eq!(mail.len(), 1);
+        assert_eq!(
+            mail[0].body,
+            "message_agent restarts it where it stopped.\n\nr1 used 12 tokens (Stopped, no result)."
+        );
     }
 }
 
