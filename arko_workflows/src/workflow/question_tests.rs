@@ -252,11 +252,15 @@ async fn a_late_answer_tells_the_host_its_run_has_news() {
     assert_eq!(continued.summary, "answered");
 }
 
-/// Says the host has seen questions up to `q5` of the lead's runs.
-struct SeenFive;
+/// Gives out question numbers from 6 on, one ask at a time, and keeps the
+/// ids it heard of as they were recorded.
+struct Numbers {
+    next: std::sync::atomic::AtomicU32,
+    recorded: std::sync::Mutex<Vec<String>>,
+}
 
 #[async_trait]
-impl UserInputHandler for SeenFive {
+impl UserInputHandler for Numbers {
     async fn respond(&self, _request: UserInputRequest) -> Result<String, String> {
         Ok(String::new())
     }
@@ -265,36 +269,76 @@ impl UserInputHandler for SeenFive {
         Ok(None)
     }
 
-    fn last_question_number(&self, agent_name: &str) -> u32 {
-        if agent_name == "lead" { 5 } else { 0 }
+    fn question_numbers(&self, _run: uuid::Uuid, agent_name: &str, count: u32) -> Option<u32> {
+        (agent_name == "lead").then(|| {
+            self.next
+                .fetch_add(count, std::sync::atomic::Ordering::SeqCst)
+        })
+    }
+
+    fn questions_recorded(
+        &self,
+        _run: uuid::Uuid,
+        _agent_name: &str,
+        asked: &[arko_agents::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        self.recorded
+            .lock()
+            .unwrap()
+            .extend(asked.iter().map(|question| question.id.clone()));
     }
 }
 
-/// A run numbers its questions after the last one the host has seen, so
-/// ids stay unique across the host's runs.
+/// The host numbers each ask's questions, so two runs asking at the same
+/// time get ids of their own, and it hears of them as they are recorded.
 #[tokio::test]
-async fn questions_are_numbered_after_those_the_host_has_seen() {
+async fn runs_asking_at_once_get_ids_of_their_own() {
     let workspace = Workspace::new();
     let server = ResponsesServer::start(move |_, body| {
-        Some(if body.contains("Asked q6.") {
+        Some(if body.contains("Asked q") {
             complete_turn("done", "asked")
         } else {
-            tool_call_turn("ask", "ask_user", json!({"questions": ["Tabs or spaces?"]}))
+            tool_call_turn(
+                "ask",
+                "ask_user",
+                json!({"questions": ["Tabs or spaces?", "Push now?"]}),
+            )
         })
     })
     .await;
+    let handler = Arc::new(Numbers {
+        next: std::sync::atomic::AtomicU32::new(6),
+        recorded: Default::default(),
+    });
     let workflow = Workflow::builder()
         .name("async-question-test")
         .workspace(&workspace.0)
         .llm_client(Arc::new(server.client()))
         .agent("lead", asking_agent())
-        .user_input_handler(Arc::new(SeenFive))
+        .user_input_handler(handler.clone())
         .build()
         .unwrap();
-    let result = within(workflow.run_agent("lead", "Format the code."))
-        .await
-        .unwrap();
-    assert_eq!(result.summary, "asked");
-    let task = result.task().unwrap();
-    assert_eq!(task.questions.open[0].id, "q6");
+    let (first, second) = tokio::join!(
+        within(workflow.run_agent("lead", "Format the code.")),
+        within(workflow.run_agent("lead", "Format the docs.")),
+    );
+    let mut ids: Vec<String> = [first.unwrap(), second.unwrap()]
+        .iter()
+        .flat_map(|result| {
+            result
+                .task()
+                .unwrap()
+                .questions
+                .open
+                .iter()
+                .map(|question| question.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["q6", "q7", "q8", "q9"]);
+    let mut recorded = handler.recorded.lock().unwrap().clone();
+    recorded.sort();
+    assert_eq!(recorded, ids);
 }

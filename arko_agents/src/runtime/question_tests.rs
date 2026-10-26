@@ -475,3 +475,86 @@ async fn a_handover_restates_the_open_questions() {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }
+
+/// A host's record of the questions: it numbers them from 41 and keeps
+/// those asked open.
+#[derive(Default)]
+struct HostBook {
+    asked: std::sync::Mutex<Vec<crate::questions::AskedQuestion>>,
+}
+
+impl HandoverHook for HostBook {
+    fn open_questions(&self, _task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(self.asked.lock().unwrap().clone())
+    }
+
+    fn question_numbers(&self, _task: &Task, _count: u32) -> Option<u32> {
+        Some(41 + self.asked.lock().unwrap().len() as u32)
+    }
+
+    fn questions_asked(
+        &self,
+        _task: &Task,
+        asked: &[crate::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        self.asked.lock().unwrap().extend(asked.iter().cloned());
+    }
+}
+
+/// The host numbers the questions and hears of them as they are recorded,
+/// so a handover right after an ask restates it, once.
+#[tokio::test]
+async fn a_handover_right_after_an_ask_restates_it_once() {
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = true;
+    config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    let (mut agent, mut events, _commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent.handover_hook = Some(Arc::new(HostBook::default()));
+    push(
+        &mut agent,
+        vec![
+            with_input(
+                vec![native_call(
+                    "first",
+                    "ask_user",
+                    serde_json::json!({"questions": ["Which branch?"]}),
+                )],
+                500,
+            ),
+            // Over the threshold: the next request asks for the report.
+            with_input(
+                vec![native_call(
+                    "ask",
+                    "ask_user",
+                    serde_json::json!({"questions": ["Tabs or spaces?"]}),
+                )],
+                1_500,
+            ),
+            with_input(
+                vec![native_call(
+                    "report",
+                    HANDOVER_REPORT_TOOL_NAME,
+                    serde_json::json!({"report": "Asked a question."}),
+                )],
+                1_600,
+            ),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(agent.run());
+    let (task, seen) = finish(run, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(
+        asks(&seen),
+        [
+            (vec!["q41".to_string()], false),
+            (vec!["q42".to_string()], false)
+        ]
+    );
+    let first = message_text(&task.conversation.messages[0]);
+    assert_eq!(first.matches("q42 Tabs or spaces?").count(), 1, "{first}");
+    assert_eq!(first.matches("q41 Which branch?").count(), 1, "{first}");
+    std::fs::remove_dir_all(workspace).unwrap();
+}

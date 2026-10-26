@@ -576,6 +576,41 @@ pub trait HandoverHook: Send + Sync {
         let _ = task;
         None
     }
+
+    /// The number of the first of `count` questions `task`'s agent asks now
+    /// (they are `q{n}`, `q{n + 1}`, ...), which a host that shows the
+    /// questions of several tasks gives out, one ask at a time, so that no
+    /// two of them share an id, even in tasks that run at the same time.
+    /// `None` (the default) numbers them on from the task's own count. A
+    /// number below the task's own count is raised to it.
+    fn question_numbers(&self, task: &Task, count: u32) -> Option<u32> {
+        let _ = (task, count);
+        None
+    }
+
+    /// `task`'s agent asked `asked` (`wait`: it waits for the answer). The
+    /// runtime calls it as it records them, before the agent goes on, so a
+    /// host's [`open_questions`](Self::open_questions) has them for a
+    /// handover or compaction that comes right after.
+    fn questions_asked(&self, task: &Task, asked: &[crate::questions::AskedQuestion], wait: bool) {
+        let _ = (task, asked, wait);
+    }
+}
+
+/// The highest question number already taken before `count` questions
+/// `task`'s agent asks now (see [`HandoverHook::question_numbers`]), with
+/// `taken` numbers the runtime holds for calls not recorded yet.
+pub(crate) fn last_question_number(
+    hook: Option<&dyn HandoverHook>,
+    task: &Task,
+    count: u32,
+    taken: u32,
+) -> u32 {
+    let own = task.questions.asked.max(taken);
+    match hook.and_then(|hook| hook.question_numbers(task, count)) {
+        Some(first) => first.saturating_sub(1).max(own),
+        None => own,
+    }
 }
 
 /// The answer to the questions `task`'s agent waited for came: they are

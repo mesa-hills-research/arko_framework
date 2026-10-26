@@ -422,12 +422,23 @@ impl AgentLoop {
     ) -> Result<Option<String>, ArkoAgentsError> {
         if tool_name == ASK_USER_TOOL_NAME {
             let (questions, wait) = crate::tool::builtins::ask_user::read_call(raw);
+            let hook = self.handover_hook.clone();
+            let last = crate::handover::last_question_number(
+                hook.as_deref(),
+                &self.task,
+                questions.len() as u32,
+                0,
+            );
             let (asked, wait, result) = crate::questions::take_ask(
                 &mut self.task.questions,
+                last,
                 questions,
                 wait,
                 self.task.agent_config.tool_config.async_questions,
             );
+            if let Some(hook) = &hook {
+                hook.questions_asked(&self.task, &asked, wait);
+            }
             let questions = crate::questions::questions_text(&asked);
             if wait {
                 self.task.set_state(TaskState::AwaitingUserResponse {

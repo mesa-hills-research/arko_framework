@@ -606,9 +606,10 @@ run that ended (`SubagentEventKind::NewsWaiting`). By default `asked` answers wi
 A host that shows questions and gathers answers over time returns `Ok(None)`, delivers each
 answer itself as a note, and returns the questions still open from
 `UserInputHandler::open_questions`, which a handover restates. A host that shows the
-questions of several runs returns the last question number it has seen from
-`last_question_number`, and each run numbers its questions after it, so no two of the
-host's questions share an id. Without a handler, the agent is told no one can answer.
+questions of several runs gives out their numbers with `question_numbers`, one ask at a time,
+so no two of its questions share an id, even in runs at the same time, and
+`questions_recorded` tells it of each ask as the runtime records it, before a handover can
+come. Without a handler, the agent is told no one can answer.
 
 ## Approvals and error recovery
 

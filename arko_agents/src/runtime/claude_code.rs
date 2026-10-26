@@ -2728,7 +2728,6 @@ impl ClaudeCodeRun {
     /// (a middleware may still refuse it). A call whose input can't be read
     /// runs as it is, and its tool says why.
     fn take_question_call(&mut self, name: &str, input: &Value, call: &mut Admitted) {
-        let last = self.task.questions.asked.max(self.questions_numbered);
         let taken = if name == ASK_USER_TOOL_NAME {
             let Some(Ok(questions)) = input
                 .get(crate::tool::builtins::ask_user::ASK_USER_QUESTIONS_PARAM_NAME)
@@ -2736,6 +2735,12 @@ impl ClaudeCodeRun {
             else {
                 return;
             };
+            let last = crate::handover::last_question_number(
+                self.handover_hook.as_deref(),
+                &self.task,
+                questions.len() as u32,
+                self.questions_numbered,
+            );
             let wait = crate::questions::parse_wait(
                 input.get(crate::tool::builtins::ask_user::ASK_USER_WAIT_PARAM_NAME),
             );
@@ -2775,6 +2780,7 @@ impl ClaudeCodeRun {
                 .map(str::trim)
                 .filter(|why| !why.is_empty())
                 .map(str::to_string);
+            let last = self.task.questions.asked.max(self.questions_numbered);
             let (ids, result) = crate::questions::plan_close(last, ids);
             call.reply = Some(result.clone());
             QuestionCall::Closed { ids, why, result }
@@ -3685,6 +3691,9 @@ impl ClaudeCodeRun {
                 match &question_call {
                     Some(QuestionCall::Asked { asked, wait, .. }) => {
                         self.task.questions.record(asked, *wait);
+                        if let Some(hook) = &self.handover_hook {
+                            hook.questions_asked(&self.task, asked, *wait);
+                        }
                     }
                     Some(QuestionCall::Closed { ids, .. }) => {
                         self.task.questions.settle(ids);
@@ -3748,6 +3757,7 @@ impl ClaudeCodeRun {
                         let (questions, wait) = crate::tool::builtins::ask_user::read_call(&raw);
                         let (asked, _, _) = crate::questions::take_ask(
                             &mut self.task.questions,
+                            0,
                             questions,
                             wait,
                             false,

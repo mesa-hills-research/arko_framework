@@ -1900,6 +1900,26 @@ pub(crate) struct WorkflowHandover {
     pub review: bool,
 }
 
+impl WorkflowHandover {
+    /// The user input handler, for a run whose questions it takes (not a
+    /// subagent whose questions go to its lead).
+    fn question_handler(
+        &self,
+        task: &Task,
+    ) -> Option<&Arc<dyn crate::user_input::UserInputHandler>> {
+        let ctx = &self.context;
+        let to_lead = ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.questions_to_lead)
+            && ctx.subagents.is_subagent(task.id);
+        if to_lead {
+            return None;
+        }
+        ctx.user_input_handler.as_ref()
+    }
+}
+
 impl HandoverHook for WorkflowHandover {
     fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
         let ctx = &self.context;
@@ -1949,10 +1969,25 @@ impl HandoverHook for WorkflowHandover {
 
     /// The questions the user input handler says are still open.
     fn open_questions(&self, task: &Task) -> Option<Vec<arko_agents::questions::AskedQuestion>> {
-        self.context
-            .user_input_handler
-            .as_ref()?
-            .open_questions(task.id)
+        self.question_handler(task)?.open_questions(task.id)
+    }
+
+    /// The user input handler numbers the questions it takes.
+    fn question_numbers(&self, task: &Task, count: u32) -> Option<u32> {
+        self.question_handler(task)?
+            .question_numbers(task.id, &self.agent_name, count)
+    }
+
+    /// The user input handler hears of the questions it takes at once.
+    fn questions_asked(
+        &self,
+        task: &Task,
+        asked: &[arko_agents::questions::AskedQuestion],
+        wait: bool,
+    ) {
+        if let Some(handler) = self.question_handler(task) {
+            handler.questions_recorded(task.id, &self.agent_name, asked, wait);
+        }
     }
 
     fn on_compaction(&self, task: &Task) -> Option<String> {
@@ -3303,12 +3338,6 @@ impl WorkflowEngine {
         driven: bool,
         review: bool,
     ) -> StartedRun {
-        let mut task = task;
-        // Its questions are numbered after those the host has seen.
-        if let Some(handler) = &ctx.user_input_handler {
-            let last = handler.last_question_number(agent_name);
-            task.questions.asked = task.questions.asked.max(last);
-        }
         let load_skill_policy = task
             .agent_config
             .skills_config

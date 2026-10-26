@@ -559,16 +559,18 @@ pub fn open_section(open: &[AskedQuestion]) -> Option<String> {
 }
 
 /// An `ask_user` call that asks `questions` (`wait`: the agent passed
-/// `wait: true`): they are numbered and recorded in `log`. Returns them,
+/// `wait: true`): they are numbered after `last` (or the log's count, when
+/// higher) and recorded in `log`. Returns them,
 /// whether the agent waits for the answer (it always does without
 /// `async_questions`), and the call's result for the agent.
 pub(crate) fn take_ask(
     log: &mut QuestionLog,
+    last: u32,
     questions: Vec<Question>,
     wait: bool,
     async_questions: bool,
 ) -> (Vec<AskedQuestion>, bool, String) {
-    let (asked, wait, reply) = plan_ask(log.asked, questions, wait, async_questions);
+    let (asked, wait, reply) = plan_ask(last.max(log.asked), questions, wait, async_questions);
     log.record(&asked, wait);
     (asked, wait, reply)
 }

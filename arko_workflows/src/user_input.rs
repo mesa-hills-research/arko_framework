@@ -61,13 +61,37 @@ pub trait UserInputHandler: Send + Sync {
         None
     }
 
-    /// The highest question number the host has seen in the runs of agent
-    /// `agent_name` (`5` after `q5`). A run of it that starts or goes on
-    /// numbers its questions after it, so every id the host sees is unique
-    /// across those runs, and an answer can't reach another run's question.
-    /// The default, 0, numbers each task's questions on from its own.
-    fn last_question_number(&self, agent_name: &str) -> u32 {
-        let _ = agent_name;
-        0
+    /// The number of the first of `count` questions agent run
+    /// `agent_run_id` (of agent `agent_name`) asks now: they are `q{n}`,
+    /// `q{n + 1}`, ... A host that gives out the numbers itself, one ask at
+    /// a time, sees every id once across its runs, even runs at the same
+    /// time, so an answer can't reach another run's question. `None` (the
+    /// default) numbers each task's questions on from its own count. Asked
+    /// only for the runs whose questions the handler takes (not a subagent
+    /// whose questions go to its lead).
+    fn question_numbers(
+        &self,
+        agent_run_id: uuid::Uuid,
+        agent_name: &str,
+        count: u32,
+    ) -> Option<u32> {
+        let _ = (agent_run_id, agent_name, count);
+        None
+    }
+
+    /// Agent run `agent_run_id` (of agent `agent_name`) asked `asked`
+    /// (`wait`: it waits for the answer). Called as its runtime records
+    /// them, before the agent goes on and before [`asked`](Self::asked) or
+    /// [`respond`](Self::respond) hears of them, so that
+    /// [`open_questions`](Self::open_questions) has them for a handover or a
+    /// compaction that comes right after. The default does nothing.
+    fn questions_recorded(
+        &self,
+        agent_run_id: uuid::Uuid,
+        agent_name: &str,
+        asked: &[AskedQuestion],
+        wait: bool,
+    ) {
+        let _ = (agent_run_id, agent_name, asked, wait);
     }
 }
