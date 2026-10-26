@@ -156,6 +156,67 @@ async fn an_ask_returns_at_once_with_ids_that_go_on() {
     }
 }
 
+/// A task saved and resumed keeps its questions: the next ask goes on
+/// from their ids, and those still open stay open.
+#[tokio::test]
+async fn the_ids_go_on_after_a_resume() {
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = true;
+    let (mut agent, mut events, _commands) = agent(config, ToolRegistry::new(), &workspace);
+    push(
+        &mut agent,
+        vec![
+            turn(vec![native_call(
+                "ask",
+                "ask_user",
+                serde_json::json!({"questions": ["A?", "B?"]}),
+            )]),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(agent.run());
+    let (task, _) = finish(run, &mut events).await;
+    let mut saved: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+    assert_eq!(saved.questions.asked, 2);
+    saved
+        .prepare_for_resumption_from_completed("Go on.".into())
+        .unwrap();
+    let (mut resumed, mut events, _commands) = super::tool_call_tests::agent_for(
+        saved,
+        ToolRegistry::new(),
+        Arc::new(ai::LLMClient::new()),
+    );
+    push(
+        &mut resumed,
+        vec![
+            turn(vec![native_call(
+                "again",
+                "ask_user",
+                serde_json::json!({"questions": ["C?"]}),
+            )]),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(resumed.run());
+    let (task, seen) = finish(run, &mut events).await;
+    assert_eq!(
+        asks(&seen),
+        [(vec!["q3".to_string()], false)],
+        "{:?}\n{seen:#?}",
+        task.current_state
+    );
+    assert_eq!(
+        task.questions
+            .open
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1", "q2", "q3"]
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// `wait: true` holds the task until the answer, which reaches the agent as
 /// the host wrote it and settles the questions. Without `async_questions`
 /// every ask waits, as before.
