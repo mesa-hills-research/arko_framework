@@ -1114,6 +1114,61 @@ async fn a_subagents_question_goes_to_its_lead() {
     assert!(worker.last().unwrap().contains("Yes, go ahead."));
 }
 
+/// A subagent's question goes to its lead as text with its id, choices and
+/// default, and the subagent waits for the answer, even when its
+/// configuration lets questions be answered later.
+#[tokio::test]
+async fn a_subagents_question_reaches_its_lead_with_its_structure() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                start("Ask before you act."),
+                wait(),
+                ("message_agent", json!({ "to": "r1", "message": "q1 Yes" })),
+                wait(),
+            ],
+        ),
+        (
+            "r1",
+            vec![
+                (
+                    "ask_user",
+                    json!({ "questions": [{
+                        "question": "May I delete the cache?",
+                        "choices": ["Yes", "No"],
+                        "default": "No"
+                    }] }),
+                ),
+                complete("Deleted it."),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let mut worker = agent_config("Worker");
+    worker
+        .tool_config
+        .available_tool_names
+        .push("ask_user".to_string());
+    worker.tool_config.async_questions = true;
+    let workflow = builder_with(&server, &workspace, SubagentsConfig::default(), worker)
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let asked = result_of(&lead[2], "lead", 1);
+    assert!(
+        asked.contains("q1 May I delete the cache?\n   Choices: Yes | No\n   Default: No"),
+        "{asked}"
+    );
+    let worker = bodies_of(&server, "r1");
+    assert!(!worker[1].contains("Asked q1"), "{}", worker[1]);
+    assert!(worker.last().unwrap().contains("q1 Yes"));
+}
+
 /// Linked subagents message each other, up to the cap between two of
 /// their lead's messages; the lead may get a copy.
 #[tokio::test]

@@ -404,6 +404,30 @@ impl Board {
         item
     }
 
+    /// Puts the host's `body` under `heading` in run `to`'s mailbox, which
+    /// wakes it as a report does (whether or not subagents are on).
+    pub(crate) fn host_mail(
+        &self,
+        ctx: &Arc<SharedContext>,
+        to: Uuid,
+        heading: String,
+        body: String,
+    ) -> MailItem {
+        let item = {
+            let mut state = self.state.lock();
+            self.add_mail(
+                &mut state,
+                to,
+                MailSender::Host,
+                MailKind::Message,
+                heading,
+                body.trim().to_string(),
+            )
+        };
+        self.posted(ctx, &item);
+        item
+    }
+
     fn save_mail(&self, id: u64, heading: &str, body: &str) -> Option<PathBuf> {
         let file = self.mail_dir.join(format!("mail-{id}.md"));
         let saved = std::fs::create_dir_all(&self.mail_dir)
