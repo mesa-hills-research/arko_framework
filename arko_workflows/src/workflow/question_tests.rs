@@ -110,7 +110,7 @@ async fn an_answer_to_a_question_asked_without_waiting_comes_as_mail() {
     assert!(
         bodies
             .iter()
-            .any(|body| body.contains("The user answered q1:")),
+            .any(|body| body.contains("About your question q1:")),
         "{bodies:#?}"
     );
 }

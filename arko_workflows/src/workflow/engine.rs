@@ -1350,10 +1350,14 @@ fn ask_later(
         .iter()
         .map(|question| question.id.clone())
         .collect::<Vec<_>>();
-    let heading = format!(
-        "The user answered {}:",
-        arko_agents::questions::id_list(&ids)
-    );
+    // (The handler's answer may also say that no one can answer.)
+    let heading = match ids.as_slice() {
+        [one] => format!("About your question {one}:"),
+        _ => format!(
+            "About your questions {}:",
+            arko_agents::questions::id_list(&ids)
+        ),
+    };
     let Some(handler) = ctx.user_input_handler.clone() else {
         ctx.subagents
             .host_mail(&ctx, agent_run_id, String::new(), NO_ONE_TO_ASK.to_string());
