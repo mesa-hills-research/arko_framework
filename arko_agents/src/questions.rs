@@ -431,26 +431,18 @@ impl QuestionAnswer {
     }
 }
 
-/// One submission of answers: some questions answered, and what else the
-/// user wrote.
+/// One submission of answers, some questions answered.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answers {
     /// The answers, in the order given.
     #[serde(default)]
     pub answers: Vec<QuestionAnswer>,
-    /// What the user wrote that isn't tied to a question.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anything_else: Option<String>,
 }
 
 impl Answers {
     /// Whether nothing is filled in.
     pub fn is_empty(&self) -> bool {
         self.answers.iter().all(|given| given.answer.is_empty())
-            && self
-                .anything_else
-                .as_deref()
-                .is_none_or(|text| text.trim().is_empty())
     }
 
     /// The ids answered, in order.
@@ -471,7 +463,6 @@ impl Answers {
 /// The user answered q3 and q4.
 /// q3 Tabs or spaces? Spaces
 /// q4 Push now? You decide (you said you'd assume: not yet)
-/// Anything else: Keep the old API one more release.
 /// Still open: q5.
 /// ```
 pub fn answer_note<S: AsRef<str>>(
@@ -485,15 +476,11 @@ pub fn answer_note<S: AsRef<str>>(
         .filter(|given| !given.answer.is_empty())
         .collect::<Vec<_>>();
     let mut lines = Vec::new();
-    if answered.is_empty() {
-        lines.push("The user wrote about your questions.".to_string());
-    } else {
-        let ids = answered
-            .iter()
-            .map(|given| given.id.as_str())
-            .collect::<Vec<_>>();
-        lines.push(format!("The user answered {}.", id_list(&ids)));
-    }
+    let ids = answered
+        .iter()
+        .map(|given| given.id.as_str())
+        .collect::<Vec<_>>();
+    lines.push(format!("The user answered {}.", id_list(&ids)));
     for QuestionAnswer { id, answer } in answered {
         let question = asked
             .iter()
@@ -504,14 +491,6 @@ pub fn answer_note<S: AsRef<str>>(
             Some(question) => format!("{id} {} {words}", question.question.trim()),
             None => format!("{id} {words}"),
         });
-    }
-    if let Some(text) = answers
-        .anything_else
-        .as_deref()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    {
-        lines.push(format!("Anything else: {text}"));
     }
     if !still_open.is_empty() {
         lines.push(format!("Still open: {}.", id_list(still_open)));
@@ -742,14 +721,12 @@ mod tests {
                     },
                 ),
             ],
-            anything_else: Some("Keep the old API one more release.".into()),
         };
         assert_eq!(
             answer_note(&asked, &answers, &["q5"]),
             "The user answered q3 and q4.\n\
              q3 Tabs or spaces? Spaces\n\
              q4 Push now? You decide (you said you'd assume: not yet)\n\
-             Anything else: Keep the old API one more release.\n\
              Still open: q5."
         );
         let other = Answers {
@@ -761,7 +738,6 @@ mod tests {
                     you_decide: false,
                 },
             )],
-            anything_else: None,
         };
         assert_eq!(
             answer_note::<&str>(&asked, &other, &[]),

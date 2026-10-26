@@ -132,7 +132,6 @@ with the helpers of `arko_agents::questions`:
 The user answered q3 and q4.
 q3 Tabs or spaces? Spaces
 q4 Push now? You decide (you said you'd assume: not yet)
-Anything else: Keep the old API one more release.
 Still open: q5.
 ```
 
