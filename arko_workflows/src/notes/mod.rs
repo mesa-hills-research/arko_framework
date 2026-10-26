@@ -137,6 +137,10 @@ pub struct Note {
     /// [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
+    /// For this one agent run only (a one-time note, see
+    /// [`for_run`](Self::for_run)). Its audience still names the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 impl Note {
@@ -171,6 +175,20 @@ impl Note {
     /// A one-time note ([`NoteKind::Once`]).
     pub fn once(mut self) -> Self {
         self.kind = NoteKind::Once;
+        self
+    }
+
+    /// A one-time note for agent run `run` only, such as an answer meant
+    /// for one conversation of an agent that has several. The run gets it
+    /// at its next turn boundary, or when it is continued, even if it
+    /// wasn't running when the note was posted, and
+    /// [`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes)
+    /// doesn't keep it from the run. Other runs never get it.
+    /// [`Workflow::notes_given`](crate::Workflow::notes_given) at or past
+    /// its number says the run was given it.
+    pub fn for_run(mut self, run: Uuid) -> Self {
+        self.kind = NoteKind::Once;
+        self.run = Some(run);
         self
     }
 
@@ -455,6 +473,7 @@ impl NoteBoard {
         state.notes.iter().any(|posted| {
             posted.seq > seen
                 && self.receives(&posted.note, agent, false)
+                && for_run(&posted.note, task_id)
                 && !skipped(&state, task_id, posted)
         })
     }
@@ -581,6 +600,7 @@ impl NoteBoard {
             .filter(|posted| {
                 posted.seq > seen
                     && self.receives(&posted.note, agent, review)
+                    && for_run(&posted.note, task_id)
                     && !skipped(&state, task_id, posted)
             })
             .collect::<Vec<_>>();
@@ -655,7 +675,11 @@ impl NoteBoard {
                 .notes
                 .iter()
                 .rev()
-                .filter(|posted| posted.seq > started && self.receives(&posted.note, agent, review))
+                .filter(|posted| {
+                    posted.seq > started
+                        && self.receives(&posted.note, agent, review)
+                        && for_run(&posted.note, task.id)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             (started, given)
@@ -763,6 +787,11 @@ impl NoteBoard {
                     "a note's source agent name {name:?} has a line break or a control character"
                 )));
             }
+        }
+        if note.run.is_some() && note.kind != NoteKind::Once {
+            return Err(WorkflowError::BuilderInvalid(
+                "a note for one run is a one-time note".to_string(),
+            ));
         }
         let named = match &note.audience {
             NoteAudience::All => None,
@@ -983,10 +1012,17 @@ fn holds(task: &arko_agents::Task, text: &str) -> bool {
         })
 }
 
+/// Whether `note` may reach run `task_id`: a note for one run reaches
+/// that run only.
+fn for_run(note: &Note, task_id: Uuid) -> bool {
+    note.run.is_none_or(|run| run == task_id)
+}
+
 /// Whether `posted` is a one-time note the host skipped for run `task_id`
-/// ([`NoteBoard::skip_one_time`]).
+/// ([`NoteBoard::skip_one_time`]). A note for that run alone isn't.
 fn skipped(state: &NotesSnapshot, task_id: Uuid, posted: &PostedNote) -> bool {
     posted.note.kind == NoteKind::Once
+        && posted.note.run.is_none()
         && state
             .skipped
             .get(&task_id)

@@ -1291,7 +1291,7 @@ pub const PROMPT_MAX_BYTES: usize; // 16 KiB, likewise
 
 | Public type | Fields or variants |
 | --- | --- |
-| `Note` | `text: String`, `audience: NoteAudience`, `kind: NoteKind`, `source: NoteSource`, `images: Vec<arko_ai::Image>`. In JSON only `text` is required. The others default, and `images` is left out when empty. |
+| `Note` | `text: String`, `audience: NoteAudience`, `kind: NoteKind`, `source: NoteSource`, `images: Vec<arko_ai::Image>`, `run: Option<Uuid>`. In JSON only `text` is required. The others default, and `images` and `run` are left out when empty. `Note::for_run(run)` makes a one-time note for that agent run alone (other runs of the agent never get it, and `skip_one_time_notes` doesn't keep it from that run), which the run gets at its next turn boundary or when it is continued. `notes_given(run)` at or past the note's `seq` says the run was given it. |
 | `NoteAudience` | `All` (the default) for every agent. `Only(BTreeSet<String>)` for the agents named. `Except(BTreeSet<String>)` for every agent but those. Snake case in JSON, as `"all"`, `{"only": ["a"]}`, `{"except": ["b"]}`. |
 | `NoteKind` | `Standing` (the default) is delivered to the running runs of its audience and shown in the initial prompt of every later run. `Once` is delivered once to each run of its audience that has started when it is posted. `"standing"`, `"once"`. |
 | `NoteSource` | Who wrote it, as the agents are told, `Operator` (the default, "the operator (the person running this workflow)"), `Host` ("the workflow (the program running the agents)"), or `Agent(String)` ("agent `name`"), for example an observer reviewing the run. The name need not be a registered agent's. In JSON it is `"operator"`, `"host"` or `{"agent": "observer"}`. |
