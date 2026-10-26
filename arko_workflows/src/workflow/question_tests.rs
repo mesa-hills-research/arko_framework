@@ -31,8 +31,17 @@ impl UserInputHandler for Spaces {
         Ok(format!("{} Spaces.", request.asked[0].id))
     }
 
-    fn open_questions(&self, _agent_run_id: uuid::Uuid) -> Option<Vec<String>> {
-        Some(vec!["q2".to_string()])
+    fn open_questions(
+        &self,
+        _agent_run_id: uuid::Uuid,
+    ) -> Option<Vec<arko_agents::questions::AskedQuestion>> {
+        Some(vec![arko_agents::questions::AskedQuestion {
+            id: "q2".into(),
+            question: arko_agents::questions::Question {
+                question: "B?".into(),
+                ..Default::default()
+            },
+        }])
     }
 }
 
@@ -170,6 +179,7 @@ async fn a_handover_restates_the_questions_the_handler_has_open() {
         );
         let open = hook
             .open_questions(&task)
+            .unwrap_or_else(|| task.questions.open.clone())
             .into_iter()
             .map(|question| question.id)
             .collect::<Vec<_>>();
@@ -179,4 +189,51 @@ async fn a_handover_restates_the_questions_the_handler_has_open() {
             assert_eq!(open, ["q1", "q2", "q3"]);
         }
     }
+}
+
+/// Says the host has seen questions up to `q5` of the lead's runs.
+struct SeenFive;
+
+#[async_trait]
+impl UserInputHandler for SeenFive {
+    async fn respond(&self, _request: UserInputRequest) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    async fn asked(&self, _request: UserInputRequest) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn last_question_number(&self, agent_name: &str) -> u32 {
+        if agent_name == "lead" { 5 } else { 0 }
+    }
+}
+
+/// A run numbers its questions after the last one the host has seen, so
+/// ids stay unique across the host's runs.
+#[tokio::test]
+async fn questions_are_numbered_after_those_the_host_has_seen() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(move |_, body| {
+        Some(if body.contains("Asked q6.") {
+            complete_turn("done", "asked")
+        } else {
+            tool_call_turn("ask", "ask_user", json!({"questions": ["Tabs or spaces?"]}))
+        })
+    })
+    .await;
+    let workflow = Workflow::builder()
+        .name("async-question-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", asking_agent())
+        .user_input_handler(Arc::new(SeenFive))
+        .build()
+        .unwrap();
+    let result = within(workflow.run_agent("lead", "Format the code."))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "asked");
+    let task = result.task().unwrap();
+    assert_eq!(task.questions.open[0].id, "q6");
 }

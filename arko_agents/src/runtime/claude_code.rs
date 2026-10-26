@@ -1485,6 +1485,8 @@ impl ClaudeCodeRun {
                     TaskState::AwaitingUserResponse { .. },
                     UserCommand::SubmitUserResponse { response },
                 ) => {
+                    // (Those the host still has open stay open.)
+                    crate::handover::settle_waited(self.handover_hook.as_deref(), &mut self.task);
                     self.task
                         .prepare_for_resumption_with_user_response(response)?;
                     self.emit(AgentEvent::TaskStateChanged(

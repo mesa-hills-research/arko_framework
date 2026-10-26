@@ -562,16 +562,33 @@ pub trait HandoverHook: Send + Sync {
         None
     }
 
-    /// The questions `task`'s agent asked that are still open, which the
-    /// fresh conversation (after its report and context) and a compacted
-    /// one (with its next input) restate, so the agent doesn't lose track.
-    /// The default is the task's own log ([`Task::questions`]), which knows
-    /// of the answers given while the agent waited and of the questions it
-    /// closed. A host that delivers answers later as context returns the
-    /// questions it still has open.
-    fn open_questions(&self, task: &Task) -> Vec<crate::questions::AskedQuestion> {
-        task.questions.open.clone()
+    /// The questions `task`'s agent asked that are still open, as the host
+    /// keeps them, or `None` (the default) to go by the task's own log
+    /// ([`Task::questions`]), which knows of the answers given while the
+    /// agent waited and of the questions it closed. The fresh conversation
+    /// of a handover (after its report and context) and a compacted one
+    /// (with its next input) restate them, so the agent doesn't lose track.
+    /// An answer to questions the agent waited for leaves those the host
+    /// still has open, so a host can answer some of them. A host that
+    /// delivers answers later as context returns the questions it still has
+    /// open.
+    fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        let _ = task;
+        None
     }
+}
+
+/// The answer to the questions `task`'s agent waited for came: they are
+/// settled, except those `hook` says are still open.
+pub(crate) fn settle_waited(hook: Option<&dyn HandoverHook>, task: &mut Task) {
+    let open = hook
+        .and_then(|hook| hook.open_questions(task))
+        .unwrap_or_default();
+    let answered = std::mem::take(&mut task.questions.waiting)
+        .into_iter()
+        .filter(|id| !open.iter().any(|question| &question.id == id))
+        .collect::<Vec<_>>();
+    task.questions.settle(&answered);
 }
 
 /// `seed` with the section that restates the open questions `hook` (or the
@@ -596,10 +613,8 @@ pub(crate) fn open_questions(
     hook: Option<&dyn HandoverHook>,
     task: &Task,
 ) -> Vec<crate::questions::AskedQuestion> {
-    match hook {
-        Some(hook) => hook.open_questions(task),
-        None => task.questions.open.clone(),
-    }
+    hook.and_then(|hook| hook.open_questions(task))
+        .unwrap_or_else(|| task.questions.open.clone())
 }
 
 #[cfg(test)]

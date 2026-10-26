@@ -145,9 +145,10 @@ those still open. An agent with `async_questions` that waits gets the host's
 settles them in the task's log and reports `QuestionsClosed { ids, why }`. It runs without
 approval, as `ask_user` does. A handover's fresh conversation restates the questions still
 open (`# Your open questions`), and so does the context given after Claude Code compacts a
-conversation. `HandoverHook::open_questions` returns them, by default from the task's log,
-which knows of answers given while the agent waited and of the questions it closed. A host
-that delivers answers later returns the ones it still has open.
+conversation. `HandoverHook::open_questions` returns the questions the host still has open,
+or `None` (the default) to go by the task's log, which knows of answers given while the agent
+waited and of the questions it closed. An answer to questions the agent waited for settles
+those the host no longer has open, so a host may answer some of a batch and keep the rest.
 
 `message_user` shows the user a message while the agent works, with nothing to wait for,
 such as an answer to a question the user asked meanwhile, or progress. The runtime sends its

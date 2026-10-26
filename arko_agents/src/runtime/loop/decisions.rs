@@ -440,10 +440,10 @@ impl AgentLoop {
         match *cmd {
             UserCommand::SubmitUserResponse { ref response } => {
                 log::info!("Task {}: User response received.", self.task.id);
-                // The answer settles the questions waited for. An agent whose
-                // questions can be answered later gets the host's note as it
-                // is.
-                self.task.questions.settle_waiting();
+                // The answer settles the questions waited for, except those
+                // the host still has open. An agent whose questions can be
+                // answered later gets the host's note as it is.
+                crate::handover::settle_waited(self.handover_hook.as_deref(), &mut self.task);
                 let formatted = if self.task.agent_config.tool_config.async_questions {
                     response.trim().to_string()
                 } else {

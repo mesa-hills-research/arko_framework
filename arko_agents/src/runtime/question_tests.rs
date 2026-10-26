@@ -312,14 +312,106 @@ async fn close_questions_settles_what_the_task_asked() {
 struct HostAnswered;
 
 impl HandoverHook for HostAnswered {
-    fn open_questions(&self, task: &Task) -> Vec<crate::questions::AskedQuestion> {
-        task.questions
+    fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(
+            task.questions
+                .open
+                .iter()
+                .filter(|question| question.id == "q2")
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+/// The host has `q2` open, with its text, whatever the task's log says.
+struct HostKeepsQ2;
+
+impl HandoverHook for HostKeepsQ2 {
+    fn open_questions(&self, _task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(vec![crate::questions::AskedQuestion {
+            id: "q2".into(),
+            question: crate::questions::Question {
+                question: "Push now?".into(),
+                ..Default::default()
+            },
+        }])
+    }
+}
+
+/// The host answers only `q1` of a batch the agent waited for: the answer
+/// settles `q1` alone, so `q2` stays open in the task's log, a checkpoint
+/// keeps it, and the handover after it restates it.
+#[tokio::test]
+async fn a_partial_answer_to_a_waited_batch_leaves_the_rest_open() {
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = true;
+    config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent.handover_hook = Some(Arc::new(HostKeepsQ2));
+    push(
+        &mut agent,
+        vec![
+            with_input(
+                vec![native_call(
+                    "ask",
+                    "ask_user",
+                    serde_json::json!({"questions": ["Tabs or spaces?", "Push now?"], "wait": true}),
+                )],
+                500,
+            ),
+            // Over the threshold: the next request asks for the report.
+            with_input(
+                vec![native_call(
+                    "list",
+                    "ask_user",
+                    serde_json::json!({"questions": ["Which branch?"]}),
+                )],
+                1_500,
+            ),
+            with_input(
+                vec![native_call(
+                    "report",
+                    HANDOVER_REPORT_TOOL_NAME,
+                    serde_json::json!({"report": "Used spaces."}),
+                )],
+                1_600,
+            ),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    super::tool_call_tests::wait_for(&mut events, &mut seen, |event| match event {
+        AgentEvent::UserQuestionsAsked { wait: true, .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = finish(run, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    let saved: Task = serde_json::from_value(serde_json::to_value(&task).unwrap()).unwrap();
+    assert_eq!(
+        saved
+            .questions
             .open
             .iter()
-            .filter(|question| question.id == "q2")
-            .cloned()
-            .collect()
-    }
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q2", "q3"],
+        "the log settled q1 alone"
+    );
+    assert!(saved.questions.waiting.is_empty());
+    let first = message_text(&task.conversation.messages[0]);
+    assert!(first.contains("q2 Push now?"), "{first}");
+    assert!(!first.contains("q1 Tabs or spaces?"), "{first}");
+    std::fs::remove_dir_all(workspace).unwrap();
 }
 
 /// The fresh conversation of a handover restates the questions still open,

@@ -1940,24 +1940,12 @@ impl HandoverHook for WorkflowHandover {
         }
     }
 
-    /// The questions the user input handler says are still open, or those
-    /// the task's own record holds.
-    fn open_questions(&self, task: &Task) -> Vec<arko_agents::questions::AskedQuestion> {
-        let open = self
-            .context
+    /// The questions the user input handler says are still open.
+    fn open_questions(&self, task: &Task) -> Option<Vec<arko_agents::questions::AskedQuestion>> {
+        self.context
             .user_input_handler
-            .as_ref()
-            .and_then(|handler| handler.open_questions(task.id));
-        match open {
-            Some(ids) => task
-                .questions
-                .open
-                .iter()
-                .filter(|question| ids.contains(&question.id))
-                .cloned()
-                .collect(),
-            None => task.questions.open.clone(),
-        }
+            .as_ref()?
+            .open_questions(task.id)
     }
 
     fn on_compaction(&self, task: &Task) -> Option<String> {
@@ -3308,6 +3296,12 @@ impl WorkflowEngine {
         driven: bool,
         review: bool,
     ) -> StartedRun {
+        let mut task = task;
+        // Its questions are numbered after those the host has seen.
+        if let Some(handler) = &ctx.user_input_handler {
+            let last = handler.last_question_number(agent_name);
+            task.questions.asked = task.questions.asked.max(last);
+        }
         let load_skill_policy = task
             .agent_config
             .skills_config

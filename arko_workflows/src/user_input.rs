@@ -47,15 +47,27 @@ pub trait UserInputHandler: Send + Sync {
         self.respond(request).await.map(Some)
     }
 
-    /// The ids of the questions of agent run `agent_run_id` that are still
-    /// open, which its fresh conversation restates after a handover (and its
+    /// The questions of agent run `agent_run_id` that are still open, which
+    /// its fresh conversation restates after a handover (and its
     /// conversation after Claude Code compacted it), or `None` (the default)
     /// to go by the task's own record
     /// ([`QuestionLog`](arko_agents::questions::QuestionLog)), which knows
     /// only of answers given while the agent waited and the questions it
-    /// closed.
-    fn open_questions(&self, agent_run_id: uuid::Uuid) -> Option<Vec<String>> {
+    /// closed. An answer to questions the agent waited for
+    /// ([`respond`](Self::respond)) leaves those this returns open, so a
+    /// host may answer some of them.
+    fn open_questions(&self, agent_run_id: uuid::Uuid) -> Option<Vec<AskedQuestion>> {
         let _ = agent_run_id;
         None
+    }
+
+    /// The highest question number the host has seen in the runs of agent
+    /// `agent_name` (`5` after `q5`). A run of it that starts or goes on
+    /// numbers its questions after it, so every id the host sees is unique
+    /// across those runs, and an answer can't reach another run's question.
+    /// The default, 0, numbers each task's questions on from its own.
+    fn last_question_number(&self, agent_name: &str) -> u32 {
+        let _ = agent_name;
+        0
     }
 }

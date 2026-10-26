@@ -604,9 +604,11 @@ workflow then calls the handler's `asked` in the background while the agent goes
 answer it returns reaches the agent in its mailbox, as a subagent's report does, which wakes a
 run that ended (`SubagentEventKind::NewsWaiting`). By default `asked` answers with `respond`.
 A host that shows questions and gathers answers over time returns `Ok(None)`, delivers each
-answer itself as a note, and says which questions are still open with
-`UserInputHandler::open_questions`, which a handover restates. Without a handler, the agent
-is told no one can answer.
+answer itself as a note, and returns the questions still open from
+`UserInputHandler::open_questions`, which a handover restates. A host that shows the
+questions of several runs returns the last question number it has seen from
+`last_question_number`, and each run numbers its questions after it, so no two of the
+host's questions share an id. Without a handler, the agent is told no one can answer.
 
 ## Approvals and error recovery
 

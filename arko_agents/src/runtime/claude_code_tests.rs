@@ -4292,6 +4292,63 @@ async fn a_compaction_restates_the_open_questions() {
     assert!(note.contains("q1 Tabs or spaces?"), "{note}");
 }
 
+/// A host that has answered `q1` and keeps `q2` open.
+struct KeepsQ2;
+
+impl crate::handover::HandoverHook for KeepsQ2 {
+    fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(
+            task.questions
+                .open
+                .iter()
+                .filter(|question| question.id == "q2")
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+/// The host answers `q1` of a batch the agent waited for and keeps `q2`
+/// open: the log settles `q1` alone, and the compaction after it restates
+/// `q2`.
+#[tokio::test]
+async fn a_compaction_after_a_partial_answer_restates_the_rest() {
+    let fake = Fake::new(json!([
+        [{"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?", "Push now?"], "wait": true}, "input_tokens": 400}],
+        [
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [complete("Searched")],
+    ]));
+    let mut config = compacting(&fake, &["Grep", "ask_user"], 1000);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Search b.".into(), fake.workspace(), None);
+    let mut run = start_with(
+        task,
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(KeepsQ2)),
+    );
+    run.events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.questions.open.len(), 1);
+    assert_eq!(task.questions.open[0].id, "q2");
+    let users = user_texts(&fake);
+    let note = users.last().unwrap();
+    assert!(note.contains("# Your open questions"), "{note}");
+    assert!(note.contains("q2 Push now?"), "{note}");
+    assert!(!note.contains("q1 Tabs or spaces?"), "{note}");
+}
+
 /// A conversation whose last turn ended over the threshold compacts as
 /// its next session starts: `/compact` first, then the task's new input.
 #[tokio::test]
