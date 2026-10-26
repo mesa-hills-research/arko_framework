@@ -5598,17 +5598,18 @@ impl crate::handover::HandoverHook for SharedNumbers {
 /// the host supplied on approval, asks that result as one question. It is
 /// numbered by the host's allocator and recorded with the host before the
 /// question's event comes, as any ask is, and it waits, as such a call
-/// always did.
+/// always did. The compaction right after it restates it.
 #[tokio::test]
 async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
     let fake = Fake::new(json!([
         [
-            {"tool": "mcp__arko__ask_user", "input": {"questions": 42}},
-            {"text": "Waiting for the answer."},
+            {"tool": "mcp__arko__ask_user", "input": {"questions": 42}, "input_tokens": 400},
+            {"text": "Waiting for the answer.", "input_tokens": 1500},
         ],
+        {"compact": {"pre_tokens": 1510, "post_tokens": 200}},
         [complete("Answered")],
     ]));
-    let mut config = config(&fake, &["ask_user"]);
+    let mut config = compacting(&fake, &["ask_user"], 1000);
     config.tool_config.async_questions = true;
     config.tool_config.tool_specific_configs.insert(
         "ask_user".into(),
@@ -5658,4 +5659,11 @@ async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
         .unwrap();
     let (task, _) = run.finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let users = user_texts(&fake);
+    assert!(users.iter().any(|text| text == "/compact"), "{users:#?}");
+    let last = users.last().unwrap();
+    assert!(
+        last.contains("# Your open questions") && last.contains("q43 Which branch?"),
+        "{last}"
+    );
 }
