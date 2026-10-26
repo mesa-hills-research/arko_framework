@@ -949,6 +949,7 @@ fn all_turns_reasoning_context_goes_where_documented_or_verified() {
         for model in [
             Model::openai_gpt_6_astra(),
             Model::openai_gpt_6_sol(),
+            Model::openai_gpt_6_1_terra(),
             Model::openai_gpt_6_luna(),
         ] {
             assert_eq!(
