@@ -26,6 +26,12 @@ const ASYNC_DESCRIPTION: &str = "Asks the user without stopping your work. Ask o
     the plan changed), close it with close_questions. When the user dismisses a question, go \
     on with your default.";
 
+/// What both descriptions say of a reply that isn't an answer.
+const NON_ANSWER: &str = "A reply that doesn't answer a question (a new request, or words \
+    about something else) leaves it unanswered. Respond to what the user said, ask the question \
+    again in the same words, and end with a short reminder such as \"The question about the \
+    branch is still waiting for your answer.\"";
+
 const QUESTIONS_DESCRIPTION: &str = "The questions, as a list. Each has `question` (what you \
     need to know and why it matters) and, when they help, `choices` (up to 6 short suggested \
     answers, shown as buttons), `multiple` (true lets the user pick several choices) and \
@@ -113,7 +119,7 @@ pub fn offered_definition(
     {
         return definition;
     }
-    definition.description = ASYNC_DESCRIPTION.to_string();
+    definition.description = format!("{ASYNC_DESCRIPTION} {NON_ANSWER}");
     definition.parameters.push(ToolParameterDefinition {
         name: ASK_USER_WAIT_PARAM_NAME.to_string(),
         description: WAIT_DESCRIPTION.to_string(),
@@ -171,7 +177,7 @@ impl Tool for AskUserTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: ASK_USER_TOOL_NAME.to_string(),
-            description: DESCRIPTION.to_string(),
+            description: format!("{DESCRIPTION} {NON_ANSWER}"),
             output_based_example: None,
             parameters: vec![ToolParameterDefinition {
                 name: ASK_USER_QUESTIONS_PARAM_NAME.to_string(),
@@ -263,5 +269,9 @@ mod tests {
         assert!(offered.parameters.iter().any(|p| p.name == "wait"));
         assert!(offered.to_json_schema()["properties"]["wait"]["type"] == "boolean");
         assert!(offered.description.contains("returns at once"));
+        // Both say what to do with a reply that isn't an answer.
+        for description in [plain.description, offered.description] {
+            assert!(description.ends_with(NON_ANSWER), "{description}");
+        }
     }
 }
