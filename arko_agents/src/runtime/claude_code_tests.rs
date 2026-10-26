@@ -559,7 +559,7 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
         fake.logged("post")[0]["output"]
             .as_str()
             .unwrap()
-            .contains("questions were sent")
+            .starts_with("Asked q1. End your turn now")
     );
 }
 

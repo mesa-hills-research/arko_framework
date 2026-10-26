@@ -2748,7 +2748,11 @@ impl ClaudeCodeRun {
             self.questions_numbered = last + asked.len() as u32;
             // A question the agent waits for ends its turn.
             call.reply = Some(if wait {
-                ASKED.to_string()
+                let ids = asked.iter().map(|question| question.id.as_str());
+                format!(
+                    "Asked {}. End your turn now without calling tools, and the answer arrives as the next message.",
+                    crate::questions::id_list(&ids.collect::<Vec<_>>())
+                )
             } else {
                 result.clone()
             });
