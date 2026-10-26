@@ -709,6 +709,7 @@ impl Board {
         workspace: Option<&str>,
         isolated: bool,
         peers: Option<&str>,
+        group: Option<&str>,
         parameters: BTreeMap<String, serde_json::Value>,
     ) -> Result<String, String> {
         let config = self.config.as_ref().ok_or("subagents are off")?;
@@ -743,11 +744,21 @@ impl Board {
                 for id in split_ids(text) {
                     let run = find(&state, &id)
                         .filter(|run| run.caller_run_id == caller)
-                        .ok_or_else(|| format!("{id} is not one of your agent runs"))?;
+                        .ok_or_else(|| {
+                            format!(
+                                "{id} is not one of your agent runs (yet). Start it first and link them with link_agents, or start both with the same group"
+                            )
+                        })?;
                     ids.push(run.run_id);
                 }
                 (ids, false)
             }
+        };
+        let group = match group.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(_) if !config.peer_messages => {
+                return Err("messages between agent runs are off in this workflow".to_string());
+            }
+            group => group.map(str::to_string),
         };
         let run_id = Uuid::new_v4();
         let (handle, claim) = {
@@ -775,6 +786,7 @@ impl Board {
             parameters,
             peers: peer_ids,
             all_peers,
+            group: group.clone(),
             state: SubagentState::Queued,
             created: now,
             since: now,
@@ -837,10 +849,62 @@ impl Board {
         };
         record.workspace = workspace.clone();
         record.isolated = isolated.clone();
-        let prompt = subagent_prompt(self, config, self.workflow_run_id, &record);
         self.prepared.lock().insert(run_id, prepared);
         claim.keep();
-        self.state.lock().runs.push(record.clone());
+        // Linked with the runs already in its group as it is recorded, so
+        // that runs started at the same time all find each other.
+        let (joined, mates) = {
+            let mut state = self.state.lock();
+            let mut joined = Vec::new();
+            let mut handles = Vec::new();
+            if let Some(group) = &group {
+                let mates: Vec<Uuid> = state
+                    .runs
+                    .iter()
+                    .filter(|run| run.caller_run_id == caller && run.group.as_ref() == Some(group))
+                    .map(|run| run.run_id)
+                    .collect();
+                for mate in &mates {
+                    if let Some(run) = state.runs.iter().find(|run| run.run_id == *mate) {
+                        handles.push(run.handle.clone());
+                    }
+                    if !record.peers.contains(mate) {
+                        record.peers.push(*mate);
+                    }
+                    if let Some(run) = state.runs.iter_mut().find(|run| run.run_id == *mate)
+                        && !run.peers.contains(&run_id)
+                    {
+                        run.peers.push(run_id);
+                    }
+                    // Those queued or at work (even one launched a moment
+                    // ago, whose prompt was written without the newcomer)
+                    // hear of it at their next step. One that ended learns
+                    // the id from the newcomer's first message.
+                    if state
+                        .runs
+                        .iter()
+                        .any(|run| run.run_id == *mate && run.state.is_active())
+                    {
+                        joined.push(self.add_mail(
+                            &mut state,
+                            *mate,
+                            MailSender::Host,
+                            MailKind::Message,
+                            format!("{handle} (agent `{agent}`) joined your group `{group}`."),
+                            format!(
+                                "You may message each other. message_agent with to \"{handle}\" reaches it."
+                            ),
+                        ));
+                    }
+                }
+            }
+            state.runs.push(record.clone());
+            (joined, handles)
+        };
+        for item in &joined {
+            self.posted(ctx, item);
+        }
+        let prompt = subagent_prompt(self, config, self.workflow_run_id, &record);
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
         let latest = self.record(run_id).unwrap_or(record);
         let queued = latest.state == SubagentState::Queued;
@@ -866,8 +930,16 @@ impl Board {
         let described = describe(config, &latest)
             .map(|text| format!("\n{text}"))
             .unwrap_or_default();
+        let grouped = match (&group, mates.as_slice()) {
+            (Some(group), []) => format!(" It's the first in group `{group}`."),
+            (Some(group), mates) => format!(
+                " It's in group `{group}` with {}, and they may message each other.",
+                mates.join(", ")
+            ),
+            (None, _) => String::new(),
+        };
         Ok(format!(
-            "{start} It works while you go on, and its report reaches you when it finishes (wait_for_agents waits for it). message_agent with to \"{handle}\" sends it a message.{described}"
+            "{start}{grouped} It works while you go on, and its report reaches you when it finishes (wait_for_agents waits for it). message_agent with to \"{handle}\" sends it a message.{described}"
         ))
     }
 
@@ -3152,6 +3224,19 @@ fn subagent_prompt(
         text.push_str(
             " You may also message your lead's other agent runs, by their ids (such as r2).",
         );
+    } else if let Some(group) = &record.group {
+        let peers: Vec<String> = record
+            .peers
+            .iter()
+            .filter_map(|id| board.record(*id))
+            .map(|peer| peer.handle)
+            .collect();
+        if !peers.is_empty() {
+            text.push_str(&format!(" You may also message {}.", peers.join(", ")));
+        }
+        text.push_str(&format!(
+            " You are in your lead's group `{group}`. Each agent run your lead starts in it later may message you, and you it, and you're told its id when it joins."
+        ));
     } else if !record.peers.is_empty() {
         text.push_str(
             " You may also message the agent runs your lead linked you with, by their ids.",
@@ -3331,6 +3416,7 @@ mod stop_tests {
                     None,
                     false,
                     None,
+                    None,
                     BTreeMap::new(),
                 )
                 .await
@@ -3389,6 +3475,7 @@ mod record_tests {
                     &task,
                     None,
                     false,
+                    None,
                     None,
                     BTreeMap::new(),
                 )
@@ -3554,6 +3641,7 @@ mod restore_tests {
             parameters: BTreeMap::new(),
             peers: Vec::new(),
             all_peers: false,
+            group: None,
             state: SubagentState::Running,
             created: now,
             since: now,
@@ -3666,5 +3754,62 @@ mod update_tests {
         assert!(text.contains(lines[line - 2]), "{text}");
         assert!(!text.contains(lines[line - 1]), "{text}");
         let _ = std::fs::remove_file(file);
+    }
+}
+
+/// Runs started at the same time in one group.
+#[cfg(test)]
+mod group_tests {
+    use super::super::tests::{builder, serve, wait};
+    use super::*;
+
+    /// Two runs started at once in one group are linked both ways, and the
+    /// one recorded first, which is already at work or queued, is told of
+    /// the other, so neither depends on which started first.
+    #[tokio::test]
+    async fn runs_started_at_once_in_a_group_find_each_other() {
+        let server = serve(vec![("r1", vec![wait()]), ("r2", vec![wait()])]).await;
+        let workspace = crate::test_support::Workspace::new();
+        let workflow = builder(&server, &workspace, SubagentsConfig::default())
+            .build()
+            .unwrap();
+        let ctx = workflow.context();
+        let caller = Uuid::new_v4();
+        let start = |task: &'static str| {
+            ctx.subagents.start(
+                ctx,
+                caller,
+                "lead",
+                0,
+                &workspace.0,
+                "worker",
+                task,
+                None,
+                false,
+                None,
+                Some("team"),
+                BTreeMap::new(),
+            )
+        };
+        let (first, second) = tokio::join!(start("First."), start("Second."));
+        let results = [first.unwrap(), second.unwrap()];
+        assert!(
+            results
+                .iter()
+                .any(|text| text.contains("It's the first in group `team`.")),
+            "{results:?}"
+        );
+        let runs = workflow.subagents();
+        assert_eq!(runs[0].peers, vec![runs[1].run_id]);
+        assert_eq!(runs[1].peers, vec![runs[0].run_id]);
+        let state = ctx.subagents.state.lock();
+        let told: Vec<_> = state
+            .mail
+            .iter()
+            .filter(|item| item.heading.contains("joined your group `team`."))
+            .collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].to, runs[0].run_id);
+        assert!(told[0].heading.starts_with(&runs[1].handle));
     }
 }

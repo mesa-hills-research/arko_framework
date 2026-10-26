@@ -36,7 +36,8 @@ pub const SUBAGENT_TOOL_NAMES: &[&str] = &[
 
 /// `start_agent`'s own parameters. A host parameter may not take one of
 /// these names.
-pub(crate) const START_PARAMETERS: &[&str] = &["agent", "task", "workspace", "isolated", "peers"];
+pub(crate) const START_PARAMETERS: &[&str] =
+    &["agent", "task", "workspace", "isolated", "peers", "group"];
 
 fn param(
     name: &str,
@@ -189,6 +190,12 @@ impl Tool for StartAgentTool {
                 ToolParameterType::String,
                 false,
             ));
+            parameters.push(param(
+                "group",
+                "Optional: a name for a team of your runs, such as `openrouter`. The runs you start with the same group may message each other, whichever starts first, so runs started in one response can be linked.",
+                ToolParameterType::String,
+                false,
+            ));
         }
         if let Some(config) = config {
             parameters.extend(config.start_parameters.iter().cloned());
@@ -240,6 +247,7 @@ impl Tool for StartAgentTool {
             .collect::<BTreeMap<_, _>>();
         let workspace = text(&params, "workspace");
         let peers = text(&params, "peers");
+        let group = text(&params, "group");
         self.context
             .subagents
             .start(
@@ -253,6 +261,7 @@ impl Tool for StartAgentTool {
                 workspace.as_deref(),
                 flag(&params, "isolated")?,
                 peers.as_deref(),
+                group.as_deref(),
                 parameters,
             )
             .await

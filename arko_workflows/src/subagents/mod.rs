@@ -521,6 +521,10 @@ pub struct SubagentRecord {
     /// It may message every other run of its lead, and they it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_peers: bool,
+    /// The group its lead started it in. The runs of a group may message
+    /// each other, whichever started first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub state: SubagentState,
     pub created: DateTime<Utc>,
     /// When its state last changed.

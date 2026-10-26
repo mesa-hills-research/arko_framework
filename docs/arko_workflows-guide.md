@@ -797,7 +797,8 @@ let workflow = Workflow::builder()
 
 The lead gets `start_agent`, `message_agent`, `wait_for_agents`, `list_agents` and
 `stop_agent`. A subagent gets `message_agent` and `wait_for_agents` to talk with its
-lead, and with the lead's other runs when the lead names them as peers.
+lead, and with the lead's other runs when the lead names them as peers or starts them in
+the same `group` (runs started together can be linked that way, whichever starts first).
 `wait_for_agents` returns the reports and messages themselves. For a Claude Code agent the
 result stays under about 40,000 bytes, with the rest in the next update. Like
 `wait_for_message`, it also ends when other context arrives for the agent, or when the host

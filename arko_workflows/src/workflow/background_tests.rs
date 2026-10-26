@@ -184,6 +184,7 @@ async fn a_subagents_moved_calls_stop_when_its_run_ends() {
             None,
             false,
             None,
+            None,
             std::collections::BTreeMap::new(),
         )
         .await

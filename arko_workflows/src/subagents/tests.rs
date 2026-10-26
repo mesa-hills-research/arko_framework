@@ -936,6 +936,7 @@ async fn start_worker(workflow: &Workflow, caller: Uuid, task: &str) -> Uuid {
             None,
             false,
             None,
+            None,
             Default::default(),
         )
         .await
@@ -1177,6 +1178,91 @@ async fn linked_subagents_message_each_other_up_to_a_cap() {
         workflow.subagents()[1].peers,
         vec![workflow.subagents()[0].run_id]
     );
+}
+
+/// Runs started in one group message each other, whichever started first,
+/// and a run outside it can't. The one that starts later is told the ids of
+/// those already in it, and its lead which they are.
+#[tokio::test]
+async fn runs_of_a_group_message_each_other() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Wait for r2.", "group": "team" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Tell r1.", "group": "team" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Tell r1 too.", "peers": "r9" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Tell r1 too." }),
+                ),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+        ("r1", vec![wait()]),
+        (
+            "r2",
+            vec![(
+                "message_agent",
+                json!({ "to": "r1", "message": "Found it." }),
+            )],
+        ),
+        (
+            "r3",
+            vec![("message_agent", json!({ "to": "r1", "message": "Me too." }))],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let first = result_of(&lead[1], "lead", 0);
+    assert!(first.contains("It's the first in group `team`."), "{first}");
+    let second = result_of(&lead[2], "lead", 1);
+    assert!(
+        second.contains("It's in group `team` with r1, and they may message each other."),
+        "{second}"
+    );
+    let unknown = result_of(&lead[3], "lead", 2);
+    assert!(
+        unknown.contains("r9 is not one of your agent runs (yet)")
+            && unknown.contains("link_agents"),
+        "{unknown}"
+    );
+    let r1 = bodies_of(&server, "r1");
+    let got = r1.iter().map(|body| body.as_str()).collect::<String>();
+    assert!(got.contains("Found it."), "{got}");
+    assert!(
+        got.contains("r2 (agent `worker`) joined your group `team`."),
+        "{got}"
+    );
+    assert!(!got.contains("Me too."), "{got}");
+    assert!(bodies_of(&server, "r2")[0].contains("You may also message r1."));
+    let r3 = bodies_of(&server, "r3");
+    assert!(
+        result_of(&r3[1], "r3", 0).contains("hasn't linked you with r1"),
+        "{}",
+        result_of(&r3[1], "r3", 0)
+    );
+    let runs = workflow.subagents();
+    assert_eq!(runs[0].peers, vec![runs[1].run_id]);
+    assert_eq!(runs[1].peers, vec![runs[0].run_id]);
+    assert_eq!(runs[0].group.as_deref(), Some("team"));
+    assert!(runs[2].peers.is_empty());
 }
 
 /// A run works in the directory it is given: the host's
@@ -1686,6 +1772,69 @@ async fn a_finished_subagent_goes_on_from_its_task_after_a_resume() {
     assert!(news.iter().any(|item| item.body == "r1 done"), "{news:?}");
 }
 
+/// A run keeps its group through a resume, and one started in that group
+/// after it is linked with it.
+#[tokio::test]
+async fn a_group_holds_after_a_resume() {
+    let server = serve(vec![(
+        "lead",
+        vec![(
+            "start_agent",
+            json!({ "agent": "worker", "task": "Count the files.", "group": "team" }),
+        )],
+    )])
+    .await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let build = |resume: Option<std::path::PathBuf>| {
+        let builder = builder(&server, &workspace, SubagentsConfig::default())
+            .persistence(PersistenceConfig::new(&run_dir));
+        match resume {
+            Some(checkpoint) => builder.resume_from(checkpoint),
+            None => builder,
+        }
+        .build()
+        .unwrap()
+    };
+    let workflow = build(None);
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let resumed = build(Some(run_dir.join(latest.trim())));
+    assert_eq!(resumed.subagents()[0].group.as_deref(), Some("team"));
+    let ctx = resumed.context();
+    let started = ctx
+        .subagents
+        .start(
+            ctx,
+            lead.agent_run_id,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Count them again.",
+            None,
+            false,
+            None,
+            Some("team"),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.contains("It's in group `team` with r1"),
+        "{started}"
+    );
+    let runs = resumed.subagents();
+    assert_eq!(runs[0].peers, vec![runs[1].run_id]);
+    assert_eq!(runs[1].peers, vec![runs[0].run_id]);
+}
+
 /// Background runs need workflow services, and host parameters may not
 /// take `start_agent`'s own names; a host tool may not take a subagent
 /// tool's name.
@@ -2023,6 +2172,7 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
                 task,
                 None,
                 false,
+                None,
                 None,
                 std::collections::BTreeMap::new(),
             )

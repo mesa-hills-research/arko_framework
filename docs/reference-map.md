@@ -1681,7 +1681,7 @@ An agent gets `read_memory` if it can read a tier, `write_memory` if it can writ
 |---|---|---|
 | `max_running` | 4 (`DEFAULT_MAX_RUNNING`) | Subagents running at once, workflow-wide. Starts and restarts over it wait in a queue, oldest first. `unlimited()` lifts it. |
 | `max_depth` | 1 | Subagents start no subagents and aren't offered `run_workflow_agent`. Higher, every subagent of a caller agent under that depth gets the start tools (`SubagentHook::offers_start_tools` narrows that per run). A stop of a subagent, or its end, stops the subagents it started. It can't report while they work (`complete_task` is refused five times in a row, then let through and they are stopped), and while it waits for them in `wait_for_agents` it holds no `max_running` place. |
-| `peer_messages` | On | The lead may let its subagents message each other (`peers`, `link_agents`). Off, subagents message only their lead. |
+| `peer_messages` | On | The lead may let its subagents message each other (`peers`, `group`, `link_agents`). Off, subagents message only their lead. |
 | `max_peer_messages` | 20 (`DEFAULT_MAX_PEER_MESSAGES`) | Messages between two subagents until their lead writes to either. |
 | `copy_peer_messages_to_lead` | Off | On. The lead gets a copy of each, which wakes no one. |
 | `workspaces_anywhere` | Off. A `workspace` must be inside the caller's directory | |

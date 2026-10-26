@@ -1045,6 +1045,7 @@ async fn a_compaction_restates_the_subagents_that_still_work() {
             None,
             false,
             None,
+            None,
             BTreeMap::new(),
         )
         .await
@@ -1360,6 +1361,7 @@ async fn a_start_by_a_subagent_without_the_start_tools_is_refused() {
             "Take this.",
             None,
             false,
+            None,
             None,
             BTreeMap::new(),
         )
@@ -1750,6 +1752,7 @@ async fn a_subagent_that_woke_from_its_wait_holds_a_place_again() {
             None,
             false,
             None,
+            None,
             BTreeMap::new(),
         )
         .await
@@ -1781,6 +1784,7 @@ async fn begin(
             task,
             None,
             false,
+            None,
             None,
             BTreeMap::new(),
         )
@@ -1979,6 +1983,7 @@ async fn a_handover_lists_twenty_subagents_and_counts_the_rest() {
                 &format!("Task number {number}."),
                 None,
                 false,
+                None,
                 None,
                 BTreeMap::new(),
             )
