@@ -73,23 +73,25 @@ impl QuestionLog {
 
     /// Records `questions` as asked and open, each with the next id.
     pub fn ask(&mut self, questions: Vec<Question>) -> Vec<AskedQuestion> {
-        let asked = questions
-            .into_iter()
-            .map(|question| {
-                self.asked += 1;
-                AskedQuestion {
-                    id: format!("q{}", self.asked),
-                    question,
-                }
-            })
-            .collect::<Vec<_>>();
-        self.open.extend(asked.iter().cloned());
+        let asked = numbered(questions, self.asked);
+        self.record(&asked, false);
         asked
+    }
+
+    /// Records questions numbered before (see [`ask`](Self::ask)) as asked
+    /// and open, and `wait`ed for. Later questions are numbered after them.
+    pub fn record(&mut self, asked: &[AskedQuestion], wait: bool) {
+        let last = asked.iter().filter_map(|question| number_of(&question.id));
+        self.asked = last.fold(self.asked, u32::max);
+        self.open.extend(asked.iter().cloned());
+        if wait {
+            self.waiting = asked.iter().map(|question| question.id.clone()).collect();
+        }
     }
 
     /// Whether the task asked a question with this id.
     pub fn was_asked(&self, id: &str) -> bool {
-        number_of(id).is_some_and(|number| number >= 1 && number <= self.asked)
+        was_asked(id, self.asked)
     }
 
     /// The open question `id`.
@@ -119,6 +121,22 @@ impl QuestionLog {
         self.settle(&waiting);
         waiting
     }
+}
+
+/// `questions` with the ids after `last`, the highest number taken.
+fn numbered(questions: Vec<Question>, last: u32) -> Vec<AskedQuestion> {
+    (last + 1..)
+        .zip(questions)
+        .map(|(number, question)| AskedQuestion {
+            id: format!("q{number}"),
+            question,
+        })
+        .collect()
+}
+
+/// Whether `id` is one of the first `last` questions' ids.
+fn was_asked(id: &str, last: u32) -> bool {
+    number_of(id).is_some_and(|number| number >= 1 && number <= last)
 }
 
 /// The number of an id such as `q3` (also `Q3`, `3`).
@@ -550,11 +568,22 @@ pub(crate) fn take_ask(
     wait: bool,
     async_questions: bool,
 ) -> (Vec<AskedQuestion>, bool, String) {
+    let (asked, wait, reply) = plan_ask(log.asked, questions, wait, async_questions);
+    log.record(&asked, wait);
+    (asked, wait, reply)
+}
+
+/// [`take_ask`] without recording the questions: they are numbered after
+/// `last`, the highest number taken, and the caller records them with
+/// [`QuestionLog::record`] once the call runs.
+pub(crate) fn plan_ask(
+    last: u32,
+    questions: Vec<Question>,
+    wait: bool,
+    async_questions: bool,
+) -> (Vec<AskedQuestion>, bool, String) {
     let wait = wait || !async_questions;
-    let asked = log.ask(questions);
-    if wait {
-        log.waiting = asked.iter().map(|question| question.id.clone()).collect();
-    }
+    let asked = numbered(questions, last);
     let reply = crate::tool::builtins::ask_user::call_result(&asked, wait);
     (asked, wait, reply)
 }
@@ -562,9 +591,16 @@ pub(crate) fn take_ask(
 /// A `close_questions` call that closes `ids`: those the task asked are
 /// settled in `log`. Returns their ids and the call's result for the agent.
 pub(crate) fn take_close(log: &mut QuestionLog, ids: Vec<String>) -> (Vec<String>, String) {
-    let (known, unknown): (Vec<String>, Vec<String>) =
-        ids.into_iter().partition(|id| log.was_asked(id));
+    let (known, reply) = plan_close(log.asked, ids);
     log.settle(&known);
+    (known, reply)
+}
+
+/// [`take_close`] without settling them: those among the first `last`
+/// questions are known.
+pub(crate) fn plan_close(last: u32, ids: Vec<String>) -> (Vec<String>, String) {
+    let (known, unknown): (Vec<String>, Vec<String>) =
+        ids.into_iter().partition(|id| was_asked(id, last));
     let reply = crate::tool::builtins::close_questions::call_result(&known, &unknown);
     (known, reply)
 }

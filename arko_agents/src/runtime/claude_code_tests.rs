@@ -609,6 +609,99 @@ async fn an_ask_in_claude_code_returns_at_once_with_ids() {
     assert_eq!(task.questions.open[0].id, "q1");
 }
 
+/// Refuses the `ask_user` call that asks "Refused?" and every
+/// `close_questions` call.
+struct RefusesQuestions;
+
+#[async_trait::async_trait]
+impl crate::tool::ToolExecutionMiddleware for RefusesQuestions {
+    async fn before(
+        &self,
+        _context: &crate::tool::ToolExecutionContext<'_>,
+        call: &crate::tool::ToolCallContext<'_>,
+    ) -> Result<crate::tool::ToolExecutionDecision, crate::tool::ToolError> {
+        let refused = call.tool_name == "close_questions"
+            || call
+                .parameters
+                .get("questions")
+                .is_some_and(|questions| questions.to_string().contains("Refused?"));
+        Ok(if refused {
+            crate::tool::ToolExecutionDecision::Reject {
+                message_to_agent: "Not here.".into(),
+            }
+        } else {
+            crate::tool::ToolExecutionDecision::Continue
+        })
+    }
+
+    async fn after(
+        &self,
+        _context: &crate::tool::ToolExecutionContext<'_>,
+        _call: &crate::tool::ToolCallContext<'_>,
+        _outcome: crate::tool::ToolExecutionOutcome<'_>,
+    ) -> Result<(), crate::tool::ToolError> {
+        Ok(())
+    }
+}
+
+/// A middleware refuses an `ask_user` and a `close_questions` call after
+/// Claude Code's gate admitted them: the refused ask leaves no question
+/// open and the refused close closes none, and the host hears of neither,
+/// so the task's log and the host agree.
+#[tokio::test]
+async fn refused_question_calls_in_claude_code_change_no_questions() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}},
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Refused?"]}},
+        {"tool": "mcp__arko__close_questions", "input": {"ids": ["q1"]}},
+        complete("Went on"),
+    ]]));
+    let mut config = config(&fake, &["ask_user", "close_questions"]);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Format the code.".into(), fake.workspace(), None);
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(
+            task,
+            Arc::new(ToolRegistry::new()),
+            None,
+            false,
+            None,
+            None,
+            Some(Arc::new(RefusesQuestions)),
+        );
+    let (task, events) = Run {
+        events,
+        commands,
+        handle,
+    }
+    .finish()
+    .await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let asked = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UserQuestionsAsked { asked, .. } => Some(asked.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0][0].id, "q1");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::QuestionsClosed { .. }))
+    );
+    assert_eq!(
+        task.questions
+            .open
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1"]
+    );
+    assert_eq!(task.questions.asked, 1);
+}
+
 /// A launch's message IDs are its own: after an answer relaunches Claude
 /// Code (whose IDs may start over), a reply whose ID an earlier launch
 /// streamed is still sent to the host.

@@ -835,6 +835,8 @@ pub(super) struct ClaudeCodeRun {
     /// The `ask_user` and `close_questions` calls admitted whose results
     /// haven't arrived, by call ID.
     question_calls: HashMap<Uuid, QuestionCall>,
+    /// The highest question number admitted calls took, recorded or not.
+    questions_numbered: u32,
     /// The report request reached the model in this turn (a denied call's
     /// result, or a user message).
     report_delivered: bool,
@@ -978,6 +980,7 @@ impl ClaudeCodeRun {
             open_turns: 0,
             questions: None,
             question_calls: HashMap::new(),
+            questions_numbered: 0,
             report_delivered: false,
             approval: None,
             after_result: HashMap::new(),
@@ -2717,10 +2720,13 @@ impl ClaudeCodeRun {
     }
 
     /// An `ask_user` or `close_questions` call being admitted: its
-    /// questions are numbered now, or closed, so that what Claude Code reads
-    /// of it names them (`call.reply`). Its events follow its result. A
-    /// call whose input can't be read runs as it is, and its tool says why.
+    /// questions are numbered now, or the ids to close are checked, so that
+    /// what Claude Code reads of it names them (`call.reply`). The task's
+    /// log records them, and the host hears of them, once the call ran
+    /// (a middleware may still refuse it). A call whose input can't be read
+    /// runs as it is, and its tool says why.
     fn take_question_call(&mut self, name: &str, input: &Value, call: &mut Admitted) {
+        let last = self.task.questions.asked.max(self.questions_numbered);
         let taken = if name == ASK_USER_TOOL_NAME {
             let Some(Ok(questions)) = input
                 .get(crate::tool::builtins::ask_user::ASK_USER_QUESTIONS_PARAM_NAME)
@@ -2731,12 +2737,13 @@ impl ClaudeCodeRun {
             let wait = crate::questions::parse_wait(
                 input.get(crate::tool::builtins::ask_user::ASK_USER_WAIT_PARAM_NAME),
             );
-            let (asked, wait, result) = crate::questions::take_ask(
-                &mut self.task.questions,
+            let (asked, wait, result) = crate::questions::plan_ask(
+                last,
                 questions,
                 wait,
                 self.task.agent_config.tool_config.async_questions,
             );
+            self.questions_numbered = last + asked.len() as u32;
             // A question the agent waits for ends its turn.
             call.reply = Some(if wait {
                 ASKED.to_string()
@@ -2762,7 +2769,7 @@ impl ClaudeCodeRun {
                 .map(str::trim)
                 .filter(|why| !why.is_empty())
                 .map(str::to_string);
-            let (ids, result) = crate::questions::take_close(&mut self.task.questions, ids);
+            let (ids, result) = crate::questions::plan_close(last, ids);
             call.reply = Some(result.clone());
             QuestionCall::Closed { ids, why, result }
         } else {
@@ -3651,6 +3658,8 @@ impl ClaudeCodeRun {
             .as_ref()
             .and_then(|host| host.outcomes.lock().unwrap().remove(&id))
             .map(|(outcome, _)| outcome);
+        // What its admission took of the questions counts only once it ran.
+        let question_call = self.question_calls.remove(&id);
         match outcome {
             // A built-in, or a call the gate refused.
             None => {
@@ -3667,7 +3676,15 @@ impl ClaudeCodeRun {
                 effective,
                 intercepted,
             }) => {
-                let question_call = self.question_calls.remove(&id);
+                match &question_call {
+                    Some(QuestionCall::Asked { asked, wait, .. }) => {
+                        self.task.questions.record(asked, *wait);
+                    }
+                    Some(QuestionCall::Closed { ids, .. }) => {
+                        self.task.questions.settle(ids);
+                    }
+                    None => {}
+                }
                 let (raw, effective) = match &question_call {
                     Some(
                         QuestionCall::Asked { result, .. } | QuestionCall::Closed { result, .. },
