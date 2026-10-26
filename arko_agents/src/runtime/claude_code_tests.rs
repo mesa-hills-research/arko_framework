@@ -5567,3 +5567,95 @@ async fn a_monitor_started_in_claude_code_alerts_the_agent() {
     );
     jobs.shutdown().await;
 }
+
+/// A host's record of questions with an allocator another run already took
+/// numbers from: the next ask is numbered from 43.
+#[derive(Default)]
+struct SharedNumbers {
+    asked: std::sync::Mutex<Vec<crate::questions::AskedQuestion>>,
+}
+
+impl crate::handover::HandoverHook for SharedNumbers {
+    fn open_questions(&self, _task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(self.asked.lock().unwrap().clone())
+    }
+
+    fn question_numbers(&self, _task: &Task, _count: u32) -> Option<u32> {
+        Some(43 + self.asked.lock().unwrap().len() as u32)
+    }
+
+    fn questions_asked(
+        &self,
+        _task: &Task,
+        asked: &[crate::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        self.asked.lock().unwrap().extend(asked.iter().cloned());
+    }
+}
+
+/// An `ask_user` call whose input the runtime can't read, with the result
+/// the host supplied on approval, asks that result as one question. It is
+/// numbered by the host's allocator and recorded with the host before the
+/// question's event comes, as any ask is, and it waits, as such a call
+/// always did.
+#[tokio::test]
+async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__ask_user", "input": {"questions": 42}},
+            {"text": "Waiting for the answer."},
+        ],
+        [complete("Answered")],
+    ]));
+    let mut config = config(&fake, &["ask_user"]);
+    config.tool_config.async_questions = true;
+    config.tool_config.tool_specific_configs.insert(
+        "ask_user".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let task = Task::new(config, "Pick a branch.".into(), fake.workspace(), None);
+    let host = Arc::new(SharedNumbers::default());
+    let mut run = start_with(
+        task,
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_handover_hook(host.clone()),
+    );
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: Some("Which branch?".into()),
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    // Recorded with the host before the event came.
+    let recorded = host.asked.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "q43");
+    assert_eq!(recorded[0].question.question, "Which branch?");
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::UserQuestionsAsked { asked, wait: true, .. })
+            if asked.len() == 1 && asked[0].id == "q43"
+    ));
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "main".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+}

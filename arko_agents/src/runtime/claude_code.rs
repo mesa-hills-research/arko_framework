@@ -3752,16 +3752,26 @@ impl ClaudeCodeRun {
                         self.emit(AgentEvent::QuestionsClosed { ids, why }).await?;
                     }
                     // A host's own ask_user, whose input the runtime
-                    // couldn't read, asks its result.
+                    // couldn't read, asks its result, numbered and recorded
+                    // as any ask is. It waits, as such a call always did.
                     None if name == ASK_USER_TOOL_NAME => {
                         let (questions, wait) = crate::tool::builtins::ask_user::read_call(&raw);
-                        let (asked, _, _) = crate::questions::take_ask(
+                        let last = crate::handover::last_question_number(
+                            self.handover_hook.as_deref(),
+                            &self.task,
+                            questions.len() as u32,
+                            self.questions_numbered,
+                        );
+                        let (asked, wait, _) = crate::questions::take_ask(
                             &mut self.task.questions,
-                            0,
+                            last,
                             questions,
                             wait,
                             false,
                         );
+                        if let Some(hook) = &self.handover_hook {
+                            hook.questions_asked(&self.task, &asked, wait);
+                        }
                         self.questions = Some((crate::questions::questions_text(&asked), asked));
                     }
                     _ => {}
