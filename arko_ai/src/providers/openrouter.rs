@@ -51,12 +51,16 @@ use std::{
 /// Default API base URL. Chat requests go to `{base}/chat/completions`.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
+/// Chooses a chat request's base URL from its model slug.
+type BaseUrlFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// A client for OpenRouter. Clones share the loaded catalog.
 #[derive(Clone)]
 pub struct OpenRouterClient {
     api_key: String,
     http_client: reqwest::Client,
     base_url: String,
+    base_url_for: Option<BaseUrlFor>,
     default_options: OpenRouterOptions,
     attribution: Option<AppAttribution>,
     catalog: Arc<RwLock<Option<Arc<OpenRouterCatalog>>>>,
@@ -67,6 +71,7 @@ impl std::fmt::Debug for OpenRouterClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenRouterClient")
             .field("base_url", &self.base_url)
+            .field("base_url_for", &self.base_url_for.is_some())
             .field("default_options", &self.default_options)
             .field("attribution", &self.attribution)
             .finish_non_exhaustive()
@@ -79,6 +84,7 @@ impl OpenRouterClient {
             api_key: api_key.to_string(),
             http_client: super::default_http_client(),
             base_url: OPENROUTER_BASE_URL.to_string(),
+            base_url_for: None,
             default_options: OpenRouterOptions::default(),
             attribution: None,
             catalog: Arc::new(RwLock::new(None)),
@@ -101,6 +107,20 @@ impl OpenRouterClient {
     /// or a test server) instead of `https://openrouter.ai/api/v1`.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Sends each chat request to the base URL `choose` returns for its
+    /// model slug (as sent, variant suffix included), or to the client's base
+    /// URL when it returns `None`. A client that serves models from more than
+    /// one regional host uses it, such as `https://us.openrouter.ai/api/v1`
+    /// for the models offered in the US and `https://eu.openrouter.ai/api/v1`
+    /// for the rest. Catalog requests keep the client's base URL.
+    pub fn with_base_url_for(
+        mut self,
+        choose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.base_url_for = Some(Arc::new(choose));
         self
     }
 
@@ -211,9 +231,17 @@ impl OpenRouterClient {
     }
 
     async fn send_chat(&self, prepared: &PreparedRequest) -> Result<reqwest::Response, Error> {
+        let url = match self
+            .base_url_for
+            .as_ref()
+            .and_then(|choose| choose(&prepared.body.model))
+        {
+            Some(base) => format!("{}/chat/completions", base.trim_end_matches('/')),
+            None => self.url("chat/completions"),
+        };
         let mut builder = self
             .http_client
-            .post(self.url("chat/completions"))
+            .post(url)
             .bearer_auth(&self.api_key)
             .header("Content-Type", "application/json");
         if let Some(attribution) = &self.attribution {

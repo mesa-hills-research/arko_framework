@@ -1059,7 +1059,10 @@ let response = client.generate_text(&conversation, config).await?;
 
 `LLMClient::with_openrouter_api_key` or `with_openrouter_client(OpenRouterClient::new(key)...)`
 configure it explicitly. `OpenRouterClient::with_base_url` points it at a regional
-hostname, proxy or test server.
+hostname, proxy or test server. `with_base_url_for(|slug| ...)` chooses the base URL of each
+chat request from its model slug, falling back to the client's own when it returns `None`.
+A client that serves models from both `https://us.openrouter.ai/api/v1` and
+`https://eu.openrouter.ai/api/v1` uses it.
 
 ### Models and the catalog
 

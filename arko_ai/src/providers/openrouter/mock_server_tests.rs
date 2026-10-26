@@ -181,6 +181,44 @@ async fn requests_carry_only_the_key_and_no_attribution_by_default() {
     .await;
 }
 
+/// A chat request goes to the base URL chosen for its model, and to the
+/// client's own base URL when none is chosen.
+#[tokio::test]
+async fn chat_requests_go_to_the_base_url_chosen_for_their_model() {
+    timed(async {
+        let (url, server) = serve(vec![
+            reply(200, completion("eu")),
+            reply(200, completion("us")),
+        ])
+        .await;
+        let eu = format!("{url}/eu/");
+        let client = client(&url)
+            .with_base_url_for(move |slug| (slug == "mistralai/mistral-large").then(|| eu.clone()));
+        for slug in ["mistralai/mistral-large", "anthropic/claude-sonnet-5"] {
+            client
+                .generate_text(&conversation(slug), &GenerationConfig::default())
+                .await
+                .unwrap();
+        }
+        let requests = server.await.unwrap();
+        assert!(
+            requests[0]
+                .head
+                .starts_with("post /api/v1/eu/chat/completions "),
+            "{}",
+            requests[0].head
+        );
+        assert!(
+            requests[1]
+                .head
+                .starts_with("post /api/v1/chat/completions "),
+            "{}",
+            requests[1].head
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn attribution_and_beta_headers_are_sent_when_configured() {
     timed(async {
