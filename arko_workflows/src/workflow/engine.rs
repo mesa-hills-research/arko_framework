@@ -1346,6 +1346,7 @@ fn ask_later(
 ) {
     let ctx = drive.ctx.clone();
     let agent_run_id = drive.agent_run_id;
+    let agent_name = drive.agent_name.to_string();
     let ids = asked
         .iter()
         .map(|question| question.id.clone())
@@ -1359,14 +1360,19 @@ fn ask_later(
         ),
     };
     let Some(handler) = ctx.user_input_handler.clone() else {
-        ctx.subagents
-            .host_mail(&ctx, agent_run_id, String::new(), NO_ONE_TO_ASK.to_string());
+        ctx.subagents.host_mail(
+            &ctx,
+            agent_run_id,
+            &agent_name,
+            String::new(),
+            NO_ONE_TO_ASK.to_string(),
+        );
         return;
     };
     let request = crate::user_input::UserInputRequest {
         workflow_run_id: ctx.workflow_run_id,
         agent_run_id,
-        agent_name: drive.agent_name.to_string(),
+        agent_name: agent_name.clone(),
         questions,
         asked,
         wait: false,
@@ -1379,7 +1385,8 @@ fn ask_later(
         };
         match answer {
             Ok(Some(answer)) if !answer.trim().is_empty() => {
-                ctx.subagents.host_mail(&ctx, agent_run_id, heading, answer);
+                ctx.subagents
+                    .host_mail(&ctx, agent_run_id, &agent_name, heading, answer);
             }
             Ok(_) => {}
             Err(error) => log::warn!("The answer to {ids:?} of run {agent_run_id} failed: {error}"),

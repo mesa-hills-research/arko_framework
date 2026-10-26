@@ -191,6 +191,67 @@ async fn a_handover_restates_the_questions_the_handler_has_open() {
     }
 }
 
+/// Holds every answer until `release` sends, then answers "q1 Spaces.".
+struct Held {
+    release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl UserInputHandler for Held {
+    async fn respond(&self, _request: UserInputRequest) -> Result<String, String> {
+        let release = self.release.lock().await.take();
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+        Ok("q1 Spaces.".to_string())
+    }
+}
+
+/// An answer that comes after the asking run ended wakes it: the host
+/// hears `NewsWaiting` about the run itself, and the run it continues
+/// reads the answer.
+#[tokio::test]
+async fn a_late_answer_tells_the_host_its_run_has_news() {
+    let workspace = Workspace::new();
+    let server = asking_server("q1 Spaces.").await;
+    let (release, held) = tokio::sync::oneshot::channel();
+    let workflow = Workflow::builder()
+        .name("async-question-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", asking_agent())
+        .user_input_handler(Arc::new(Held {
+            release: tokio::sync::Mutex::new(Some(held)),
+        }))
+        .build()
+        .unwrap();
+    let mut news = workflow.subscribe_subagents();
+    let result = within(workflow.run_agent("lead", "Format the code."))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "early");
+    release.send(()).unwrap();
+    let event = within(async {
+        loop {
+            let event = news.recv().await.unwrap();
+            if matches!(
+                event.kind,
+                crate::subagents::SubagentEventKind::NewsWaiting { .. }
+            ) {
+                return event;
+            }
+        }
+    })
+    .await;
+    assert_eq!(event.run_id, result.agent_run_id);
+    assert_eq!(event.caller_run_id, result.agent_run_id);
+    assert_eq!(event.agent_name, "lead");
+    let continued = within(workflow.continue_agent(&result, "Go on."))
+        .await
+        .unwrap();
+    assert_eq!(continued.summary, "answered");
+}
+
 /// Says the host has seen questions up to `q5` of the lead's runs.
 struct SeenFive;
 
