@@ -561,6 +561,45 @@ pub trait HandoverHook: Send + Sync {
         let _ = task;
         None
     }
+
+    /// The questions `task`'s agent asked that are still open, which the
+    /// fresh conversation (after its report and context) and a compacted
+    /// one (with its next input) restate, so the agent doesn't lose track.
+    /// The default is the task's own log ([`Task::questions`]), which knows
+    /// of the answers given while the agent waited and of the questions it
+    /// closed. A host that delivers answers later as context returns the
+    /// questions it still has open.
+    fn open_questions(&self, task: &Task) -> Vec<crate::questions::AskedQuestion> {
+        task.questions.open.clone()
+    }
+}
+
+/// `seed` with the section that restates the open questions `hook` (or the
+/// task's log, without a hook) gives, after its context.
+pub(crate) fn with_open_questions(
+    mut seed: HandoverSeed,
+    hook: Option<&dyn HandoverHook>,
+    task: &Task,
+) -> HandoverSeed {
+    if let Some(section) = crate::questions::open_section(&open_questions(hook, task)) {
+        seed.context = Some(match seed.context.take().filter(|c| !c.trim().is_empty()) {
+            Some(context) => format!("{}\n\n{section}", context.trim_end()),
+            None => section,
+        });
+    }
+    seed
+}
+
+/// The questions still open, as `hook` (or, without one, the task's log)
+/// says.
+pub(crate) fn open_questions(
+    hook: Option<&dyn HandoverHook>,
+    task: &Task,
+) -> Vec<crate::questions::AskedQuestion> {
+    match hook {
+        Some(hook) => hook.open_questions(task),
+        None => task.questions.open.clone(),
+    }
 }
 
 #[cfg(test)]

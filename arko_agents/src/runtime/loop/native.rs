@@ -376,22 +376,14 @@ impl AgentLoop {
     ) -> Result<ai::ToolResult, ArkoAgentsError> {
         let tool_name = call.name.as_str();
         let images = result_images(output.images);
-        let raw = output.text;
+        let mut raw = output.text;
+        let mut effective = effective;
         // A call of a group another call already ended (possible only
         // for tools configured parallel-safe) changes no state.
         let open = !self.task.current_state.is_terminal();
-        if tool_name == ASK_USER_TOOL_NAME && open {
-            self.task.set_state(TaskState::AwaitingUserResponse {
-                questions: raw.clone(),
-            });
-            self.emit_event(AgentEvent::TaskStateChanged(
-                self.task.current_state.clone(),
-            ))
-            .await?;
-            self.emit_event(AgentEvent::UserQuestionsAsked {
-                questions: raw.clone(),
-            })
-            .await?;
+        if open && let Some(result) = self.take_question_call(tool_name, &raw).await? {
+            raw = result.clone();
+            effective = result;
         }
         if let Some(message) = self.message_to_user(
             tool_name,
@@ -415,6 +407,56 @@ impl AgentLoop {
             .await?;
         }
         Ok(ai::ToolResult::from_tool_call(call, &text).with_images(images))
+    }
+
+    /// An `ask_user` or `close_questions` call that finished with `raw`:
+    /// its questions are numbered and recorded in the task's log, or closed
+    /// there, and the host is told (`UserQuestionsAsked`,
+    /// `QuestionsClosed`). An `ask_user` that waits sets the task awaiting
+    /// the answer. Returns the call's result for the agent, or `None` for
+    /// any other tool.
+    pub(super) async fn take_question_call(
+        &mut self,
+        tool_name: &str,
+        raw: &str,
+    ) -> Result<Option<String>, ArkoAgentsError> {
+        if tool_name == ASK_USER_TOOL_NAME {
+            let (questions, wait) = crate::tool::builtins::ask_user::read_call(raw);
+            let (asked, wait, result) = crate::questions::take_ask(
+                &mut self.task.questions,
+                questions,
+                wait,
+                self.task.agent_config.tool_config.async_questions,
+            );
+            let questions = crate::questions::questions_text(&asked);
+            if wait {
+                self.task.set_state(TaskState::AwaitingUserResponse {
+                    questions: questions.clone(),
+                });
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+            }
+            self.emit_event(AgentEvent::UserQuestionsAsked {
+                questions,
+                asked,
+                wait,
+            })
+            .await?;
+            return Ok(Some(result));
+        }
+        if tool_name == crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME
+            && let Some((ids, why)) = crate::tool::builtins::close_questions::read_call(raw)
+        {
+            let (ids, result) = crate::questions::take_close(&mut self.task.questions, ids);
+            if !ids.is_empty() {
+                self.emit_event(AgentEvent::QuestionsClosed { ids, why })
+                    .await?;
+            }
+            return Ok(Some(result));
+        }
+        Ok(None)
     }
 
     pub(super) fn tool_call_args_to_map(tc: &ai::ToolCall) -> HashMap<String, Value> {

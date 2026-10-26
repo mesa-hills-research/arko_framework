@@ -563,6 +563,52 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
     );
 }
 
+/// With `async_questions`, the MCP `ask_user` returns at once, naming the
+/// questions' ids, and the turn goes on. `close_questions` closes one, and
+/// the host hears of both.
+#[tokio::test]
+async fn an_ask_in_claude_code_returns_at_once_with_ids() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__ask_user", "input": {"questions": [
+            {"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]},
+            {"question": "Push now?", "default": "not yet"}
+        ]}},
+        {"tool": "mcp__arko__close_questions", "input": {"ids": ["q2"], "why": "Decided"}},
+        complete("Went on"),
+    ]]));
+    let mut config = config(&fake, &["ask_user", "close_questions"]);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Format the code.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::UserQuestionsAsked { asked, wait: false, .. }
+            if asked.len() == 2 && asked[1].id == "q2"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::QuestionsClosed { ids, .. } if ids == &["q2"]
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TaskStateChanged(TaskState::AwaitingUserResponse { .. })
+    )));
+    let posts = fake.logged("post");
+    assert_eq!(
+        posts[0]["output"].as_str().unwrap(),
+        "Asked q1 and q2. Their answers reach you as a note, so go on with your work."
+    );
+    assert_eq!(posts[1]["output"].as_str().unwrap(), "Closed q2.");
+    assert_eq!(fake.logged("argv").len(), 1, "the turn went on");
+    assert_eq!(task.questions.open.len(), 1);
+    assert_eq!(task.questions.open[0].id, "q1");
+}
+
 /// A launch's message IDs are its own: after an answer relaunches Claude
 /// Code (whose IDs may start over), a reply whose ID an earlier launch
 /// streamed is still sent to the host.
@@ -4124,6 +4170,33 @@ async fn a_compaction_holds_the_next_call_and_continues_in_the_same_session() {
     assert!(!texts.iter().any(|text| text.starts_with("Not reached")));
     assert_eq!(task.conversation_usage_start, 2);
     assert_eq!(task.usage_history[2].input_tokens, 600);
+}
+
+/// After a compaction, the questions still open come back with the
+/// agent's next input, after the hook's context.
+#[tokio::test]
+async fn a_compaction_restates_the_open_questions() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [complete("Searched")],
+    ]));
+    let mut config = compacting(&fake, &["Grep", "ask_user"], 1000);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Search b.".into(), fake.workspace(), None);
+    let (task, _) = start_with(task, with_notes()).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let users = user_texts(&fake);
+    let note = users.last().unwrap();
+    assert!(
+        note.contains("# Notes on your task\n- Keep the tests green.\n\n# Your open questions"),
+        "{note}"
+    );
+    assert!(note.contains("q1 Tabs or spaces?"), "{note}");
 }
 
 /// A conversation whose last turn ended over the threshold compacts as

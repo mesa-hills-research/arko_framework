@@ -591,6 +591,19 @@ pub struct AgentToolConfig {
     /// tools and behaviour its host gives every agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat: bool,
+    /// `ask_user` returns at once, unless the agent passes `wait: true`, and
+    /// the host delivers the answers later as context (such as a note). Off
+    /// by default, when every question waits for its answer. On, the tool's
+    /// description says so and it offers `wait`, its result names the
+    /// questions' ids ("Asked q3 and q4. Their answers reach you as a note,
+    /// so go on with your work."), and
+    /// [`AgentEvent::UserQuestionsAsked`](crate::AgentEvent::UserQuestionsAsked)
+    /// has `wait: false`. The task doesn't wait. Set it only for an agent
+    /// whose host answers that way, as arko_workflows' user input handler
+    /// can (its `asked`). A subagent whose questions go to its lead always
+    /// waits. See [`crate::questions`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub async_questions: bool,
 }
 
 /// The terminal tool that starts a command. An agent offered it has a
@@ -631,6 +644,8 @@ struct AgentToolConfigRepr {
     text_reply_ends_task: bool,
     #[serde(default)]
     chat: bool,
+    #[serde(default)]
+    async_questions: bool,
     /// Removed: every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
@@ -660,6 +675,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             text_reply_as_message: repr.text_reply_as_message,
             text_reply_ends_task: repr.text_reply_ends_task,
             chat: repr.chat,
+            async_questions: repr.async_questions,
         }
     }
 }
@@ -834,6 +850,7 @@ impl Default for AgentToolConfig {
             text_reply_as_message: false,
             text_reply_ends_task: false,
             chat: false,
+            async_questions: false,
         }
     }
 }
@@ -1477,9 +1494,9 @@ impl AgentConfig {
 
     /// Determines if tool use should be auto-approved for a given tool using its
     /// `tool_specific_configs` override, or else
-    /// `default_auto_approve_tool_use`. `ask_user` is auto-approved unless
-    /// its override says otherwise, since the question already waits for an
-    /// answer.
+    /// `default_auto_approve_tool_use`. `ask_user` and `close_questions` are
+    /// auto-approved unless their overrides say otherwise, since a question
+    /// already waits for an answer.
     pub fn should_auto_approve_tool(&self, tool_name: &str) -> bool {
         self.tool_config
             .tool_specific_configs
@@ -1487,7 +1504,8 @@ impl AgentConfig {
             .and_then(|override_cfg| override_cfg.auto_approve_tool_use)
             .unwrap_or(
                 self.tool_config.default_auto_approve_tool_use
-                    || tool_name == crate::tool::builtins::ASK_USER_TOOL_NAME,
+                    || tool_name == crate::tool::builtins::ASK_USER_TOOL_NAME
+                    || tool_name == crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
             )
     }
 
@@ -1546,9 +1564,11 @@ impl AgentConfig {
     /// A tool's definition as the agent is shown it, in either tool calling
     /// mode, with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
     /// as `complete_task`'s `summary` description, and the built-in
-    /// `read_file` and `write_file` as the agent's tools shape them (see
-    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition)
-    /// and [`write_file::offered_definition`](crate::tool::builtins::write_file::offered_definition)).
+    /// `read_file`, `write_file` and `ask_user` as the agent's tools shape
+    /// them (see
+    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition),
+    /// [`write_file::offered_definition`](crate::tool::builtins::write_file::offered_definition)
+    /// and [`ask_user::offered_definition`](crate::tool::builtins::ask_user::offered_definition)).
     ///
     /// The definition follows from the configuration alone, so the same
     /// configuration always shows the same definitions (the prompt cache
@@ -1572,6 +1592,8 @@ impl AgentConfig {
         }
         let definition =
             crate::tool::builtins::write_file::offered_definition(definition, &self.tool_config);
+        let definition =
+            crate::tool::builtins::ask_user::offered_definition(definition, &self.tool_config);
         crate::tool::builtins::read_file::offered_definition(definition, &self.tool_config)
     }
 

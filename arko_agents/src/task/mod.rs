@@ -552,6 +552,13 @@ pub struct Task {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<TaskParent>,
+    /// The questions the agent asked with `ask_user`: how many, and those
+    /// still open as far as the runtime knows. See [`crate::questions`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::questions::QuestionLog::is_empty"
+    )]
+    pub questions: crate::questions::QuestionLog,
 }
 
 /// The task and tool call a task runs inside. See [`Task::parent`].
@@ -788,6 +795,7 @@ impl Task {
             claude_code_fork_of: None,
             reconfigured: false,
             running_tool_calls: Vec::new(),
+            questions: crate::questions::QuestionLog::default(),
             parent: None,
         }
     }
@@ -1058,9 +1066,16 @@ impl Task {
             }
         };
         self.set_state(TaskState::InProgress);
-        let answer = self.with_pending_text_tool_results(format!(
-            "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
-        ));
+        // The answer settles the questions waited for. An agent whose
+        // questions can be answered later gets the host's note as it is.
+        self.questions.settle_waiting();
+        let answer = if self.agent_config.tool_config.async_questions {
+            self.with_pending_text_tool_results(response)
+        } else {
+            self.with_pending_text_tool_results(format!(
+                "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
+            ))
+        };
         // With the environment details and reminder due, as the runtime
         // sends any user message.
         let parsing = self.agent_config.get_tool_parsing_config();

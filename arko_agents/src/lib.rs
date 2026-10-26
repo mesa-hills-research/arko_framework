@@ -19,6 +19,7 @@ mod file_tree;
 pub mod handover;
 pub mod mcp;
 pub mod parsing;
+pub mod questions;
 pub mod runtime;
 pub mod skill;
 pub mod snapshot;

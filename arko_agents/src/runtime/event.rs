@@ -6,6 +6,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// An asking event saved by an older version waited for its answer.
+fn waits() -> bool {
+    true
+}
+
 /// Events emitted by the agent runtime during task execution.
 // Events are built once and sent through channels, so the size of the largest
 // variant costs little, and boxing it would change the public variants.
@@ -84,10 +89,33 @@ pub enum AgentEvent {
         batch_id: Uuid,
         pending_calls: Vec<PendingToolCallInfo>,
     },
-    /// The agent has asked questions and is awaiting user response.
+    /// The agent asked the user questions (`ask_user`). With `wait` the
+    /// task now awaits the answer
+    /// ([`TaskState::AwaitingUserResponse`]), which
+    /// [`UserCommand::SubmitUserResponse`](crate::UserCommand::SubmitUserResponse)
+    /// gives. Without it (an agent with
+    /// [`async_questions`](crate::agent_config::AgentToolConfig::async_questions)
+    /// that didn't pass `wait: true`), the agent goes on, and the host
+    /// delivers the answers later as context. See [`crate::questions`].
     UserQuestionsAsked {
-        /// The questions asked by the agent.
+        /// The questions as text, with their ids, choices and defaults
+        /// ([`questions_text`](crate::questions::questions_text)).
         questions: String,
+        /// The questions, each with its id in the task. Empty in an event
+        /// saved by an older version.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        asked: Vec<crate::questions::AskedQuestion>,
+        /// The task waits for the answer.
+        #[serde(default = "waits")]
+        wait: bool,
+    },
+    /// The agent closed questions it asked (`close_questions`), which no
+    /// longer need an answer. Ids it never asked are left out.
+    QuestionsClosed {
+        ids: Vec<String>,
+        /// Why, in the agent's words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
     /// The agent sent the user a message without ending its turn. It called
     /// the built-in `message_user` tool, or, with

@@ -591,3 +591,7 @@ mod user_image_tests;
 #[cfg(test)]
 #[path = "reconfigure_tests.rs"]
 mod reconfigure_tests;
+
+#[cfg(test)]
+#[path = "question_tests.rs"]
+mod question_tests;

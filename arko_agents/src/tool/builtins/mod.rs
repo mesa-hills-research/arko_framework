@@ -2,6 +2,7 @@
 
 pub mod apply_diff;
 pub mod ask_user;
+pub mod close_questions;
 pub mod complete_task;
 pub mod edit_file;
 pub mod list_files;
@@ -29,6 +30,9 @@ pub use list_files::ListFilesTool;
 
 pub use ask_user::ASK_USER_TOOL_NAME;
 pub use ask_user::AskUserTool;
+
+pub use close_questions::CLOSE_QUESTIONS_TOOL_NAME;
+pub use close_questions::CloseQuestionsTool;
 
 pub use message_user::MESSAGE_USER_TOOL_NAME;
 pub use message_user::MessageUserTool;

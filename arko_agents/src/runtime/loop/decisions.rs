@@ -440,8 +440,16 @@ impl AgentLoop {
         match *cmd {
             UserCommand::SubmitUserResponse { ref response } => {
                 log::info!("Task {}: User response received.", self.task.id);
-                let pb = self.prompts();
-                let formatted = pb.format_user_response_as_user_message(questions, response);
+                // The answer settles the questions waited for. An agent whose
+                // questions can be answered later gets the host's note as it
+                // is.
+                self.task.questions.settle_waiting();
+                let formatted = if self.task.agent_config.tool_config.async_questions {
+                    response.trim().to_string()
+                } else {
+                    self.prompts()
+                        .format_user_response_as_user_message(questions, response)
+                };
                 self.task.set_state(TaskState::InProgress);
 
                 if self.is_native_mode() {

@@ -787,22 +787,22 @@ impl AgentLoop {
         intercepted: bool,
         message_to_agent_on_approval: Option<String>,
     ) -> Result<String, ArkoAgentsError> {
-        let raw = output.text;
+        let mut raw = output.text;
+        let mut effective = effective;
         // A call of a group another call already ended (possible only
         // for tools configured parallel-safe) changes no state.
         let open = !self.task.current_state.is_terminal();
-        if tool_name == ASK_USER_TOOL_NAME && open {
-            self.task.set_state(TaskState::AwaitingUserResponse {
-                questions: raw.clone(),
-            });
-            self.emit_event(AgentEvent::TaskStateChanged(
-                self.task.current_state.clone(),
-            ))
-            .await?;
-            self.emit_event(AgentEvent::UserQuestionsAsked {
-                questions: raw.clone(),
-            })
-            .await?;
+        if open && let Some(result) = self.take_question_call(tool_name, &raw).await? {
+            raw = result.clone();
+            effective = result;
+        }
+        if tool_name == ASK_USER_TOOL_NAME
+            && open
+            && matches!(
+                self.task.current_state,
+                TaskState::AwaitingUserResponse { .. }
+            )
+        {
             self.emit_event(AgentEvent::ToolResult {
                 tool_call_id,
                 tool_name: tool_name.to_string(),
