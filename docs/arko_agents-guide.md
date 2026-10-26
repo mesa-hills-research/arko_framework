@@ -102,13 +102,52 @@ first snapshot followed by changes at model-call boundaries. See
 ## Tools
 
 `ToolRegistry::new()` registers the built-in tools `complete_task`, `read_file`,
-`write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, and `message_user`.
+`write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, `close_questions` and
+`message_user`.
 `edit_file` replaces one exact piece of text in a file (or every occurrence, with
 `replace_all`) and changes nothing when the text isn't there exactly once. `apply_diff`
 applies SEARCH/REPLACE blocks. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
+
+### Questions
+
+`ask_user` takes `questions`, a list of `{question, choices?, multiple?, default?}`.
+`choices` are up to six suggested answers, `multiple` lets the user pick several, and
+`default` is what the agent assumes without an answer. A plain string is one question, as
+older configurations and models write it. Each question gets an id in its task (`q1`,
+`q2`, ...), and `Task::questions` (a `QuestionLog`) keeps the count and the questions still
+open, so a checkpoint saves them. `UserQuestionsAsked { questions, asked, wait }` gives the
+host the questions as text (`questions_text`), the numbered questions, and whether the task
+waits.
+
+By default every ask waits, and the result the model reads is the questions as text. With
+`AgentToolConfig::async_questions` on, `ask_user` offers `wait` and returns at once unless
+the agent passes `wait: true` ("Asked q3 and q4. Their answers reach you as a note, so go on
+with your work."). The host then delivers the answers as context, such as a note, worded
+with the helpers of `arko_agents::questions`:
+
+```text
+The user answered q3 and q4.
+q3 Tabs or spaces? Spaces
+q4 Push now? You decide (you said you'd assume: not yet)
+Anything else: Keep the old API one more release.
+Still open: q5.
+```
+
+`dismissed_note` says the user dismissed questions, `message_answers` labels a message that
+answers them ("(This message answers q3 and q4.)"), and `still_open` ends a message with
+those still open. An agent with `async_questions` that waits gets the host's
+`SubmitUserResponse` as it is, so the host words it as such a note.
+
+`close_questions { ids, why? }` closes questions that no longer need an answer. The runtime
+settles them in the task's log and reports `QuestionsClosed { ids, why }`. It runs without
+approval, as `ask_user` does. A handover's fresh conversation restates the questions still
+open (`# Your open questions`), and so does the context given after Claude Code compacts a
+conversation. `HandoverHook::open_questions` returns them, by default from the task's log,
+which knows of answers given while the agent waited and of the questions it closed. A host
+that delivers answers later returns the ones it still has open.
 
 `message_user` shows the user a message while the agent works, with nothing to wait for,
 such as an answer to a question the user asked meanwhile, or progress. The runtime sends its
@@ -846,7 +885,9 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `TaskStateChanged` | The task's state changed. |
 | `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning. `event_throttle_ms` coalesces chunks. |
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
-| `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
+| `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval` | The task waits for a command. |
+| `UserQuestionsAsked` | The agent asked. With `wait` the task waits for `SubmitUserResponse`, and without it the agent goes on. See [Questions](#questions). |
+| `QuestionsClosed` | The agent closed questions it asked (`close_questions`). |
 | `MessageToUser` | The agent sent the user a message and carries on, from a `message_user` call (`tool_call_id` names it) or, with `text_reply_as_message`, a reply in plain text (`tool_call_id` is `None`, and the text has already streamed as `AssistantResponseChunk`). See [Tools](#tools). |
 | `ToolResultShortened` | A result was shortened before it went into the conversation (`reason` names the overflow guard, a cap, or overflow recovery). See [Tool result size](#tool-result-size). |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that didn't run (stopped, held, not reached, announced in an output-based turn that can't run them, or a `complete_task` refused after an earlier call of its turn was rejected or failed). |
@@ -1357,8 +1398,10 @@ They run as for any agent, with the execution middleware, result interception an
 limits. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
 its final text as `MessageToUser` before the runtime's note. With `text_reply_ends_task`
 on, a turn that ends with text completes the task with it, and `complete_task` isn't
-served. The turns Claude Code is told to end (after `ask_user`, for a handover report or a
-`/compact`) and the turns arko interrupts aren't replies. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`, such as `Read`,
+served. The turns Claude Code is told to end (after an `ask_user` that waits, for a
+handover report or a `/compact`) and the turns arko interrupts aren't replies. An `ask_user`
+that doesn't wait (with `async_questions`) returns its ids at once and the turn goes on, as
+in other runtimes. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`, such as `Read`,
 `Edit`, `Bash`, `Grep` and `WebFetch`) are offered when `available_tool_names` lists them, and
 only then. `ClaudeCodeTools::{read_only, editing, shell, web, all}` list common sets. A
 name that isn't an arko tool is offered as a built-in, so tools a newer CLI adds can be

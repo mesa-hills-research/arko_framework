@@ -598,6 +598,16 @@ Suspension stops the live runtime without marking the task failed or cancelled.
 `OnUserInputRequired` fires, and `OnWorkflowFailed` doesn't, because a pause isn't a
 failure.
 
+An agent with `AgentToolConfig::async_questions` asks without waiting unless it passes
+`wait: true` (see the arko_agents guide's [Questions](arko_agents-guide.md#questions)). The
+workflow then calls the handler's `asked` in the background while the agent goes on, and an
+answer it returns reaches the agent in its mailbox, as a subagent's report does, which wakes a
+run that ended (`SubagentEventKind::NewsWaiting`). By default `asked` answers with `respond`.
+A host that shows questions and gathers answers over time returns `Ok(None)`, delivers each
+answer itself as a note, and says which questions are still open with
+`UserInputHandler::open_questions`, which a handover restates. Without a handler, the agent
+is told no one can answer.
+
 ## Approvals and error recovery
 
 ### By default a workflow runs without human input
@@ -836,8 +846,8 @@ background as jobs of an arko_agents terminal manager, which the host moves them
 When a subagent's run ends, its moved calls and monitors stop, since their notes would reach
 no one. Commands it started keep running.
 
-A subagent's `ask_user` goes to its lead as a message, and the lead's reply is the
-answer. See [background subagents](../arko_workflows/INDEX.md#background-subagents) for the tools,
+A subagent's `ask_user` goes to its lead as a message, with each question's id, suggested
+answers and default, and the lead's reply is the answer. It always waits for that reply. See [background subagents](../arko_workflows/INDEX.md#background-subagents) for the tools,
 settings, events and how mail is delivered.
 
 ## Persistence

@@ -7,8 +7,8 @@ policies. A `Task` holds one run's conversation and state. `AgentRuntime` runs a
 updates, cancellation and suspension.
 
 - Built-in tools for files (`read_file`, `write_file`, `edit_file`, `apply_diff`,
-  `list_files`), for talking to the user (`ask_user`, `message_user`) and for finishing
-  (`complete_task`)
+  `list_files`), for talking to the user (`ask_user`, `close_questions`, `message_user`) and
+  for finishing (`complete_task`)
 - Custom tools, MCP servers and skills
 - Interactive terminals in a PTY or with pipes, with background jobs, input requests,
   monitors that alert the agent, and a guard against destructive commands
