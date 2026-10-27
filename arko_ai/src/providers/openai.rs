@@ -85,6 +85,7 @@ const ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 const CHATGPT_FAST_MODE_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-sol",
     "gpt-6-luna",
     "gpt-5.6-sol",
@@ -3527,10 +3528,10 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_sol_and_luna_build_reasoning_verbosity_and_cache_requests() {
+    fn gpt_6_sol_terra_and_luna_build_reasoning_verbosity_and_cache_requests() {
         let client = OpenAIClient::new("test");
 
-        for id in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+        for id in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] {
             let conversation = Conversation::new(Model::get(Provider::OpenAI, id).unwrap());
 
             for effort in [
@@ -3968,6 +3969,7 @@ mod tests {
             Model::openai_gpt_6_astra(),
             Model::openai_gpt_6_sol(),
             Model::openai_gpt_6_1_sol(),
+            Model::openai_gpt_6_1_terra(),
             Model::openai_gpt_6_luna(),
             Model::openai_gpt_5_6_sol(),
             Model::openai_gpt_5_6_terra(),

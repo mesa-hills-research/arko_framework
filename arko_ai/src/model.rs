@@ -207,6 +207,36 @@ impl Model {
         }
     }
 
+    /// Standard API pricing and limits. Rates are half GPT-6.1 Sol's.
+    /// Long-context rates are 2x input and cache, 1.5x output.
+    /// <https://developers.openai.com/api/docs/models/gpt-6.1-terra>
+    pub fn openai_gpt_6_1_terra() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6.1-terra".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 1.00,
+                output_cost_per_million: 5.00,
+                cached_input_cost_per_million: Some(0.05),
+                cache_write_cost_per_million: Some(1.25),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(2.00),
+                large_output_cost_per_million: Some(7.50),
+                large_cached_input_cost_per_million: Some(0.10),
+                large_cache_write_cost_per_million: Some(2.50),
+                reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
     /// Standard API pricing and limits.
     /// <https://developers.openai.com/api/docs/models/gpt-6-luna>
     pub fn openai_gpt_6_luna() -> Self {
@@ -1890,6 +1920,7 @@ impl Model {
         vec![
             Self::openai_gpt_6_astra(),
             Self::openai_gpt_6_1_sol(),
+            Self::openai_gpt_6_1_terra(),
             Self::openai_gpt_6_sol(),
             Self::openai_gpt_6_luna(),
             Self::openai_gpt_5_6_sol(),
@@ -2163,10 +2194,13 @@ impl Model {
         self.id == "gpt-6-astra"
     }
 
-    /// GPT-6 Sol, GPT-6.1 Sol and GPT-6 Luna share GPT-5.6's reasoning
-    /// controls. Unlike Astra, they accept `none`.
+    /// GPT-6 Sol, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna share GPT-5.6's
+    /// reasoning controls. Unlike Astra, they accept `none`.
     pub fn is_openai_gpt_6_sol_or_luna(&self) -> bool {
-        matches!(self.id.as_str(), "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna")
+        matches!(
+            self.id.as_str(),
+            "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna"
+        )
     }
 
     pub fn is_openai_gpt_5_6(&self) -> bool {
@@ -2589,7 +2623,7 @@ mod tests {
         blind.supports_image_input = false;
         assert!(!blind.accepts_tool_result_images());
     }
-    use crate::{config::GenerationConfig, reasoning::ReasoningConfig};
+    use crate::{config::GenerationConfig, pricing::ServiceTier, reasoning::ReasoningConfig};
     use std::collections::HashSet;
 
     #[test]
@@ -2660,6 +2694,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+    #[test]
+    fn gpt_6_1_terra_is_registered_with_its_documented_prices_and_limits() {
+        let terra = Model::get(Provider::OpenAI, "gpt-6.1-terra").unwrap();
+        assert_eq!(terra.id, Model::openai_gpt_6_1_terra().id);
+        assert_eq!(terra.model_type, ModelType::Reasoning);
+        assert_eq!(
+            (terra.max_input_tokens, terra.max_output_tokens),
+            (922_000, 128_000)
+        );
+        assert!(terra.supports_image_input && terra.supports_cache);
+
+        let pricing = &terra.pricing;
+        assert_eq!(pricing.input_cost_per_million, 1.00);
+        assert_eq!(pricing.output_cost_per_million, 5.00);
+        assert_eq!(pricing.cached_input_cost_per_million, Some(0.05));
+        assert_eq!(pricing.cache_write_cost_per_million, Some(1.25));
+        assert_eq!(pricing.large_input_threshold, Some(272_000));
+        assert_eq!(pricing.large_input_cost_per_million, Some(2.00));
+        assert_eq!(pricing.large_output_cost_per_million, Some(7.50));
+        assert_eq!(pricing.large_cached_input_cost_per_million, Some(0.10));
+        assert_eq!(pricing.large_cache_write_cost_per_million, Some(2.50));
+        assert_eq!(
+            pricing.tier_multiplier(Some(&ServiceTier::Fast), false),
+            2.0
+        );
+        assert_eq!(pricing.tier_multiplier(Some(&ServiceTier::Flex), true), 0.5);
+
+        assert!(terra.is_openai_gpt_6_sol_or_luna());
+        assert!(!terra.is_openai_gpt_6_astra() && !terra.is_openai_gpt_5_6());
+        assert!(terra.supports_openai_prompt_cache_options());
+
+        let ids: Vec<_> = Model::list(Provider::OpenAI)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        let position = |id: &str| ids.iter().position(|listed| listed == id).unwrap();
+        assert_eq!(position("gpt-6.1-terra"), position("gpt-6.1-sol") + 1);
     }
 
     /// Cache reads cost 0.025x input on Fable 5.1 and Mythos 5.1, 0.05x on

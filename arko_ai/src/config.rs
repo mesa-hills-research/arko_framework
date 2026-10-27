@@ -132,9 +132,9 @@ pub struct GenerationConfig {
     /// OpenAI processing tier (`service_tier`). With an API key, Flex and Fast
     /// must be offered by the model (see [`ModelPricing::service_tiers`]).
     /// Over ChatGPT OAuth, as in Codex, only Fast mode is available, on the
-    /// models Codex offers it for (GPT-6 Astra, Sol, Luna and 6.1 Sol,
-    /// GPT-5.6 Sol, Terra and Luna, GPT-5.5). `Default` sends no tier there,
-    /// and Flex and Auto are [`Error::UnsupportedFeature`].
+    /// models Codex offers it for (GPT-6 Astra, Sol, Luna, 6.1 Sol and 6.1
+    /// Terra, GPT-5.6 Sol, Terra and Luna, GPT-5.5). `Default` sends no tier
+    /// there, and Flex and Auto are [`Error::UnsupportedFeature`].
     /// `None` sends nothing, so the project (or plan) default applies.
     ///
     /// [`Error::UnsupportedFeature`]: crate::error::Error::UnsupportedFeature

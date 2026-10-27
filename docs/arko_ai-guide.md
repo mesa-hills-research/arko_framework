@@ -407,7 +407,7 @@ and warns once when configured.
 `GenerationConfig::with_openai_service_tier(Fast)`
 works on a subscription as Codex's Fast mode does. It sends `service_tier: "priority"` in
 the body of every request it is set for, on the models Codex's catalog offers it for (GPT-6
-Astra, Sol, Luna and 6.1 Sol, GPT-5.6 Sol, Terra and Luna, and GPT-5.5), and fails with
+Astra, Sol, Luna, 6.1 Sol and 6.1 Terra, GPT-5.6 Sol, Terra and Luna, and GPT-5.5), and fails with
 `Error::InvalidRequest` on other models. Every OAuth request also carries Codex's `x-codex-routing-hint` header,
 `model=<model>`, with `;tier=priority` in Fast mode. Codex's catalog describes Fast mode
 as "2x speed, increased usage", so it uses more of the plan's limits. `Default` sends no
