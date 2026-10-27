@@ -1910,6 +1910,7 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
                 "The image of note 3:",
                 pixels(),
             )],
+            ..Default::default()
         })
     }
 }

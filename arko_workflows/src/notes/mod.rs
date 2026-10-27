@@ -271,6 +271,10 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// The name of a task's mark of the newest note it took
+/// ([`arko_agents::Task::context_marks`]).
+const NOTES_MARK: &str = "notes";
+
 /// The heading of the notes in an initial prompt or a handover's fresh
 /// conversation, with the start of its introduction (what
 /// [`without_notes`] looks for).
@@ -657,6 +661,7 @@ impl NoteBoard {
                 others,
                 operator,
                 seqs,
+                given,
                 images,
             }
         })
@@ -666,8 +671,26 @@ impl NoteBoard {
     /// a crash, or aborted after the grace period), which may lack notes it
     /// was given after that save. Like a message, every note it receives
     /// that the task doesn't hold is given again, at its next turn boundary.
+    /// The task's mark of the notes it took ([`NOTES_MARK`]), saved with it
+    /// and kept through handovers and compactions, says which it holds.
     /// `review` as the run is launched with (see [`WithNotes::review`]).
     pub(crate) fn recovered(&self, agent: &str, task: &arko_agents::Task, review: bool) {
+        if let Some(mark) = task.context_marks.get(NOTES_MARK) {
+            let mut state = self.state.lock();
+            let held = state.started.get(&task.id).copied().unwrap_or(0).max(*mark);
+            if state.seen.get(&task.id).is_some_and(|seen| *seen > held) {
+                state.seen.insert(task.id, held);
+            }
+            return;
+        }
+        // A task without the mark (saved before tasks kept it, or cut back)
+        // holds what its conversation holds.
+        self.held_in_conversation(agent, task, review);
+    }
+
+    /// [`recovered`](Self::recovered) by the notes `task`'s conversation
+    /// holds: the newest one it holds tells what it was given.
+    fn held_in_conversation(&self, agent: &str, task: &arko_agents::Task, review: bool) {
         let (started, given) = {
             let state = self.state.lock();
             let started = state.started.get(&task.id).copied().unwrap_or(0);
@@ -1303,6 +1326,8 @@ pub(crate) struct NotesUpdate {
     pub operator: String,
     /// The numbers of the notes shown.
     pub seqs: Vec<u64>,
+    /// The number of the newest note the run counts as given now.
+    pub given: u64,
     pub images: Vec<arko_agents::ContextImage>,
 }
 
@@ -1347,6 +1372,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
         let mut user_content = String::new();
         let mut ids = Vec::new();
         let mut images = Vec::new();
+        let mut marks = std::collections::BTreeMap::new();
         let mut used = 0;
         if let Some(inner) = self.inner.context_update_within(task_id, max_chars) {
             used += inner.content.chars().count();
@@ -1354,6 +1380,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             user_content = inner.user_content;
             ids.extend(inner.ids);
             images.extend(inner.images);
+            marks.extend(inner.marks);
         }
         if let Some(notes) = self.context.notes.update_with_seqs(
             &self.context,
@@ -1374,6 +1401,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             }
             ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
             images.extend(notes.images);
+            marks.insert(NOTES_MARK.to_string(), notes.given);
         }
         if !self.review
             && max_chars.saturating_sub(used) >= max_chars / 2
@@ -1390,6 +1418,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             user_content,
             ids,
             images,
+            marks,
         })
     }
 

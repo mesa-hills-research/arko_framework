@@ -1763,6 +1763,7 @@ impl ClaudeCodeRun {
             {
                 update_ids = update.ids;
             }
+            self.task.raise_context_marks(&update.marks);
             arrived = update.images.len();
             self.queue_context(update.content, false);
             if with_images {

@@ -113,6 +113,7 @@ impl AgentLoop {
             {
                 self.context_ids.extend(update.ids);
             }
+            self.task.raise_context_marks(&update.marks);
             self.queue_context_injection(update.content);
             self.queue_context_injection(update.user_content);
             self.task.pending_context_images.extend(update.images);
