@@ -1191,9 +1191,19 @@ async fn drive_events(
                 }
             }
 
-            AgentEvent::UserQuestionsAsked { questions } => {
-                answer_questions(drive, questions, cmd_tx).await?;
+            AgentEvent::UserQuestionsAsked {
+                questions,
+                asked,
+                wait: true,
+            } => {
+                answer_questions(drive, questions, asked, cmd_tx).await?;
             }
+
+            AgentEvent::UserQuestionsAsked {
+                questions,
+                asked,
+                wait: false,
+            } => ask_later(drive, questions, asked),
 
             AgentEvent::ToolResultIntercepted {
                 tool_call_id,
@@ -1260,6 +1270,7 @@ async fn drive_events(
 async fn answer_questions(
     drive: &Drive<'_>,
     questions: String,
+    asked: Vec<arko_agents::questions::AskedQuestion>,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
 ) -> Result<(), WorkflowError> {
     let Drive {
@@ -1288,6 +1299,8 @@ async fn answer_questions(
             agent_run_id,
             agent_name: agent_name.to_string(),
             questions: questions.clone(),
+            asked,
+            wait: true,
         };
         // The handler may wait on a person; a stop doesn't.
         let response = tokio::select! {
@@ -1314,6 +1327,71 @@ async fn answer_questions(
             questions,
         })
     }
+}
+
+/// What an agent is told when it asked without waiting and no one can
+/// answer: the workflow has no user input handler.
+pub(crate) const NO_ONE_TO_ASK: &str = "No one can answer questions in this workflow, so go on with your defaults and say in your result what you assumed.";
+
+/// Questions the agent asked without waiting for the answer: the user input
+/// handler takes them in the background
+/// ([`UserInputHandler::asked`](crate::user_input::UserInputHandler::asked)),
+/// and an answer it returns reaches the agent in its mailbox, as a
+/// subagent's report does. Without a handler, the agent is told no one can
+/// answer.
+fn ask_later(
+    drive: &Drive<'_>,
+    questions: String,
+    asked: Vec<arko_agents::questions::AskedQuestion>,
+) {
+    let ctx = drive.ctx.clone();
+    let agent_run_id = drive.agent_run_id;
+    let agent_name = drive.agent_name.to_string();
+    let ids = asked
+        .iter()
+        .map(|question| question.id.clone())
+        .collect::<Vec<_>>();
+    // (The handler's answer may also say that no one can answer.)
+    let heading = match ids.as_slice() {
+        [one] => format!("About your question {one}:"),
+        _ => format!(
+            "About your questions {}:",
+            arko_agents::questions::id_list(&ids)
+        ),
+    };
+    let Some(handler) = ctx.user_input_handler.clone() else {
+        ctx.subagents.host_mail(
+            &ctx,
+            agent_run_id,
+            &agent_name,
+            String::new(),
+            NO_ONE_TO_ASK.to_string(),
+        );
+        return;
+    };
+    let request = crate::user_input::UserInputRequest {
+        workflow_run_id: ctx.workflow_run_id,
+        agent_run_id,
+        agent_name: agent_name.clone(),
+        questions,
+        asked,
+        wait: false,
+    };
+    tokio::spawn(async move {
+        let answer = tokio::select! {
+            biased;
+            _ = ctx.run_control.stopped() => return,
+            answer = handler.asked(request) => answer,
+        };
+        match answer {
+            Ok(Some(answer)) if !answer.trim().is_empty() => {
+                ctx.subagents
+                    .host_mail(&ctx, agent_run_id, &agent_name, heading, answer);
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("The answer to {ids:?} of run {agent_run_id} failed: {error}"),
+        }
+    });
 }
 
 /// Answers the wait a recovered task was saved in, as the driver answered
@@ -1386,7 +1464,15 @@ async fn answer_saved_wait(
             .await
         }
         TaskState::AwaitingUserResponse { questions } => {
-            answer_questions(drive, questions.clone(), cmd_tx).await
+            let waiting = &task.questions.waiting;
+            let asked = task
+                .questions
+                .open
+                .iter()
+                .filter(|question| waiting.contains(&question.id))
+                .cloned()
+                .collect();
+            answer_questions(drive, questions.clone(), asked, cmd_tx).await
         }
         _ => Ok(()),
     }
@@ -1814,6 +1900,26 @@ pub(crate) struct WorkflowHandover {
     pub review: bool,
 }
 
+impl WorkflowHandover {
+    /// The user input handler, for a run whose questions it takes (not a
+    /// subagent whose questions go to its lead).
+    fn question_handler(
+        &self,
+        task: &Task,
+    ) -> Option<&Arc<dyn crate::user_input::UserInputHandler>> {
+        let ctx = &self.context;
+        let to_lead = ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.questions_to_lead)
+            && ctx.subagents.is_subagent(task.id);
+        if to_lead {
+            return None;
+        }
+        ctx.user_input_handler.as_ref()
+    }
+}
+
 impl HandoverHook for WorkflowHandover {
     fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
         let ctx = &self.context;
@@ -1858,6 +1964,29 @@ impl HandoverHook for WorkflowHandover {
         HandoverSeed {
             task_prompt,
             context: (!context.is_empty()).then_some(context),
+        }
+    }
+
+    /// The questions the user input handler says are still open.
+    fn open_questions(&self, task: &Task) -> Option<Vec<arko_agents::questions::AskedQuestion>> {
+        self.question_handler(task)?.open_questions(task.id)
+    }
+
+    /// The user input handler numbers the questions it takes.
+    fn question_numbers(&self, task: &Task, count: u32) -> Option<u32> {
+        self.question_handler(task)?
+            .question_numbers(task.id, &self.agent_name, count)
+    }
+
+    /// The user input handler hears of the questions it takes at once.
+    fn questions_asked(
+        &self,
+        task: &Task,
+        asked: &[arko_agents::questions::AskedQuestion],
+        wait: bool,
+    ) {
+        if let Some(handler) = self.question_handler(task) {
+            handler.questions_recorded(task.id, &self.agent_name, asked, wait);
         }
     }
 
@@ -2966,6 +3095,15 @@ impl WorkflowEngine {
         // workflow's tools.
         if config.tool_config.chat {
             return config;
+        }
+        // A subagent whose questions go to its lead waits for the answer.
+        if role.subagent
+            && ctx
+                .subagents
+                .config()
+                .is_some_and(|config| config.questions_to_lead)
+        {
+            config.tool_config.async_questions = false;
         }
 
         let (reads, writes) = ctx.memory.access_of(agent_name);

@@ -137,6 +137,10 @@ pub struct Note {
     /// [`PostedNote::images`] names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<arko_ai::Image>,
+    /// For this one agent run only (a one-time note, see
+    /// [`for_run`](Self::for_run)). Its audience still names the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 impl Note {
@@ -171,6 +175,20 @@ impl Note {
     /// A one-time note ([`NoteKind::Once`]).
     pub fn once(mut self) -> Self {
         self.kind = NoteKind::Once;
+        self
+    }
+
+    /// A one-time note for agent run `run` only, such as an answer meant
+    /// for one conversation of an agent that has several. The run gets it
+    /// at its next turn boundary, or when it is continued, even if it
+    /// wasn't running when the note was posted, and
+    /// [`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes)
+    /// doesn't keep it from the run. Other runs never get it.
+    /// [`Workflow::notes_given`](crate::Workflow::notes_given) at or past
+    /// its number says the run was given it.
+    pub fn for_run(mut self, run: Uuid) -> Self {
+        self.kind = NoteKind::Once;
+        self.run = Some(run);
         self
     }
 
@@ -252,6 +270,10 @@ pub struct NotesSnapshot {
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
+
+/// The name of a task's mark of the newest note it took
+/// ([`arko_agents::Task::context_marks`]).
+const NOTES_MARK: &str = "notes";
 
 /// The heading of the notes in an initial prompt or a handover's fresh
 /// conversation, with the start of its introduction (what
@@ -455,6 +477,7 @@ impl NoteBoard {
         state.notes.iter().any(|posted| {
             posted.seq > seen
                 && self.receives(&posted.note, agent, false)
+                && for_run(&posted.note, task_id)
                 && !skipped(&state, task_id, posted)
         })
     }
@@ -475,23 +498,44 @@ impl NoteBoard {
         (*state != NotesSnapshot::default()).then(|| state.clone())
     }
 
+    /// The note posted under `id`, if any, after reading the control folder.
+    fn posted_as(&self, ctx: &SharedContext, id: Uuid) -> Option<PostedNote> {
+        self.poll(ctx);
+        let state = self.state.lock();
+        state.notes.iter().find(|posted| posted.id == id).cloned()
+    }
+
     /// Every note posted, oldest first, after reading the control folder.
     pub(crate) fn notes(&self, ctx: &SharedContext) -> Vec<PostedNote> {
         self.poll(ctx);
         self.state.lock().notes.clone()
     }
 
-    /// Posts `note`: checks it, numbers it and logs it.
+    /// Posts `note`: checks it, numbers it and logs it. With `id`, the note
+    /// posted under that id already, if any, is returned instead.
     pub(crate) fn post(
         &self,
         ctx: &SharedContext,
         note: Note,
+        id: Option<Uuid>,
     ) -> Result<PostedNote, WorkflowError> {
+        if let Some(posted) = id.and_then(|id| self.posted_as(ctx, id)) {
+            return Ok(posted);
+        }
         let (mut note, recipients) = self.check(ctx, note)?;
         let images = self.keep_images(&mut note).map_err(|error| {
             WorkflowError::Persistence(format!("could not keep the note's images: {error}"))
         })?;
-        let posted = insert(&mut self.state.lock(), note, images, None, None);
+        let posted = {
+            let mut state = self.state.lock();
+            // (Checked again under the lock: two posts of one id insert once.)
+            if let Some(posted) =
+                id.and_then(|id| state.notes.iter().find(|posted| posted.id == id))
+            {
+                return Ok(posted.clone());
+            }
+            insert(&mut state, note, images, id, None)
+        };
         self.announce(ctx, &posted, &recipients);
         self.posted
             .send_modify(|count| *count = count.wrapping_add(1));
@@ -581,6 +625,7 @@ impl NoteBoard {
             .filter(|posted| {
                 posted.seq > seen
                     && self.receives(&posted.note, agent, review)
+                    && for_run(&posted.note, task_id)
                     && !skipped(&state, task_id, posted)
             })
             .collect::<Vec<_>>();
@@ -637,6 +682,7 @@ impl NoteBoard {
                 others,
                 operator,
                 seqs,
+                given,
                 images,
             }
         })
@@ -646,8 +692,26 @@ impl NoteBoard {
     /// a crash, or aborted after the grace period), which may lack notes it
     /// was given after that save. Like a message, every note it receives
     /// that the task doesn't hold is given again, at its next turn boundary.
+    /// The task's mark of the notes it took ([`NOTES_MARK`]), saved with it
+    /// and kept through handovers and compactions, says which it holds.
     /// `review` as the run is launched with (see [`WithNotes::review`]).
     pub(crate) fn recovered(&self, agent: &str, task: &arko_agents::Task, review: bool) {
+        if let Some(mark) = task.context_marks.get(NOTES_MARK) {
+            let mut state = self.state.lock();
+            let held = state.started.get(&task.id).copied().unwrap_or(0).max(*mark);
+            if state.seen.get(&task.id).is_some_and(|seen| *seen > held) {
+                state.seen.insert(task.id, held);
+            }
+            return;
+        }
+        // A task without the mark (saved before tasks kept it, or cut back)
+        // holds what its conversation holds.
+        self.held_in_conversation(agent, task, review);
+    }
+
+    /// [`recovered`](Self::recovered) by the notes `task`'s conversation
+    /// holds: the newest one it holds tells what it was given.
+    fn held_in_conversation(&self, agent: &str, task: &arko_agents::Task, review: bool) {
         let (started, given) = {
             let state = self.state.lock();
             let started = state.started.get(&task.id).copied().unwrap_or(0);
@@ -655,7 +719,11 @@ impl NoteBoard {
                 .notes
                 .iter()
                 .rev()
-                .filter(|posted| posted.seq > started && self.receives(&posted.note, agent, review))
+                .filter(|posted| {
+                    posted.seq > started
+                        && self.receives(&posted.note, agent, review)
+                        && for_run(&posted.note, task.id)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             (started, given)
@@ -763,6 +831,11 @@ impl NoteBoard {
                     "a note's source agent name {name:?} has a line break or a control character"
                 )));
             }
+        }
+        if note.run.is_some() && note.kind != NoteKind::Once {
+            return Err(WorkflowError::BuilderInvalid(
+                "a note for one run is a one-time note".to_string(),
+            ));
         }
         let named = match &note.audience {
             NoteAudience::All => None,
@@ -983,10 +1056,17 @@ fn holds(task: &arko_agents::Task, text: &str) -> bool {
         })
 }
 
+/// Whether `note` may reach run `task_id`: a note for one run reaches
+/// that run only.
+fn for_run(note: &Note, task_id: Uuid) -> bool {
+    note.run.is_none_or(|run| run == task_id)
+}
+
 /// Whether `posted` is a one-time note the host skipped for run `task_id`
-/// ([`NoteBoard::skip_one_time`]).
+/// ([`NoteBoard::skip_one_time`]). A note for that run alone isn't.
 fn skipped(state: &NotesSnapshot, task_id: Uuid, posted: &PostedNote) -> bool {
     posted.note.kind == NoteKind::Once
+        && posted.note.run.is_none()
         && state
             .skipped
             .get(&task_id)
@@ -1191,11 +1271,21 @@ impl NotesHandle {
 
     /// Posts `note`. See [`Workflow::post_note`](crate::Workflow::post_note).
     pub fn post(&self, note: Note) -> Result<PostedNote, WorkflowError> {
+        self.post_as(None, note)
+    }
+
+    /// Posts `note` under `id`, once. See
+    /// [`Workflow::post_note_once`](crate::Workflow::post_note_once).
+    pub fn post_once(&self, id: Uuid, note: Note) -> Result<PostedNote, WorkflowError> {
+        self.post_as(Some(id), note)
+    }
+
+    fn post_as(&self, id: Option<Uuid>, note: Note) -> Result<PostedNote, WorkflowError> {
         let context = self
             .context
             .upgrade()
             .ok_or_else(|| WorkflowError::BuilderInvalid("the workflow was dropped".to_string()))?;
-        let posted = context.notes.post(&context, note)?;
+        let posted = context.notes.post(&context, note, id)?;
         // Saved at once while agents run, as a budget change is.
         if let Some(persistence) = context.notes.events.clone()
             && persistence.has_live_runs()
@@ -1267,6 +1357,8 @@ pub(crate) struct NotesUpdate {
     pub operator: String,
     /// The numbers of the notes shown.
     pub seqs: Vec<u64>,
+    /// The number of the newest note the run counts as given now.
+    pub given: u64,
     pub images: Vec<arko_agents::ContextImage>,
 }
 
@@ -1311,6 +1403,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
         let mut user_content = String::new();
         let mut ids = Vec::new();
         let mut images = Vec::new();
+        let mut marks = std::collections::BTreeMap::new();
         let mut used = 0;
         if let Some(inner) = self.inner.context_update_within(task_id, max_chars) {
             used += inner.content.chars().count();
@@ -1318,6 +1411,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             user_content = inner.user_content;
             ids.extend(inner.ids);
             images.extend(inner.images);
+            marks.extend(inner.marks);
         }
         if let Some(notes) = self.context.notes.update_with_seqs(
             &self.context,
@@ -1338,6 +1432,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             }
             ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
             images.extend(notes.images);
+            marks.insert(NOTES_MARK.to_string(), notes.given);
         }
         if !self.review
             && max_chars.saturating_sub(used) >= max_chars / 2
@@ -1354,6 +1449,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             user_content,
             ids,
             images,
+            marks,
         })
     }
 

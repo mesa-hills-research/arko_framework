@@ -834,7 +834,10 @@ pub enum SubagentEventKind {
     /// or restart its run), and the news arrives at its first turn
     /// boundary. It may come more than once for the same news, and an item
     /// that goes out again has [`MailItem::resent`]. Check
-    /// [`Workflow::pending_news`](crate::Workflow::pending_news).
+    /// [`Workflow::pending_news`](crate::Workflow::pending_news). News that
+    /// no subagent sent (a late answer from the user input handler) is
+    /// about the run itself, so `run_id` and `caller_run_id` are both that
+    /// run's, and `handle` is empty.
     NewsWaiting { mail_ids: Vec<u64> },
     /// Its isolated workspace was removed.
     WorkspaceRemoved,

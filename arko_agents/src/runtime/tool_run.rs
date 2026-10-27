@@ -69,6 +69,7 @@ impl RunEnvironment {
             initial_task_prompt: &self.initial_task_prompt,
             current_working_directory: &self.working_directory,
             tool_call_id: Some(run.tool_call_id),
+            call_id: run.call_id.clone(),
             recovering: run.recovering,
             stop: signals.stop.clone(),
             moved: signals.moved.clone(),

@@ -127,6 +127,9 @@ pub(crate) struct Board {
     /// How many times in a row each subagent's `complete_task` was refused
     /// because its own subagents still work. Not saved.
     refusals: Mutex<HashMap<Uuid, u32>>,
+    /// The agents of the runs the host's mail went to ([`Self::host_mail`]),
+    /// for the news that wakes them. Not saved.
+    host_runs: Mutex<HashMap<Uuid, String>>,
 }
 
 impl Board {
@@ -169,6 +172,7 @@ impl Board {
             lead_stops: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
             refusals: Mutex::new(HashMap::new()),
+            host_runs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -300,7 +304,7 @@ impl Board {
     }
 
     fn emit(&self, record: &SubagentRecord, kind: SubagentEventKind) {
-        let event = SubagentEvent {
+        self.send_event(SubagentEvent {
             timestamp: Utc::now(),
             workflow_run_id: self.workflow_run_id,
             run_id: record.run_id,
@@ -309,7 +313,10 @@ impl Board {
             caller_run_id: record.caller_run_id,
             caller_agent: record.caller_agent.clone(),
             kind,
-        };
+        });
+    }
+
+    fn send_event(&self, event: SubagentEvent) {
         if let Some(persistence) = &self.persistence {
             persistence.append_subagent_event(&event);
         }
@@ -404,6 +411,34 @@ impl Board {
         item
     }
 
+    /// Puts the host's `body` under `heading` in the mailbox of run `to`,
+    /// of agent `agent`, which wakes it as a report does (whether or not
+    /// subagents are on). A run the host drives that isn't running gets
+    /// `NewsWaiting`, about itself when no subagent is involved.
+    pub(crate) fn host_mail(
+        &self,
+        ctx: &Arc<SharedContext>,
+        to: Uuid,
+        agent: &str,
+        heading: String,
+        body: String,
+    ) -> MailItem {
+        self.host_runs.lock().insert(to, agent.to_string());
+        let item = {
+            let mut state = self.state.lock();
+            self.add_mail(
+                &mut state,
+                to,
+                MailSender::Host,
+                MailKind::Message,
+                heading,
+                body.trim().to_string(),
+            )
+        };
+        self.posted(ctx, &item);
+        item
+    }
+
     fn save_mail(&self, id: u64, heading: &str, body: &str) -> Option<PathBuf> {
         let file = self.mail_dir.join(format!("mail-{id}.md"));
         let saved = std::fs::create_dir_all(&self.mail_dir)
@@ -483,13 +518,24 @@ impl Board {
                         .last()
                         .and_then(|item| about_record(&state, item.from, to))
                 };
+                let kind = SubagentEventKind::NewsWaiting {
+                    mail_ids: pending.iter().map(|item| item.id).collect(),
+                };
                 if let Some(record) = about {
-                    self.emit(
-                        &record,
-                        SubagentEventKind::NewsWaiting {
-                            mail_ids: pending.iter().map(|item| item.id).collect(),
-                        },
-                    );
+                    self.emit(&record, kind);
+                } else if let Some(agent) = self.host_runs.lock().get(&to).cloned() {
+                    // The host's own mail to a run no subagent concerns:
+                    // the news is about the run itself.
+                    self.send_event(SubagentEvent {
+                        timestamp: Utc::now(),
+                        workflow_run_id: self.workflow_run_id,
+                        run_id: to,
+                        handle: String::new(),
+                        agent_name: agent.clone(),
+                        caller_run_id: to,
+                        caller_agent: agent,
+                        kind,
+                    });
                 }
             }
         }

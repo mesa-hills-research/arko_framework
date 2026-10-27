@@ -559,8 +559,147 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
         fake.logged("post")[0]["output"]
             .as_str()
             .unwrap()
-            .contains("questions were sent")
+            .starts_with("Asked q1. End your turn now")
     );
+}
+
+/// With `async_questions`, the MCP `ask_user` returns at once, naming the
+/// questions' ids, and the turn goes on. `close_questions` closes one, and
+/// the host hears of both.
+#[tokio::test]
+async fn an_ask_in_claude_code_returns_at_once_with_ids() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__ask_user", "input": {"questions": [
+            {"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]},
+            {"question": "Push now?", "default": "not yet"}
+        ]}},
+        {"tool": "mcp__arko__close_questions", "input": {"ids": ["q2"], "why": "Decided"}},
+        complete("Went on"),
+    ]]));
+    let mut config = config(&fake, &["ask_user", "close_questions"]);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Format the code.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::UserQuestionsAsked { asked, wait: false, .. }
+            if asked.len() == 2 && asked[1].id == "q2"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::QuestionsClosed { ids, .. } if ids == &["q2"]
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TaskStateChanged(TaskState::AwaitingUserResponse { .. })
+    )));
+    let posts = fake.logged("post");
+    assert_eq!(
+        posts[0]["output"].as_str().unwrap(),
+        "Asked q1 and q2. Their answers reach you as a note, so go on with your work."
+    );
+    assert_eq!(posts[1]["output"].as_str().unwrap(), "Closed q2.");
+    assert_eq!(fake.logged("argv").len(), 1, "the turn went on");
+    assert_eq!(task.questions.open.len(), 1);
+    assert_eq!(task.questions.open[0].id, "q1");
+}
+
+/// Refuses the `ask_user` call that asks "Refused?" and every
+/// `close_questions` call.
+struct RefusesQuestions;
+
+#[async_trait::async_trait]
+impl crate::tool::ToolExecutionMiddleware for RefusesQuestions {
+    async fn before(
+        &self,
+        _context: &crate::tool::ToolExecutionContext<'_>,
+        call: &crate::tool::ToolCallContext<'_>,
+    ) -> Result<crate::tool::ToolExecutionDecision, crate::tool::ToolError> {
+        let refused = call.tool_name == "close_questions"
+            || call
+                .parameters
+                .get("questions")
+                .is_some_and(|questions| questions.to_string().contains("Refused?"));
+        Ok(if refused {
+            crate::tool::ToolExecutionDecision::Reject {
+                message_to_agent: "Not here.".into(),
+            }
+        } else {
+            crate::tool::ToolExecutionDecision::Continue
+        })
+    }
+
+    async fn after(
+        &self,
+        _context: &crate::tool::ToolExecutionContext<'_>,
+        _call: &crate::tool::ToolCallContext<'_>,
+        _outcome: crate::tool::ToolExecutionOutcome<'_>,
+    ) -> Result<(), crate::tool::ToolError> {
+        Ok(())
+    }
+}
+
+/// A middleware refuses an `ask_user` and a `close_questions` call after
+/// Claude Code's gate admitted them: the refused ask leaves no question
+/// open and the refused close closes none, and the host hears of neither,
+/// so the task's log and the host agree.
+#[tokio::test]
+async fn refused_question_calls_in_claude_code_change_no_questions() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}},
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Refused?"]}},
+        {"tool": "mcp__arko__close_questions", "input": {"ids": ["q1"]}},
+        complete("Went on"),
+    ]]));
+    let mut config = config(&fake, &["ask_user", "close_questions"]);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Format the code.".into(), fake.workspace(), None);
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(
+            task,
+            Arc::new(ToolRegistry::new()),
+            None,
+            false,
+            None,
+            None,
+            Some(Arc::new(RefusesQuestions)),
+        );
+    let (task, events) = Run {
+        events,
+        commands,
+        handle,
+    }
+    .finish()
+    .await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let asked = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UserQuestionsAsked { asked, .. } => Some(asked.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0][0].id, "q1");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::QuestionsClosed { .. }))
+    );
+    assert_eq!(
+        task.questions
+            .open
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1"]
+    );
+    assert_eq!(task.questions.asked, 1);
 }
 
 /// A launch's message IDs are its own: after an answer relaunches Claude
@@ -784,6 +923,121 @@ async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
     let (task, _) = run.finish().await;
     assert_eq!(fake.logged("midturn").len(), 1);
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
+}
+
+/// The operator's note of `TYPED_NOTE`, marked as note 3, given at the
+/// second boundary, as a workflow gives the user's answer.
+struct MarkedTypedNote(std::sync::atomic::AtomicUsize);
+
+impl crate::runtime::TurnContextSource for MarkedTypedNote {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let asked = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| crate::runtime::TurnContext {
+            user_content: TYPED_NOTE.into(),
+            ids: vec!["note:3".into()],
+            marks: [("notes".to_string(), 3)].into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// A note given with a call's result that the CLI took, but exited before
+/// it reported the result: the task saved then neither holds the note nor
+/// keeps its mark, so a host that recovers it gives the note again. Once
+/// the result is reported with the note, the task holds both.
+#[tokio::test]
+async fn a_note_the_cli_took_before_it_exited_leaves_no_mark() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "a"}, "crash": "post"}],
+        [{"tool": "Grep", "input": {"pattern": "b"}}, complete("Done")],
+    ]));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime =
+        recording(&recorder).with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    assert_eq!(fake.logged("midturn").len(), 1, "the CLI took the note");
+    let holds = |task: &Task| {
+        task.pending_context_injections
+            .iter()
+            .any(|text| text.contains("Use tabs."))
+            || texts(task).iter().any(|text| text.contains("Use tabs."))
+    };
+    let snapshots = recorder.snapshots();
+    assert!(!snapshots.is_empty());
+    for (task, _) in &snapshots {
+        assert!(
+            !task.context_marks.contains_key("notes") || holds(task),
+            "{:?}",
+            task.context_marks
+        );
+    }
+    let saved = &snapshots.last().unwrap().0;
+    assert!(!saved.context_marks.contains_key("notes"));
+    assert!(!holds(saved));
+    // Reported with its result, the note and its mark are kept.
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(holds(&task));
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// A marked note the CLI cancels goes back to the task with its mark, so a
+/// task that had an earlier mark doesn't keep that one beside the note and
+/// get the note again when a host recovers it.
+#[tokio::test]
+async fn a_cancelled_note_goes_back_with_its_mark() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"sleep": 0.5},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let mut task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.context_marks.insert("notes".into(), 2);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+        .await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
 }
 
 /// A completed task continued with a new configuration resumes its session
@@ -1771,6 +2025,7 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
                 "The image of note 3:",
                 pixels(),
             )],
+            ..Default::default()
         })
     }
 }
@@ -4126,6 +4381,90 @@ async fn a_compaction_holds_the_next_call_and_continues_in_the_same_session() {
     assert_eq!(task.usage_history[2].input_tokens, 600);
 }
 
+/// After a compaction, the questions still open come back with the
+/// agent's next input, after the hook's context.
+#[tokio::test]
+async fn a_compaction_restates_the_open_questions() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [complete("Searched")],
+    ]));
+    let mut config = compacting(&fake, &["Grep", "ask_user"], 1000);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Search b.".into(), fake.workspace(), None);
+    let (task, _) = start_with(task, with_notes()).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let users = user_texts(&fake);
+    let note = users.last().unwrap();
+    assert!(
+        note.contains("# Notes on your task\n- Keep the tests green.\n\n# Your open questions"),
+        "{note}"
+    );
+    assert!(note.contains("q1 Tabs or spaces?"), "{note}");
+}
+
+/// A host that has answered `q1` and keeps `q2` open.
+struct KeepsQ2;
+
+impl crate::handover::HandoverHook for KeepsQ2 {
+    fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(
+            task.questions
+                .open
+                .iter()
+                .filter(|question| question.id == "q2")
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+/// The host answers `q1` of a batch the agent waited for and keeps `q2`
+/// open: the log settles `q1` alone, and the compaction after it restates
+/// `q2`.
+#[tokio::test]
+async fn a_compaction_after_a_partial_answer_restates_the_rest() {
+    let fake = Fake::new(json!([
+        [{"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?", "Push now?"], "wait": true}, "input_tokens": 400}],
+        [
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [complete("Searched")],
+    ]));
+    let mut config = compacting(&fake, &["Grep", "ask_user"], 1000);
+    config.tool_config.async_questions = true;
+    let task = Task::new(config, "Search b.".into(), fake.workspace(), None);
+    let mut run = start_with(
+        task,
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(KeepsQ2)),
+    );
+    run.events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.questions.open.len(), 1);
+    assert_eq!(task.questions.open[0].id, "q2");
+    let users = user_texts(&fake);
+    let note = users.last().unwrap();
+    assert!(note.contains("# Your open questions"), "{note}");
+    assert!(note.contains("q2 Push now?"), "{note}");
+    assert!(!note.contains("q1 Tabs or spaces?"), "{note}");
+}
+
 /// A conversation whose last turn ended over the threshold compacts as
 /// its next session starts: `/compact` first, then the task's new input.
 #[tokio::test]
@@ -5343,4 +5682,104 @@ async fn a_monitor_started_in_claude_code_alerts_the_agent() {
         "{context}"
     );
     jobs.shutdown().await;
+}
+
+/// A host's record of questions with an allocator another run already took
+/// numbers from: the next ask is numbered from 43.
+#[derive(Default)]
+struct SharedNumbers {
+    asked: std::sync::Mutex<Vec<crate::questions::AskedQuestion>>,
+}
+
+impl crate::handover::HandoverHook for SharedNumbers {
+    fn open_questions(&self, _task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        Some(self.asked.lock().unwrap().clone())
+    }
+
+    fn question_numbers(&self, _task: &Task, _count: u32) -> Option<u32> {
+        Some(43 + self.asked.lock().unwrap().len() as u32)
+    }
+
+    fn questions_asked(
+        &self,
+        _task: &Task,
+        asked: &[crate::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        self.asked.lock().unwrap().extend(asked.iter().cloned());
+    }
+}
+
+/// An `ask_user` call whose input the runtime can't read, with the result
+/// the host supplied on approval, asks that result as one question. It is
+/// numbered by the host's allocator and recorded with the host before the
+/// question's event comes, as any ask is, and it waits, as such a call
+/// always did. The compaction right after it restates it.
+#[tokio::test]
+async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__ask_user", "input": {"questions": 42}, "input_tokens": 400},
+            {"text": "Waiting for the answer.", "input_tokens": 1500},
+        ],
+        {"compact": {"pre_tokens": 1510, "post_tokens": 200}},
+        [complete("Answered")],
+    ]));
+    let mut config = compacting(&fake, &["ask_user"], 1000);
+    config.tool_config.async_questions = true;
+    config.tool_config.tool_specific_configs.insert(
+        "ask_user".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let task = Task::new(config, "Pick a branch.".into(), fake.workspace(), None);
+    let host = Arc::new(SharedNumbers::default());
+    let mut run = start_with(
+        task,
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_handover_hook(host.clone()),
+    );
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: Some("Which branch?".into()),
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    // Recorded with the host before the event came.
+    let recorded = host.asked.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "q43");
+    assert_eq!(recorded[0].question.question, "Which branch?");
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::UserQuestionsAsked { asked, wait: true, .. })
+            if asked.len() == 1 && asked[0].id == "q43"
+    ));
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "main".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let users = user_texts(&fake);
+    assert!(users.iter().any(|text| text == "/compact"), "{users:#?}");
+    let last = users.last().unwrap();
+    assert!(
+        last.contains("# Your open questions") && last.contains("q43 Which branch?"),
+        "{last}"
+    );
 }

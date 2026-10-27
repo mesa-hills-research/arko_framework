@@ -2118,7 +2118,7 @@ async fn an_approved_ask_user_answered_through_the_task_keeps_its_result() {
     assert_calls_paired(&task.conversation);
     assert_eq!(
         result_for(&task.conversation, "ask")[0].output,
-        "Which file?"
+        "q1 Which file?"
     );
     assert!(
         serde_json::to_string(&task.conversation)

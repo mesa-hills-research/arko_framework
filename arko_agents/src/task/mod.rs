@@ -552,6 +552,20 @@ pub struct Task {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<TaskParent>,
+    /// The questions the agent asked with `ask_user`: how many, and those
+    /// still open as far as the runtime knows. See [`crate::questions`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::questions::QuestionLog::is_empty"
+    )]
+    pub questions: crate::questions::QuestionLog,
+    /// The host's marks of the context the task has taken, each the highest
+    /// given ([`TurnContext::marks`](crate::runtime::TurnContext::marks)),
+    /// such as the number of the newest workflow note. Kept through
+    /// handovers and compactions, so a saved task says what it was given
+    /// when its conversation no longer shows it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_marks: BTreeMap<String, u64>,
 }
 
 /// The task and tool call a task runs inside. See [`Task::parent`].
@@ -788,6 +802,8 @@ impl Task {
             claude_code_fork_of: None,
             reconfigured: false,
             running_tool_calls: Vec::new(),
+            questions: crate::questions::QuestionLog::default(),
+            context_marks: BTreeMap::new(),
             parent: None,
         }
     }
@@ -1058,9 +1074,16 @@ impl Task {
             }
         };
         self.set_state(TaskState::InProgress);
-        let answer = self.with_pending_text_tool_results(format!(
-            "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
-        ));
+        // The answer settles the questions waited for. An agent whose
+        // questions can be answered later gets the host's note as it is.
+        self.questions.settle_waiting();
+        let answer = if self.agent_config.tool_config.async_questions {
+            self.with_pending_text_tool_results(response)
+        } else {
+            self.with_pending_text_tool_results(format!(
+                "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
+            ))
+        };
         // With the environment details and reminder due, as the runtime
         // sends any user message.
         let parsing = self.agent_config.get_tool_parsing_config();
@@ -1214,6 +1237,15 @@ impl Task {
         self.conversation_usage_start = self.usage_history.len();
         self.conversation_model_call_start = self.model_call_usage_history.len();
         replaced
+    }
+
+    /// Raises the task's [`context_marks`](Self::context_marks) to `marks`
+    /// where they are higher, as it takes the context they mark.
+    pub fn raise_context_marks(&mut self, marks: &BTreeMap<String, u64>) {
+        for (key, value) in marks {
+            let mark = self.context_marks.entry(key.clone()).or_insert(0);
+            *mark = (*mark).max(*value);
+        }
     }
 
     /// Increments the user message count and returns the new count.

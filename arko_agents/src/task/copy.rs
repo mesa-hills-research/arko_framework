@@ -65,6 +65,8 @@ impl Task {
             reconfigured,
             running_tool_calls,
             parent,
+            questions,
+            context_marks,
         } = self;
         copy.id = *id;
         copy.agent_config_id.clone_from(agent_config_id);
@@ -120,6 +122,8 @@ impl Task {
         copy.reconfigured = *reconfigured;
         same(&mut copy.running_tool_calls, running_tool_calls);
         copy.parent = *parent;
+        copy.questions.clone_from(questions);
+        copy.context_marks.clone_from(context_marks);
     }
 }
 

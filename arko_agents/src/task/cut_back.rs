@@ -263,6 +263,9 @@ impl Task {
         self.running_tool_calls.clear();
         self.pending_context_injections.clear();
         self.pending_context_images.clear();
+        // What it took may have gone with the messages cut, so a host reads
+        // its conversation again.
+        self.context_marks.clear();
         self.handover_requested = None;
         if index == 0 {
             // A new conversation: its usage starts here.

@@ -309,6 +309,11 @@ pub struct TaskContext<'a> {
     /// result interceptor run by a host). A call recovered after its host
     /// stopped keeps its id. See [`Tool::recovery_mode`].
     pub tool_call_id: Option<uuid::Uuid>,
+    /// The model's id of the call, as the task's conversation records it
+    /// (the provider's call id, or Claude Code's `tool_use_id`), when it has
+    /// one. A host that keeps something about a call (an answer it asked
+    /// the user for) finds the call in the conversation by it later.
+    pub call_id: Option<String>,
     /// The call is being run again because the task stopped while it ran
     /// (its host crashed, say). Its tool declared
     /// [`ToolRecovery::Rerun`] or [`ToolRecovery::Resume`]. A
@@ -359,6 +364,7 @@ impl<'a> TaskContext<'a> {
             initial_task_prompt,
             current_working_directory,
             tool_call_id: None,
+            call_id: None,
             recovering: false,
             stop: crate::stop::StopSignal::never(),
             moved: MoveSignal::never(),

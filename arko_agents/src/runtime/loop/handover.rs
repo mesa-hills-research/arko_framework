@@ -205,6 +205,8 @@ impl AgentLoop {
             None if chat => HandoverSeed::for_chat(&self.task),
             None => HandoverSeed::for_task(&self.task),
         };
+        let seed =
+            crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);

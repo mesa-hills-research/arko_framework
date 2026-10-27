@@ -454,6 +454,10 @@ fn agent_config(
         // at all (the workflow adds none either), and its reply in text ends
         // its task.
         chat: false,
+        // Default false: ask_user waits for the answer. True returns at once
+        // (unless the agent passes wait: true), and the user input handler's
+        // answer reaches the agent later, in its mailbox.
+        async_questions: false,
     };
     let mut builder = AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())

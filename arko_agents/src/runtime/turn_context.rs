@@ -26,6 +26,12 @@ pub struct TurnContext {
     /// next input. An update with images that arrives during a turn waits
     /// for the turn's end, with any context taken after it.
     pub images: Vec<ContextImage>,
+    /// The host's marks of what the update gives, by name, such as the
+    /// number of the newest note in it. The task keeps the highest of each
+    /// once it holds the update, in its conversation or pending in it
+    /// ([`Task::context_marks`](crate::Task::context_marks)), saved with it.
+    /// May be empty.
+    pub marks: std::collections::BTreeMap<String, u64>,
 }
 
 impl From<String> for TurnContext {
@@ -35,6 +41,7 @@ impl From<String> for TurnContext {
             user_content: String::new(),
             ids: Vec::new(),
             images: Vec::new(),
+            marks: Default::default(),
         }
     }
 }

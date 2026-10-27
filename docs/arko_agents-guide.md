@@ -102,13 +102,57 @@ first snapshot followed by changes at model-call boundaries. See
 ## Tools
 
 `ToolRegistry::new()` registers the built-in tools `complete_task`, `read_file`,
-`write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, and `message_user`.
+`write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, `close_questions` and
+`message_user`.
 `edit_file` replaces one exact piece of text in a file (or every occurrence, with
 `replace_all`) and changes nothing when the text isn't there exactly once. `apply_diff`
 applies SEARCH/REPLACE blocks. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
+
+### Questions
+
+`ask_user` takes `questions`, a list of `{question, choices?, multiple?, default?}`.
+`choices` are up to six suggested answers, `multiple` lets the user pick several, and
+`default` is what the agent assumes without an answer. A plain string is one question, as
+older configurations and models write it. Each question gets an id in its task (`q1`,
+`q2`, ...), and `Task::questions` (a `QuestionLog`) keeps the count and the questions still
+open, so a checkpoint saves them. `UserQuestionsAsked { questions, asked, wait }` gives the
+host the questions as text (`questions_text`), the numbered questions, and whether the task
+waits.
+
+By default every ask waits, and the result the model reads is the questions as text. With
+`AgentToolConfig::async_questions` on, `ask_user` offers `wait` and returns at once unless
+the agent passes `wait: true` ("Asked q3 and q4. Their answers reach you as a note, so go on
+with your work."). The host then delivers the answers as context, such as a note, worded
+with the helpers of `arko_agents::questions`:
+
+```text
+The user answered q3 and q4.
+q3 Tabs or spaces? Spaces
+q4 Push now? You decide (you said you'd assume: not yet)
+Still open: q5.
+```
+
+`answer_note` names each question by its id and an excerpt of its text (`excerpt`, at most
+`EXCERPT_CHARS` characters), and gives the user's answers whole. `dismissed_note` says the
+user dismissed questions, `message_answers` labels a message that
+answers them ("(This message answers q3 and q4.)"), and `still_open` ends a message with
+those still open. An agent with `async_questions` that waits gets the host's
+`SubmitUserResponse` as it is, so the host words it as such a note.
+
+`close_questions { ids, why? }` closes questions that no longer need an answer. The runtime
+settles them in the task's log and reports `QuestionsClosed { ids, why }`. It runs without
+approval, as `ask_user` does. A handover's fresh conversation restates the questions still
+open (`# Your open questions`), and so does the context given after Claude Code compacts a
+conversation. `HandoverHook::open_questions` returns the questions the host still has open,
+or `None` (the default) to go by the task's log, which knows of answers given while the agent
+waited and of the questions it closed. An answer to questions the agent waited for settles
+those the host no longer has open, so a host may answer some of a batch and keep the rest.
+A host that shows several tasks' questions gives out their numbers with
+`HandoverHook::question_numbers`, one ask at a time, and `questions_asked` tells it of each ask
+as the runtime records it, before the agent goes on.
 
 `message_user` shows the user a message while the agent works, with nothing to wait for,
 such as an answer to a question the user asked meanwhile, or progress. The runtime sends its
@@ -846,7 +890,9 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `TaskStateChanged` | The task's state changed. |
 | `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning. `event_throttle_ms` coalesces chunks. |
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
-| `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
+| `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval` | The task waits for a command. |
+| `UserQuestionsAsked` | The agent asked. With `wait` the task waits for `SubmitUserResponse`, and without it the agent goes on. See [Questions](#questions). |
+| `QuestionsClosed` | The agent closed questions it asked (`close_questions`). |
 | `MessageToUser` | The agent sent the user a message and carries on, from a `message_user` call (`tool_call_id` names it) or, with `text_reply_as_message`, a reply in plain text (`tool_call_id` is `None`, and the text has already streamed as `AssistantResponseChunk`). See [Tools](#tools). |
 | `ToolResultShortened` | A result was shortened before it went into the conversation (`reason` names the overflow guard, a cap, or overflow recovery). See [Tool result size](#tool-result-size). |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that didn't run (stopped, held, not reached, announced in an output-based turn that can't run them, or a `complete_task` refused after an earlier call of its turn was rejected or failed). |
@@ -879,13 +925,20 @@ Besides answers to the waiting states, a running task accepts:
   A workflow holds agents over their budget this way. A Claude Code agent is asked before
   each turn and at each message of a turn, and a turn it holds is interrupted.
   Each update that goes into the conversation is reported with `ContextInjected`. Its
-  `ids` come from the source. `context_update` returns a `TurnContext { content, user_content, ids, images }`
+  `ids` come from the source. `context_update` returns a `TurnContext { content, user_content, ids, images, marks }`
   (by default `turn_context` with no ids), and `identify` gives an id for each queued
   `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
   read. `wakes_calls` says whether a queued `InjectContext` fires the running calls'
   `TaskContext::context_arrived` (by default it does). A workflow's context notices
-  don't, so they wait for the turn boundary. `TurnContext::user_content` is the part of
+  don't, so they wait for the turn boundary. `TurnContext::marks` are the source's
+  high-water marks of what the update gives, by name. The task keeps the highest of each
+  in `Task::context_marks` once it holds the update (in its conversation, or pending in it).
+  A Claude Code agent's update given with a call's result counts once the CLI reports that
+  result, so a CLI that exits first leaves no mark. The marks are saved with the task and kept through
+  handovers and compactions (a cut back clears them), so a host can tell from a saved task
+  what it was given after its conversation no longer shows it. A workflow marks the newest
+  note (`notes`) and recovers a run's notes from that mark. `TurnContext::user_content` is the part of
   an update the user typed themselves (a workflow's operator notes), which follows
   `content` in the same message. During a turn, a Claude Code agent gets it as a message
   from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
@@ -1357,8 +1410,10 @@ They run as for any agent, with the execution middleware, result interception an
 limits. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
 its final text as `MessageToUser` before the runtime's note. With `text_reply_ends_task`
 on, a turn that ends with text completes the task with it, and `complete_task` isn't
-served. The turns Claude Code is told to end (after `ask_user`, for a handover report or a
-`/compact`) and the turns arko interrupts aren't replies. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`, such as `Read`,
+served. The turns Claude Code is told to end (after an `ask_user` that waits, for a
+handover report or a `/compact`) and the turns arko interrupts aren't replies. An `ask_user`
+that doesn't wait (with `async_questions`) returns its ids at once and the turn goes on, as
+in other runtimes. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`, such as `Read`,
 `Edit`, `Bash`, `Grep` and `WebFetch`) are offered when `available_tool_names` lists them, and
 only then. `ClaudeCodeTools::{read_only, editing, shell, web, all}` list common sets. A
 name that isn't an arko tool is offered as a built-in, so tools a newer CLI adds can be

@@ -754,13 +754,18 @@ The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work alre
 ### UserInputHandler and UserInputRequest
 
 ```rust
-#[async_trait::async_trait]
 pub trait UserInputHandler: Send + Sync {
     async fn respond(&self, request: UserInputRequest) -> Result<String, String>;
+    async fn asked(&self, request: UserInputRequest) -> Result<Option<String>, String>; // default: respond
+    fn open_questions(&self, agent_run_id: Uuid) -> Option<Vec<AskedQuestion>>;       // default: None
+    fn question_numbers(&self, agent_run_id: Uuid, agent_name: &str, count: u32) -> Option<u32>; // default: None
+    fn questions_recorded(&self, agent_run_id: Uuid, agent_name: &str, asked: &[AskedQuestion], wait: bool); // default: nothing
 }
 ```
 
-`UserInputRequest` has the fields `workflow_run_id: Uuid`, `agent_run_id: Uuid`, `agent_name: String`, and `questions: String`. Pass an `Arc<dyn UserInputHandler>` to `user_input_handler`. The returned string is submitted as the user's response. An `Err` string ends the invocation with `WorkflowError::Channel`.
+`UserInputRequest` has the fields `workflow_run_id: Uuid`, `agent_run_id: Uuid`, `agent_name: String`, `questions: String` (the questions as text, with their ids, choices and defaults), `asked: Vec<AskedQuestion>` (the numbered questions) and `wait: bool`. Pass an `Arc<dyn UserInputHandler>` to `user_input_handler`. For a question the agent waits for, `respond`'s string is submitted as the user's response. An `Err` string ends the invocation with `WorkflowError::Channel`.
+
+An agent with `async_questions` that asks without `wait` goes on. The workflow calls `asked` in the background, and `Ok(Some(answer))` reaches the agent in its mailbox under "About your questions q1 and q2:", as a report does, waking a run that ended (`NewsWaiting`). A host that gathers answers itself returns `Ok(None)`, delivers them as notes worded with `arko_agents::questions`, and returns the questions still open from `open_questions`, which a handover's fresh conversation (and a Claude Code compaction) restates. An answer to questions the agent waited for leaves those `open_questions` returns open. `question_numbers` gives out the number of each ask's first question, one ask at a time, so ids stay unique across the host's runs, even runs at the same time, and `questions_recorded` tells the handler of each ask as the runtime records it, before the agent goes on, so `open_questions` has it for a handover right after. Neither is asked for a subagent whose questions go to its lead. A late answer to a run that ended sends `NewsWaiting` about the run itself (`run_id` and `caller_run_id` are both the run's, and `handle` is empty). Without a handler, the agent's mailbox gets a note that no one can answer. A subagent whose questions go to its lead always waits.
 
 Without a handler, the managed driver suspends the task on `ask_user` and returns `WorkflowError::UserInputRequired { agent, task_id, questions }`. To answer, take the matching `WaitingForInput` result from `workflow.result().agent_results` and pass it with the answer to `continue_agent`. With persistence, checkpoints include the suspended result and its task, so it can also be continued after `resume_from`.
 
@@ -838,7 +843,7 @@ A subagent is an ordinary run of the workflow, with its own run ID (`SubagentRec
 | `copy_peer_messages_to_lead` | `bool` | `false`. The lead gets a copy of each message its subagents send each other. A copy ends no wait and wakes no one. |
 | `workspaces_anywhere` | `bool` | `false`. `start_agent`'s `workspace` may name any directory, instead of one inside the caller's working directory. |
 | `offer_blocking_tool` | `bool` | `true`. Callers are offered `run_workflow_agent` too. |
-| `questions_to_lead` | `bool` | `true`. A subagent's `ask_user` goes to its lead as a message (`MailKind::Question`), and the lead's next message to it is the answer. Off, it goes to the workflow's `UserInputHandler`, as other runs' questions do. |
+| `questions_to_lead` | `bool` | `true`. A subagent's `ask_user` goes to its lead as a message (`MailKind::Question`), and the lead's next message to it is the answer. The subagent always waits for it, whatever its `async_questions`. Off, it goes to the workflow's `UserInputHandler`, as other runs' questions do. |
 | `workspace_provider` | `Option<Arc<dyn WorkspaceProvider>>` | None. Creates and removes isolated workspaces. With one, `start_agent` offers `isolated` and `stop_agent` offers `remove_workspace`. |
 | `hook` | `Option<Arc<dyn SubagentHook>>` | None. Adjusts a subagent's `AgentConfig` as it starts. |
 | `start_parameters` | `Vec<arko_agents::ToolParameterDefinition>` | Empty. The host's own `start_agent` parameters, whose values reach the hook. |
@@ -1286,7 +1291,7 @@ pub const PROMPT_MAX_BYTES: usize; // 16 KiB, likewise
 
 | Public type | Fields or variants |
 | --- | --- |
-| `Note` | `text: String`, `audience: NoteAudience`, `kind: NoteKind`, `source: NoteSource`, `images: Vec<arko_ai::Image>`. In JSON only `text` is required. The others default, and `images` is left out when empty. |
+| `Note` | `text: String`, `audience: NoteAudience`, `kind: NoteKind`, `source: NoteSource`, `images: Vec<arko_ai::Image>`, `run: Option<Uuid>`. In JSON only `text` is required. The others default, and `images` and `run` are left out when empty. `Note::for_run(run)` makes a one-time note for that agent run alone (other runs of the agent never get it, and `skip_one_time_notes` doesn't keep it from that run), which the run gets at its next turn boundary or when it is continued. `notes_given(run)` at or past the note's `seq` says the run was given it. |
 | `NoteAudience` | `All` (the default) for every agent. `Only(BTreeSet<String>)` for the agents named. `Except(BTreeSet<String>)` for every agent but those. Snake case in JSON, as `"all"`, `{"only": ["a"]}`, `{"except": ["b"]}`. |
 | `NoteKind` | `Standing` (the default) is delivered to the running runs of its audience and shown in the initial prompt of every later run. `Once` is delivered once to each run of its audience that has started when it is posted. `"standing"`, `"once"`. |
 | `NoteSource` | Who wrote it, as the agents are told, `Operator` (the default, "the operator (the person running this workflow)"), `Host` ("the workflow (the program running the agents)"), or `Agent(String)` ("agent `name`"), for example an observer reviewing the run. The name need not be a registered agent's. In JSON it is `"operator"`, `"host"` or `{"agent": "observer"}`. |

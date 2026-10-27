@@ -389,7 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n--- MESSAGE FROM THE AGENT ---");
                 println!("{}", message);
             }
-            AgentEvent::UserQuestionsAsked { questions } => {
+            AgentEvent::UserQuestionsAsked { questions, .. } => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 println!("\n--- AGENT QUESTIONS ---");
                 println!("{}", questions);

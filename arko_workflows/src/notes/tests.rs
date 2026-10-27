@@ -925,6 +925,44 @@ async fn a_claude_code_compaction_gives_the_standing_notes_again() {
     let _ = std::fs::remove_dir_all(&fake);
 }
 
+/// A note posted under the host's id is posted once: posting it again,
+/// also after a resume from a checkpoint that saved it, returns the note
+/// already posted, whatever the text.
+#[tokio::test]
+async fn a_note_posted_under_an_id_is_posted_once() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let id = uuid::Uuid::new_v4();
+    let note = || Note::new("The user answered q1.").once();
+    let posted = first.post_note_once(id, note()).unwrap();
+    assert_eq!(posted.id, id);
+    assert_eq!(first.post_note_once(id, note()).unwrap(), posted);
+    assert_eq!(first.notes().len(), 1);
+    first.checkpoint().await.unwrap();
+    drop(first);
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    assert_eq!(
+        resumed
+            .post_note_once(id, Note::new("Other words.").once())
+            .unwrap(),
+        posted
+    );
+    assert_eq!(resumed.notes(), [posted]);
+    let other = resumed
+        .post_note_once(uuid::Uuid::new_v4(), note())
+        .unwrap();
+    assert_eq!(other.seq, 2);
+}
+
 /// Notes are saved in checkpoints: a resumed workflow has them, a new run
 /// gets the standing ones, and a restored run continued after the resume
 /// isn't given again what it had been given, only what was posted since.
@@ -1655,6 +1693,59 @@ async fn a_run_skips_the_one_time_notes_posted_before_the_host_said_so() {
     assert!(!continued.contains("For the other run."), "{continued}");
     assert_eq!(continued.matches("Keep it short.").count(), 1);
     assert_eq!(continued.matches("For this run too.").count(), 1);
+}
+
+/// A note for one run reaches that run alone, when it is continued, also
+/// after the host skipped the one-time notes for it and after a checkpoint,
+/// and the run counts as given it from then on. Another run of the same
+/// agent never gets it. A standing note can't be for one run.
+#[tokio::test]
+async fn a_note_for_one_run_reaches_that_run_alone() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let mine = first.run_agent("worker", "Write it.").await.unwrap();
+    let other = first.run_agent("worker", "Write that.").await.unwrap();
+    let posted = first
+        .post_note(
+            Note::new("The user answered q1.")
+                .to(["worker"])
+                .for_run(mine.agent_run_id),
+        )
+        .unwrap();
+    assert!(
+        first
+            .post_note(Note {
+                kind: NoteKind::Standing,
+                ..Note::new("Standing.").for_run(mine.agent_run_id)
+            })
+            .is_err()
+    );
+    first.skip_one_time_notes(mine.agent_run_id);
+    first.checkpoint().await.unwrap();
+    drop(first);
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    assert!(resumed.notes_given(mine.agent_run_id) < posted.seq);
+    let other = resumed.agent_result(other.agent_run_id).unwrap();
+    resumed
+        .continue_agent(&other, "Go on there.")
+        .await
+        .unwrap();
+    let there = &requests_of(&server, "Go on there.")[0];
+    assert!(!there.contains("The user answered q1."), "{there}");
+    let mine = resumed.agent_result(mine.agent_run_id).unwrap();
+    resumed.continue_agent(&mine, "Go on here.").await.unwrap();
+    let here = &requests_of(&server, "Go on here.")[0];
+    assert_eq!(here.matches("The user answered q1.").count(), 1, "{here}");
+    assert!(resumed.notes_given(mine.agent_run_id) >= posted.seq);
 }
 
 /// A one-time note posted before a run started never reaches it, also when

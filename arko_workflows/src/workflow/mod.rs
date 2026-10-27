@@ -1227,6 +1227,19 @@ impl Workflow {
         self.notes_handle().post(note)
     }
 
+    /// Posts `note` as [`post_note`](Self::post_note) does, under `id`, the
+    /// host's own key for it. Once a note with that id is posted (also before
+    /// a resume, from the checkpoint), posting it again returns that note
+    /// instead of a second one, so a host that doesn't know whether its last
+    /// post was saved can post again.
+    pub fn post_note_once(
+        &self,
+        id: uuid::Uuid,
+        note: crate::notes::Note,
+    ) -> Result<crate::notes::PostedNote, WorkflowError> {
+        self.notes_handle().post_once(id, note)
+    }
+
     /// Every note posted to this run, oldest first, including those restored
     /// from the checkpoint and those read from the control folder.
     pub fn notes(&self) -> Vec<crate::notes::PostedNote> {
@@ -3339,6 +3352,10 @@ mod plan_budget_tests;
 #[cfg(test)]
 #[path = "stop_tests.rs"]
 mod stop_tests;
+
+#[cfg(test)]
+#[path = "question_tests.rs"]
+mod question_tests;
 
 #[cfg(test)]
 #[path = "run_stop_tests.rs"]

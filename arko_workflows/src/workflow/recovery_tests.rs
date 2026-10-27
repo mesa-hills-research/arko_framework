@@ -2669,3 +2669,208 @@ async fn the_journal_keeps_the_images_it_holds_at_each_safe_point() {
     );
     crash(workflow, vec![run]).await;
 }
+
+/// A one-time note the run took before it handed over isn't given again
+/// when the run is recovered after a crash in its fresh conversation. The
+/// saved task's mark says it took the note, though its conversation no
+/// longer holds it.
+#[tokio::test]
+async fn a_note_taken_before_a_handover_isnt_given_again_on_recovery() {
+    let workspace = Workspace::new();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let server = ResponsesServer::start_async({
+        let go = go.clone();
+        move |_, body| {
+            let go = go.clone();
+            Box::pin(async move {
+                let outputs = body.matches("function_call_output").count();
+                let tokens = |turn: String, tokens: &str| {
+                    turn.replace("\"input_tokens\":10", &format!("\"input_tokens\":{tokens}"))
+                };
+                Some(crate::test_support::Reply::Stream(
+                    if body.contains("# Handover report") {
+                        if outputs == 0 {
+                            tool_call_turn("h0", "hold", json!({}))
+                        } else {
+                            complete_turn("done", "worked")
+                        }
+                    } else if body.contains("Your conversation is getting long") {
+                        tool_call_turn(
+                            "report",
+                            "handover_report",
+                            json!({ "report": "REPORT: probed twice." }),
+                        )
+                    } else if outputs == 0 {
+                        go.notified().await;
+                        tokens(tool_call_turn("p0", "probe", json!({})), "5000")
+                    } else {
+                        tokens(tool_call_turn("p1", "probe", json!({})), "20000")
+                    },
+                ))
+            })
+        }
+    })
+    .await;
+    let workflow = |hold: Arc<ProbeTool>| {
+        let mut coder = agent_config("Friendly Coder");
+        coder.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+        Workflow::builder()
+            .name("recovery-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", coder)
+            .global_tool(ProbeTool::new("probe", false))
+            .global_tool(hold)
+            .persistence(config(&workspace))
+    };
+    let hold = ProbeTool::new("hold", true);
+    let first = Arc::new(workflow(hold.clone()).build().unwrap());
+    let run = tokio::spawn({
+        let first = first.clone();
+        async move { first.run_agent("coder", "Probe it.").await }
+    });
+    server.wait_for_requests(1).await;
+    first
+        .post_note(crate::notes::Note::new("ANSWER-ONCE").once())
+        .unwrap();
+    go.notify_one();
+    within(hold.started.notified()).await;
+    assert!(running_call_saved(&workspace));
+    let given = server
+        .bodies()
+        .iter()
+        .filter(|body| body.contains("ANSWER-ONCE"))
+        .count();
+    assert!(given > 0);
+    let path = latest(&workspace);
+    crash(first, vec![run]).await;
+
+    let resumed = workflow(ProbeTool::new("hold", false))
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    let saved = resumed.interrupted_runs().remove(0);
+    let task = saved.task().unwrap();
+    assert_eq!(task.handovers.len(), 1);
+    assert!(
+        !serde_json::to_string(&task.conversation)
+            .unwrap()
+            .contains("ANSWER-ONCE")
+    );
+    assert_eq!(task.context_marks.get("notes"), Some(&1));
+    let before = server.bodies().len();
+    let result = within(resumed.recover_agent(&saved)).await.unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let after = server.bodies();
+    assert!(after.len() > before);
+    for body in &after[before..] {
+        assert!(!body.contains("ANSWER-ONCE"), "{body}");
+    }
+}
+
+/// A one-time note a Claude Code agent took before Claude Code compacted
+/// its conversation isn't given again when the run is recovered after a
+/// crash that followed the compaction.
+#[tokio::test]
+async fn a_note_taken_before_a_claude_code_compaction_isnt_given_again_on_recovery() {
+    let workspace = Workspace::new();
+    let fake = FakeClaude::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"sleep": 1.5},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "c"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [{"tool": "mcp__arko__hold", "input": {}, "id": "toolu_hold"}],
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "recovered"}}],
+    ]));
+    let server = ResponsesServer::start(|_, _| None).await;
+    let claude_code = |hold: Arc<ProbeTool>| {
+        let mut coder = fake.agent();
+        coder.tool_config.available_tool_names.push("Grep".into());
+        coder.handover = Some(arko_agents::HandoverConfig {
+            compact_in_claude_code: true,
+            ..arko_agents::HandoverConfig::at_input_tokens(1000)
+        });
+        Workflow::builder()
+            .name("recovery-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", coder)
+            .global_tool(hold)
+            .persistence(config(&workspace))
+    };
+    let hold = ProbeTool::new("hold", true);
+    let workflow = Arc::new(claude_code(hold.clone()).build().unwrap());
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Search it.").await }
+    });
+    // Posted after the first search, so it comes with the second's result,
+    // before the third is held for the compaction.
+    until(|| !fake.logged("post").is_empty()).await;
+    workflow
+        .post_note(
+            crate::notes::Note::new("ANSWER-ONCE")
+                .source(crate::notes::NoteSource::Host)
+                .once(),
+        )
+        .unwrap();
+    within(hold.started.notified()).await;
+    assert!(running_call_saved(&workspace));
+    // What the agent was sent: its inputs, and the context with its calls'
+    // results.
+    let given = || {
+        let texts = fake
+            .logged("user")
+            .into_iter()
+            .map(|entry| entry["text"].clone());
+        let contexts = fake
+            .logged("post")
+            .into_iter()
+            .map(|entry| entry["answer"]["hookSpecificOutput"]["additionalContext"].clone());
+        texts
+            .chain(contexts)
+            .filter_map(|text| text.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    // Given with the second search's result, then compacted.
+    assert!(
+        fake.logged("post")[1]["answer"]
+            .to_string()
+            .contains("ANSWER-ONCE"),
+        "{:#?}",
+        given()
+    );
+    assert!(given().iter().any(|text| text == "/compact"));
+    let path = latest(&workspace);
+    crash(workflow, vec![run]).await;
+
+    let resumed = claude_code(ProbeTool::new("hold", false))
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    let saved = resumed.interrupted_runs().remove(0);
+    assert_eq!(saved.task().unwrap().context_marks.get("notes"), Some(&1));
+    let result = within(resumed.recover_agent(&saved)).await.unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert_eq!(result.summary, "recovered");
+    let given = given();
+    let count = given
+        .iter()
+        .map(|text| text.matches("ANSWER-ONCE").count())
+        .sum::<usize>();
+    assert_eq!(count, 1, "{given:#?}");
+}

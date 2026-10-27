@@ -18,7 +18,7 @@
 //! keeps it: the runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -428,6 +428,25 @@ struct Admitted {
     /// Claude Code's ID of the call (its `tool_use_id`).
     call_id: Option<String>,
     custom_output: Option<String>,
+    /// What Claude Code reads of the call in place of its result: an
+    /// `ask_user` or `close_questions` call's, which the runtime words as
+    /// it admits the call.
+    reply: Option<String>,
+}
+
+/// An `ask_user` or `close_questions` call the runtime took as it admitted
+/// it, for when its result arrives.
+enum QuestionCall {
+    Asked {
+        asked: Vec<crate::questions::AskedQuestion>,
+        wait: bool,
+        result: String,
+    },
+    Closed {
+        ids: Vec<String>,
+        why: Option<String>,
+        result: String,
+    },
 }
 
 /// Runs the agent's arko tools for Claude Code's MCP calls.
@@ -444,7 +463,12 @@ impl ToolHost {
     fn interception_for(&self, name: &str, tool: &dyn crate::tool::Tool) -> Option<Interception> {
         let config = self.interceptor.as_ref()?;
         if !tool.allow_result_interception()
-            || [COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME].contains(&name)
+            || [
+                COMPLETE_TASK_TOOL_NAME,
+                ASK_USER_TOOL_NAME,
+                crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
+            ]
+            .contains(&name)
         {
             return None;
         }
@@ -511,6 +535,7 @@ impl ToolHost {
             id,
             call_id,
             custom_output,
+            reply,
         } = call;
         let mut params = params_of(arguments);
         crate::tool::builtins::read_file::ignore_line_ranges(
@@ -546,9 +571,10 @@ impl ToolHost {
                 effective,
                 intercepted,
             } => {
-                let text = match name {
-                    ASK_USER_TOOL_NAME => ASKED.to_string(),
-                    _ => effective.clone(),
+                let text = match (reply, name) {
+                    (Some(reply), _) => reply,
+                    (None, ASK_USER_TOOL_NAME) => ASKED.to_string(),
+                    (None, _) => effective.clone(),
                 };
                 let reply = served_output(text, output.images);
                 (
@@ -803,8 +829,14 @@ pub(super) struct ClaudeCodeRun {
     context_size: Option<usize>,
     first_context_size: Option<usize>,
     open_turns: u32,
-    /// Questions `ask_user` sent in this turn.
-    questions: Option<String>,
+    /// Questions `ask_user` sent in this turn that the agent waits for:
+    /// their text and the questions.
+    questions: Option<(String, Vec<crate::questions::AskedQuestion>)>,
+    /// The `ask_user` and `close_questions` calls admitted whose results
+    /// haven't arrived, by call ID.
+    question_calls: HashMap<Uuid, QuestionCall>,
+    /// The highest question number admitted calls took, recorded or not.
+    questions_numbered: u32,
     /// The report request reached the model in this turn (a denied call's
     /// result, or a user message).
     report_delivered: bool,
@@ -813,9 +845,17 @@ pub(super) struct ClaudeCodeRun {
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
     delivered_context: Vec<String>,
+    /// The marks of the context taken out of the task to be sent
+    /// ([`TurnContext::marks`]), kept by the task once it holds that
+    /// context: in a message it records, or pending again.
+    taken_marks: BTreeMap<String, u64>,
+    /// The marks of `delivered_context`, kept by the task once it is
+    /// mirrored after the results.
+    delivered_marks: BTreeMap<String, u64>,
     /// The notes the user typed that were sent as messages, by the UUID of the
-    /// message, until the CLI reports what became of them.
-    sent_notes: HashMap<String, String>,
+    /// message, until the CLI reports what became of them, each with the
+    /// marks of its update when the note was all of it.
+    sent_notes: HashMap<String, (String, BTreeMap<String, u64>)>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -947,10 +987,14 @@ impl ClaudeCodeRun {
             first_context_size,
             open_turns: 0,
             questions: None,
+            question_calls: HashMap::new(),
+            questions_numbered: 0,
             report_delivered: false,
             approval: None,
             after_result: HashMap::new(),
             delivered_context: Vec::new(),
+            taken_marks: BTreeMap::new(),
+            delivered_marks: BTreeMap::new(),
             sent_notes: HashMap::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
@@ -1239,8 +1283,12 @@ impl ClaudeCodeRun {
                 .filter(|_| {
                     // Their outcomes change the task; the model calls them
                     // again.
-                    ![COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME]
-                        .contains(&call.tool_name.as_str())
+                    ![
+                        COMPLETE_TASK_TOOL_NAME,
+                        ASK_USER_TOOL_NAME,
+                        crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
+                    ]
+                    .contains(&call.tool_name.as_str())
                 });
             let mode = match (&tool, &call.custom_output) {
                 (Some(_), Some(_)) => ToolRecovery::Rerun,
@@ -1268,6 +1316,7 @@ impl ClaudeCodeRun {
                         id: call.tool_call_id,
                         call_id: call.call_id.clone(),
                         custom_output: call.custom_output.clone(),
+                        reply: None,
                     },
                     true,
                 )
@@ -1446,6 +1495,8 @@ impl ClaudeCodeRun {
                     TaskState::AwaitingUserResponse { .. },
                     UserCommand::SubmitUserResponse { response },
                 ) => {
+                    // (Those the host still has open stay open.)
+                    crate::handover::settle_waited(self.handover_hook.as_deref(), &mut self.task);
                     self.task
                         .prepare_for_resumption_with_user_response(response)?;
                     self.emit(AgentEvent::TaskStateChanged(
@@ -1722,6 +1773,7 @@ impl ClaudeCodeRun {
             {
                 update_ids = update.ids;
             }
+            raise(&mut self.taken_marks, &update.marks);
             arrived = update.images.len();
             self.queue_context(update.content, false);
             if with_images {
@@ -1735,12 +1787,15 @@ impl ClaudeCodeRun {
             && self.task.pending_context_images.is_empty()
             && typed.is_empty()
         {
+            self.keep_taken_marks();
             return None;
         }
         let hold_images = !with_images && !self.task.pending_context_images.is_empty();
         if hold_images && self.task.pending_context_injections.is_empty() && typed.is_empty() {
             // Only images wait, said already: nothing goes until they can.
             self.held_context_ids.append(&mut update_ids);
+            // (They wait in the task.)
+            self.keep_taken_marks();
             return None;
         }
         let mut content = self.task.pending_context_injections.join("\n\n");
@@ -1791,6 +1846,13 @@ impl ClaudeCodeRun {
             format!("{CONTEXT_UPDATE}\n\n{content}")
         };
         Some((content, typed, images))
+    }
+
+    /// The task holds the context taken since the last call, so it keeps its
+    /// marks.
+    fn keep_taken_marks(&mut self) {
+        let marks = std::mem::take(&mut self.taken_marks);
+        self.task.raise_context_marks(&marks);
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -2064,6 +2126,7 @@ impl ClaudeCodeRun {
                 crate::task::with_context_images(context.clone(), images),
             );
             self.task.increment_user_message_count();
+            self.keep_taken_marks();
             parts.push(context);
         }
         let messages = &self.task.conversation.messages[synced..];
@@ -2650,6 +2713,7 @@ impl ClaudeCodeRun {
             id,
             call_id: tool_use_id,
             custom_output: None,
+            reply: None,
         };
         self.admit(&name, built_in, call, &input, session).await
     }
@@ -2679,6 +2743,75 @@ impl ClaudeCodeRun {
         from_session_directory(served, input, from, &self.task.current_working_directory)
     }
 
+    /// An `ask_user` or `close_questions` call being admitted: its
+    /// questions are numbered now, or the ids to close are checked, so that
+    /// what Claude Code reads of it names them (`call.reply`). The task's
+    /// log records them, and the host hears of them, once the call ran
+    /// (a middleware may still refuse it). A call whose input can't be read
+    /// runs as it is, and its tool says why.
+    fn take_question_call(&mut self, name: &str, input: &Value, call: &mut Admitted) {
+        let taken = if name == ASK_USER_TOOL_NAME {
+            let Some(Ok(questions)) = input
+                .get(crate::tool::builtins::ask_user::ASK_USER_QUESTIONS_PARAM_NAME)
+                .map(crate::questions::parse_questions)
+            else {
+                return;
+            };
+            let last = crate::handover::last_question_number(
+                self.handover_hook.as_deref(),
+                &self.task,
+                questions.len() as u32,
+                self.questions_numbered,
+            );
+            let wait = crate::questions::parse_wait(
+                input.get(crate::tool::builtins::ask_user::ASK_USER_WAIT_PARAM_NAME),
+            );
+            let (asked, wait, result) = crate::questions::plan_ask(
+                last,
+                questions,
+                wait,
+                self.task.agent_config.tool_config.async_questions,
+            );
+            self.questions_numbered = last + asked.len() as u32;
+            // A question the agent waits for ends its turn.
+            call.reply = Some(if wait {
+                let ids = asked.iter().map(|question| question.id.as_str());
+                format!(
+                    "Asked {}. End your turn now without calling tools, and the answer arrives as the next message.",
+                    crate::questions::id_list(&ids.collect::<Vec<_>>())
+                )
+            } else {
+                result.clone()
+            });
+            QuestionCall::Asked {
+                asked,
+                wait,
+                result,
+            }
+        } else if name == crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME {
+            use crate::tool::builtins::close_questions as close;
+            let Some(Ok(ids)) = input
+                .get(close::CLOSE_QUESTIONS_IDS_PARAM_NAME)
+                .map(crate::questions::parse_ids)
+            else {
+                return;
+            };
+            let why = input
+                .get(close::CLOSE_QUESTIONS_WHY_PARAM_NAME)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|why| !why.is_empty())
+                .map(str::to_string);
+            let last = self.task.questions.asked.max(self.questions_numbered);
+            let (ids, result) = crate::questions::plan_close(last, ids);
+            call.reply = Some(result.clone());
+            QuestionCall::Closed { ids, why, result }
+        } else {
+            return;
+        };
+        self.question_calls.insert(call.id, taken);
+    }
+
     async fn reject_call(
         &self,
         id: Uuid,
@@ -2701,11 +2834,12 @@ impl ClaudeCodeRun {
         &mut self,
         name: &str,
         built_in: bool,
-        call: Admitted,
+        mut call: Admitted,
         input: &Value,
         session: &cc::ClaudeSession,
     ) -> Result<Value, ArkoAgentsError> {
         if !built_in {
+            self.take_question_call(name, input, &mut call);
             self.tool_host()
                 .admitted
                 .lock()
@@ -2935,17 +3069,20 @@ impl ClaudeCodeRun {
         } else {
             self.record_running(approval.tool_use_id.as_ref(), custom_output.clone())
                 .await;
+            let mut call = Admitted {
+                id,
+                call_id: approval.tool_use_id.clone(),
+                custom_output,
+                reply: None,
+            };
+            self.take_question_call(&approval.name, &approval.input, &mut call);
             self.tool_host()
                 .admitted
                 .lock()
                 .unwrap()
                 .entry(input_key(&approval.name, &approval.input))
                 .or_default()
-                .push_back(Admitted {
-                    id,
-                    call_id: approval.tool_use_id.clone(),
-                    custom_output,
-                });
+                .push_back(call);
             cc::PermissionDecision::allow()
         };
         let _ = approval.reply.send(decision);
@@ -3020,6 +3157,11 @@ impl ClaudeCodeRun {
         // A hook's context is text: its images wait for the next input. What
         // the user typed goes as their own message instead.
         let (context, typed, _) = self.take_context(false).unwrap_or_default();
+        // The task holds it once the CLI reports the results it went with
+        // (or it is pending again, cancelled), not now: a CLI that stops
+        // first leaves the task without it.
+        let marks = std::mem::take(&mut self.taken_marks);
+        raise(&mut self.delivered_marks, &marks);
         let headed = !context.is_empty();
         if headed {
             texts.push(context);
@@ -3040,7 +3182,14 @@ impl ClaudeCodeRun {
             // the write fails, the hook has it.
             match session.send_human(&typed).await {
                 Ok(uuid) => {
-                    self.sent_notes.insert(uuid, typed);
+                    // A note cancelled goes back to the task, which then
+                    // holds the update when the note was all of it.
+                    let marks = if headed {
+                        BTreeMap::new()
+                    } else {
+                        marks.clone()
+                    };
+                    self.sent_notes.insert(uuid, (typed, marks));
                 }
                 Err(error) => {
                     log::warn!(
@@ -3068,12 +3217,13 @@ impl ClaudeCodeRun {
         let state = raw["state"].as_str();
         if raw["type"] == "command_lifecycle"
             && matches!(state, Some("completed" | "cancelled"))
-            && let Some(text) = raw["command_uuid"]
+            && let Some((text, marks)) = raw["command_uuid"]
                 .as_str()
                 .and_then(|uuid| self.sent_notes.remove(uuid))
             && state == Some("cancelled")
         {
             self.queue_context(text, false);
+            self.task.raise_context_marks(&marks);
         }
     }
 
@@ -3287,6 +3437,8 @@ impl ClaudeCodeRun {
                         self.task.increment_user_message_count();
                         self.observe_last();
                     }
+                    let marks = std::mem::take(&mut self.delivered_marks);
+                    self.task.raise_context_marks(&marks);
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                     self.report(false).await;
                 }
@@ -3555,6 +3707,8 @@ impl ClaudeCodeRun {
             .as_ref()
             .and_then(|host| host.outcomes.lock().unwrap().remove(&id))
             .map(|(outcome, _)| outcome);
+        // What its admission took of the questions counts only once it ran.
+        let question_call = self.question_calls.remove(&id);
         match outcome {
             // A built-in, or a call the gate refused.
             None => {
@@ -3571,6 +3725,24 @@ impl ClaudeCodeRun {
                 effective,
                 intercepted,
             }) => {
+                match &question_call {
+                    Some(QuestionCall::Asked { asked, wait, .. }) => {
+                        self.task.questions.record(asked, *wait);
+                        if let Some(hook) = &self.handover_hook {
+                            hook.questions_asked(&self.task, asked, *wait);
+                        }
+                    }
+                    Some(QuestionCall::Closed { ids, .. }) => {
+                        self.task.questions.settle(ids);
+                    }
+                    None => {}
+                }
+                let (raw, effective) = match &question_call {
+                    Some(
+                        QuestionCall::Asked { result, .. } | QuestionCall::Closed { result, .. },
+                    ) => (result.clone(), result.clone()),
+                    None => (raw, effective),
+                };
                 if let Some(message) = self.registry.get(name).and_then(|tool| {
                     message_user::message_to_user(
                         name,
@@ -3599,10 +3771,49 @@ impl ClaudeCodeRun {
                     })
                     .await?;
                 }
-                if name == ASK_USER_TOOL_NAME {
-                    self.questions = Some(raw);
-                } else if name == COMPLETE_TASK_TOOL_NAME && !self.task.current_state.is_terminal()
-                {
+                match question_call {
+                    Some(QuestionCall::Asked {
+                        asked, wait: true, ..
+                    }) => {
+                        self.questions = Some((crate::questions::questions_text(&asked), asked));
+                    }
+                    Some(QuestionCall::Asked { asked, .. }) => {
+                        self.emit(AgentEvent::UserQuestionsAsked {
+                            questions: crate::questions::questions_text(&asked),
+                            asked,
+                            wait: false,
+                        })
+                        .await?;
+                    }
+                    Some(QuestionCall::Closed { ids, why, .. }) if !ids.is_empty() => {
+                        self.emit(AgentEvent::QuestionsClosed { ids, why }).await?;
+                    }
+                    // A host's own ask_user, whose input the runtime
+                    // couldn't read, asks its result, numbered and recorded
+                    // as any ask is. It waits, as such a call always did.
+                    None if name == ASK_USER_TOOL_NAME => {
+                        let (questions, wait) = crate::tool::builtins::ask_user::read_call(&raw);
+                        let last = crate::handover::last_question_number(
+                            self.handover_hook.as_deref(),
+                            &self.task,
+                            questions.len() as u32,
+                            self.questions_numbered,
+                        );
+                        let (asked, wait, _) = crate::questions::take_ask(
+                            &mut self.task.questions,
+                            last,
+                            questions,
+                            wait,
+                            false,
+                        );
+                        if let Some(hook) = &self.handover_hook {
+                            hook.questions_asked(&self.task, &asked, wait);
+                        }
+                        self.questions = Some((crate::questions::questions_text(&asked), asked));
+                    }
+                    _ => {}
+                }
+                if name == COMPLETE_TASK_TOOL_NAME && !self.task.current_state.is_terminal() {
                     self.set_state(TaskState::Completed { summary: raw })
                         .await?;
                     // Its turn ends here.
@@ -4404,13 +4615,17 @@ impl ClaudeCodeRun {
                 }
             }
         }
-        if let Some(questions) = self.questions.take() {
+        if let Some((questions, asked)) = self.questions.take() {
             self.set_state(TaskState::AwaitingUserResponse {
                 questions: questions.clone(),
             })
             .await?;
-            self.emit(AgentEvent::UserQuestionsAsked { questions })
-                .await?;
+            self.emit(AgentEvent::UserQuestionsAsked {
+                questions,
+                asked,
+                wait: true,
+            })
+            .await?;
             return Ok(Some(SessionEnd::Wait));
         }
         if self.compaction == Some(Compaction::Due) && !self.held_calls.is_empty() {
@@ -4559,7 +4774,10 @@ impl ClaudeCodeRun {
             note.push_str(&context);
             images = context_images;
         }
-        if let Err(error) = self.send_with_images(session, &note, images).await {
+        // The task records the message as it is sent.
+        let sent = self.send_with_images(session, &note, images).await;
+        self.keep_taken_marks();
+        if let Err(error) = sent {
             return self.session_failed(error.to_string()).await.map(Some);
         }
         self.emit_context_receipts().await?;
@@ -4859,11 +5077,19 @@ impl ClaudeCodeRun {
                 tool.reset_context(self.task.id);
             }
         }
-        if let Some(context) = self
+        let context = self
             .handover_hook
             .as_ref()
-            .and_then(|hook| hook.on_compaction(&self.task))
-        {
+            .and_then(|hook| hook.on_compaction(&self.task));
+        let questions = crate::questions::open_section(&crate::handover::open_questions(
+            self.handover_hook.as_deref(),
+            &self.task,
+        ));
+        let context = match (context, questions) {
+            (Some(context), Some(questions)) => Some(format!("{context}\n\n{questions}")),
+            (context, questions) => context.or(questions),
+        };
+        if let Some(context) = context {
             self.queue_context(context, false);
         }
         log::info!(
@@ -5032,6 +5258,8 @@ impl ClaudeCodeRun {
             None if chat => HandoverSeed::for_chat(&self.task),
             None => HandoverSeed::for_task(&self.task),
         };
+        let seed =
+            crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
@@ -5310,3 +5538,11 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 #[path = "claude_code_tests.rs"]
 mod tests;
+
+/// Raises `marks` to `taken`'s where they are higher.
+fn raise(marks: &mut BTreeMap<String, u64>, taken: &BTreeMap<String, u64>) {
+    for (key, value) in taken {
+        let mark = marks.entry(key.clone()).or_insert(0);
+        *mark = (*mark).max(*value);
+    }
+}

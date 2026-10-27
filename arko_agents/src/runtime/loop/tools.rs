@@ -48,7 +48,11 @@ pub(super) enum PathVerdict {
 /// Tool names excluded from result interception because their results
 /// carry semantic meaning used directly by the runtime (task state
 /// transitions, user-facing questions, etc.).
-const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME];
+const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[
+    COMPLETE_TASK_TOOL_NAME,
+    ASK_USER_TOOL_NAME,
+    crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
+];
 
 impl AgentLoop {
     /// What the task's tool calls see of it. See [`RunEnvironment`].
