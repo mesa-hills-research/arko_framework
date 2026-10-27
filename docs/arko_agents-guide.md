@@ -933,7 +933,9 @@ Besides answers to the waiting states, a running task accepts:
   `TaskContext::context_arrived` (by default it does). A workflow's context notices
   don't, so they wait for the turn boundary. `TurnContext::marks` are the source's
   high-water marks of what the update gives, by name. The task keeps the highest of each
-  in `Task::context_marks` as it takes the update, saved with it and kept through
+  in `Task::context_marks` once it holds the update (in its conversation, or pending in it).
+  A Claude Code agent's update given with a call's result counts once the CLI reports that
+  result, so a CLI that exits first leaves no mark. The marks are saved with the task and kept through
   handovers and compactions (a cut back clears them), so a host can tell from a saved task
   what it was given after its conversation no longer shows it. A workflow marks the newest
   note (`notes`) and recovers a run's notes from that mark. `TurnContext::user_content` is the part of

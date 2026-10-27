@@ -28,8 +28,9 @@ pub struct TurnContext {
     pub images: Vec<ContextImage>,
     /// The host's marks of what the update gives, by name, such as the
     /// number of the newest note in it. The task keeps the highest of each
-    /// once it takes the update ([`Task::context_marks`](crate::Task::context_marks)),
-    /// saved with it. May be empty.
+    /// once it holds the update, in its conversation or pending in it
+    /// ([`Task::context_marks`](crate::Task::context_marks)), saved with it.
+    /// May be empty.
     pub marks: std::collections::BTreeMap<String, u64>,
 }
 

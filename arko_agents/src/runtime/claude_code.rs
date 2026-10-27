@@ -18,7 +18,7 @@
 //! keeps it: the runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -845,9 +845,17 @@ pub(super) struct ClaudeCodeRun {
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
     delivered_context: Vec<String>,
+    /// The marks of the context taken out of the task to be sent
+    /// ([`TurnContext::marks`]), kept by the task once it holds that
+    /// context: in a message it records, or pending again.
+    taken_marks: BTreeMap<String, u64>,
+    /// The marks of `delivered_context`, kept by the task once it is
+    /// mirrored after the results.
+    delivered_marks: BTreeMap<String, u64>,
     /// The notes the user typed that were sent as messages, by the UUID of the
-    /// message, until the CLI reports what became of them.
-    sent_notes: HashMap<String, String>,
+    /// message, until the CLI reports what became of them, each with the
+    /// marks of its update when the note was all of it.
+    sent_notes: HashMap<String, (String, BTreeMap<String, u64>)>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -985,6 +993,8 @@ impl ClaudeCodeRun {
             approval: None,
             after_result: HashMap::new(),
             delivered_context: Vec::new(),
+            taken_marks: BTreeMap::new(),
+            delivered_marks: BTreeMap::new(),
             sent_notes: HashMap::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
@@ -1763,7 +1773,7 @@ impl ClaudeCodeRun {
             {
                 update_ids = update.ids;
             }
-            self.task.raise_context_marks(&update.marks);
+            raise(&mut self.taken_marks, &update.marks);
             arrived = update.images.len();
             self.queue_context(update.content, false);
             if with_images {
@@ -1777,12 +1787,15 @@ impl ClaudeCodeRun {
             && self.task.pending_context_images.is_empty()
             && typed.is_empty()
         {
+            self.keep_taken_marks();
             return None;
         }
         let hold_images = !with_images && !self.task.pending_context_images.is_empty();
         if hold_images && self.task.pending_context_injections.is_empty() && typed.is_empty() {
             // Only images wait, said already: nothing goes until they can.
             self.held_context_ids.append(&mut update_ids);
+            // (They wait in the task.)
+            self.keep_taken_marks();
             return None;
         }
         let mut content = self.task.pending_context_injections.join("\n\n");
@@ -1833,6 +1846,13 @@ impl ClaudeCodeRun {
             format!("{CONTEXT_UPDATE}\n\n{content}")
         };
         Some((content, typed, images))
+    }
+
+    /// The task holds the context taken since the last call, so it keeps its
+    /// marks.
+    fn keep_taken_marks(&mut self) {
+        let marks = std::mem::take(&mut self.taken_marks);
+        self.task.raise_context_marks(&marks);
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -2106,6 +2126,7 @@ impl ClaudeCodeRun {
                 crate::task::with_context_images(context.clone(), images),
             );
             self.task.increment_user_message_count();
+            self.keep_taken_marks();
             parts.push(context);
         }
         let messages = &self.task.conversation.messages[synced..];
@@ -3136,6 +3157,11 @@ impl ClaudeCodeRun {
         // A hook's context is text: its images wait for the next input. What
         // the user typed goes as their own message instead.
         let (context, typed, _) = self.take_context(false).unwrap_or_default();
+        // The task holds it once the CLI reports the results it went with
+        // (or it is pending again, cancelled), not now: a CLI that stops
+        // first leaves the task without it.
+        let marks = std::mem::take(&mut self.taken_marks);
+        raise(&mut self.delivered_marks, &marks);
         let headed = !context.is_empty();
         if headed {
             texts.push(context);
@@ -3156,7 +3182,14 @@ impl ClaudeCodeRun {
             // the write fails, the hook has it.
             match session.send_human(&typed).await {
                 Ok(uuid) => {
-                    self.sent_notes.insert(uuid, typed);
+                    // A note cancelled goes back to the task, which then
+                    // holds the update when the note was all of it.
+                    let marks = if headed {
+                        BTreeMap::new()
+                    } else {
+                        marks.clone()
+                    };
+                    self.sent_notes.insert(uuid, (typed, marks));
                 }
                 Err(error) => {
                     log::warn!(
@@ -3184,12 +3217,13 @@ impl ClaudeCodeRun {
         let state = raw["state"].as_str();
         if raw["type"] == "command_lifecycle"
             && matches!(state, Some("completed" | "cancelled"))
-            && let Some(text) = raw["command_uuid"]
+            && let Some((text, marks)) = raw["command_uuid"]
                 .as_str()
                 .and_then(|uuid| self.sent_notes.remove(uuid))
             && state == Some("cancelled")
         {
             self.queue_context(text, false);
+            self.task.raise_context_marks(&marks);
         }
     }
 
@@ -3403,6 +3437,8 @@ impl ClaudeCodeRun {
                         self.task.increment_user_message_count();
                         self.observe_last();
                     }
+                    let marks = std::mem::take(&mut self.delivered_marks);
+                    self.task.raise_context_marks(&marks);
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                     self.report(false).await;
                 }
@@ -4738,7 +4774,10 @@ impl ClaudeCodeRun {
             note.push_str(&context);
             images = context_images;
         }
-        if let Err(error) = self.send_with_images(session, &note, images).await {
+        // The task records the message as it is sent.
+        let sent = self.send_with_images(session, &note, images).await;
+        self.keep_taken_marks();
+        if let Err(error) = sent {
             return self.session_failed(error.to_string()).await.map(Some);
         }
         self.emit_context_receipts().await?;
@@ -5499,3 +5538,11 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 #[path = "claude_code_tests.rs"]
 mod tests;
+
+/// Raises `marks` to `taken`'s where they are higher.
+fn raise(marks: &mut BTreeMap<String, u64>, taken: &BTreeMap<String, u64>) {
+    for (key, value) in taken {
+        let mark = marks.entry(key.clone()).or_insert(0);
+        *mark = (*mark).max(*value);
+    }
+}

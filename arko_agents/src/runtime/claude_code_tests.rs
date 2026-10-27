@@ -925,6 +925,121 @@ async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
 }
 
+/// The operator's note of `TYPED_NOTE`, marked as note 3, given at the
+/// second boundary, as a workflow gives the user's answer.
+struct MarkedTypedNote(std::sync::atomic::AtomicUsize);
+
+impl crate::runtime::TurnContextSource for MarkedTypedNote {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let asked = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| crate::runtime::TurnContext {
+            user_content: TYPED_NOTE.into(),
+            ids: vec!["note:3".into()],
+            marks: [("notes".to_string(), 3)].into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// A note given with a call's result that the CLI took, but exited before
+/// it reported the result: the task saved then neither holds the note nor
+/// keeps its mark, so a host that recovers it gives the note again. Once
+/// the result is reported with the note, the task holds both.
+#[tokio::test]
+async fn a_note_the_cli_took_before_it_exited_leaves_no_mark() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "a"}, "crash": "post"}],
+        [{"tool": "Grep", "input": {"pattern": "b"}}, complete("Done")],
+    ]));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime =
+        recording(&recorder).with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    assert_eq!(fake.logged("midturn").len(), 1, "the CLI took the note");
+    let holds = |task: &Task| {
+        task.pending_context_injections
+            .iter()
+            .any(|text| text.contains("Use tabs."))
+            || texts(task).iter().any(|text| text.contains("Use tabs."))
+    };
+    let snapshots = recorder.snapshots();
+    assert!(!snapshots.is_empty());
+    for (task, _) in &snapshots {
+        assert!(
+            !task.context_marks.contains_key("notes") || holds(task),
+            "{:?}",
+            task.context_marks
+        );
+    }
+    let saved = &snapshots.last().unwrap().0;
+    assert!(!saved.context_marks.contains_key("notes"));
+    assert!(!holds(saved));
+    // Reported with its result, the note and its mark are kept.
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(holds(&task));
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// A marked note the CLI cancels goes back to the task with its mark, so a
+/// task that had an earlier mark doesn't keep that one beside the note and
+/// get the note again when a host recovers it.
+#[tokio::test]
+async fn a_cancelled_note_goes_back_with_its_mark() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"sleep": 0.5},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let mut task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.context_marks.insert("notes".into(), 2);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let mut run = start_with(task, runtime);
+    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+        .await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
 /// A completed task continued with a new configuration resumes its session
 /// with the new tools and system prompt, telling Claude Code not to reuse
 /// the prompt it recorded.
