@@ -135,7 +135,9 @@ q4 Push now? You decide (you said you'd assume: not yet)
 Still open: q5.
 ```
 
-`dismissed_note` says the user dismissed questions, `message_answers` labels a message that
+`answer_note` names each question by its id and an excerpt of its text (`excerpt`, at most
+`EXCERPT_CHARS` characters), and gives the user's answers whole. `dismissed_note` says the
+user dismissed questions, `message_answers` labels a message that
 answers them ("(This message answers q3 and q4.)"), and `still_open` ends a message with
 those still open. An agent with `async_questions` that waits gets the host's
 `SubmitUserResponse` as it is, so the host words it as such a note.

@@ -394,7 +394,10 @@ impl Answer {
     pub fn words(&self, question: Option<&Question>) -> String {
         if self.you_decide {
             return match question.and_then(|question| question.default.as_deref()) {
-                Some(default) => format!("You decide (you said you'd assume: {default})"),
+                Some(default) => format!(
+                    "You decide (you said you'd assume: {})",
+                    excerpt(default, EXCERPT_CHARS)
+                ),
                 None => "You decide".to_string(),
             };
         }
@@ -455,9 +458,29 @@ impl Answers {
     }
 }
 
+/// How many characters of a question, or of its default, a note repeats.
+pub const EXCERPT_CHARS: usize = 80;
+
+/// `text` on one line, cut at a word to about `max` characters with "…"
+/// where it was cut: how a note names a question the agent asked without
+/// repeating it whole.
+pub fn excerpt(text: &str, max: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let cut: String = line.chars().take(max).collect();
+    let cut = match cut.rfind(' ') {
+        Some(at) if at > cut.len() / 2 => &cut[..at],
+        _ => &cut[..],
+    };
+    format!("{}…", cut.trim_end())
+}
+
 /// The note that gives the agent one submission of answers. `asked` holds
-/// the questions (for their text and defaults), `still_open` the ids that
-/// stay open after it.
+/// the questions (for their text and defaults, each named by an
+/// [`excerpt`]), `still_open` the ids that stay open after it. The user's
+/// answers are given whole.
 ///
 /// ```text
 /// The user answered q3 and q4.
@@ -488,7 +511,12 @@ pub fn answer_note<S: AsRef<str>>(
             .map(|question| &question.question);
         let words = answer.words(question);
         lines.push(match question {
-            Some(question) => format!("{id} {} {words}", question.question.trim()),
+            Some(question) => {
+                format!(
+                    "{id} {} {words}",
+                    excerpt(&question.question, EXCERPT_CHARS)
+                )
+            }
             None => format!("{id} {words}"),
         });
     }
@@ -742,6 +770,32 @@ mod tests {
         assert_eq!(
             answer_note::<&str>(&asked, &other, &[]),
             "The user answered q3.\nq3 Tabs or spaces? Tabs. but 2 wide"
+        );
+        // A long question, and its default, are named by an excerpt, and
+        // the answer is given whole.
+        let mut long = self::asked("q6", &format!("Which {} file?", "very ".repeat(30)), None);
+        long.question.default = Some(format!("the {} one", "old ".repeat(30)));
+        let answer = |you_decide: bool, text: &str| Answers {
+            answers: vec![QuestionAnswer::new(
+                "q6",
+                Answer {
+                    text: Some(text.into()).filter(|text: &String| !text.is_empty()),
+                    you_decide,
+                    ..Answer::default()
+                },
+            )],
+        };
+        let words = "main ".repeat(40);
+        assert_eq!(
+            answer_note::<&str>(&[long.clone()], &answer(false, &words), &[]),
+            format!(
+                "The user answered q6.\nq6 Which very very very very very very very very very very very very very very… {}",
+                words.trim()
+            )
+        );
+        assert_eq!(
+            answer_note::<&str>(&[long], &answer(true, ""), &[]),
+            "The user answered q6.\nq6 Which very very very very very very very very very very very very very very… You decide (you said you'd assume: the old old old old old old old old old old old old old old old old old old old…)"
         );
         assert_eq!(dismissed_note(&["q5"]), "The user dismissed q5.");
         assert_eq!(
