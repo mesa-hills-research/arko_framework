@@ -925,6 +925,44 @@ async fn a_claude_code_compaction_gives_the_standing_notes_again() {
     let _ = std::fs::remove_dir_all(&fake);
 }
 
+/// A note posted under the host's id is posted once: posting it again,
+/// also after a resume from a checkpoint that saved it, returns the note
+/// already posted, whatever the text.
+#[tokio::test]
+async fn a_note_posted_under_an_id_is_posted_once() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let id = uuid::Uuid::new_v4();
+    let note = || Note::new("The user answered q1.").once();
+    let posted = first.post_note_once(id, note()).unwrap();
+    assert_eq!(posted.id, id);
+    assert_eq!(first.post_note_once(id, note()).unwrap(), posted);
+    assert_eq!(first.notes().len(), 1);
+    first.checkpoint().await.unwrap();
+    drop(first);
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    assert_eq!(
+        resumed
+            .post_note_once(id, Note::new("Other words.").once())
+            .unwrap(),
+        posted
+    );
+    assert_eq!(resumed.notes(), [posted]);
+    let other = resumed
+        .post_note_once(uuid::Uuid::new_v4(), note())
+        .unwrap();
+    assert_eq!(other.seq, 2);
+}
+
 /// Notes are saved in checkpoints: a resumed workflow has them, a new run
 /// gets the standing ones, and a restored run continued after the resume
 /// isn't given again what it had been given, only what was posted since.

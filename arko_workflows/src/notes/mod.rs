@@ -498,23 +498,44 @@ impl NoteBoard {
         (*state != NotesSnapshot::default()).then(|| state.clone())
     }
 
+    /// The note posted under `id`, if any, after reading the control folder.
+    fn posted_as(&self, ctx: &SharedContext, id: Uuid) -> Option<PostedNote> {
+        self.poll(ctx);
+        let state = self.state.lock();
+        state.notes.iter().find(|posted| posted.id == id).cloned()
+    }
+
     /// Every note posted, oldest first, after reading the control folder.
     pub(crate) fn notes(&self, ctx: &SharedContext) -> Vec<PostedNote> {
         self.poll(ctx);
         self.state.lock().notes.clone()
     }
 
-    /// Posts `note`: checks it, numbers it and logs it.
+    /// Posts `note`: checks it, numbers it and logs it. With `id`, the note
+    /// posted under that id already, if any, is returned instead.
     pub(crate) fn post(
         &self,
         ctx: &SharedContext,
         note: Note,
+        id: Option<Uuid>,
     ) -> Result<PostedNote, WorkflowError> {
+        if let Some(posted) = id.and_then(|id| self.posted_as(ctx, id)) {
+            return Ok(posted);
+        }
         let (mut note, recipients) = self.check(ctx, note)?;
         let images = self.keep_images(&mut note).map_err(|error| {
             WorkflowError::Persistence(format!("could not keep the note's images: {error}"))
         })?;
-        let posted = insert(&mut self.state.lock(), note, images, None, None);
+        let posted = {
+            let mut state = self.state.lock();
+            // (Checked again under the lock: two posts of one id insert once.)
+            if let Some(posted) =
+                id.and_then(|id| state.notes.iter().find(|posted| posted.id == id))
+            {
+                return Ok(posted.clone());
+            }
+            insert(&mut state, note, images, id, None)
+        };
         self.announce(ctx, &posted, &recipients);
         self.posted
             .send_modify(|count| *count = count.wrapping_add(1));
@@ -1250,11 +1271,21 @@ impl NotesHandle {
 
     /// Posts `note`. See [`Workflow::post_note`](crate::Workflow::post_note).
     pub fn post(&self, note: Note) -> Result<PostedNote, WorkflowError> {
+        self.post_as(None, note)
+    }
+
+    /// Posts `note` under `id`, once. See
+    /// [`Workflow::post_note_once`](crate::Workflow::post_note_once).
+    pub fn post_once(&self, id: Uuid, note: Note) -> Result<PostedNote, WorkflowError> {
+        self.post_as(Some(id), note)
+    }
+
+    fn post_as(&self, id: Option<Uuid>, note: Note) -> Result<PostedNote, WorkflowError> {
         let context = self
             .context
             .upgrade()
             .ok_or_else(|| WorkflowError::BuilderInvalid("the workflow was dropped".to_string()))?;
-        let posted = context.notes.post(&context, note)?;
+        let posted = context.notes.post(&context, note, id)?;
         // Saved at once while agents run, as a budget change is.
         if let Some(persistence) = context.notes.events.clone()
             && persistence.has_live_runs()
