@@ -1116,7 +1116,8 @@ async fn a_subagents_question_goes_to_its_lead() {
 
 /// A subagent's question goes to its lead as text with its id, choices and
 /// default, and the subagent waits for the answer, even when its
-/// configuration lets questions be answered later.
+/// configuration lets questions be answered later and it passes
+/// `wait: false`.
 #[tokio::test]
 async fn a_subagents_question_reaches_its_lead_with_its_structure() {
     let server = serve(vec![
@@ -1138,7 +1139,7 @@ async fn a_subagents_question_reaches_its_lead_with_its_structure() {
                         "question": "May I delete the cache?",
                         "choices": ["Yes", "No"],
                         "default": "No"
-                    }] }),
+                    }], "wait": false }),
                 ),
                 complete("Deleted it."),
             ],

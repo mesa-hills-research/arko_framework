@@ -4,8 +4,8 @@
 //! Each question gets an id that is unique in its task (`q1`, `q2`, ...).
 //! The task keeps them in its [`QuestionLog`], which a checkpoint saves.
 //! With [`AgentToolConfig::async_questions`](crate::agent_config::AgentToolConfig::async_questions)
-//! on, `ask_user` returns at once (unless the agent passes `wait: true`) and
-//! the host delivers the answers later, as context such as a note. The
+//! on, `ask_user` still waits for the answer by default, and an agent that
+//! passes `wait: false` gets it later, as context such as a note. The
 //! helpers here write those notes in one format: [`answer_note`],
 //! [`dismissed_note`], [`message_answers`] and [`still_open`]. The agent
 //! settles a question itself with `close_questions`.
@@ -59,8 +59,8 @@ pub struct QuestionLog {
     /// The questions still open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open: Vec<AskedQuestion>,
-    /// The ids of the questions the agent waits for (`wait: true`, or a
-    /// host that answers at once). The answer settles them.
+    /// The ids of the questions the agent waits for (all it asks unless it
+    /// passes `wait: false`). The answer settles them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting: Vec<String>,
 }
@@ -254,12 +254,13 @@ fn parse_question(value: &Value) -> Result<Question, String> {
     })
 }
 
-/// Reads `ask_user`'s `wait`: a boolean, or `"true"` as text.
+/// Reads `ask_user`'s `wait`: a boolean, or `"false"` as text. The agent
+/// waits unless it passed false.
 pub fn parse_wait(value: Option<&Value>) -> bool {
     match value {
         Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => text.trim().eq_ignore_ascii_case("true"),
-        _ => false,
+        Some(Value::String(text)) => !text.trim().eq_ignore_ascii_case("false"),
+        _ => true,
     }
 }
 
@@ -314,18 +315,19 @@ pub fn id_list<S: AsRef<str>>(ids: &[S]) -> String {
     }
 }
 
-/// `ask_user`'s result when it returns at once: "Asked q3 and q4. Their
-/// answers reach you as a note, so go on with your work."
+/// `ask_user`'s result when it returns at once (`wait: false`): "Asked q3
+/// and q4. Their answers reach you as a note. Until then, do only work that
+/// no answer could change."
 pub fn asked_reply(asked: &[AskedQuestion]) -> String {
     let ids = asked.iter().map(|q| q.id.as_str()).collect::<Vec<_>>();
     if ids.len() == 1 {
         format!(
-            "Asked {}. Its answer reaches you as a note, so go on with your work.",
+            "Asked {}. Its answer reaches you as a note. Until then, do only work that no answer could change.",
             ids[0]
         )
     } else {
         format!(
-            "Asked {}. Their answers reach you as a note, so go on with your work.",
+            "Asked {}. Their answers reach you as a note. Until then, do only work that no answer could change.",
             id_list(&ids)
         )
     }
@@ -565,8 +567,8 @@ pub fn open_section(open: &[AskedQuestion]) -> Option<String> {
     ))
 }
 
-/// An `ask_user` call that asks `questions` (`wait`: the agent passed
-/// `wait: true`): they are numbered after `last` (or the log's count, when
+/// An `ask_user` call that asks `questions` (`wait`: the agent didn't pass
+/// `wait: false`): they are numbered after `last` (or the log's count, when
 /// higher) and recorded in `log`. Returns them,
 /// whether the agent waits for the answer (it always does without
 /// `async_questions`), and the call's result for the agent.
@@ -705,6 +707,31 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_waits_unless_it_passes_wait_false() {
+        assert!(parse_wait(None));
+        assert!(parse_wait(Some(&Value::Null)));
+        assert!(parse_wait(Some(&json!(true))));
+        assert!(parse_wait(Some(&json!("true"))));
+        assert!(!parse_wait(Some(&json!(false))));
+        assert!(!parse_wait(Some(&json!(" False "))));
+        // Without async questions every ask waits.
+        let question = || {
+            vec![Question {
+                question: "A?".into(),
+                ..Question::default()
+            }]
+        };
+        assert!(plan_ask(0, question(), false, false).1);
+        let (asked, wait, reply) = plan_ask(2, question(), false, true);
+        assert!(!wait);
+        assert_eq!(asked[0].id, "q3");
+        assert_eq!(reply, asked_reply(&asked));
+        let (asked, wait, reply) = plan_ask(2, question(), true, true);
+        assert!(wait);
+        assert_eq!(reply, questions_text(&asked));
+    }
+
+    #[test]
     fn close_ids_are_read_from_a_list_or_text() {
         assert_eq!(
             parse_ids(&json!(["q3", "Q4", 5, "q3"])).unwrap(),
@@ -726,11 +753,11 @@ mod tests {
         assert_eq!(id_list(&["q3", "q4", "q5"]), "q3, q4 and q5");
         assert_eq!(
             asked_reply(&asked),
-            "Asked q3 and q4. Their answers reach you as a note, so go on with your work."
+            "Asked q3 and q4. Their answers reach you as a note. Until then, do only work that no answer could change."
         );
         assert_eq!(
             asked_reply(&asked[..1]),
-            "Asked q3. Its answer reaches you as a note, so go on with your work."
+            "Asked q3. Its answer reaches you as a note. Until then, do only work that no answer could change."
         );
         let answers = Answers {
             answers: vec![

@@ -71,8 +71,9 @@ fn conversation_text(task: &Task) -> String {
     serde_json::to_string(&task.conversation).unwrap()
 }
 
-/// With `async_questions`, `ask_user` returns at once with the questions'
-/// ids, which go on across calls, and the task never waits. In both tool
+/// With `async_questions` and `wait: false`, `ask_user` returns at once
+/// with the questions' ids, which go on across calls, and the task never
+/// waits. In both tool
 /// calling modes, with the list and with one question as text.
 #[tokio::test]
 async fn an_ask_returns_at_once_with_ids_that_go_on() {
@@ -89,21 +90,23 @@ async fn an_ask_returns_at_once_with_ids_that_go_on() {
                     serde_json::json!({"questions": [
                         {"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"], "default": "Spaces"},
                         {"question": "Push now?"}
-                    ]}),
+                    ], "wait": false}),
                 )]),
                 turn(vec![native_call(
                     "again",
                     "ask_user",
-                    serde_json::json!({"questions": "Which branch?"}),
+                    serde_json::json!({"questions": "Which branch?", "wait": false}),
                 )]),
                 complete(),
             ]
         } else {
             vec![
                 text_turn(
-                    "<ask_user>\n<questions>[{\"question\": \"Tabs or spaces?\", \"choices\": [\"Tabs\", \"Spaces\"]}, \"Push now?\"]</questions>\n</ask_user>",
+                    "<ask_user>\n<questions>[{\"question\": \"Tabs or spaces?\", \"choices\": [\"Tabs\", \"Spaces\"]}, \"Push now?\"]</questions>\n<wait>false</wait>\n</ask_user>",
                 ),
-                text_turn("<ask_user>\n<questions>Which branch?</questions>\n</ask_user>"),
+                text_turn(
+                    "<ask_user>\n<questions>Which branch?</questions>\n<wait>false</wait>\n</ask_user>",
+                ),
                 text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
             ]
         };
@@ -132,7 +135,7 @@ async fn an_ask_returns_at_once_with_ids_that_go_on() {
         let text = conversation_text(&task);
         assert!(
             text.contains(
-                "Asked q1 and q2. Their answers reach you as a note, so go on with your work."
+                "Asked q1 and q2. Their answers reach you as a note. Until then, do only work that no answer could change."
             ),
             "{mode:?}: {text}"
         );
@@ -170,7 +173,7 @@ async fn the_ids_go_on_after_a_resume() {
             turn(vec![native_call(
                 "ask",
                 "ask_user",
-                serde_json::json!({"questions": ["A?", "B?"]}),
+                serde_json::json!({"questions": ["A?", "B?"], "wait": false}),
             )]),
             complete(),
         ],
@@ -193,7 +196,7 @@ async fn the_ids_go_on_after_a_resume() {
             turn(vec![native_call(
                 "again",
                 "ask_user",
-                serde_json::json!({"questions": ["C?"]}),
+                serde_json::json!({"questions": ["C?"], "wait": false}),
             )]),
             complete(),
         ],
@@ -217,12 +220,17 @@ async fn the_ids_go_on_after_a_resume() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// `wait: true` holds the task until the answer, which reaches the agent as
-/// the host wrote it and settles the questions. Without `async_questions`
-/// every ask waits, as before.
+/// An ask holds the task until the answer, which reaches the agent as the
+/// host wrote it and settles the questions: with `wait: true`, without
+/// `wait` (it defaults to true), and always without `async_questions`.
 #[tokio::test]
 async fn wait_holds_the_task_until_the_answer() {
-    for async_questions in [true, false] {
+    let which = serde_json::json!([{"question": "Which file?"}]);
+    for (async_questions, params) in [
+        (true, serde_json::json!({"questions": which, "wait": true})),
+        (true, serde_json::json!({"questions": which})),
+        (false, serde_json::json!({"questions": which})),
+    ] {
         let workspace = workspace();
         let mut config = config(ToolCallingMode::Native, &["ask_user"]);
         config.tool_config.async_questions = async_questions;
@@ -230,11 +238,7 @@ async fn wait_holds_the_task_until_the_answer() {
         push(
             &mut agent,
             vec![
-                turn(vec![native_call(
-                    "ask",
-                    "ask_user",
-                    serde_json::json!({"questions": [{"question": "Which file?"}], "wait": true}),
-                )]),
+                turn(vec![native_call("ask", "ask_user", params)]),
                 complete(),
             ],
         );
@@ -284,7 +288,7 @@ async fn close_questions_settles_what_the_task_asked() {
             turn(vec![native_call(
                 "ask",
                 "ask_user",
-                serde_json::json!({"questions": ["A?", "B?"]}),
+                serde_json::json!({"questions": ["A?", "B?"], "wait": false}),
             )]),
             turn(vec![native_call(
                 "close",
@@ -366,7 +370,7 @@ async fn a_partial_answer_to_a_waited_batch_leaves_the_rest_open() {
                 vec![native_call(
                     "list",
                     "ask_user",
-                    serde_json::json!({"questions": ["Which branch?"]}),
+                    serde_json::json!({"questions": ["Which branch?"], "wait": false}),
                 )],
                 1_500,
             ),
@@ -437,7 +441,7 @@ async fn a_handover_restates_the_open_questions() {
                         serde_json::json!({"questions": [
                             {"question": "Tabs or spaces?"},
                             {"question": "Push now?", "default": "not yet"}
-                        ]}),
+                        ], "wait": false}),
                     )],
                     500,
                 ),
@@ -446,7 +450,7 @@ async fn a_handover_restates_the_open_questions() {
                     vec![native_call(
                         "again",
                         "ask_user",
-                        serde_json::json!({"questions": ["Which branch?"]}),
+                        serde_json::json!({"questions": ["Which branch?"], "wait": false}),
                     )],
                     1_500,
                 ),
@@ -519,7 +523,7 @@ async fn a_handover_right_after_an_ask_restates_it_once() {
                 vec![native_call(
                     "first",
                     "ask_user",
-                    serde_json::json!({"questions": ["Which branch?"]}),
+                    serde_json::json!({"questions": ["Which branch?"], "wait": false}),
                 )],
                 500,
             ),
@@ -528,7 +532,7 @@ async fn a_handover_right_after_an_ask_restates_it_once() {
                 vec![native_call(
                     "ask",
                     "ask_user",
-                    serde_json::json!({"questions": ["Tabs or spaces?"]}),
+                    serde_json::json!({"questions": ["Tabs or spaces?"], "wait": false}),
                 )],
                 1_500,
             ),

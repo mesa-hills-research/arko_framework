@@ -563,8 +563,8 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
     );
 }
 
-/// With `async_questions`, the MCP `ask_user` returns at once, naming the
-/// questions' ids, and the turn goes on. `close_questions` closes one, and
+/// With `async_questions` and `wait: false`, the MCP `ask_user` returns at
+/// once, naming the questions' ids, and the turn goes on. `close_questions` closes one, and
 /// the host hears of both.
 #[tokio::test]
 async fn an_ask_in_claude_code_returns_at_once_with_ids() {
@@ -572,7 +572,7 @@ async fn an_ask_in_claude_code_returns_at_once_with_ids() {
         {"tool": "mcp__arko__ask_user", "input": {"questions": [
             {"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]},
             {"question": "Push now?", "default": "not yet"}
-        ]}},
+        ], "wait": false}},
         {"tool": "mcp__arko__close_questions", "input": {"ids": ["q2"], "why": "Decided"}},
         complete("Went on"),
     ]]));
@@ -601,7 +601,7 @@ async fn an_ask_in_claude_code_returns_at_once_with_ids() {
     let posts = fake.logged("post");
     assert_eq!(
         posts[0]["output"].as_str().unwrap(),
-        "Asked q1 and q2. Their answers reach you as a note, so go on with your work."
+        "Asked q1 and q2. Their answers reach you as a note. Until then, do only work that no answer could change."
     );
     assert_eq!(posts[1]["output"].as_str().unwrap(), "Closed q2.");
     assert_eq!(fake.logged("argv").len(), 1, "the turn went on");
@@ -651,8 +651,8 @@ impl crate::tool::ToolExecutionMiddleware for RefusesQuestions {
 #[tokio::test]
 async fn refused_question_calls_in_claude_code_change_no_questions() {
     let fake = Fake::new(json!([[
-        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}},
-        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Refused?"]}},
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"], "wait": false}},
+        {"tool": "mcp__arko__ask_user", "input": {"questions": ["Refused?"], "wait": false}},
         {"tool": "mcp__arko__close_questions", "input": {"ids": ["q1"]}},
         complete("Went on"),
     ]]));
@@ -4387,7 +4387,7 @@ async fn a_compaction_holds_the_next_call_and_continues_in_the_same_session() {
 async fn a_compaction_restates_the_open_questions() {
     let fake = Fake::new(json!([
         [
-            {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"]}, "input_tokens": 400},
+            {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?"], "wait": false}, "input_tokens": 400},
             {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
             {"text": "Not reached: the turn was interrupted."},
         ],
@@ -4424,13 +4424,13 @@ impl crate::handover::HandoverHook for KeepsQ2 {
     }
 }
 
-/// The host answers `q1` of a batch the agent waited for and keeps `q2`
-/// open: the log settles `q1` alone, and the compaction after it restates
-/// `q2`.
+/// The host answers `q1` of a batch the agent waited for (an ask without
+/// `wait` waits) and keeps `q2` open: the log settles `q1` alone, and the
+/// compaction after it restates `q2`.
 #[tokio::test]
 async fn a_compaction_after_a_partial_answer_restates_the_rest() {
     let fake = Fake::new(json!([
-        [{"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?", "Push now?"], "wait": true}, "input_tokens": 400}],
+        [{"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?", "Push now?"]}, "input_tokens": 400}],
         [
             {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
             {"text": "Not reached: the turn was interrupted."},

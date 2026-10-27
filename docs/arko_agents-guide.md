@@ -122,11 +122,13 @@ open, so a checkpoint saves them. `UserQuestionsAsked { questions, asked, wait }
 host the questions as text (`questions_text`), the numbered questions, and whether the task
 waits.
 
-By default every ask waits, and the result the model reads is the questions as text. With
-`AgentToolConfig::async_questions` on, `ask_user` offers `wait` and returns at once unless
-the agent passes `wait: true` ("Asked q3 and q4. Their answers reach you as a note, so go on
-with your work."). The host then delivers the answers as context, such as a note, worded
-with the helpers of `arko_agents::questions`:
+Every ask waits by default, and the result the model reads is the questions as text. With
+`AgentToolConfig::async_questions` on, `ask_user` also offers `wait`, true unless the agent
+passes false. Its description tells the agent to pass `wait: false` only when it has work
+that no answer could change, such as reading. Such an ask returns at once ("Asked q3 and q4.
+Their answers reach you as a note. Until then, do only work that no answer could change."),
+and the host delivers the answers as context, such as a note, worded with the helpers of
+`arko_agents::questions`:
 
 ```text
 The user answered q3 and q4.

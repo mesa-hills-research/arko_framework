@@ -86,8 +86,8 @@ Defaults of background subagents (`WorkflowBuilder::subagents`, off until set), 
   between two of the lead's (`max_peer_messages`). The lead gets no copies unless
   `copy_peer_messages_to_lead` is set.
 - A subagent's `ask_user` goes to its lead (`questions_to_lead`), and waits for the answer.
-- `ask_user` waits for the answer. `AgentToolConfig::async_questions` lets it return at once, for
-  a host that delivers answers later.
+- `ask_user` waits for the answer. `AgentToolConfig::async_questions` lets the agent pass
+  `wait: false` to go on without it, for a host that delivers answers later.
 - A subagent recovers from failed model requests without a limit, like the run the host
   drives. `max_failed_requests` makes it fail once that many requests have failed in a row.
 - A `workspace` must be inside the caller's directory (`workspaces_anywhere` lifts this),

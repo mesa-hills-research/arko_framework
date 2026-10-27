@@ -598,8 +598,8 @@ Suspension stops the live runtime without marking the task failed or cancelled.
 `OnUserInputRequired` fires, and `OnWorkflowFailed` doesn't, because a pause isn't a
 failure.
 
-An agent with `AgentToolConfig::async_questions` asks without waiting unless it passes
-`wait: true` (see the arko_agents guide's [Questions](arko_agents-guide.md#questions)). The
+An agent with `AgentToolConfig::async_questions` asks without waiting when it passes
+`wait: false` (see the arko_agents guide's [Questions](arko_agents-guide.md#questions)). The
 workflow then calls the handler's `asked` in the background while the agent goes on, and an
 answer it returns reaches the agent in its mailbox, as a subagent's report does, which wakes a
 run that ended (`SubagentEventKind::NewsWaiting`). By default `asked` answers with `respond`.
