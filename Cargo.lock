@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "arko_agents"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arko_ai",
  "async-trait",
