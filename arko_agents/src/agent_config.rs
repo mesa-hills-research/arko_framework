@@ -591,17 +591,19 @@ pub struct AgentToolConfig {
     /// tools and behaviour its host gives every agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat: bool,
-    /// `ask_user` returns at once, unless the agent passes `wait: true`, and
-    /// the host delivers the answers later as context (such as a note). Off
-    /// by default, when every question waits for its answer. On, the tool's
-    /// description says so and it offers `wait`, its result names the
-    /// questions' ids ("Asked q3 and q4. Their answers reach you as a note,
-    /// so go on with your work."), and
+    /// `ask_user` offers `wait`, which is true unless the agent passes
+    /// false. An ask that doesn't wait returns at once, and the host
+    /// delivers the answers later as context (such as a note). Off by
+    /// default, when every question waits for its answer. On, the tool's
+    /// description says when to pass `wait: false`, such an ask's result
+    /// names the questions' ids ("Asked q3 and q4. Their answers reach you
+    /// as a note. Until then, do only work that no answer could change."),
+    /// and
     /// [`AgentEvent::UserQuestionsAsked`](crate::AgentEvent::UserQuestionsAsked)
-    /// has `wait: false`. The task doesn't wait. Set it only for an agent
-    /// whose host answers that way, as arko_workflows' user input handler
-    /// can (its `asked`). A subagent whose questions go to its lead always
-    /// waits. See [`crate::questions`].
+    /// has `wait: false`. The task doesn't wait then. Set it only for an
+    /// agent whose host answers that way, as arko_workflows' user input
+    /// handler can (its `asked`). A subagent whose questions go to its lead
+    /// always waits. See [`crate::questions`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub async_questions: bool,
 }

@@ -67,7 +67,7 @@ async fn asking_server(answer: &'static str) -> ResponsesServer {
             tool_call_turn(
                 "ask",
                 "ask_user",
-                json!({"questions": [{"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]}]}),
+                json!({"questions": [{"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]}], "wait": false}),
             )
         })
     })
@@ -100,7 +100,7 @@ async fn run_until_answered(workflow: &Workflow, answer: &str) {
     assert_eq!(continued.summary, "answered");
 }
 
-/// Without `wait`, the agent goes on, the handler's answer (its `respond`,
+/// With `wait: false`, the agent goes on, the handler's answer (its `respond`,
 /// by default) reaches it as mail, and the run never waits for input.
 #[tokio::test]
 async fn an_answer_to_a_question_asked_without_waiting_comes_as_mail() {
@@ -302,7 +302,7 @@ async fn runs_asking_at_once_get_ids_of_their_own() {
             tool_call_turn(
                 "ask",
                 "ask_user",
-                json!({"questions": ["Tabs or spaces?", "Push now?"]}),
+                json!({"questions": ["Tabs or spaces?", "Push now?"], "wait": false}),
             )
         })
     })

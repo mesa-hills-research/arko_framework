@@ -10,21 +10,25 @@ use crate::tool::{
 
 pub const ASK_USER_TOOL_NAME: &str = "ask_user";
 pub const ASK_USER_QUESTIONS_PARAM_NAME: &str = "questions";
-/// `ask_user`'s parameter that holds the agent until the answer comes, with
+/// `ask_user`'s parameter that says whether the agent waits for the answer,
+/// offered with
 /// [`AgentToolConfig::async_questions`](crate::agent_config::AgentToolConfig::async_questions)
-/// on.
+/// on. It is true unless the agent passes false.
 pub const ASK_USER_WAIT_PARAM_NAME: &str = "wait";
 
 const DESCRIPTION: &str = "Asks the user and waits for their answer. Ask only what you can't \
     reasonably decide yourself, and put related questions in one call.";
 
-const ASYNC_DESCRIPTION: &str = "Asks the user without stopping your work. Ask only what you \
-    can't reasonably decide yourself, and put related questions in one call. The call returns \
-    at once with the questions' ids (q1, q2, ...), and the answers reach you later as a note. \
-    Meanwhile go on with what doesn't depend on them. Set wait to true only when you can't go \
-    on at all without the answer. When a question no longer matters (you found the answer, or \
-    the plan changed), close it with close_questions. When the user dismisses a question, go \
-    on with your default.";
+const ASYNC_DESCRIPTION: &str = "Asks the user and, by default, waits for the answer. Ask only \
+    what you can't reasonably decide yourself, and put related questions in one call. Most \
+    questions need the answer before you go on: a preference, a design choice, the scope, which \
+    model or account to use, and anything that writes, changes or deletes files, spends money or \
+    starts workers. Never act on your default while such a question is open. Pass wait false \
+    only when you have work that no answer could change, such as reading and investigating. \
+    Then the call returns the questions' ids (q1, q2, ...) at once, the answers reach you later \
+    as a note, and you do only that work until they come. When a question no longer matters \
+    (you found the answer, or the plan changed), close it with close_questions. When the user \
+    dismisses a question, go on with your default.";
 
 /// What both descriptions say of a reply that isn't an answer.
 const NON_ANSWER: &str = "A reply that doesn't answer a question (a new request, or words \
@@ -37,8 +41,9 @@ const QUESTIONS_DESCRIPTION: &str = "The questions, as a list. Each has `questio
     answers, shown as buttons), `multiple` (true lets the user pick several choices) and \
     `default` (what you'll assume if the user doesn't answer, shown to them).";
 
-const WAIT_DESCRIPTION: &str = "Optional: true holds you until the user answers, for \
-    questions you can't go on without. Default false.";
+const WAIT_DESCRIPTION: &str = "Optional. Default true, which holds you until the user \
+    answers. Pass false only to go on with work that no answer could change while the question \
+    is open.";
 
 #[derive(Debug, Clone)]
 pub struct AskUserTool;
@@ -107,8 +112,9 @@ fn schema(wait: bool) -> Value {
 
 /// `ask_user`'s definition as an agent with `tool_config` is shown it. With
 /// [`async_questions`](crate::agent_config::AgentToolConfig::async_questions)
-/// on, the built-in `ask_user` returns at once and offers `wait`, and its
-/// description says so. Any other definition is returned unchanged.
+/// on, the built-in `ask_user` offers `wait`, whose false returns at once,
+/// and its description says when to pass it. Any other definition is
+/// returned unchanged.
 pub fn offered_definition(
     mut definition: ToolDefinition,
     tool_config: &crate::agent_config::AgentToolConfig,
@@ -134,10 +140,10 @@ pub fn offered_definition(
 }
 
 /// What an `ask_user` call asks, read from its result: the questions and
-/// whether the agent passed `wait: true`. The built-in tool's result holds
-/// them as JSON. Any other text (a host's own `ask_user`, or a result the
-/// host supplied on approval) is one question, as `ask_user` took them
-/// before it took a list.
+/// whether the agent waits (true unless it passed `wait: false`). The
+/// built-in tool's result holds them as JSON. Any other text (a host's own
+/// `ask_user`, or a result the host supplied on approval) is one question,
+/// as `ask_user` took them before it took a list, and the agent waits.
 pub fn read_call(result: &str) -> (Vec<Question>, bool) {
     if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(result.trim())
         && let Some(value) = object.get(ASK_USER_QUESTIONS_PARAM_NAME)
@@ -152,7 +158,7 @@ pub fn read_call(result: &str) -> (Vec<Question>, bool) {
         question: result.trim().to_string(),
         ..Question::default()
     };
-    (vec![question], false)
+    (vec![question], true)
 }
 
 /// The result an `ask_user` call that asked `asked` returns to the agent:
@@ -240,19 +246,29 @@ mod tests {
     async fn the_tool_takes_a_list_or_one_question_as_text() {
         let listed = run(json!({
             "questions": [{"question": "Tabs or spaces?", "choices": ["Tabs", "Spaces"]}],
-            "wait": true
+            "wait": false
         }))
         .await
         .unwrap();
         let (asked, wait) = read_call(&listed);
-        assert!(wait);
+        assert!(!wait);
         assert_eq!(asked[0].choices, ["Tabs", "Spaces"]);
+        // Without `wait`, the agent waits.
         let text = run(json!({"questions": "Which file?"})).await.unwrap();
         let (asked, wait) = read_call(&text);
-        assert!(!wait);
+        assert!(wait);
         assert_eq!(asked[0].question, "Which file?");
-        // A host's own result text is one question.
-        assert_eq!(read_call("Why?").0[0].question, "Why?");
+        // A host's own result text is one question, which the agent waits for.
+        assert_eq!(
+            read_call("Why?"),
+            (
+                vec![Question {
+                    question: "Why?".into(),
+                    ..Question::default()
+                }],
+                true
+            )
+        );
         assert!(run(json!({"questions": "  "})).await.is_err());
         assert!(run(json!({})).await.is_err());
     }
@@ -268,7 +284,13 @@ mod tests {
         let offered = offered_definition(AskUserTool.definition(), &config);
         assert!(offered.parameters.iter().any(|p| p.name == "wait"));
         assert!(offered.to_json_schema()["properties"]["wait"]["type"] == "boolean");
-        assert!(offered.description.contains("returns at once"));
+        assert!(
+            offered
+                .description
+                .contains("by default, waits for the answer")
+        );
+        assert!(offered.description.contains("Pass wait false only"));
+        assert!(WAIT_DESCRIPTION.starts_with("Optional. Default true"));
         // Both say what to do with a reply that isn't an answer.
         for description in [plain.description, offered.description] {
             assert!(description.ends_with(NON_ANSWER), "{description}");

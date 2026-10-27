@@ -95,7 +95,7 @@ pub enum AgentEvent {
     /// [`UserCommand::SubmitUserResponse`](crate::UserCommand::SubmitUserResponse)
     /// gives. Without it (an agent with
     /// [`async_questions`](crate::agent_config::AgentToolConfig::async_questions)
-    /// that didn't pass `wait: true`), the agent goes on, and the host
+    /// that passed `wait: false`), the agent goes on, and the host
     /// delivers the answers later as context. See [`crate::questions`].
     UserQuestionsAsked {
         /// The questions as text, with their ids, choices and defaults

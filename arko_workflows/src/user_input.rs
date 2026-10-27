@@ -17,8 +17,8 @@ pub struct UserInputRequest {
     pub asked: Vec<AskedQuestion>,
     /// The agent waits for the answer. Without it (an agent with
     /// [`async_questions`](arko_agents::AgentToolConfig::async_questions)
-    /// that didn't pass `wait: true`), the agent goes on, and the answers
-    /// reach it later.
+    /// that passed `wait: false`), the agent goes on, and the answers reach
+    /// it later.
     pub wait: bool,
 }
 
