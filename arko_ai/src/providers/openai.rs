@@ -2958,6 +2958,7 @@ impl OpenAIClient {
     /// `service_tier` is the tier actually used (for example `default` when a
     /// Fast request was downgraded). Over ChatGPT OAuth the requested tier
     /// replaces it (see [`chatgpt_oauth_requested_tier`](Self::chatgpt_oauth_requested_tier)).
+    /// 12-hour cache writes are `cache_write_1h_tokens`, the longer lifetime's.
     /// https://developers.openai.com/api/docs/guides/prompt-caching
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
         let mut usage = UsageInfo::new(response.usage.input_tokens, response.usage.output_tokens);
@@ -2967,8 +2968,20 @@ impl OpenAIClient {
                 usage = usage.with_cached_tokens(details.cached_tokens);
             }
 
-            if details.cache_write_tokens > 0 {
-                usage = usage.with_cache_write_tokens(details.cache_write_tokens);
+            // GPT-5.6 and later split writes by lifetime, and the parts sum
+            // to `cache_write_tokens`.
+            let (written_30m, written_12h) = details
+                .cache_write_tokens_details
+                .as_ref()
+                .map_or((0, 0), |split| (split.ttl_30m_tokens, split.ttl_12h_tokens));
+            let written = details
+                .cache_write_tokens
+                .max(written_30m.saturating_add(written_12h));
+            if written > 0 {
+                usage = usage.with_cache_write_tokens(written);
+            }
+            if written_12h > 0 {
+                usage.cache_write_1h_tokens = Some(written_12h);
             }
         }
 
@@ -3270,6 +3283,17 @@ struct OpenAIInputTokensDetails {
     cached_tokens: usize,
     #[serde(default)]
     cache_write_tokens: usize,
+    #[serde(default)]
+    cache_write_tokens_details: Option<OpenAICacheWriteTokensDetails>,
+}
+
+/// Cache writes by lifetime, `prompt_cache_options.ttl` `"30m"` and `"12h"`.
+#[derive(Debug, Deserialize)]
+struct OpenAICacheWriteTokensDetails {
+    #[serde(default)]
+    ttl_30m_tokens: usize,
+    #[serde(default)]
+    ttl_12h_tokens: usize,
 }
 
 pub fn list_models() -> Vec<crate::model::Model> {
@@ -4142,6 +4166,113 @@ mod tests {
             Some(crate::pricing::ServiceTier::Standard)
         );
         assert!(close(downgraded.total_cost, 51.0));
+    }
+
+    /// OpenAI's worked example of a request with both write lifetimes
+    /// (https://developers.openai.com/api/docs/guides/prompt-caching). The
+    /// 12-hour writes are the longer lifetime's, priced at 2.5x input.
+    #[test]
+    fn cache_writes_are_split_and_priced_by_lifetime() {
+        let usage_of = |details: serde_json::Value, model: &Model| {
+            let response: super::OpenAIResponse = serde_json::from_value(serde_json::json!({
+                "id": "resp_1", "status": "completed", "model": model.id,
+                "output": [],
+                "usage": {"input_tokens": 12_000, "output_tokens": 0,
+                    "input_tokens_details": details},
+            }))
+            .unwrap();
+            OpenAIClient::generation_response(
+                &response,
+                model,
+                &GenerationConfig::default(),
+                false,
+                super::StreamedOutput::default(),
+                &super::ResponseHead::default(),
+            )
+            .usage
+        };
+        let both = serde_json::json!({"cached_tokens": 4000, "cache_write_tokens": 7000,
+            "cache_write_tokens_details": {"ttl_30m_tokens": 3000, "ttl_12h_tokens": 4000}});
+        // The guide's prices, $1 input and $0.10 cached.
+        let mut guide = Model::openai_gpt_6_1_terra();
+        guide.pricing.cached_input_cost_per_million = Some(0.10);
+        let usage = usage_of(both.clone(), &guide);
+        assert_eq!(usage.cached_tokens, Some(4000));
+        assert_eq!(usage.cache_write_tokens, Some(7000));
+        assert_eq!(usage.cache_write_1h_tokens, Some(4000));
+        // (1000 + 4000 × 0.1 + 3000 × 1.25 + 4000 × 2.5) / 1e6
+        assert!(close(usage.total_cost, 0.01515), "{}", usage.total_cost);
+        assert!(close(usage.input_cost, 0.001));
+        assert!(close(usage.cache_read_cost.unwrap(), 0.0004));
+        assert!(close(usage.cache_write_cost.unwrap(), 0.01375));
+        // At GPT-6.1 Terra's own read price, $0.05.
+        let terra = usage_of(both, &Model::openai_gpt_6_1_terra());
+        assert!(close(terra.total_cost, 0.01495), "{}", terra.total_cost);
+
+        // Writes of one lifetime, and usage without the split.
+        let standard = usage_of(
+            serde_json::json!({"cached_tokens": 0, "cache_write_tokens": 7000,
+                "cache_write_tokens_details": {"ttl_30m_tokens": 7000, "ttl_12h_tokens": 0}}),
+            &guide,
+        );
+        assert_eq!(standard.cache_write_1h_tokens, None);
+        assert!(close(standard.cache_write_cost.unwrap(), 0.00875));
+        let unsplit = usage_of(
+            serde_json::json!({"cached_tokens": 0, "cache_write_tokens": 7000}),
+            &guide,
+        );
+        assert_eq!(unsplit.cache_write_tokens, Some(7000));
+        assert_eq!(unsplit.cache_write_1h_tokens, None);
+    }
+
+    /// Usage GPT-6 Luna reported for a 12-hour write, the next turn reading
+    /// it, and a 30-minute write of a prompt of the same size.
+    #[test]
+    fn recorded_gpt_6_luna_usage_is_split_and_priced() {
+        let luna = Model::openai_gpt_6_luna();
+        for (usage, written_12h, total_cost) in [
+            (
+                serde_json::json!({"input_tokens": 23028, "output_tokens": 6,
+                    "input_tokens_details": {"cache_write_tokens": 23025, "cached_tokens": 0,
+                        "cache_write_tokens_details": {"ttl_12h_tokens": 23025, "ttl_30m_tokens": 0}},
+                    "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 23034}),
+                Some(23025),
+                0.00575955,
+            ),
+            (
+                serde_json::json!({"input_tokens": 23055, "output_tokens": 5,
+                    "input_tokens_details": {"cache_write_tokens": 27, "cached_tokens": 23025,
+                        "cache_write_tokens_details": {"ttl_12h_tokens": 27, "ttl_30m_tokens": 0}},
+                    "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 23060}),
+                Some(27),
+                0.0002398,
+            ),
+            (
+                serde_json::json!({"input_tokens": 23028, "output_tokens": 6,
+                    "input_tokens_details": {"cache_write_tokens": 23025, "cached_tokens": 0,
+                        "cache_write_tokens_details": {"ttl_12h_tokens": 0, "ttl_30m_tokens": 23025}},
+                    "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 23034}),
+                None,
+                0.002881425,
+            ),
+        ] {
+            let response: super::OpenAIResponse = serde_json::from_value(serde_json::json!({
+                "id": "resp_1", "status": "completed", "model": "gpt-6-luna",
+                "output": [], "usage": usage,
+            }))
+            .unwrap();
+            let usage = OpenAIClient::generation_response(
+                &response,
+                &luna,
+                &GenerationConfig::default(),
+                false,
+                super::StreamedOutput::default(),
+                &super::ResponseHead::default(),
+            )
+            .usage;
+            assert_eq!(usage.cache_write_1h_tokens, written_12h);
+            assert!(close(usage.total_cost, total_cost), "{}", usage.total_cost);
+        }
     }
 
     #[test]

@@ -59,7 +59,9 @@ pub struct ModelPricing {
     pub large_cache_write_cost_per_million: Option<f64>,
     /// Unused. Reasoning tokens are billed as output by every provider.
     pub reasoning_output_cost_per_million: Option<f64>,
-    /// Anthropic 1-hour TTL cache writes (2x base input).
+    /// Cache writes with the longer of the provider's two lifetimes,
+    /// Anthropic's 1-hour TTL (2x base input) or OpenAI's 12-hour one (2.5x
+    /// input on GPT-5.6 and later).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_cost_per_million: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +113,9 @@ pub struct Model {
 ///   Standard table. The tables round a few cached prices (for example gpt-5.4
 ///   Flex cached input $0.13 for 0.5 x $0.25). Fast mode on GPT-5.4/5.5 is
 ///   listed for short context only. Models without an entry do not offer the tier.
+/// - OpenAI GPT-5.6 and later charge 2.5x input for 12-hour cache writes
+///   (`cache_write_1h_cost_per_million`), against 1.25x for 30-minute ones.
+///   Above 272K input tokens both double, as the other rates do.
 /// - Anthropic 1-hour cache writes cost 2x base input on every model. Fast mode
 ///   (Opus 5, Opus 4.8) is 2x across the full context window. US-only inference
 ///   (`inference_geo: "us"`) is 1.1x on Claude 4.6 and later. Claude Haiku 5.5
@@ -140,6 +145,8 @@ impl Model {
                 large_output_cost_per_million: Some(75.00),
                 large_cached_input_cost_per_million: Some(2.00),
                 large_cache_write_cost_per_million: Some(25.00),
+                cache_write_1h_cost_per_million: Some(25.00),
+                large_cache_write_1h_cost_per_million: Some(50.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -169,6 +176,8 @@ impl Model {
                 large_output_cost_per_million: Some(15.00),
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: Some(5.00),
+                cache_write_1h_cost_per_million: Some(5.00),
+                large_cache_write_1h_cost_per_million: Some(10.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -200,6 +209,8 @@ impl Model {
                 large_output_cost_per_million: Some(15.00),
                 large_cached_input_cost_per_million: Some(0.20),
                 large_cache_write_cost_per_million: Some(5.00),
+                cache_write_1h_cost_per_million: Some(5.00),
+                large_cache_write_1h_cost_per_million: Some(10.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -230,6 +241,8 @@ impl Model {
                 large_output_cost_per_million: Some(7.50),
                 large_cached_input_cost_per_million: Some(0.10),
                 large_cache_write_cost_per_million: Some(2.50),
+                cache_write_1h_cost_per_million: Some(2.50),
+                large_cache_write_1h_cost_per_million: Some(5.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -259,6 +272,8 @@ impl Model {
                 large_output_cost_per_million: Some(0.75),
                 large_cached_input_cost_per_million: Some(0.02),
                 large_cache_write_cost_per_million: Some(0.25),
+                cache_write_1h_cost_per_million: Some(0.25),
+                large_cache_write_1h_cost_per_million: Some(0.50),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -289,6 +304,8 @@ impl Model {
                 large_output_cost_per_million: Some(30.00),
                 large_cached_input_cost_per_million: Some(0.80),
                 large_cache_write_cost_per_million: Some(10.00),
+                cache_write_1h_cost_per_million: Some(10.00),
+                large_cache_write_1h_cost_per_million: Some(20.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -318,6 +335,8 @@ impl Model {
                 large_output_cost_per_million: Some(18.00),
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: Some(5.00),
+                cache_write_1h_cost_per_million: Some(5.00),
+                large_cache_write_1h_cost_per_million: Some(10.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -347,6 +366,8 @@ impl Model {
                 large_output_cost_per_million: Some(1.80),
                 large_cached_input_cost_per_million: Some(0.04),
                 large_cache_write_cost_per_million: Some(0.50),
+                cache_write_1h_cost_per_million: Some(0.50),
+                large_cache_write_1h_cost_per_million: Some(1.00),
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
                 ..ModelPricing::default()
@@ -2691,6 +2712,28 @@ mod tests {
                 assert!(
                     pricing.cache_write_1h_cost_per_million.is_some(),
                     "{id} 1h writes"
+                );
+            }
+            // OpenAI's 12-hour writes cost 2.5x input, at either context size.
+            if model.supports_openai_prompt_cache_options() {
+                let close = |a: Option<f64>, b: Option<f64>| {
+                    a.zip(b).is_some_and(|(a, b)| (a - b).abs() < 1e-9)
+                };
+                assert!(
+                    close(
+                        pricing.cache_write_1h_cost_per_million,
+                        Some(2.5 * pricing.input_cost_per_million)
+                    ),
+                    "{id} 12h writes"
+                );
+                assert!(
+                    close(
+                        pricing.large_cache_write_1h_cost_per_million,
+                        pricing
+                            .large_input_cost_per_million
+                            .map(|input| 2.5 * input)
+                    ),
+                    "{id} long-context 12h writes"
                 );
             }
         }

@@ -816,7 +816,9 @@ request would go to, and every account refreshes its own credentials before it i
 - `output_tokens` includes reasoning tokens. `reasoning_tokens` reports them separately
   when the provider does (OpenAI `output_tokens_details.reasoning_tokens`, Gemini thought
   tokens).
-- `cache_write_1h_tokens` is the part of Anthropic cache writes made with a 1-hour TTL.
+- `cache_write_1h_tokens` is the part of the cache writes made with the longer of the
+  provider's two lifetimes, Anthropic's 1-hour TTL or OpenAI's 12-hour one (from
+  `input_tokens_details.cache_write_tokens_details.ttl_12h_tokens`).
 
 Costs are estimates at list prices from the model registry, computed for what the call
 actually used:
@@ -831,7 +833,9 @@ actually used:
   Its estimate uses the API's Fast rates and is not billed. Tier prices are per model
   (`ModelPricing::service_tiers`). Tiers without a published price (Anthropic priority,
   OpenAI scale) are estimated at standard rates.
-- Anthropic 1-hour cache writes use their own rate.
+- Anthropic 1-hour and OpenAI 12-hour cache writes use their own rate
+  (`ModelPricing::cache_write_1h_cost_per_million`), 2x input on Claude and 2.5x on OpenAI
+  GPT-5.6 and later.
   `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later.
   `ModelPricing::schedule` switches prices on a date (for example the end of promotional
   pricing). Tier and residency multipliers stack.
