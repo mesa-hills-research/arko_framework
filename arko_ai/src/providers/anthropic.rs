@@ -129,7 +129,7 @@ impl AnthropicClient {
             return;
         }
         let mut cache_control = serde_json::json!({"type": "ephemeral"});
-        if let Some(ttl) = config.anthropic_cache_ttl {
+        if let Some(ttl) = config.claude_cache_ttl() {
             cache_control["ttl"] = serde_json::to_value(ttl).unwrap_or(Value::Null);
         }
         json["cache_control"] = cache_control;
@@ -2745,10 +2745,33 @@ mod model_rule_tests {
             &hour.clone().with_prompt_caching(false),
         ));
         let value = request(
-            model,
+            model.clone(),
             &GenerationConfig::default().with_prompt_caching(false),
         )
         .unwrap();
+        assert!(value.get("cache_control").is_none());
+
+        // The long cache is the hour, and its shorter lifetime 5 minutes.
+        // An explicit TTL comes first, and with caching off it asks for
+        // nothing.
+        let long = GenerationConfig::default().with_long_prompt_cache(true);
+        assert_eq!(
+            request(model.clone(), &long).unwrap()["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        let short = GenerationConfig::default().with_long_prompt_cache(false);
+        assert_eq!(
+            request(model.clone(), &short).unwrap()["cache_control"]["ttl"],
+            "5m"
+        );
+        let explicit = long
+            .clone()
+            .with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
+        assert_eq!(
+            request(model.clone(), &explicit).unwrap()["cache_control"]["ttl"],
+            "5m"
+        );
+        let value = request(model, &long.with_prompt_caching(false)).unwrap();
         assert!(value.get("cache_control").is_none());
     }
 

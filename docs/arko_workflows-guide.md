@@ -498,8 +498,9 @@ turn boundary.
 A wait lasts up to about 4.5 minutes by default. Each wake-up is a cheap turn that keeps
 the provider's prompt cache warm, so a long wait is simply several short waits. The
 default follows the agent's cache lifetime, with about 27 minutes for a 30-minute cache
-(OpenAI GPT-5.6 and later, and OpenAI over ChatGPT OAuth), and about 54 minutes with Anthropic's 1-hour cache TTL
-(`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`). You can set a longer wait,
+(OpenAI GPT-5.6 and later, and OpenAI over ChatGPT OAuth), about 54 minutes with Anthropic's
+1-hour cache TTL (`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`, or
+`long_prompt_cache`), and about 10.8 hours with OpenAI's 12-hour cache. You can set a longer wait,
 for every agent or one:
 
 ```rust

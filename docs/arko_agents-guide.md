@@ -1331,9 +1331,10 @@ carries it) and how long the prompt cache lasts. A request made after the cache 
 expired reads the whole context again as uncached input, which uses more of the plan than
 cached input, more than any wait saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
 gives a model's lifetime, which is 5 minutes for Anthropic by default (1 hour with
-`AnthropicCacheTtl::OneHour`), 30 minutes for OpenAI GPT-5.6 and later with an API key, a
-conservative 5 minutes for earlier OpenAI models, and 30 minutes over ChatGPT OAuth. For a Claude Code
-model it is `anthropic_cache_ttl` when set, otherwise Claude Code's choice, 1 hour on a
+`AnthropicCacheTtl::OneHour` or `long_prompt_cache`), 30 minutes for OpenAI GPT-5.6 and
+later with an API key (12 hours with `long_prompt_cache`), a conservative 5 minutes for
+earlier OpenAI models, and 30 minutes over ChatGPT OAuth. For a Claude Code
+model it is the TTL asked for when set, otherwise Claude Code's choice, 1 hour on a
 Claude subscription within its usage limits and 5 minutes on an API key. Claude Code's
 subagents (its `Agent` tool) and helper requests cache for 5 minutes whatever the main
 conversation's TTL, so a stop of more than about 4½ minutes loses their caches.
@@ -1451,8 +1452,9 @@ through an interpreter), `env`, whether the agent's system prompt replaces Claud
 session loads (`setting_sources`, none by default, with `--strict-mcp-config`, so the
 agent behaves the same on any machine). The reasoning effort of an `Anthropic` or
 `AnthropicAdaptive` reasoning config becomes `--effort`, `anthropic_fast_mode` Claude
-Code's fast mode, and `anthropic_cache_ttl` the main conversation's prompt-cache TTL
-(Claude Code's `promptCacheTtl` setting). Without it, Claude Code caches for 1 hour on a
+Code's fast mode, and `anthropic_cache_ttl` (or `long_prompt_cache`, 1 hour or 5 minutes)
+the main conversation's prompt-cache TTL (Claude Code's `promptCacheTtl` setting).
+Without either, Claude Code caches for 1 hour on a
 Claude subscription within its usage limits and 5 minutes on an API key. Its subagents
 (the `Agent` tool) and helper requests cache for 5 minutes regardless, so any stop longer
 than about 4½ minutes (an `ask_user` answer, an approval, an error-recovery decision, a

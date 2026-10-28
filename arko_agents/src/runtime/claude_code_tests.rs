@@ -3697,6 +3697,32 @@ async fn wait_until_reset_waits_out_the_limit_and_continues() {
 }
 
 #[tokio::test]
+async fn the_long_cache_is_passed_on_as_the_hour_and_its_opposite_as_five_minutes() {
+    for (long, ttl, minutes) in [(true, "1h", 60), (false, "5m", 5)] {
+        let fake = Fake::new(json!([[complete("done")]]));
+        let mut config = config(&fake, &[]);
+        config.llm_config.generation_config.long_prompt_cache = Some(long);
+        let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+        let (task, _) = start(task).finish().await;
+        let argv: Vec<String> =
+            serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+        let settings = argv.iter().position(|arg| arg == "--settings").unwrap();
+        assert!(
+            argv[settings + 1].contains(&format!("\"promptCacheTtl\":\"{ttl}\"")),
+            "{argv:?}"
+        );
+        assert_eq!(
+            arko_ai::prompt_cache::prompt_cache_lifetime(
+                &task.agent_config.llm_config.model,
+                &task.agent_config.llm_config.generation_config,
+                false
+            ),
+            arko_ai::PromptCacheLifetime::Known(Duration::from_secs(minutes * 60))
+        );
+    }
+}
+
+#[tokio::test]
 async fn one_hour_cache_writes_are_recorded_and_the_ttl_is_passed_on() {
     let fake = Fake::new(json!([[
         {"text": "Starting.", "input_tokens": 3000, "cached": 0, "written_1h": 2000},

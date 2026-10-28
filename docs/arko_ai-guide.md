@@ -143,8 +143,8 @@ request's prompt cache after its last use, as `PromptCacheLifetime::Known(durati
 makes a request within it stays cached however long it waits in between. Anthropic, and
 Claude on OpenRouter, report 5 minutes, or 1 hour with `anthropic_cache_ttl` set to
 `OneHour`. OpenAI with an API key reports 30 minutes on GPT-5.6 and later, the default
-`prompt_cache_options.ttl`. OpenAI documents it as a minimum that every cache read
-extends. Earlier OpenAI models report a conservative 5 minutes, the lower end of the
+`prompt_cache_options.ttl`, or 12 hours with the long cache below. OpenAI documents both
+as minimums that every cache read extends. Earlier OpenAI models report a conservative 5 minutes, the lower end of the
 documented in-memory retention. Their extended retention typically lasts longer, but OpenAI
 promises no lifetime there, and a request after a longer idle time can miss the cache.
 OpenAI over ChatGPT OAuth reports 30 minutes for every model, the lifetime of the backend's
@@ -152,6 +152,16 @@ implicit cache, which no request configures. Gemini and other OpenRouter models 
 `Unknown`. Models without caching, and caching turned off where the request can turn it off
 (Anthropic, Claude on OpenRouter, GPT-5.6 and later with an API key), report `Disabled`. The `prompt_cache`
 module has the constants and the providers' documentation links.
+
+`GenerationConfig::with_long_prompt_cache(true)` asks for the longer of the provider's two
+lifetimes on every route that has two. That is 1 hour on Claude (Anthropic, OpenRouter and
+Claude Code), and 12 hours on OpenAI GPT-5.6 and later with an API key
+(`prompt_cache_options.ttl: "12h"`). Longer lifetimes cost more to write, 2x input against
+1.25x on Claude and 2.5x against 1.25x on OpenAI, and reads cost the same. One avoided
+rewrite of the prompt pays for it, so it suits conversations likely to sit idle past the
+shorter lifetime. Other routes ignore it, as do requests with caching off. `false` asks for
+the shorter lifetime outright, which matters only in Claude Code, which otherwise chooses
+for itself. `anthropic_cache_ttl` takes precedence on Claude when set.
 
 A host that knows how long its route keeps the cache sets
 `GenerationConfig::prompt_cache_lifetime_seconds` (or `with_prompt_cache_lifetime`). The

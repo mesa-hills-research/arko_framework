@@ -12,10 +12,13 @@
 //! - Anthropic documents caching at <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
 //!   (5 minutes by default, 1 hour with `ttl: "1h"`). OpenRouter passes
 //!   Claude models' `cache_control`, `ttl` included, through to Anthropic.
+//!   [`GenerationConfig::long_prompt_cache`] asks for the hour.
 //! - OpenAI documents caching at <https://developers.openai.com/api/docs/guides/prompt-caching>.
 //!   GPT-5.6 and later take `prompt_cache_options.ttl`, a minimum lifetime
 //!   that every cache read extends, 30 minutes by default
-//!   ([`OPENAI_STANDARD_PROMPT_CACHE_LIFETIME`]). Earlier models only
+//!   ([`OPENAI_STANDARD_PROMPT_CACHE_LIFETIME`]) and 12 hours with `"12h"`
+//!   ([`OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME`], asked for with
+//!   [`GenerationConfig::long_prompt_cache`]). Earlier models only
 //!   document typical lifetimes. In-memory retention keeps entries "around 5
 //!   to 10 minutes of inactivity" (their default for organizations with Zero
 //!   Data Retention), and extended retention "around 30 minutes and ... up to
@@ -71,6 +74,13 @@ pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// that read.
 pub const OPENAI_STANDARD_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
+/// OpenAI's extended cache lifetime on GPT-5.6 and later with an API key
+/// (`prompt_cache_options.ttl: "12h"`, sent for
+/// [`GenerationConfig::long_prompt_cache`]), 12 hours. OpenAI documents it as
+/// a minimum too, and a read keeps the later of its expiry and 30 minutes
+/// after the read.
+pub const OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// The cache lifetime reported for OpenAI models over ChatGPT OAuth (the
 /// Codex backend), 30 minutes. The backend caches implicitly, on every
 /// model, with a lifetime no request configures. A live measurement over
@@ -98,18 +108,21 @@ impl AnthropicCacheTtl {
 /// - A model without cache support returns `Disabled`.
 /// - Anthropic and Claude models on OpenRouter return `Disabled` when
 ///   [`GenerationConfig::prompt_caching`] is off, since no `cache_control` is
-///   sent. Otherwise [`GenerationConfig::anthropic_cache_ttl`]'s lifetime, 5
-///   minutes by default.
+///   sent. Otherwise the lifetime of [`GenerationConfig::claude_cache_ttl`]
+///   (from `anthropic_cache_ttl` or `long_prompt_cache`), 5 minutes by
+///   default.
 /// - OpenAI with an API key returns [`OPENAI_STANDARD_PROMPT_CACHE_LIFETIME`],
-///   30 minutes, on GPT-5.6 and later, and `Disabled` there with caching off
-///   (explicit mode without breakpoints). Earlier models return
+///   30 minutes, on GPT-5.6 and later, or
+///   [`OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME`], 12 hours, with
+///   [`GenerationConfig::long_prompt_cache`] on. It returns `Disabled` there
+///   with caching off (explicit mode without breakpoints). Earlier models return
 ///   [`OPENAI_PROMPT_CACHE_LIFETIME`], a conservative 5 minutes. They cache
 ///   automatically, so turning caching off doesn't change them.
 /// - OpenAI over ChatGPT OAuth returns [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`], 30
 ///   minutes, on every model. The backend caches implicitly, so turning
 ///   caching off doesn't change it.
-/// - Claude Code returns `anthropic_cache_ttl`'s lifetime when set (passed on
-///   as its `promptCacheTtl`). Otherwise `Unknown`, since Claude Code chooses
+/// - Claude Code returns the lifetime of `claude_cache_ttl` when set (passed
+///   on as its `promptCacheTtl`). Otherwise `Unknown`, since Claude Code chooses
 ///   1 hour on a Claude subscription within its usage limits, 5 minutes on
 ///   an API key.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
@@ -151,7 +164,7 @@ fn provider_prompt_cache_lifetime(
         if enabled {
             PromptCacheLifetime::Known(
                 config
-                    .anthropic_cache_ttl
+                    .claude_cache_ttl()
                     .map_or(ANTHROPIC_PROMPT_CACHE_LIFETIME, AnthropicCacheTtl::duration),
             )
         } else {
@@ -163,11 +176,11 @@ fn provider_prompt_cache_lifetime(
         Provider::OpenRouter if crate::providers::openrouter::is_claude_family(&model.id) => {
             anthropic()
         }
-        // Claude Code's main conversation uses `anthropic_cache_ttl` when set
-        // (its `promptCacheTtl`); otherwise it chooses: 1 hour on a Claude
+        // Claude Code's main conversation uses the TTL asked for (its
+        // `promptCacheTtl`). Otherwise it chooses, 1 hour on a Claude
         // subscription within its usage limits, 5 minutes on an API key.
         Provider::ClaudeCode => config
-            .anthropic_cache_ttl
+            .claude_cache_ttl()
             .map_or(PromptCacheLifetime::Unknown, |ttl| {
                 PromptCacheLifetime::Known(ttl.duration())
             }),
@@ -176,10 +189,12 @@ fn provider_prompt_cache_lifetime(
             PromptCacheLifetime::Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
         }
         Provider::OpenAI if model.supports_openai_prompt_cache_options() => {
-            if enabled {
-                PromptCacheLifetime::Known(OPENAI_STANDARD_PROMPT_CACHE_LIFETIME)
-            } else {
+            if !enabled {
                 PromptCacheLifetime::Disabled
+            } else if config.long_prompt_cache == Some(true) {
+                PromptCacheLifetime::Known(OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME)
+            } else {
+                PromptCacheLifetime::Known(OPENAI_STANDARD_PROMPT_CACHE_LIFETIME)
             }
         }
         Provider::OpenAI => PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME),
@@ -275,6 +290,71 @@ mod tests {
         assert_eq!(OPENAI_PROMPT_CACHE_LIFETIME, 5 * MINUTE);
         assert_eq!(OPENAI_STANDARD_PROMPT_CACHE_LIFETIME, 30 * MINUTE);
         assert_eq!(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME, 30 * MINUTE);
+    }
+
+    /// The long cache is an hour on every Claude route and 12 hours on
+    /// OpenAI GPT-5.6 and later with an API key. Routes with one lifetime
+    /// keep it, and an uncached request stays uncached.
+    #[test]
+    fn the_long_cache_lasts_as_long_as_each_route_allows() {
+        let long = GenerationConfig::default().with_long_prompt_cache(true);
+        let short = GenerationConfig::default().with_long_prompt_cache(false);
+        let long_off = long.clone().with_prompt_caching(false);
+        let opus = Model::anthropic_claude_opus_5_5();
+        for model in [
+            opus.clone(),
+            Model::openrouter("anthropic/claude-opus-5.5"),
+            Model::claude_code(opus.clone()),
+        ] {
+            assert_eq!(lifetime(&model, &long), Known(60 * MINUTE), "{}", model.id);
+            assert_eq!(lifetime(&model, &short), Known(5 * MINUTE), "{}", model.id);
+        }
+        assert_eq!(lifetime(&opus, &long_off), Disabled);
+        // Claude Code without either chooses for itself.
+        assert_eq!(
+            lifetime(
+                &Model::claude_code(opus.clone()),
+                &GenerationConfig::default()
+            ),
+            Unknown
+        );
+        // An explicit Claude TTL comes first.
+        let five = long
+            .clone()
+            .with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
+        assert_eq!(
+            five.claude_cache_ttl(),
+            Some(AnthropicCacheTtl::FiveMinutes)
+        );
+        assert_eq!(lifetime(&opus, &five), Known(5 * MINUTE));
+        assert_eq!(GenerationConfig::default().claude_cache_ttl(), None);
+
+        for model in [Model::openai_gpt_6_luna(), Model::openai_gpt_5_6_sol()] {
+            assert_eq!(lifetime(&model, &long), Known(12 * 60 * MINUTE));
+            assert_eq!(lifetime(&model, &short), Known(30 * MINUTE));
+            assert_eq!(lifetime(&model, &long_off), Disabled);
+            // The ChatGPT backend takes no lifetime.
+            assert_eq!(
+                prompt_cache_lifetime(&model, &long, true),
+                Known(30 * MINUTE)
+            );
+        }
+        assert_eq!(lifetime(&Model::openai_gpt_5_5(), &long), Known(5 * MINUTE));
+        assert_eq!(lifetime(&Model::google_gemini_2_5_pro(), &long), Unknown);
+        assert_eq!(
+            lifetime(&Model::openrouter("openai/gpt-6-luna"), &long),
+            Unknown
+        );
+        assert_eq!(OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME, 12 * 60 * MINUTE);
+
+        // Saved without it, a config loads without it, and it is written
+        // only when set.
+        let saved = serde_json::to_value(GenerationConfig::default()).unwrap();
+        assert!(saved.get("long_prompt_cache").is_none(), "{saved}");
+        let saved = serde_json::to_value(&long).unwrap();
+        assert_eq!(saved["long_prompt_cache"], true);
+        let loaded: GenerationConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.long_prompt_cache, Some(true));
     }
 
     /// The host's lifetime replaces the provider's, known or not, on any

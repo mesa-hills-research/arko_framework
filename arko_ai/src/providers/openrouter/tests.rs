@@ -228,6 +228,21 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
     ));
     assert!(error(CLAUDE, &ttl.clone().with_prompt_caching(false)).contains("TTL"));
 
+    // The long cache is Claude's hour, and nothing for other models.
+    let long = GenerationConfig::default().with_long_prompt_cache(true);
+    assert_eq!(
+        body(CLAUDE, &long)["cache_control"],
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+    let gpt = body(GPT, &long);
+    assert!(gpt.get("cache_control").is_none(), "{gpt}");
+    assert!(gpt.get("prompt_cache_options").is_none(), "{gpt}");
+    assert!(
+        body(CLAUDE, &long.with_prompt_caching(false))
+            .get("cache_control")
+            .is_none()
+    );
+
     // Disabling caching on an OpenAI model that bills cache writes (known
     // from the catalog) also turns off OpenAI's automatic breakpoints.
     let catalog = catalog_client();

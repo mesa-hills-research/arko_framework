@@ -2234,6 +2234,8 @@ impl OpenAIClient {
                 } else {
                     OpenAIPromptCacheMode::Explicit
                 },
+                // Without a ttl the cache lasts the default 30 minutes.
+                ttl: (enabled && config.long_prompt_cache == Some(true)).then_some("12h"),
             });
         }
 
@@ -3080,6 +3082,8 @@ struct OpenAIRequest {
 #[derive(Debug, Serialize)]
 struct OpenAIPromptCacheOptions {
     mode: OpenAIPromptCacheMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3776,6 +3780,53 @@ mod tests {
             assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
             assert_eq!(value["prompt_cache_options"]["mode"], "implicit");
         }
+    }
+
+    /// The long cache sends `ttl: "12h"` on API-key requests to GPT-5.6 and
+    /// later with caching on. Without it the ttl is left out, which is the
+    /// default 30 minutes.
+    #[test]
+    fn the_long_cache_asks_for_twelve_hours_where_the_request_can() {
+        let client = OpenAIClient::new("test");
+        let long = GenerationConfig::default().with_long_prompt_cache(true);
+        let body = |model: Model, config: &GenerationConfig, oauth: bool| {
+            let conversation = Conversation::new(model);
+            serde_json::to_value(client.build_request(&conversation, config, oauth).unwrap())
+                .unwrap()
+        };
+        for model in [Model::openai_gpt_6_luna(), Model::openai_gpt_5_6_sol()] {
+            let value = body(model.clone(), &long, false);
+            assert_eq!(
+                value["prompt_cache_options"],
+                serde_json::json!({"mode": "implicit", "ttl": "12h"})
+            );
+            for config in [
+                GenerationConfig::default(),
+                GenerationConfig::default().with_long_prompt_cache(false),
+            ] {
+                let value = body(model.clone(), &config, false);
+                assert_eq!(
+                    value["prompt_cache_options"],
+                    serde_json::json!({"mode": "implicit"})
+                );
+            }
+            // Caching off writes nothing, so no lifetime is asked for.
+            let value = body(
+                model.clone(),
+                &long.clone().with_prompt_caching(false),
+                false,
+            );
+            assert_eq!(
+                value["prompt_cache_options"],
+                serde_json::json!({"mode": "explicit"})
+            );
+            // The ChatGPT backend takes no cache options.
+            let value = body(model, &long, true);
+            assert!(value.get("prompt_cache_options").is_none(), "{value}");
+        }
+        // Earlier models take none either.
+        let value = body(Model::openai_gpt_5_5(), &long, false);
+        assert!(value.get("prompt_cache_options").is_none(), "{value}");
     }
 
     #[test]

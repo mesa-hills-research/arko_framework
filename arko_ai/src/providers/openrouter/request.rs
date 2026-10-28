@@ -556,7 +556,7 @@ impl OpenRouterClient {
             config.prompt_caching.unwrap_or(conversation.enable_cache) && model.supports_cache;
         let cache_control = if caching && claude {
             let mut cache_control = json!({"type": "ephemeral"});
-            if let Some(ttl) = config.anthropic_cache_ttl {
+            if let Some(ttl) = config.claude_cache_ttl() {
                 cache_control["ttl"] = json!(match ttl {
                     AnthropicCacheTtl::FiveMinutes => "5m",
                     AnthropicCacheTtl::OneHour => "1h",

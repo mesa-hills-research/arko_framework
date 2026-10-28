@@ -1900,8 +1900,8 @@ impl ClaudeCodeRun {
         if generation.anthropic_fast_mode == Some(true) {
             cc_settings.insert("fastMode".into(), json!(true));
         }
-        if let Some(ttl) = generation.anthropic_cache_ttl {
-            // The main conversation's cache TTL; unset, Claude Code uses 1
+        if let Some(ttl) = generation.claude_cache_ttl() {
+            // The main conversation's cache TTL. Unset, Claude Code uses 1
             // hour on a subscription within its limits, 5 minutes otherwise.
             let ttl = match ttl {
                 ai::AnthropicCacheTtl::FiveMinutes => "5m",
@@ -4331,7 +4331,7 @@ impl ClaudeCodeRun {
                         config
                             .llm_config
                             .generation_config
-                            .anthropic_cache_ttl
+                            .claude_cache_ttl()
                             .map(ai::AnthropicCacheTtl::duration)
                             .or(self.cache_lifetime)
                             .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
