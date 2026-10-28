@@ -800,6 +800,58 @@ async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_requested_t
     .unwrap();
 }
 
+/// The backend's load-balancer cookies come back on the client's later
+/// ChatGPT OAuth requests, clones included, as Codex sends them. No other
+/// cookie is kept, and API-key requests keep none.
+#[tokio::test]
+async fn oauth_requests_send_back_the_backends_routing_cookies() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![
+            reply("/responses", 200, &text_turn_stream("ok"))
+                .with_header("set-cookie", "__oailb=pin-1; Path=/; HttpOnly")
+                .with_header("set-cookie", "__cflb=lb-1; Path=/; Max-Age=3600")
+                .with_header("set-cookie", "session=account-secret; Path=/"),
+            reply("/responses", 200, &text_turn_stream("ok"))
+                .with_header("set-cookie", "__cflb=; Max-Age=0"),
+            reply("/responses", 200, &text_turn_stream("ok")),
+            reply("/responses", 200, &completed_response().to_string())
+                .with_header("set-cookie", "__oailb=api; Path=/"),
+            reply("/responses", 200, &completed_response().to_string()),
+        ])
+        .await;
+        let oauth = client(&url);
+        for client in [oauth.clone(), oauth.clone(), oauth] {
+            client
+                .generate_text(&conversation(), &GenerationConfig::default())
+                .await
+                .unwrap();
+        }
+        let key = api_key_client(&url);
+        for _ in 0..2 {
+            key.generate_text(&conversation(), &GenerationConfig::default())
+                .await
+                .unwrap();
+        }
+        let requests = server.await.unwrap();
+        let cookies: Vec<Option<String>> = requests
+            .iter()
+            .map(|(head, _)| header(head, "cookie"))
+            .collect();
+        assert_eq!(
+            cookies,
+            [
+                None,
+                Some("__oailb=pin-1; __cflb=lb-1".into()),
+                Some("__oailb=pin-1".into()),
+                None,
+                None,
+            ]
+        );
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn plan_usage_headers_are_reported_with_the_call() {
     tokio::time::timeout(Duration::from_secs(5), async {

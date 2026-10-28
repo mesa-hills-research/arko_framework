@@ -142,15 +142,26 @@ request's prompt cache after its last use, as `PromptCacheLifetime::Known(durati
 `Unknown` or `Disabled`. Every cache hit starts the lifetime again, so a conversation that
 makes a request within it stays cached however long it waits in between. Anthropic, and
 Claude on OpenRouter, report 5 minutes, or 1 hour with `anthropic_cache_ttl` set to
-`OneHour`. OpenAI with an API key reports a conservative 5 minutes for every model, the
-lower end of the documented in-memory retention. Longer retention exists (GPT-5.6 and later
-default to a 30-minute `prompt_cache_options.ttl` on the API, so none is sent), but not on
-every model and organization, and a request after a longer idle time can miss the cache.
+`OneHour`. OpenAI with an API key reports 30 minutes on GPT-5.6 and later, the default
+`prompt_cache_options.ttl`, or 12 hours with the long cache below. OpenAI documents both
+as minimums that every cache read extends. Earlier OpenAI models report a conservative 5 minutes, the lower end of the
+documented in-memory retention. Their extended retention typically lasts longer, but OpenAI
+promises no lifetime there, and a request after a longer idle time can miss the cache.
 OpenAI over ChatGPT OAuth reports 30 minutes for every model, the lifetime of the backend's
 implicit cache, which no request configures. Gemini and other OpenRouter models report
 `Unknown`. Models without caching, and caching turned off where the request can turn it off
 (Anthropic, Claude on OpenRouter, GPT-5.6 and later with an API key), report `Disabled`. The `prompt_cache`
 module has the constants and the providers' documentation links.
+
+`GenerationConfig::with_long_prompt_cache(true)` asks for the longer of the provider's two
+lifetimes on every route that has two. That is 1 hour on Claude (Anthropic, OpenRouter and
+Claude Code), and 12 hours on OpenAI GPT-5.6 and later with an API key
+(`prompt_cache_options.ttl: "12h"`). Longer lifetimes cost more to write, 2x input against
+1.25x on Claude and 2.5x against 1.25x on OpenAI, and reads cost the same. One avoided
+rewrite of the prompt pays for it, so it suits conversations likely to sit idle past the
+shorter lifetime. Other routes ignore it, as do requests with caching off. `false` asks for
+the shorter lifetime outright, which matters only in Claude Code, which otherwise chooses
+for itself. `anthropic_cache_ttl` takes precedence on Claude when set.
 
 A host that knows how long its route keeps the cache sets
 `GenerationConfig::prompt_cache_lifetime_seconds` (or `with_prompt_cache_lifetime`). The
@@ -394,6 +405,9 @@ ChatGPT OAuth requests always stream (`generate_text` collects the stream) and c
 the conversation's identity, like Codex, in `session-id`, `thread-id` and
 `x-client-request-id`, all set to the conversation's `prompt_cache_key`. The backend
 derives prompt-cache affinity from `session-id`, so give each agent its own conversation.
+The backend's load-balancer cookies, `__oailb` and `__cflb`, go back on the client's later
+OAuth requests to the host that set them, as Codex sends them. They are kept in memory,
+shared by the client's clones, and no other cookie is kept.
 No `OpenAI-Beta` header is sent on either path. The backend rejects `max_output_tokens`
 ("Unsupported parameter"), so `GenerationConfig::max_tokens` is never sent over ChatGPT
 OAuth and the model's own output limit applies. A set limit is ignored with a warning
@@ -805,7 +819,9 @@ request would go to, and every account refreshes its own credentials before it i
 - `output_tokens` includes reasoning tokens. `reasoning_tokens` reports them separately
   when the provider does (OpenAI `output_tokens_details.reasoning_tokens`, Gemini thought
   tokens).
-- `cache_write_1h_tokens` is the part of Anthropic cache writes made with a 1-hour TTL.
+- `cache_write_1h_tokens` is the part of the cache writes made with the longer of the
+  provider's two lifetimes, Anthropic's 1-hour TTL or OpenAI's 12-hour one (from
+  `input_tokens_details.cache_write_tokens_details.ttl_12h_tokens`).
 
 Costs are estimates at list prices from the model registry, computed for what the call
 actually used:
@@ -820,7 +836,9 @@ actually used:
   Its estimate uses the API's Fast rates and is not billed. Tier prices are per model
   (`ModelPricing::service_tiers`). Tiers without a published price (Anthropic priority,
   OpenAI scale) are estimated at standard rates.
-- Anthropic 1-hour cache writes use their own rate.
+- Anthropic 1-hour and OpenAI 12-hour cache writes use their own rate
+  (`ModelPricing::cache_write_1h_cost_per_million`), 2x input on Claude and 2.5x on OpenAI
+  GPT-5.6 and later.
   `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later.
   `ModelPricing::schedule` switches prices on a date (for example the end of promotional
   pricing). Tier and residency multipliers stack.

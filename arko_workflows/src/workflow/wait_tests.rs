@@ -360,16 +360,17 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
                 client.clone(),
             )
         };
-        // OpenAI is a conservative 5 minutes with an API key, and 30
-        // minutes over ChatGPT OAuth, whose cache ignores the caching switch.
-        let openai = if oauth {
+        // OpenAI is 30 minutes on GPT-5.6 and later, and with an API key a
+        // conservative 5 minutes on earlier models. Over ChatGPT OAuth it is
+        // 30 minutes, whose cache ignores the caching switch.
+        let older = if oauth {
             minutes(27)
         } else {
             Duration::from_secs(270)
         };
         for (agent, expected) in [
-            ("openai", openai),
-            ("older", openai),
+            ("openai", minutes(27)),
+            ("older", older),
             ("claude", Duration::from_secs(270)),
             ("claude_hour", minutes(54)),
             ("claude_off", DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT),
@@ -410,8 +411,9 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
 async fn an_automatic_limit_counts_from_the_last_model_request() {
     let workspace = Workspace::new();
     let client = Arc::new(LLMClient::new());
+    // GPT-5.6 Luna's 30-minute cache gives a 27-minute automatic limit.
     for (timeout, expected) in [
-        (WaitForMessageTimeout::Auto, "No messages after 170 s."),
+        (WaitForMessageTimeout::Auto, "No messages after 1520 s."),
         (Duration::from_secs(200).into(), "No messages after 200 s."),
     ] {
         let workflow = builder(&workspace, &["lead", "worker"])
@@ -433,7 +435,7 @@ async fn an_automatic_limit_counts_from_the_last_model_request() {
         assert_eq!(
             waited,
             if timeout == WaitForMessageTimeout::Auto {
-                170
+                1520
             } else {
                 200
             }
@@ -454,9 +456,10 @@ async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
         "lead".to_string(),
         Arc::new(LLMClient::new()),
     );
-    // The limit is 270 s; the model took longer than that to call the tool.
+    // The limit is 27 minutes, and the model took longer than that to call
+    // the tool.
     tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
-    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::advance(Duration::from_secs(30 * 60)).await;
     let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
     let started = tokio::time::Instant::now();
     let result = tool.execute(&task_context, HashMap::new()).await.unwrap();

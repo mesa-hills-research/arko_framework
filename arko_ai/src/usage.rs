@@ -500,7 +500,10 @@ pub struct UsageInfo {
     /// Input tokens written to the prompt cache (part of `input_tokens`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<usize>,
-    /// The part of `cache_write_tokens` written with a 1-hour TTL (Anthropic).
+    /// The part of `cache_write_tokens` written with the longer of the
+    /// provider's two cache lifetimes, Anthropic's 1-hour TTL or OpenAI's
+    /// 12-hour one (the field is named for Anthropic's). It is priced at
+    /// [`ModelPricing::cache_write_1h_cost_per_million`](crate::model::ModelPricing::cache_write_1h_cost_per_million).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

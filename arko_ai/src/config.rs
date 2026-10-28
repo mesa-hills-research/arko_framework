@@ -149,6 +149,29 @@ pub struct GenerationConfig {
     /// Also the `ttl` of the `cache_control` sent for Claude models on OpenRouter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_cache_ttl: Option<AnthropicCacheTtl>,
+    /// Asks for the longer of the provider's two prompt-cache lifetimes where
+    /// the route offers two, or with `Some(false)` for the shorter one.
+    /// `None` keeps each provider's default. Longer lifetimes cost more to
+    /// write, and reads cost the same.
+    ///
+    /// - Claude (Anthropic, Claude on OpenRouter and Claude Code) caches for
+    ///   1 hour, or 5 minutes with `Some(false)`. 1-hour writes cost 2x base
+    ///   input, 5-minute writes 1.25x. Without it, Claude Code chooses (1 hour
+    ///   on a Claude subscription within its usage limits) and the others
+    ///   cache for 5 minutes. [`anthropic_cache_ttl`](Self::anthropic_cache_ttl)
+    ///   takes precedence when set.
+    /// - OpenAI GPT-5.6 and later with an API key send
+    ///   `prompt_cache_options.ttl: "12h"`, a 12-hour minimum lifetime whose
+    ///   writes cost 2.5x input, against 1.25x for the default 30 minutes.
+    /// - Other routes have a single lifetime, or none a request can set, and
+    ///   ignore it (OpenAI models before GPT-5.6, ChatGPT OAuth, Gemini and
+    ///   other OpenRouter models).
+    ///
+    /// Requests with caching turned off ignore it.
+    /// [`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime)
+    /// reports the lifetime it asks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_prompt_cache: Option<bool>,
     /// The prompt-cache lifetime arko reports for these requests, in seconds,
     /// in place of the provider's
     /// ([`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime)),
@@ -397,6 +420,27 @@ impl GenerationConfig {
     pub fn with_anthropic_cache_ttl(mut self, ttl: AnthropicCacheTtl) -> Self {
         self.anthropic_cache_ttl = Some(ttl);
         self
+    }
+
+    /// Asks for the provider's longer prompt-cache lifetime, or with `false`
+    /// its shorter one ([`long_prompt_cache`](Self::long_prompt_cache)).
+    pub fn with_long_prompt_cache(mut self, long: bool) -> Self {
+        self.long_prompt_cache = Some(long);
+        self
+    }
+
+    /// The `ttl` Claude requests ask for, [`anthropic_cache_ttl`](Self::anthropic_cache_ttl)
+    /// when set, else 1 hour or 5 minutes as
+    /// [`long_prompt_cache`](Self::long_prompt_cache) says.
+    pub fn claude_cache_ttl(&self) -> Option<AnthropicCacheTtl> {
+        self.anthropic_cache_ttl
+            .or(self.long_prompt_cache.map(|long| {
+                if long {
+                    AnthropicCacheTtl::OneHour
+                } else {
+                    AnthropicCacheTtl::FiveMinutes
+                }
+            }))
     }
 
     /// Sets the prompt-cache lifetime arko reports for these requests, in

@@ -497,9 +497,10 @@ turn boundary.
 
 A wait lasts up to about 4.5 minutes by default. Each wake-up is a cheap turn that keeps
 the provider's prompt cache warm, so a long wait is simply several short waits. The
-default follows the agent's cache lifetime, with about 27 minutes for OpenAI over ChatGPT
-OAuth, whose cache lasts 30, and about 54 minutes with Anthropic's 1-hour cache TTL
-(`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`). You can set a longer wait,
+default follows the agent's cache lifetime, with about 27 minutes for a 30-minute cache
+(OpenAI GPT-5.6 and later, and OpenAI over ChatGPT OAuth), about 54 minutes with Anthropic's
+1-hour cache TTL (`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`, or
+`long_prompt_cache`), and about 10.8 hours with OpenAI's 12-hour cache. You can set a longer wait,
 for every agent or one:
 
 ```rust
@@ -512,9 +513,9 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Provider caches often last longer (OpenAI documents about 30 minutes, and a test over
-ChatGPT OAuth still hit after 40), but that isn't guaranteed, and a miss re-reads the
-whole context at full price.
+Provider caches often last longer than the lifetime arko reports (OpenAI's models before
+GPT-5.6 typically keep it about 30 minutes, and a test over ChatGPT OAuth still hit after 40),
+but that isn't guaranteed, and a miss re-reads the whole context at full price.
 
 The optional `attachments_json` parameter is a JSON array of typed references.
 They are described to the recipient. Files, memory, and transcripts are not loaded

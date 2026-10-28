@@ -124,6 +124,7 @@ Code paths are relative to the repository root. Items are listed by their shorte
 | `GenerationConfig::interleaved_thinking`, `with_interleaved_thinking` | Claude interleaved thinking between tool calls. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::openai_service_tier`, `with_openai_service_tier`. `OpenAIServiceTier` (`Auto`, `Default`, `Flex`, `Fast`), `OpenAIServiceTier::pricing_tier` | OpenAI `service_tier` (`Fast` is sent as `priority`). Over ChatGPT OAuth only `Fast` (on the models Codex offers it for) and `Default` (sends no tier). `pricing_tier` maps it to the `ServiceTier` used for cost (`Auto` and `Default` price as `Standard`). | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::anthropic_cache_ttl`, `with_anthropic_cache_ttl` | `ttl` of the `cache_control` arko sends for Claude (`AnthropicCacheTtl`). | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `GenerationConfig::long_prompt_cache`, `with_long_prompt_cache`, `claude_cache_ttl` | The provider's longer prompt-cache lifetime where the route has two, 1 hour on Claude and 12 hours on OpenAI GPT-5.6 and later with an API key. `claude_cache_ttl` is the `ttl` Claude requests send, from `anthropic_cache_ttl` or this. | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `GenerationConfig::anthropic_fast_mode`, `with_anthropic_fast_mode` | Anthropic fast mode (`speed: "fast"`), Opus 5.5, Opus 5 and Opus 4.8. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::anthropic_inference_geo`, `with_anthropic_inference_geo`. `AnthropicInferenceGeo` (`Global`, `Us`) | Anthropic `inference_geo`, Claude 4.6 and later. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::openrouter`, `with_openrouter_options` | Per-request `OpenRouterOptions`, merged over the client's default options. | `arko_ai/src/config.rs` | [OpenRouter (arko_ai)](#openrouter-arko_ai) |
@@ -240,7 +241,7 @@ Code paths are relative to the repository root. Items are listed by their shorte
 |---|---|---|---|
 | `PromptCacheLifetime` (`Known(Duration)`, `Unknown`, `Disabled`) | How long a provider keeps a request's prompt cache after its last use. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `prompt_cache::prompt_cache_lifetime` | The lifetime for a model, config and auth path. Reads `GenerationConfig::prompt_caching` and `prompt_cache_lifetime_seconds`, not `Conversation::enable_cache`. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
-| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME`, `CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, 5 minutes (a conservative value for OpenAI with an API key), and 30 minutes (OpenAI over ChatGPT OAuth). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_STANDARD_PROMPT_CACHE_LIFETIME`, `OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME`, `CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, 30 minutes and 12 hours (OpenAI GPT-5.6 and later with an API key), 5 minutes (a conservative value for OpenAI models before GPT-5.6 with an API key), and 30 minutes (OpenAI over ChatGPT OAuth). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `GenerationConfig::prompt_cache_lifetime_seconds`, `GenerationConfig::with_prompt_cache_lifetime` | The host's prompt-cache lifetime, reported in place of the provider's. | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `AnthropicCacheTtl` (`FiveMinutes` = `"5m"`, `OneHour` = `"1h"`), `AnthropicCacheTtl::duration` | Claude cache lifetimes and their durations. | `arko_ai/src/config.rs`, `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 
@@ -387,7 +388,8 @@ does use is an error before anything is sent. Exceptions, `temperature` and
 | `tool_config` | No tools | See [Tool calls (arko_ai)](#tool-calls-arko_ai). |
 | `interleaved_thinking` | Automatic on Claude 4.6 and later while adaptive thinking is active | On the Anthropic provider, `Some(true)` needs a model that supports it and active thinking (not a manual budget on Opus 4.6). With a manual budget it sends the `interleaved-thinking-2025-05-14` beta header, with adaptive thinking nothing. `Some(false)` is `Error::InvalidRequest` while adaptive thinking is active on 4.6 and later, and sends nothing otherwise. For Claude on OpenRouter, `Some(true)` adds the beta header and `Some(false)` is `Error::UnsupportedFeature`. |
 | `openai_service_tier` | Not sent, the project's default tier | `auto`, `default`, `flex`, `priority` (the `Fast` variant). With an API key, Flex and Fast only on models that offer them (`Error::InvalidRequest` otherwise). Over ChatGPT OAuth, as in Codex, Fast (`priority`, plus `tier=priority` in the `x-codex-routing-hint` header) on GPT-6 Astra, Sol, Luna, 6.1 Sol and 6.1 Terra, GPT-5.6 Sol, Terra and Luna, and GPT-5.5 (`Error::InvalidRequest` on other models). `Default` sends no tier. Flex and Auto are `Error::UnsupportedFeature`. |
-| `anthropic_cache_ttl` | No `ttl`, 5 minutes | `"5m"`, `"1h"` (1-hour cache writes cost 2x base input). `Error::InvalidRequest` while caching is off. Also used for Claude on OpenRouter. |
+| `anthropic_cache_ttl` | No `ttl`, 5 minutes | `"5m"`, `"1h"` (1-hour cache writes cost 2x base input). `Error::InvalidRequest` while caching is off. Also used for Claude on OpenRouter and in Claude Code. Takes precedence over `long_prompt_cache`. |
+| `long_prompt_cache` | Each provider's default | `Some(true)` sends `ttl: "1h"` for Claude (Anthropic, OpenRouter, Claude Code's `promptCacheTtl`) and `prompt_cache_options.ttl: "12h"` to OpenAI GPT-5.6 and later with an API key (writes cost 2.5x input, against 1.25x for the default 30 minutes). `Some(false)` sends `"5m"` for Claude and nothing to OpenAI. Ignored with caching off and on routes with one lifetime (OpenAI before GPT-5.6, ChatGPT OAuth, Gemini, other OpenRouter models). |
 | `prompt_cache_lifetime_seconds` | `None`, the provider's lifetime | Never sent. Replaces the lifetime `prompt_cache_lifetime` reports, `Known` or `Unknown`. An uncached request stays `Disabled`, and `0` reports `Disabled`. Left out of saved configs when `None`. |
 | `anthropic_fast_mode` | Nothing sent | `Some(true)` sends `speed: "fast"` with the `fast-mode-2026-02-01` beta header on Opus 5.5, Opus 5 and Opus 4.8 (`Error::InvalidRequest` on other models). Billed at fast-mode rates. |
 | `anthropic_inference_geo` | Not sent, the workspace's default | `global`, `us` (1.1x price). Claude 4.6 and later (`Error::InvalidRequest` on older models). |
@@ -463,8 +465,10 @@ The conversation's key goes with every OpenAI request, and as `session_id` with 
 OpenRouter request, either way. It routes requests but doesn't turn caching on. On
 Anthropic and OpenRouter, caching also needs the model's cache support
 (`Model::supports_cache`). `prompt_cache_lifetime` reports 5 minutes for Anthropic and
-Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour`), a conservative
-5 minutes for OpenAI with an API key, and 30 minutes for OpenAI over ChatGPT OAuth. Gemini
+Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour` or `long_prompt_cache`),
+30 minutes for OpenAI GPT-5.6 and later with an API key (12 hours with `long_prompt_cache`),
+a conservative 5 minutes for earlier OpenAI models with an API key, and 30 minutes for
+OpenAI over ChatGPT OAuth. Gemini
 and other OpenRouter models are `Unknown`. `GenerationConfig::prompt_cache_lifetime_seconds`
 replaces any of these, except for an uncached request. It reports `Disabled` for models without cache support (the OpenAI Pro models,
 `o3-pro`, `gemini-2.0-flash`, OpenRouter catalog models without cache prices), and with
@@ -482,6 +486,9 @@ Requests over ChatGPT OAuth go to the Codex backend and differ from API-key requ
 - Caching is implicit and can't be turned off. The conversation's `prompt_cache_key` goes
   in the body and in the `session-id`, `thread-id` and `x-client-request-id` headers. The
   backend derives cache affinity from `session-id`.
+- The backend's routing cookies (`__oailb`, `__cflb`) are kept in memory per client and its
+  clones, for the host that set them, and sent back on later OAuth requests. Other cookies
+  are ignored. Max-Age and Expires are honoured, and Secure cookies go only over HTTPS.
 - Without a reasoning config, `effort: "medium"` is sent to GPT-5.x and GPT-6 models.
   `openai_reasoning_mode` is omitted and warns once, because the backend does not accept
   `reasoning.mode`.
