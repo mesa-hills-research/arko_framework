@@ -571,7 +571,9 @@ pub trait HandoverHook: Send + Sync {
     /// An answer to questions the agent waited for leaves those the host
     /// still has open, so a host can answer some of them. A host that
     /// delivers answers later as context returns the questions it still has
-    /// open.
+    /// open. Claude Code waits for an answer only when the turn that asked
+    /// ends, and doesn't wait for the questions this leaves out by then,
+    /// such as those the host answered while the turn went on.
     fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
         let _ = task;
         None
@@ -624,6 +626,28 @@ pub(crate) fn settle_waited(hook: Option<&dyn HandoverHook>, task: &mut Task) {
         .filter(|id| !open.iter().any(|question| &question.id == id))
         .collect::<Vec<_>>();
     task.questions.settle(&answered);
+}
+
+/// Of `asked`, questions `task`'s agent waits for, those still open: in the
+/// task's log (the agent didn't close them) and as `hook` says. The others
+/// were settled since they were asked (answered, dismissed or closed), and
+/// the log settles them too.
+pub(crate) fn still_open(
+    hook: Option<&dyn HandoverHook>,
+    task: &mut Task,
+    asked: Vec<crate::questions::AskedQuestion>,
+) -> Vec<crate::questions::AskedQuestion> {
+    let open = open_questions(hook, task);
+    let (open, settled): (Vec<_>, Vec<_>) = asked.into_iter().partition(|question| {
+        task.questions.get(&question.id).is_some()
+            && open.iter().any(|known| known.id == question.id)
+    });
+    let settled = settled
+        .into_iter()
+        .map(|question| question.id)
+        .collect::<Vec<_>>();
+    task.questions.settle(&settled);
+    open
 }
 
 /// `seed` with the section that restates the open questions `hook` (or the

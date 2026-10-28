@@ -5154,6 +5154,161 @@ async fn the_turn_after_ask_user_is_not_the_final_reply() {
     assert_eq!(completions(&events), ["Edited main.rs."]);
 }
 
+/// A host that answers the questions `answers` names once the agent asked
+/// them. Their note reaches the agent with the next call's result, and they
+/// are no longer open.
+struct AnswersMidTurn {
+    answers: &'static [&'static str],
+    asked: std::sync::Mutex<Vec<crate::questions::AskedQuestion>>,
+    answered: std::sync::Mutex<Vec<String>>,
+}
+
+impl AnswersMidTurn {
+    fn new(answers: &'static [&'static str]) -> Arc<Self> {
+        Arc::new(Self {
+            answers,
+            asked: Default::default(),
+            answered: Default::default(),
+        })
+    }
+}
+
+impl crate::handover::HandoverHook for AnswersMidTurn {
+    fn open_questions(&self, _task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        let answered = self.answered.lock().unwrap();
+        Some(
+            self.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|question| !answered.contains(&question.id))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn questions_asked(
+        &self,
+        _task: &Task,
+        asked: &[crate::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        self.asked.lock().unwrap().extend(asked.iter().cloned());
+    }
+}
+
+impl crate::runtime::TurnContextSource for AnswersMidTurn {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        let mut answered = self.answered.lock().unwrap();
+        if self.asked.lock().unwrap().is_empty() || !answered.is_empty() {
+            return None;
+        }
+        answered.extend(self.answers.iter().map(|id| id.to_string()));
+        Some(format!(
+            "The user answered {}.",
+            crate::questions::id_list(self.answers)
+        ))
+    }
+}
+
+/// The agent asks and waits, but goes on working in the same turn, and the
+/// answer reaches it there as a note. When the turn ends, the task doesn't
+/// wait for the questions answered meanwhile: a batch answered whole ends
+/// the turn as any other turn does, and of one answered in part, only the
+/// rest is waited for.
+#[tokio::test]
+async fn questions_answered_while_the_turn_goes_on_are_not_waited_for() {
+    for (answers, waited) in [(&["q1", "q2"][..], &[][..]), (&["q1"][..], &["q2"][..])] {
+        let fake = Fake::new(json!([
+            [
+                {"tool": "mcp__arko__ask_user", "input": {"questions": ["Tabs or spaces?", "Push now?"]}},
+                {"tool": "Grep", "input": {"pattern": "a"}},
+                {"tool": "Grep", "input": {"pattern": "b"}},
+                {"text": "Formatted with spaces."},
+            ],
+            [{"text": "Pushed."}],
+        ]));
+        let mut config = replying(&fake, &["ask_user", "Grep"]);
+        config.tool_config.async_questions = true;
+        let task = Task::new(config, "Format the code.".into(), fake.workspace(), None);
+        let host = AnswersMidTurn::new(answers);
+        let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(host.clone())
+            .with_turn_context(host.clone());
+        let mut run = start_with(task, runtime);
+        let seen = run
+            .events_until(|event| {
+                matches!(
+                    event,
+                    AgentEvent::UserQuestionsAsked { .. }
+                        | AgentEvent::TaskStateChanged(TaskState::Completed { .. })
+                )
+            })
+            .await;
+        let note = format!("The user answered {}.", crate::questions::id_list(answers));
+        assert!(
+            fake.logged("post").iter().any(|post| {
+                post["answer"]["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .is_some_and(|context| context.contains(&note))
+            }),
+            "the note reached the agent in the turn"
+        );
+        let waits = seen
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::UserQuestionsAsked {
+                    questions,
+                    asked,
+                    wait: true,
+                } => Some((
+                    questions.clone(),
+                    asked
+                        .iter()
+                        .map(|question| question.id.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if waited.is_empty() {
+            assert!(waits.is_empty(), "{waits:?}");
+            let (task, events) = run.finish().await;
+            assert_eq!(completions(&seen), ["Formatted with spaces."]);
+            assert!(
+                !seen.iter().chain(&events).any(|event| matches!(
+                    event,
+                    AgentEvent::TaskStateChanged(TaskState::AwaitingUserResponse { .. })
+                )),
+                "{seen:#?}"
+            );
+            assert_eq!(fake.logged("argv").len(), 1);
+            assert!(task.questions.open.is_empty() && task.questions.waiting.is_empty());
+            continue;
+        }
+        assert_eq!(
+            waits,
+            [("q2 Push now?".to_string(), vec!["q2".to_string()])]
+        );
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingUserResponse { questions })
+                if questions == "q2 Push now?"
+        )));
+        assert!(completions(&seen).is_empty());
+        host.answered.lock().unwrap().push("q2".into());
+        run.commands
+            .send(UserCommand::SubmitUserResponse {
+                response: "The user answered q2.".into(),
+            })
+            .await
+            .unwrap();
+        let (task, events) = run.finish().await;
+        assert_eq!(completions(&events), ["Pushed."]);
+        assert!(task.questions.open.is_empty() && task.questions.waiting.is_empty());
+    }
+}
+
 /// The handover report comes before the final reply: the text of the turn
 /// the report was asked for in is the report, and the reply in the fresh
 /// conversation ends the task.
