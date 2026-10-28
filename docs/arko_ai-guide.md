@@ -1395,7 +1395,9 @@ left out.
 
 The CLI runs in a process group of its own (on Windows, a job object that kills its
 processes when closed), with the programs it starts. `close`, or dropping the session,
-kills a command a Bash call left running as well as the CLI.
+kills a command a Bash call left running as well as the CLI. `process_tree::ProcessTree`
+does the same for any command. `ProcessTree::spawn(&mut command)` returns the child and a
+tree, and `kill` or dropping the tree ends both.
 
 ## Examples and tests
 

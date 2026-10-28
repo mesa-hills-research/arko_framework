@@ -23,6 +23,7 @@ pub mod model;
 mod notice;
 pub mod pricing;
 pub mod process;
+pub mod process_tree;
 pub mod prompt_cache;
 pub mod providers;
 pub mod reasoning;
