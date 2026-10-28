@@ -927,7 +927,10 @@ tool_config.available_tool_names changed); ...`). Workflow-injected tools and pr
 comparison, as are saved model registry details and `SkillsConfig::embedded`. Provider,
 model ID, generation settings, and other user configuration must remain compatible. `keep_saved_configs(agents)` lets
 those agents change for their new runs while each saved run keeps the configuration saved
-in its task, as long as the tools it offers are still registered.
+in its task, as long as the tools it offers are still registered. A tool a saved run still lists
+that the host no longer provides can be registered with `resume_only_agent_tool` (with a stand-in
+that says it isn't available). Only a saved run that lists it is offered it, and a new run or one
+continued with a new configuration is not.
 
 A saved task doesn't hold the agent's embedded skills (`SkillsConfig::embedded`). A run that
 is continued, resumed or recovered, or kept warm with `refresh_prompt_cache`, takes the

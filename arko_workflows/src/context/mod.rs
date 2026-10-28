@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +40,9 @@ pub struct SharedContext {
     pub(crate) agent_skills: RwLock<HashMap<String, Option<SkillsConfig>>>,
     pub global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     pub agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
+    /// The (agent, tool name) pairs of `agent_tools` that new and
+    /// reconfigured runs are not offered.
+    pub(crate) resume_only_tools: HashSet<(String, String)>,
     pub agent_results: RwLock<Vec<AgentResult>>,
     /// Interceptors applied to every agent's tool results.
     pub global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,

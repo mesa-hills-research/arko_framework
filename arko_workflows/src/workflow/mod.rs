@@ -1645,6 +1645,9 @@ pub struct WorkflowBuilder {
     freshness_config: Option<ContextFreshnessConfig>,
     global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
+    /// The (agent, tool name) pairs of `agent_tools` registered for saved
+    /// runs only ([`resume_only_agent_tool`](Self::resume_only_agent_tool)).
+    resume_only_tools: HashSet<(String, String)>,
     global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
     agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
     handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
@@ -1698,6 +1701,7 @@ impl WorkflowBuilder {
             freshness_config: None,
             global_tools: Vec::new(),
             agent_tools: HashMap::new(),
+            resume_only_tools: HashSet::new(),
             global_interceptors: Vec::new(),
             agent_interceptors: HashMap::new(),
             handover_thresholds: HashMap::new(),
@@ -1965,6 +1969,26 @@ impl WorkflowBuilder {
             .or_default()
             .push(tool);
         self
+    }
+
+    /// Register a tool for an agent's saved runs only. A saved run that
+    /// keeps its own configuration ([`keep_saved_configs`](Self::keep_saved_configs))
+    /// and lists the tool is offered it and can call it, and a resume that
+    /// needs it is accepted. A new run, or a run continued with a new
+    /// configuration ([`ContinueOptions::reconfigure`]), is not offered it
+    /// unless its configuration lists it. Use it for a tool a saved run may
+    /// still list that the session no longer provides, such as a tool of a
+    /// server that isn't running, to stand in for it. The tool's name must
+    /// differ from the agent's other tools.
+    pub fn resume_only_agent_tool(
+        mut self,
+        agent_name: impl Into<String>,
+        tool: Arc<dyn arko_agents::tool::Tool>,
+    ) -> Self {
+        let agent_name = agent_name.into();
+        self.resume_only_tools
+            .insert((agent_name.clone(), tool.name()));
+        self.agent_tool(agent_name, tool)
     }
 
     /// Register a tool result interceptor applied to all agents.
@@ -2828,6 +2852,7 @@ impl WorkflowBuilder {
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
+            resume_only_tools: self.resume_only_tools,
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
             handover_thresholds: self.handover_thresholds,
