@@ -405,6 +405,9 @@ ChatGPT OAuth requests always stream (`generate_text` collects the stream) and c
 the conversation's identity, like Codex, in `session-id`, `thread-id` and
 `x-client-request-id`, all set to the conversation's `prompt_cache_key`. The backend
 derives prompt-cache affinity from `session-id`, so give each agent its own conversation.
+The backend's load-balancer cookies, `__oailb` and `__cflb`, go back on the client's later
+OAuth requests to the host that set them, as Codex sends them. They are kept in memory,
+shared by the client's clones, and no other cookie is kept.
 No `OpenAI-Beta` header is sent on either path. The backend rejects `max_output_tokens`
 ("Unsupported parameter"), so `GenerationConfig::max_tokens` is never sent over ChatGPT
 OAuth and the model's own output limit applies. A set limit is ignored with a warning

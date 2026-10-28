@@ -17,7 +17,7 @@ use async_stream::try_stream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, COOKIE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -64,6 +64,8 @@ pub use accounts::{
 };
 
 pub(crate) mod spent_tokens;
+
+mod routing_cookies;
 
 type StreamingRefusals = BTreeMap<(String, u64), String>;
 
@@ -512,6 +514,9 @@ pub struct OpenAIClient {
     /// The organization refused reasoning summaries (it isn't verified for
     /// them): requests ask for none from then on. Shared by clones.
     summaries_refused: Arc<AtomicBool>,
+    /// The ChatGPT backend's routing cookies, sent back on later ChatGPT
+    /// OAuth requests. Shared by clones.
+    routing_cookies: Arc<routing_cookies::RoutingCookies>,
 }
 
 /// What a refresh replaces. Checked once the credential lock is held.
@@ -549,6 +554,7 @@ impl OpenAIClient {
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
             summaries_refused: Arc::default(),
+            routing_cookies: Arc::default(),
         }
     }
 
@@ -580,6 +586,7 @@ impl OpenAIClient {
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
             summaries_refused: Arc::default(),
+            routing_cookies: Arc::default(),
         }
     }
 
@@ -601,6 +608,7 @@ impl OpenAIClient {
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
             summaries_refused: Arc::default(),
+            routing_cookies: Arc::default(),
         }
     }
 
@@ -1180,10 +1188,16 @@ impl OpenAIClient {
                 .post(url)
                 .header("Content-Type", "application/json");
             let builder = self.apply_request_headers(&auth, builder, conversation, request);
-            let http_request = self.prepare_http_request(
+            let mut http_request = self.prepare_http_request(
                 Self::apply_auth_headers(&auth, builder).json(request),
                 conversation_key,
             )?;
+            // A Cookie header a hook set comes first, as in Codex.
+            if auth.is_chatgpt_oauth()
+                && let Some(cookie) = self.routing_cookies.header(http_request.url())
+            {
+                http_request.headers_mut().entry(COOKIE).or_insert(cookie);
+            }
             if let Some(trace) = trace.as_mut() {
                 trace.record_request(&http_request);
             }
@@ -1198,6 +1212,10 @@ impl OpenAIClient {
             };
             if let Some(trace) = trace.as_mut() {
                 trace.record_response_head(&response);
+            }
+            if auth.is_chatgpt_oauth() {
+                self.routing_cookies
+                    .record(response.url(), response.headers());
             }
             if let Some(hook) = &self.request_hook {
                 hook.observe_response(conversation_key, response.headers());
@@ -1350,7 +1368,8 @@ impl OpenAIClient {
     /// `prompt_cache_key`, plus the turn's `x-codex-turn-state` when one is
     /// held (see [`Conversation::openai_turn_state`]) and Codex's
     /// `x-codex-routing-hint` (`model=<model>`, with `;tier=priority` in Fast
-    /// mode).
+    /// mode). The backend's routing cookies, when it set any, are added once
+    /// the request is built.
     fn apply_request_headers(
         &self,
         auth: &OpenAIAuth,

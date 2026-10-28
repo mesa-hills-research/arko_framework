@@ -486,6 +486,9 @@ Requests over ChatGPT OAuth go to the Codex backend and differ from API-key requ
 - Caching is implicit and can't be turned off. The conversation's `prompt_cache_key` goes
   in the body and in the `session-id`, `thread-id` and `x-client-request-id` headers. The
   backend derives cache affinity from `session-id`.
+- The backend's routing cookies (`__oailb`, `__cflb`) are kept in memory per client and its
+  clones, for the host that set them, and sent back on later OAuth requests. Other cookies
+  are ignored. Max-Age and Expires are honoured, and Secure cookies go only over HTTPS.
 - Without a reasoning config, `effort: "medium"` is sent to GPT-5.x and GPT-6 models.
   `openai_reasoning_mode` is omitted and warns once, because the backend does not accept
   `reasoning.mode`.
