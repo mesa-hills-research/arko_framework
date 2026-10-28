@@ -5,9 +5,12 @@ JSON-RPC, writes a line to stderr at start, and exits with status 7 when a
 call asks it to (`echo` with text "exit"). A call with text "hang" gets no
 answer until the client cancels it (`notifications/cancelled`), and a call
 with text "cancelled" answers with the IDs of the requests it cancelled.
+With MCP_STUB_IGNORE_EOF set it keeps running when its input ends.
 """
 import json
+import os
 import sys
+import time
 
 # Distinct base64 payloads make byte preservation and image order observable.
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJb8AAAAASUVORK5CYII="
@@ -162,3 +165,6 @@ for line in sys.stdin:
             + "\n"
         )
         sys.stdout.flush()
+
+if os.environ.get("MCP_STUB_IGNORE_EOF"):
+    time.sleep(300)
