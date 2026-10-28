@@ -1273,8 +1273,9 @@ pub struct PlanUsageThreshold {
 /// the cache has expired reads the whole context again as uncached input,
 /// which uses more of the plan than cached input, more than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
 /// gives the model's lifetime, which is 5 minutes for Anthropic by default (1 hour
-/// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI
-/// with an API key and 30 minutes over ChatGPT OAuth. For a Claude Code
+/// with `AnthropicCacheTtl::OneHour`), 30 minutes for OpenAI GPT-5.6 and
+/// later with an API key, a conservative 5 minutes for earlier OpenAI models,
+/// and 30 minutes over ChatGPT OAuth. For a Claude Code
 /// model, `anthropic_cache_ttl` when set (Claude Code's
 /// `promptCacheTtl`), otherwise Claude Code's choice of 1 hour on a Claude
 /// subscription within its usage limits, 5 minutes on an API key. Claude

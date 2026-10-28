@@ -240,7 +240,7 @@ Code paths are relative to the repository root. Items are listed by their shorte
 |---|---|---|---|
 | `PromptCacheLifetime` (`Known(Duration)`, `Unknown`, `Disabled`) | How long a provider keeps a request's prompt cache after its last use. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `prompt_cache::prompt_cache_lifetime` | The lifetime for a model, config and auth path. Reads `GenerationConfig::prompt_caching` and `prompt_cache_lifetime_seconds`, not `Conversation::enable_cache`. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
-| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME`, `CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, 5 minutes (a conservative value for OpenAI with an API key), and 30 minutes (OpenAI over ChatGPT OAuth). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_STANDARD_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME`, `CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, 30 minutes (OpenAI GPT-5.6 and later with an API key), 5 minutes (a conservative value for OpenAI models before GPT-5.6 with an API key), and 30 minutes (OpenAI over ChatGPT OAuth). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `GenerationConfig::prompt_cache_lifetime_seconds`, `GenerationConfig::with_prompt_cache_lifetime` | The host's prompt-cache lifetime, reported in place of the provider's. | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `AnthropicCacheTtl` (`FiveMinutes` = `"5m"`, `OneHour` = `"1h"`), `AnthropicCacheTtl::duration` | Claude cache lifetimes and their durations. | `arko_ai/src/config.rs`, `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 
@@ -463,8 +463,9 @@ The conversation's key goes with every OpenAI request, and as `session_id` with 
 OpenRouter request, either way. It routes requests but doesn't turn caching on. On
 Anthropic and OpenRouter, caching also needs the model's cache support
 (`Model::supports_cache`). `prompt_cache_lifetime` reports 5 minutes for Anthropic and
-Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour`), a conservative
-5 minutes for OpenAI with an API key, and 30 minutes for OpenAI over ChatGPT OAuth. Gemini
+Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour`), 30 minutes for OpenAI
+GPT-5.6 and later with an API key, a conservative 5 minutes for earlier OpenAI models with an
+API key, and 30 minutes for OpenAI over ChatGPT OAuth. Gemini
 and other OpenRouter models are `Unknown`. `GenerationConfig::prompt_cache_lifetime_seconds`
 replaces any of these, except for an uncached request. It reports `Disabled` for models without cache support (the OpenAI Pro models,
 `o3-pro`, `gemini-2.0-flash`, OpenRouter catalog models without cache prices), and with

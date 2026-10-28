@@ -1331,8 +1331,8 @@ carries it) and how long the prompt cache lasts. A request made after the cache 
 expired reads the whole context again as uncached input, which uses more of the plan than
 cached input, more than any wait saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
 gives a model's lifetime, which is 5 minutes for Anthropic by default (1 hour with
-`AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI with an API key, and
-30 minutes over ChatGPT OAuth. For a Claude Code
+`AnthropicCacheTtl::OneHour`), 30 minutes for OpenAI GPT-5.6 and later with an API key, a
+conservative 5 minutes for earlier OpenAI models, and 30 minutes over ChatGPT OAuth. For a Claude Code
 model it is `anthropic_cache_ttl` when set, otherwise Claude Code's choice, 1 hour on a
 Claude subscription within its usage limits and 5 minutes on an API key. Claude Code's
 subagents (its `Agent` tool) and helper requests cache for 5 minutes whatever the main

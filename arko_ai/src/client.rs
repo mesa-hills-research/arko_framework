@@ -1333,13 +1333,14 @@ mod tests {
         ])
     }
 
-    /// The client's OpenAI auth decides the lifetime (5 minutes with an API
-    /// key, 30 over ChatGPT OAuth) and whether turning caching off disables
-    /// it: the ChatGPT OAuth backend caches regardless.
+    /// The client's OpenAI auth decides whether turning caching off disables
+    /// the cache, since the ChatGPT OAuth backend caches regardless. Both
+    /// keep GPT-6 Astra's cache for 30 minutes.
     #[tokio::test]
     async fn prompt_cache_lifetime_reads_the_openai_auth() {
         use crate::prompt_cache::{
-            CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME, OPENAI_PROMPT_CACHE_LIFETIME, PromptCacheLifetime,
+            CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME, OPENAI_STANDARD_PROMPT_CACHE_LIFETIME,
+            PromptCacheLifetime,
         };
         let off = GenerationConfig::default().with_prompt_caching(false);
         let model = Model::openai_gpt_6_astra();
@@ -1347,7 +1348,7 @@ mod tests {
         assert_eq!(
             key.prompt_cache_lifetime(&model, &GenerationConfig::default())
                 .await,
-            PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME)
+            PromptCacheLifetime::Known(OPENAI_STANDARD_PROMPT_CACHE_LIFETIME)
         );
         assert_eq!(
             key.prompt_cache_lifetime(&model, &off).await,
