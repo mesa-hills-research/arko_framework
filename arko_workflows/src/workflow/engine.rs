@@ -3152,7 +3152,13 @@ impl WorkflowEngine {
         }
         if let Some(agent_tools) = ctx.agent_tools.get(agent_name) {
             for tool in agent_tools {
-                ensure_tool_name(&mut config, &tool.name());
+                let name = tool.name();
+                if !ctx
+                    .resume_only_tools
+                    .contains(&(agent_name.to_string(), name.clone()))
+                {
+                    ensure_tool_name(&mut config, &name);
+                }
             }
         }
 

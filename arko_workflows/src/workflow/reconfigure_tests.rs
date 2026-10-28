@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use super::*;
 use crate::persistence::PersistenceConfig;
-use crate::test_support::{ProbeTool, ResponsesServer, Workspace, agent_config, text_turn};
+use crate::test_support::{
+    ProbeTool, ResponsesServer, Workspace, agent_config, text_turn, tool_call_turn,
+};
 
 /// The agent as a chat (`AgentToolConfig::chat`): offered no tools, its
 /// reply in text ends its task.
@@ -292,6 +294,101 @@ async fn a_kept_configuration_needs_its_tools() {
     resumed.continue_agent(&restored, "And now?").await.unwrap();
     let last: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
     assert!(tool_names(&last).contains(&"probe".to_string()), "{last}");
+}
+
+/// A tool registered for saved runs only (`resume_only_agent_tool`) lets a
+/// kept run resume. The run is offered it and calls it. A new run, and a run
+/// continued with a configuration that doesn't list it, are not offered it,
+/// as they are a tool registered as usual.
+#[tokio::test]
+async fn a_resume_only_tool_serves_a_kept_run_and_is_not_offered_to_others() {
+    let workspace = Workspace::new();
+    // The run's continuation calls the tool once.
+    let server = ResponsesServer::start(|index, _| {
+        Some(match index {
+            1 => tool_call_turn("c1", "probe", serde_json::json!({})),
+            _ => text_turn(&format!("t{index}"), "Sure."),
+        })
+    })
+    .await;
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", agent())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // The agent is registered without the tool in its configuration.
+    let mut quiet = chat();
+    quiet.tool_config.chat = false;
+    let stand_in = ProbeTool::new("probe", false);
+    let resume = |probe: Option<Arc<ProbeTool>>| {
+        let mut builder = Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", quiet.clone())
+            .agent_tool("main", ProbeTool::new("other", false))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+            .resume_from(latest_checkpoint(&workspace))
+            .keep_saved_configs(["main"]);
+        if let Some(probe) = probe {
+            builder = builder.resume_only_agent_tool("main", probe);
+        }
+        builder.build()
+    };
+    let refused = resume(None).err().unwrap().to_string();
+    assert!(
+        refused.contains("offers tool 'probe', which isn't registered"),
+        "{refused}"
+    );
+    let resumed = resume(Some(stand_in.clone())).unwrap();
+
+    // The kept run is offered the tool and calls it.
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    let bodies = || -> Vec<Value> {
+        server
+            .bodies()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect()
+    };
+    assert!(tool_names(&bodies()[1]).contains(&"probe".to_string()));
+    assert_eq!(stand_in.calls(), 1);
+
+    // A new run is offered the tool registered as usual, and not it.
+    resumed.run_agent("main", "Fresh.").await.unwrap();
+    let new = tool_names(bodies().last().unwrap());
+    assert!(new.contains(&"other".to_string()), "{new:?}");
+    assert!(!new.contains(&"probe".to_string()), "{new:?}");
+
+    // So is the run continued with a configuration that doesn't list it.
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    resumed
+        .continue_agent_with(
+            &restored,
+            "Again.",
+            ContinueOptions::new().reconfigure(quiet.clone()),
+        )
+        .await
+        .unwrap();
+    let reconfigured = tool_names(bodies().last().unwrap());
+    assert!(
+        reconfigured.contains(&"other".to_string()),
+        "{reconfigured:?}"
+    );
+    assert!(
+        !reconfigured.contains(&"probe".to_string()),
+        "{reconfigured:?}"
+    );
+    assert_eq!(stand_in.calls(), 1);
 }
 
 /// A kept Claude Code run needs its host tools too: only Claude Code's own
