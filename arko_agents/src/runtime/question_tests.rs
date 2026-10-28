@@ -562,3 +562,115 @@ async fn a_handover_right_after_an_ask_restates_it_once() {
     assert_eq!(first.matches("q41 Which branch?").count(), 1, "{first}");
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A host that answers the agent's questions as it hears of them, before
+/// the task waits for the answer. Their note goes on the command channel at
+/// once, and they are no longer open.
+struct AnswersAtOnce {
+    commands: mpsc::Sender<UserCommand>,
+    answered: std::sync::Mutex<Vec<String>>,
+}
+
+impl HandoverHook for AnswersAtOnce {
+    fn open_questions(&self, task: &Task) -> Option<Vec<crate::questions::AskedQuestion>> {
+        let answered = self.answered.lock().unwrap();
+        Some(
+            task.questions
+                .open
+                .iter()
+                .filter(|question| !answered.contains(&question.id))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn questions_asked(
+        &self,
+        _task: &Task,
+        asked: &[crate::questions::AskedQuestion],
+        _wait: bool,
+    ) {
+        let ids = asked
+            .iter()
+            .map(|question| question.id.clone())
+            .collect::<Vec<_>>();
+        self.commands
+            .try_send(UserCommand::InjectContext {
+                content: format!("The user answered {}.", crate::questions::id_list(&ids)),
+            })
+            .unwrap();
+        self.answered.lock().unwrap().extend(ids);
+    }
+}
+
+/// An answer that lands before the task waits for it isn't read early or
+/// lost. The host's reply to the wait comes first and the answer's note
+/// after it, both in the request that follows, and the question is
+/// settled.
+#[tokio::test]
+async fn an_answer_that_lands_before_the_wait_follows_the_reply() {
+    const REPLIED: &str = "The user replied. What they said is in the note that follows.";
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = true;
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent.handover_hook = Some(Arc::new(AnswersAtOnce {
+        commands: commands.clone(),
+        answered: Default::default(),
+    }));
+    push(
+        &mut agent,
+        vec![
+            turn(vec![native_call(
+                "ask",
+                "ask_user",
+                serde_json::json!({"questions": ["Tabs or spaces?"]}),
+            )]),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    super::tool_call_tests::wait_for(&mut events, &mut seen, |event| match event {
+        AgentEvent::UserQuestionsAsked { wait: true, .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    commands
+        .send(UserCommand::SubmitUserResponse {
+            response: REPLIED.into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = finish(run, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.questions.open.is_empty() && task.questions.waiting.is_empty());
+    assert!(task.pending_context_injections.is_empty());
+    let texts = task
+        .conversation
+        .messages
+        .iter()
+        .map(message_text)
+        .collect::<Vec<_>>();
+    let joined = texts.join("\n---\n");
+    let note = "The user answered q1.";
+    assert_eq!(joined.matches(note).count(), 1, "{joined}");
+    assert!(
+        joined.find(REPLIED).unwrap() < joined.find(note).unwrap(),
+        "{joined}"
+    );
+    let noted = texts.iter().position(|text| text.contains(note)).unwrap();
+    let done = task
+        .conversation
+        .messages
+        .iter()
+        .position(|message| {
+            message
+                .tool_calls
+                .iter()
+                .any(|call| call.name == "complete_task")
+        })
+        .unwrap();
+    assert!(noted < done, "the note went with the request: {texts:#?}");
+    std::fs::remove_dir_all(workspace).unwrap();
+}

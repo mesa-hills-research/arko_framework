@@ -55,7 +55,10 @@ pub trait UserInputHandler: Send + Sync {
     /// only of answers given while the agent waited and the questions it
     /// closed. An answer to questions the agent waited for
     /// ([`respond`](Self::respond)) leaves those this returns open, so a
-    /// host may answer some of them.
+    /// host may answer some of them. An agent in Claude Code waits for an
+    /// answer only when the turn that asked ends, and doesn't wait for the
+    /// questions this leaves out by then, such as those answered while the
+    /// turn went on.
     fn open_questions(&self, agent_run_id: uuid::Uuid) -> Option<Vec<AskedQuestion>> {
         let _ = agent_run_id;
         None

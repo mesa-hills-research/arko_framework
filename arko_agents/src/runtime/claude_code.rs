@@ -829,9 +829,8 @@ pub(super) struct ClaudeCodeRun {
     context_size: Option<usize>,
     first_context_size: Option<usize>,
     open_turns: u32,
-    /// Questions `ask_user` sent in this turn that the agent waits for:
-    /// their text and the questions.
-    questions: Option<(String, Vec<crate::questions::AskedQuestion>)>,
+    /// Questions `ask_user` sent in this turn that the agent waits for.
+    questions: Option<Vec<crate::questions::AskedQuestion>>,
     /// The `ask_user` and `close_questions` calls admitted whose results
     /// haven't arrived, by call ID.
     question_calls: HashMap<Uuid, QuestionCall>,
@@ -3775,7 +3774,7 @@ impl ClaudeCodeRun {
                     Some(QuestionCall::Asked {
                         asked, wait: true, ..
                     }) => {
-                        self.questions = Some((crate::questions::questions_text(&asked), asked));
+                        self.questions = Some(asked);
                     }
                     Some(QuestionCall::Asked { asked, .. }) => {
                         self.emit(AgentEvent::UserQuestionsAsked {
@@ -3809,7 +3808,7 @@ impl ClaudeCodeRun {
                         if let Some(hook) = &self.handover_hook {
                             hook.questions_asked(&self.task, &asked, wait);
                         }
-                        self.questions = Some((crate::questions::questions_text(&asked), asked));
+                        self.questions = Some(asked);
                     }
                     _ => {}
                 }
@@ -4615,7 +4614,13 @@ impl ClaudeCodeRun {
                 }
             }
         }
-        if let Some((questions, asked)) = self.questions.take() {
+        // Questions settled while the turn went on (their answer may have
+        // reached the agent as a note) aren't waited for.
+        let waited = self.questions.take().map(|asked| {
+            crate::handover::still_open(self.handover_hook.as_deref(), &mut self.task, asked)
+        });
+        if let Some(asked) = waited.filter(|asked| !asked.is_empty()) {
+            let questions = crate::questions::questions_text(&asked);
             self.set_state(TaskState::AwaitingUserResponse {
                 questions: questions.clone(),
             })

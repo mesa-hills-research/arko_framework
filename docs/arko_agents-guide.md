@@ -152,6 +152,8 @@ conversation. `HandoverHook::open_questions` returns the questions the host stil
 or `None` (the default) to go by the task's log, which knows of answers given while the agent
 waited and of the questions it closed. An answer to questions the agent waited for settles
 those the host no longer has open, so a host may answer some of a batch and keep the rest.
+Claude Code waits for the answer only when the turn that asked ends, and doesn't wait for
+questions settled while that turn went on, those the agent closed or `open_questions` leaves out.
 A host that shows several tasks' questions gives out their numbers with
 `HandoverHook::question_numbers`, one ask at a time, and `questions_asked` tells it of each ask
 as the runtime records it, before the agent goes on.
