@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use arko_agents::handover::{HandoverHook, HandoverSeed};
-use arko_agents::skill::{SkillManager, SkillPromptContext};
+use arko_agents::skill::{
+    LOAD_SKILL_TOOL_NAME, LoadSkillTool, SkillManager, SkillPromptContext, SkillsConfig,
+};
 use arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME;
 use arko_agents::{
     AgentConfig, AgentRuntime, HostDecisions, InterceptedResult, InterceptionFailurePolicy,
@@ -2871,16 +2873,36 @@ impl WorkflowEngine {
         }
     }
 
+    /// Loads the skills of `config` and registers its `load_skill`, for a
+    /// run in `role`.
+    ///
+    /// A subagent's `load_skill` never loads a skill kept to the main agent
+    /// (`workers: false`), also when its configuration was saved before
+    /// [`SkillsConfig::subagent`](arko_agents::skill::SkillsConfig::subagent)
+    /// was set, or inherited from one that was. Only the tool's own copy of
+    /// the configuration says so, so a saved conversation keeps its prompt
+    /// and its tool list.
     fn setup_skills(
         config: &mut AgentConfig,
         registry: &mut ToolRegistry,
         workspace: &std::path::Path,
+        role: RunRole,
     ) -> Result<Option<SkillPromptContext>, WorkflowError> {
         let Some(source) = config.skills_config.as_ref() else {
             return Ok(None);
         };
         let manager = SkillManager::load(source, workspace)?;
-        Ok(Some(manager.setup(registry, config)))
+        let narrowed = (role.subagent && !source.subagent).then(|| SkillsConfig {
+            subagent: true,
+            ..source.clone()
+        });
+        let context = manager.setup(registry, config);
+        if let Some(narrowed) = narrowed
+            && registry.get(LOAD_SKILL_TOOL_NAME).is_some()
+        {
+            registry.register(Arc::new(LoadSkillTool::new(narrowed, workspace)));
+        }
+        Ok(Some(context))
     }
 
     pub fn new(llm_client: Arc<LLMClient>, persistence: Option<PersistenceManager>) -> Self {
@@ -3289,7 +3311,8 @@ impl WorkflowEngine {
             };
             let mut config = self.prepare_agent_config_for(agent_name, base_config, ctx, role);
             let mut registry = self.build_tool_registry(agent_name, ctx, role);
-            let skill_prompt_context = Self::setup_skills(&mut config, &mut registry, &workspace)?;
+            let skill_prompt_context =
+                Self::setup_skills(&mut config, &mut registry, &workspace, role)?;
             Ok((config, registry, skill_prompt_context, workspace))
         });
         let (config, registry, skill_prompt_context, workspace) = match prepared {
@@ -3890,6 +3913,7 @@ impl WorkflowEngine {
             &mut task.agent_config,
             &mut registry,
             &task.current_working_directory,
+            RunRole::of(ctx, depth, task.id),
         )?;
         // Continued once at a time.
         if !ctx.registry.start_unless_running(task.id, agent_name) {
@@ -4147,6 +4171,7 @@ impl WorkflowEngine {
             &mut task.agent_config,
             &mut registry,
             &task.current_working_directory,
+            RunRole::of(ctx, depth, task.id),
         )?;
         // Resumed once at a time.
         if !ctx.registry.start_unless_running(task.id, agent_name) {
@@ -4264,6 +4289,7 @@ impl WorkflowEngine {
             &mut task.agent_config,
             &mut registry,
             &task.current_working_directory,
+            RunRole::of(ctx, depth, task.id),
         )?;
         let refresh = AgentRuntime::new(self.llm_client.clone())
             .refresh_prompt_cache(task, Arc::new(registry), skill_prompt_context)
@@ -4422,6 +4448,7 @@ impl WorkflowEngine {
                 &mut task.agent_config,
                 &mut registry,
                 &task.current_working_directory,
+                RunRole::of(ctx, recovery.depth, task.id),
             )?;
             // Claimed before anything is recorded, so that a second recovery
             // of the same run records nothing twice.
@@ -5527,9 +5554,14 @@ mod tests {
             ..Default::default()
         });
         let mut registry = ToolRegistry::new();
-        let context = WorkflowEngine::setup_skills(&mut config, &mut registry, &workspace)
-            .unwrap()
-            .unwrap();
+        let context = WorkflowEngine::setup_skills(
+            &mut config,
+            &mut registry,
+            &workspace,
+            RunRole::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             context.auto_loaded_skills[0].content.trim(),
             "principles content"
@@ -5547,7 +5579,15 @@ mod tests {
             "invalid frontmatter",
         )
         .unwrap();
-        assert!(WorkflowEngine::setup_skills(&mut config, &mut registry, &workspace).is_err());
+        assert!(
+            WorkflowEngine::setup_skills(
+                &mut config,
+                &mut registry,
+                &workspace,
+                RunRole::default()
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

@@ -730,3 +730,80 @@ async fn skills_set_while_runs_go_reach_only_the_runs_that_start_after() {
     assert!(again.contains("The lead-new text."), "{again}");
     assert!(!again.contains("lead-old"), "{again}");
 }
+
+/// A subagent's `load_skill` doesn't load a skill kept to the main agent
+/// (`workers: false`), also when its configuration doesn't say it's a
+/// subagent's (one saved before `SkillsConfig::subagent`, or inherited from
+/// the lead's). A subagent continued from its saved task is refused it too,
+/// and its conversation keeps the tools it started with. The lead loads it.
+#[tokio::test]
+async fn a_subagent_never_loads_a_skill_kept_to_the_main_agent() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                load("kept"),
+                start("Review it."),
+                wait(),
+                (
+                    "message_agent",
+                    json!({ "to": "r1", "message": "Load it again." }),
+                ),
+                wait(),
+            ],
+        ),
+        (
+            "r1",
+            vec![
+                load("kept"),
+                load("open"),
+                ("complete_task", json!({ "summary": "Loaded one." })),
+                load("kept"),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    // As a configuration saved before `subagent` was set: false.
+    let saved = SkillsConfig {
+        embedded: vec![
+            EmbeddedSkill::new(
+                "kept",
+                "---\nname: kept\ndescription: For the main agent.\nworkers: false\n---\nThe kept text.\n",
+            ),
+            skill("open", false, "text"),
+        ],
+        ..Default::default()
+    };
+    assert!(!saved.subagent);
+    let workflow = builder_with(&server, &workspace, Some(saved.clone()), Some(saved))
+        .build()
+        .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate the review."))
+        .await
+        .unwrap();
+    assert_eq!(lead.summary, "lead done");
+    assert_eq!(
+        result_of(&bodies_of(&server, "lead")[1], "lead", 0),
+        "--- BEGIN SKILL: kept ---\nThe kept text.\n--- END SKILL: kept ---"
+    );
+
+    let worker = bodies_of(&server, "r1");
+    let refused = result_of(&worker[1], "r1", 0);
+    assert!(refused.starts_with("Skill 'kept' not found."), "{refused}");
+    assert_eq!(
+        result_of(&worker[2], "r1", 1),
+        "--- BEGIN SKILL: open ---\nThe open text.\n--- END SKILL: open ---"
+    );
+    // Continued from its saved task by the lead's message.
+    let continued = worker.last().unwrap();
+    assert!(continued.contains("Load it again."), "{continued}");
+    let refused = result_of(continued, "r1", 3);
+    assert!(refused.starts_with("Skill 'kept' not found."), "{refused}");
+    assert_eq!(offered(&worker[0]), offered(continued));
+    assert_eq!(
+        workflow.subagents().len(),
+        1,
+        "continued, not started again"
+    );
+}
