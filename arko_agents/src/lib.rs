@@ -27,6 +27,8 @@ pub mod stop;
 pub mod task;
 #[cfg(any(unix, windows))]
 pub mod terminal;
+#[cfg(test)]
+mod test_log;
 pub mod tool;
 pub mod utils;
 

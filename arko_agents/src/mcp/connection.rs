@@ -28,8 +28,9 @@ const STDERR_DRAIN: Duration = Duration::from_millis(250);
 /// How long a failed handshake waits for the server's exit to be reported,
 /// to give the exit as the reason.
 const EXIT_WAIT: Duration = Duration::from_millis(600);
-/// The longest stderr line an exit's description quotes.
-const QUOTED_LINE: usize = 200;
+/// The shortest value [`Redactions`] keeps out of the log. Shorter ones
+/// (`1`, `on`) would blank out ordinary words and numbers.
+const SHORTEST_REDACTED: usize = 4;
 
 /// Why a server couldn't be opened.
 #[derive(Debug)]
@@ -41,30 +42,79 @@ pub(crate) enum OpenError {
 }
 
 impl OpenError {
-    /// The reason in a few plain words, for an agent or a user: the
-    /// server's exit when it exited.
-    pub(crate) fn reason(&self, config: &McpServerConfig) -> String {
+    /// The reason in a few fixed words, for an agent or a user: the
+    /// server's exit when it exited. It never holds the server's command or
+    /// what it wrote, which can hold the values of its environment. Those
+    /// go to the log.
+    pub(crate) fn reason(&self) -> String {
         match self {
-            Self::Spawn(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                format!("{} wasn't found", program(config))
-            }
-            Self::Spawn(error) => format!("{} couldn't be started ({error})", program(config)),
+            Self::Spawn(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => "its program wasn't found".into(),
+                std::io::ErrorKind::PermissionDenied => {
+                    "its program couldn't be started (permission denied)".into()
+                }
+                _ => "its program couldn't be started".into(),
+            },
             Self::Handshake {
                 exit: Some(exit), ..
             } => exit.clone(),
-            Self::Handshake { error, exit: None } => {
-                format!("the MCP handshake failed ({error})")
-            }
+            Self::Handshake { exit: None, .. } => "it didn't complete the MCP handshake".into(),
         }
+    }
+
+    /// What the log says of it: the program by its file name and the error
+    /// in full, with `redactions` applied.
+    fn diagnostic(&self, config: &McpServerConfig, redactions: &Redactions) -> String {
+        let program = program(config);
+        redactions.apply(&match self {
+            Self::Spawn(error) => format!("{program} couldn't be started: {error}"),
+            Self::Handshake { error, .. } => format!("the MCP handshake failed: {error}"),
+        })
     }
 }
 
-/// The program a server runs, by its file name (`npx`, `python3`).
-pub(crate) fn program(config: &McpServerConfig) -> String {
+/// The program a server runs, by its file name (`npx`, `python3`), for the
+/// log only, as an expanded command can hold a secret.
+fn program(config: &McpServerConfig) -> String {
     std::path::Path::new(&config.command)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| config.command.clone())
+}
+
+/// The values a server's log lines must not show: those of its config's
+/// [`env`](McpServerConfig::env) and of the host's
+/// [`expanded`](McpServerConfig::expanded) variables, each shown as
+/// `${NAME}` instead. A server can print its own environment and arguments
+/// to stderr, a token among them.
+#[derive(Debug, Default)]
+pub(crate) struct Redactions(Vec<(String, String)>);
+
+impl Redactions {
+    pub(crate) fn of(config: &McpServerConfig) -> Self {
+        let mut values: Vec<(String, String)> = config
+            .env
+            .iter()
+            .chain(&config.expanded)
+            .filter(|(_, value)| value.chars().count() >= SHORTEST_REDACTED)
+            .map(|(name, value)| (value.clone(), format!("${{{name}}}")))
+            .collect();
+        // The longest first, so a value holding another goes whole.
+        values.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
+        values.dedup_by(|a, b| a.0 == b.0);
+        Self(values)
+    }
+
+    /// `text` with each value replaced by its name.
+    pub(crate) fn apply(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        for (value, name) in &self.0 {
+            if text.contains(value.as_str()) {
+                text = text.replace(value.as_str(), name);
+            }
+        }
+        text
+    }
 }
 
 /// A server's process and the MCP session with it.
@@ -87,7 +137,26 @@ impl Connection {
     /// when the host is killed outright, but it fires when the thread that
     /// started the server exits, not the host, and reaches only the
     /// launcher, not the programs behind it.
+    ///
+    /// A failure is logged in full, with [`Redactions`] applied, and its
+    /// [`reason`](OpenError::reason) says it in fixed words.
     pub(crate) async fn open(config: &McpServerConfig) -> Result<Self, OpenError> {
+        let redactions = Arc::new(Redactions::of(config));
+        let opened = Self::open_with(config, redactions.clone()).await;
+        if let Err(error) = &opened {
+            log::warn!(
+                "MCP server '{}': {}",
+                config.name,
+                error.diagnostic(config, &redactions)
+            );
+        }
+        opened
+    }
+
+    async fn open_with(
+        config: &McpServerConfig,
+        redactions: Arc<Redactions>,
+    ) -> Result<Self, OpenError> {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .stdin(Stdio::piped())
@@ -110,10 +179,10 @@ impl Connection {
         let exit = Arc::new(Mutex::new(None));
         let watcher = watch_server(
             config.name.clone(),
-            program(config),
             child,
             tree,
             stderr,
+            redactions,
             stopped,
             exit.clone(),
         );
@@ -160,7 +229,7 @@ impl Connection {
             .filter(|text| !text.trim().is_empty())
     }
 
-    /// How the process ended, once it ended on its own (`npx exited with
+    /// How the process ended, once it ended on its own (`it exited with
     /// code 1`), or `None` while it runs.
     pub(crate) fn exited(&self) -> Option<String> {
         if let Some(exit) = self.exit.lock().unwrap().clone() {
@@ -212,32 +281,24 @@ fn signal_of(_status: &ExitStatus) -> Option<i32> {
     None
 }
 
-/// `program`'s exit as a short phrase: `npx exited with code 1 after
-/// writing “Cannot find module”`.
-fn describe_exit(program: &str, status: &std::io::Result<ExitStatus>, tail: &[String]) -> String {
-    let how = match status {
+/// A server's exit as a short phrase, `it exited with code 1`, with nothing
+/// the server wrote (its stderr goes to the log only).
+fn describe_exit(status: &std::io::Result<ExitStatus>) -> String {
+    match status {
         Ok(status) => match (status.code(), signal_of(status)) {
-            (Some(code), _) => format!("{program} exited with code {code}"),
-            (None, Some(signal)) => format!("{program} ended on signal {signal}"),
-            (None, None) => format!("{program} exited"),
+            (Some(code), _) => format!("it exited with code {code}"),
+            (None, Some(signal)) => format!("it ended on signal {signal}"),
+            (None, None) => "it exited".into(),
         },
-        Err(_) => format!("{program} exited"),
-    };
-    match tail.iter().rev().find(|line| !line.trim().is_empty()) {
-        Some(line) => {
-            let line = line.trim();
-            let quoted: String = line.chars().take(QUOTED_LINE).collect();
-            let cut = if quoted.len() < line.len() { "…" } else { "" };
-            format!("{how} after writing “{quoted}{cut}”")
-        }
-        None => how,
+        Err(_) => "it exited".into(),
     }
 }
 
 /// Watches a server process: logs each stderr line at info level, tagged
-/// with the server's name, and when the process exits on its own, logs one
-/// warning with its exit status and last stderr lines, records how it ended
-/// in `exit` (see [`describe_exit`]), and returns them.
+/// with the server's name and with `redactions` applied, and when the
+/// process exits on its own, logs one warning with its exit status and last
+/// stderr lines, records how it ended in `exit` (see [`describe_exit`]),
+/// and returns them.
 /// `stop` stops the process: sent, it gets [`SHUTDOWN_GRACE`] to exit before
 /// it is killed. Dropped, it is killed at once. A stopped process's exit is
 /// logged at info level only.
@@ -247,10 +308,10 @@ fn describe_exit(program: &str, status: &std::io::Result<ExitStatus>, tail: &[St
 /// is dropped, as when its runtime ends.
 fn watch_server(
     name: String,
-    program: String,
     mut child: Child,
     mut tree: ProcessTree,
     stderr: Option<ChildStderr>,
+    redactions: Arc<Redactions>,
     mut stop: oneshot::Receiver<()>,
     exit: Arc<Mutex<Option<String>>>,
 ) -> JoinHandle<Option<ServerExit>> {
@@ -269,7 +330,7 @@ fn watch_server(
                     Ok(0) => break,
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&bytes);
-                        let line = line.trim_end_matches(['\n', '\r']).to_string();
+                        let line = redactions.apply(line.trim_end_matches(['\n', '\r']));
                         log::info!("MCP server '{name}' stderr: {line}");
                         let mut tail = tail.lock().unwrap();
                         if tail.len() == STDERR_LINES_KEPT {
@@ -332,7 +393,7 @@ fn watch_server(
                 stderr_tail.join("\n")
             );
         }
-        *exit.lock().unwrap() = Some(describe_exit(&program, &status, &stderr_tail));
+        *exit.lock().unwrap() = Some(describe_exit(&status));
         Some(ServerExit {
             status,
             stderr_tail,
@@ -342,6 +403,8 @@ fn watch_server(
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     fn server(script: &str) -> (Child, ProcessTree, Option<ChildStderr>) {
@@ -361,14 +424,22 @@ mod tests {
         script: &str,
         stopped: oneshot::Receiver<()>,
     ) -> (JoinHandle<Option<ServerExit>>, Arc<Mutex<Option<String>>>) {
+        watch_redacting(script, Redactions::default(), stopped)
+    }
+
+    fn watch_redacting(
+        script: &str,
+        redactions: Redactions,
+        stopped: oneshot::Receiver<()>,
+    ) -> (JoinHandle<Option<ServerExit>>, Arc<Mutex<Option<String>>>) {
         let (child, tree, stderr) = server(script);
         let exit = Arc::new(Mutex::new(None));
         let watcher = watch_server(
             "files".into(),
-            "sh".into(),
             child,
             tree,
             stderr,
+            Arc::new(redactions),
             stopped,
             exit.clone(),
         );
@@ -376,7 +447,7 @@ mod tests {
     }
 
     /// A server that exits on its own is reported with its exit status and
-    /// last stderr lines.
+    /// last stderr lines, and its exit is described without them.
     #[tokio::test]
     async fn a_server_that_exits_is_reported_with_its_status_and_stderr() {
         let (_stop, stopped) = oneshot::channel();
@@ -392,8 +463,35 @@ mod tests {
         assert_eq!(exit.stderr_tail, ["starting", "fatal: no config"]);
         assert_eq!(
             described.lock().unwrap().as_deref(),
-            Some("sh exited with code 3 after writing “fatal: no config”")
+            Some("it exited with code 3")
         );
+    }
+
+    /// The values of the server's environment, and those the host expanded,
+    /// are replaced by their names in what it writes.
+    #[tokio::test]
+    async fn stderr_is_kept_with_the_environment_values_replaced() {
+        let mut config = McpServerConfig::new("files", "sh")
+            .with_env([("GITHUB_TOKEN", "ghp_fake_token_1234"), ("SHORT", "on")]);
+        config.expanded = HashMap::from([("API_KEY".into(), "sk-fake-key-5678".into())]);
+        let (_stop, stopped) = oneshot::channel();
+        let (watcher, _) = watch_redacting(
+            "echo 'token ghp_fake_token_1234, key sk-fake-key-5678, mode on' >&2; exit 1",
+            Redactions::of(&config),
+            stopped,
+        );
+        let exit = watcher.await.unwrap().unwrap();
+        assert_eq!(
+            exit.stderr_tail,
+            ["token ${GITHUB_TOKEN}, key ${API_KEY}, mode on"]
+        );
+    }
+
+    #[test]
+    fn a_value_holding_another_is_replaced_whole() {
+        let config =
+            McpServerConfig::new("files", "sh").with_env([("A", "abcd"), ("AB", "abcdefgh")]);
+        assert_eq!(Redactions::of(&config).apply("abcdefgh abcd"), "${AB} ${A}");
     }
 
     /// Bytes that aren't UTF-8 don't stop the reading: the server can keep
@@ -451,19 +549,17 @@ mod tests {
     #[test]
     fn an_exit_is_described_in_a_few_words() {
         use std::os::unix::process::ExitStatusExt;
-        let code = |code: i32| Ok(ExitStatus::from_raw(code << 8));
         assert_eq!(
-            describe_exit("npx", &code(1), &[]),
-            "npx exited with code 1"
+            describe_exit(&Ok(ExitStatus::from_raw(1 << 8))),
+            "it exited with code 1"
         );
         assert_eq!(
-            describe_exit("npx", &Ok(ExitStatus::from_raw(9)), &[]),
-            "npx ended on signal 9"
+            describe_exit(&Ok(ExitStatus::from_raw(9))),
+            "it ended on signal 9"
         );
-        let long = "x".repeat(300);
-        let described = describe_exit("npx", &code(2), &[long, String::new()]);
-        let (said, quoted) = described.split_once('“').unwrap();
-        assert_eq!(said, "npx exited with code 2 after writing ");
-        assert_eq!(quoted, format!("{}…”", "x".repeat(QUOTED_LINE)));
+        assert_eq!(
+            describe_exit(&Err(std::io::Error::other("gone"))),
+            "it exited"
+        );
     }
 }

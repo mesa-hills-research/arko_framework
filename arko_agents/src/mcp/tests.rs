@@ -158,10 +158,10 @@ async fn the_hub_starts_stops_adds_and_removes_servers_and_reports_failures() {
     let ServerState::Failed(reason) = &facts[1].state else {
         panic!("{:?}", facts[1].state);
     };
-    assert_eq!(reason, "arko-no-such-mcp-server wasn't found");
+    assert_eq!(reason, "its program wasn't found");
     assert_eq!(
         hub.start("broken").await.unwrap_err(),
-        "Couldn't start broken, because arko-no-such-mcp-server wasn't found."
+        "Couldn't start broken, because its program wasn't found."
     );
     assert_eq!(
         hub.start("nothing").await.unwrap_err(),
@@ -219,8 +219,8 @@ async fn the_hub_starts_stops_adds_and_removes_servers_and_reports_failures() {
     })
     .await
     .expect("the exit is reported");
-    assert!(state.contains("exited with code 7"), "{state}");
-    assert!(state.contains("“stub server: asked to exit”"), "{state}");
+    // What it wrote to stderr goes to the log only.
+    assert_eq!(state, "it exited with code 7");
     // The next call starts it again.
     let again = json!({"text": "again"}).as_object().unwrap().clone();
     let output = hub.call(&context, "issues", "echo", again).await.unwrap();
@@ -231,6 +231,127 @@ async fn the_hub_starts_stops_adds_and_removes_servers_and_reports_failures() {
             .iter()
             .all(|server| server.state == ServerState::Stopped || server.name == "broken")
     );
+}
+
+const ENV_SECRET: &str = "ghp_fake_env_secret_1234";
+const ARG_SECRET: &str = "sk-fake-arg-secret-5678";
+
+/// A server that writes the secrets of its environment and arguments to
+/// stderr, then exits with code 3 (or with `stall`, waits a minute).
+fn leaky(name: &str, stall: bool) -> McpServerConfig {
+    let end = if stall {
+        "time.sleep(60)"
+    } else {
+        "sys.exit(3)"
+    };
+    let script = format!(
+        "import os, sys, time\nsys.stderr.write('token ' + os.environ['LEAKY_TOKEN'] + ' key ' + sys.argv[1] + '\\n')\nsys.stderr.flush()\n{end}"
+    );
+    McpServerConfig::new(name, python())
+        .with_args(["-c".to_string(), script, ARG_SECRET.to_string()])
+        .with_env([("LEAKY_TOKEN", ENV_SECRET)])
+        .with_expanded([("API_KEY", ARG_SECRET)])
+}
+
+/// What an agent reads holds none of a server's secrets, its command or
+/// what it wrote.
+fn assert_clean(text: &str) {
+    for secret in [ENV_SECRET, ARG_SECRET, "python", "LEAKY_TOKEN", "token "] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+}
+
+/// A failure's reason is the server's name and fixed words, wherever an
+/// agent reads it: `servers`, `start` and `call`. What the server wrote, and
+/// the program the host expanded, go to the log, with the values of its
+/// environment replaced by their names.
+#[tokio::test]
+async fn failures_show_no_secrets_and_the_log_shows_their_names() {
+    crate::test_log::install();
+    let mut gone = McpServerConfig::new("gone", format!("/nonexistent/{ARG_SECRET}"));
+    gone.expanded = HashMap::from([("API_KEY".into(), ARG_SECRET.into())]);
+    let hub = McpHub::new(vec![leaky("leaky", false), gone]);
+    hub.start_all(TIMEOUT).await;
+    let (bridge, _) = lead(&hub);
+    let servers = text(&bridge, json!({"action": "servers"})).await;
+    assert_eq!(
+        servers,
+        [
+            "leaky  failed (it exited with code 3). start tries again.",
+            "gone   failed (its program wasn't found). start tries again.",
+        ]
+        .join("\n")
+    );
+    let started = error(&bridge, json!({"action": "start", "server": "leaky"})).await;
+    assert_eq!(
+        started,
+        "Couldn't start leaky, because it exited with code 3."
+    );
+    let called = error(
+        &bridge,
+        json!({"action": "call", "server": "leaky", "tool": "echo"}),
+    )
+    .await;
+    assert_eq!(called, started);
+    let workspace = workspace();
+    let context = TaskContext::new(uuid::Uuid::new_v4(), "tester", "test", &workspace);
+    let direct = hub
+        .call(&context, "gone", "echo", serde_json::Map::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        direct.contains("Couldn't start gone, because its program wasn't found."),
+        "{direct}"
+    );
+    for text in [&servers, &started, &called, &direct] {
+        assert_clean(text);
+    }
+    for facts in hub.servers() {
+        assert_clean(&format!("{facts:?}"));
+    }
+
+    let logged = crate::test_log::logged(log::Level::Info, "MCP server '");
+    let leaked: Vec<&String> = logged
+        .iter()
+        .filter(|line| line.contains(ENV_SECRET) || line.contains(ARG_SECRET))
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:?}");
+    assert!(
+        logged
+            .iter()
+            .any(|line| line == "MCP server 'leaky' stderr: token ${LEAKY_TOKEN} key ${API_KEY}"),
+        "{logged:#?}"
+    );
+    assert!(
+        logged
+            .iter()
+            .any(|line| line.starts_with("MCP server 'gone': ${API_KEY} couldn't be started: ")),
+        "{logged:#?}"
+    );
+    hub.shutdown().await;
+}
+
+/// A server that doesn't answer in time is said to be so, also without
+/// what it wrote.
+#[tokio::test]
+async fn a_server_that_doesnt_answer_in_time_shows_no_secrets() {
+    let hub = McpHub::new(vec![leaky("slow", true)]);
+    hub.start_all(Duration::from_secs(1)).await;
+    let (bridge, _) = lead(&hub);
+    let servers = text(&bridge, json!({"action": "servers"})).await;
+    assert_eq!(
+        servers,
+        "slow  failed (it didn't start within 1 s). start tries again."
+    );
+    let started = error(&bridge, json!({"action": "start", "server": "slow"})).await;
+    assert_eq!(
+        started,
+        "Couldn't start slow, because it didn't start within 1 s."
+    );
+    assert_clean(&servers);
+    assert_clean(&started);
+    hub.shutdown().await;
 }
 
 #[tokio::test]
@@ -261,7 +382,7 @@ async fn servers_lists_each_server_with_its_state_and_what_it_is_for() {
             "issues  running, 3 tools  Tracks issues for tests.",
             "quiet   stopped",
             "kept    running, 3 tools  Added by an agent to read this project's errors. Main agent only.",
-            "figma   failed (arko-no-such-mcp-server wasn't found). start tries again.",
+            "figma   failed (its program wasn't found). start tries again.",
         ]
         .join("\n")
     );
@@ -424,7 +545,7 @@ async fn the_bridge_names_what_to_do_next_when_a_call_goes_wrong() {
     );
     assert_eq!(
         error(&bridge, json!({"action": "start", "server": "figma"})).await,
-        "Couldn't start figma, because arko-no-such-mcp-server wasn't found."
+        "Couldn't start figma, because its program wasn't found."
     );
     assert_eq!(
         text(&bridge, json!({"action": "start", "server": "issues"})).await,

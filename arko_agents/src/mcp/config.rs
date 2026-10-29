@@ -35,6 +35,12 @@ pub struct McpServerConfig {
     /// sentence of the server's own instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The `${VAR}`s the host put into the command, arguments and
+    /// environment, as variable names and values. A server can print them
+    /// to its stderr, so the log shows `${VAR}` in place of each value, as
+    /// it does for the values of `env`. Not saved.
+    #[serde(skip)]
+    pub expanded: HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -57,7 +63,21 @@ impl McpServerConfig {
             workers: true,
             shared: false,
             description: None,
+            expanded: HashMap::new(),
         }
+    }
+
+    /// This server with `expanded` as the host's [expanded](Self::expanded)
+    /// variables.
+    pub fn with_expanded(
+        mut self,
+        expanded: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.expanded = expanded
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        self
     }
 
     /// This server with `args` as its arguments.

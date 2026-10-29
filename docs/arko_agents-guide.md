@@ -804,6 +804,12 @@ to the host's stderr. A server that exits while the manager still uses it is rep
 once, with a warning giving its exit status and last stderr lines. Its tools then fail
 with a tool error, which the tool-error policy handles.
 
+A server can print its environment and arguments, so the log shows `${NAME}` in place of
+each value of its `env` and of `McpServerConfig::expanded`, the `${VAR}`s a host put into
+its command, arguments and environment (values shorter than 4 characters stay). The
+errors and failure reasons an agent reads hold neither the command nor what the server
+wrote, only fixed words such as "it exited with code 1" or "its program wasn't found".
+
 ### The MCP hub and the mcp tool
 
 `McpHub` holds a session's servers and changes them while agents run. Agents reach every

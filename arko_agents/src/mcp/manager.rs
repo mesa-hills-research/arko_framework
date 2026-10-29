@@ -65,15 +65,19 @@ impl McpManager {
     async fn connect_server(
         config: &McpServerConfig,
     ) -> Result<(Connection, Vec<Arc<McpTool>>), ArkoAgentsError> {
+        // The error leaves out the command and the server's own words, which
+        // can hold the values of its environment. The log has them.
         let connection = Connection::open(config).await.map_err(|error| {
             ArkoAgentsError::Runtime(match error {
-                OpenError::Spawn(error) => format!(
-                    "Failed to spawn MCP server '{}' (command: '{}'): {}",
-                    config.name, config.command, error
+                OpenError::Spawn(_) => format!(
+                    "Failed to spawn MCP server '{}': {}",
+                    config.name,
+                    error.reason()
                 ),
-                OpenError::Handshake { error, .. } => format!(
+                OpenError::Handshake { .. } => format!(
                     "Failed to initialise MCP client for server '{}': {}",
-                    config.name, error
+                    config.name,
+                    error.reason()
                 ),
             })
         })?;

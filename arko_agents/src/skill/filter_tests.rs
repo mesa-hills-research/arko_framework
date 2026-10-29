@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Mutex, Once};
 
 use serde_json::{Value, json};
 use zip::write::SimpleFileOptions;
@@ -575,33 +574,9 @@ async fn an_offered_load_skill_finds_the_first_skill_written_later() {
 
 // Optional sources.
 
-static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-struct Capture;
-
-impl log::Log for Capture {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
-    }
-    fn log(&self, record: &log::Record) {
-        LOG.lock().unwrap().push(record.args().to_string());
-    }
-    fn flush(&self) {}
-}
-
 /// The warnings and errors logged that mention `needle`, from now on.
 fn logged(needle: &str) -> Vec<String> {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = log::set_logger(&Capture);
-        log::set_max_level(log::LevelFilter::Warn);
-    });
-    LOG.lock()
-        .unwrap()
-        .iter()
-        .filter(|line| line.contains(needle))
-        .cloned()
-        .collect()
+    crate::test_log::logged(log::Level::Warn, needle)
 }
 
 #[test]

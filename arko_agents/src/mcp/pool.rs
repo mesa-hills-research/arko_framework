@@ -139,12 +139,18 @@ impl SharedServer {
                     ended.stop().await;
                 }
                 match tokio::time::timeout(timeout, Connection::open(&config)).await {
-                    Ok(opened) => opened.map_err(|error| error.reason(&config)),
+                    Ok(opened) => opened.map_err(|error| error.reason()),
                     Err(_) => Err(format!("it didn't start within {} s", timeout.as_secs())),
                 }
             })
             .await
-            .map_err(|error| format!("its start was stopped ({error})"))??;
+            .map_err(|error| {
+                log::warn!(
+                    "MCP server '{}': its start was stopped ({error})",
+                    self.config.name
+                );
+                "its start was stopped".to_string()
+            })??;
         let peer = opened.peer();
         *self.connection.lock().unwrap() = Some(opened);
         Ok(peer)

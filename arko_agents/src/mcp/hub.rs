@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use super::bridge::McpAccess;
 use super::call::{CallFailure, call_tool};
 use super::config::McpServerConfig;
-use super::connection::Connection;
+use super::connection::{Connection, Redactions};
 use super::pool::{self, SharedServer};
 use super::tool::mcp_definition;
 use crate::tool::{TaskContext, Tool, ToolBackground, ToolDefinition, ToolError, ToolOutput};
@@ -33,8 +33,10 @@ pub enum ServerState {
     Running,
     /// It was never started, or was stopped. A call starts it.
     Stopped,
-    /// It didn't start, or it ended on its own, for this reason (`npx
-    /// exited with code 1`, `it didn't start within 60 s`).
+    /// It didn't start, or it ended on its own, for this reason in fixed
+    /// words (`it exited with code 1`, `its program wasn't found`, `it
+    /// didn't start within 60 s`). The reason never holds the server's
+    /// command or what it wrote to stderr, which go to the log.
     Failed(String),
 }
 
@@ -232,7 +234,7 @@ impl Entry {
     }
 }
 
-/// "Couldn't start github, because npx exited with code 1."
+/// "Couldn't start github, because it exited with code 1."
 fn couldnt_start(server: &str, reason: &str) -> String {
     format!(
         "Couldn't start {server}, because {}.",
@@ -326,7 +328,7 @@ impl McpHub {
 
     /// Starts the server `name` unless it runs, and returns its facts, or
     /// a sentence saying why it didn't start (`Couldn't start github,
-    /// because npx exited with code 1.`). Its state then holds the reason.
+    /// because it exited with code 1.`). Its state then holds the reason.
     pub async fn start(&self, name: &str) -> Result<ServerFacts, String> {
         let entry = self.entry(name)?;
         self.start_entry(&entry)
@@ -362,14 +364,18 @@ impl McpHub {
             } else {
                 let connection = Connection::open(config)
                     .await
-                    .map_err(|error| error.reason(config))?;
+                    .map_err(|error| error.reason())?;
                 let peer = connection.peer();
                 (Link::Own(connection), peer)
             };
-            let tools = peer
-                .list_all_tools()
-                .await
-                .map_err(|error| format!("its tools couldn't be listed ({error})"))?;
+            let tools = peer.list_all_tools().await.map_err(|error| {
+                log::warn!(
+                    "MCP server '{}': its tools couldn't be listed: {}",
+                    config.name,
+                    Redactions::of(config).apply(&error.to_string())
+                );
+                "its tools couldn't be listed".to_string()
+            })?;
             Ok::<_, String>((link, peer, tools))
         })
         .await
