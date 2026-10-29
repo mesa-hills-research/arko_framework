@@ -268,6 +268,67 @@ async fn a_resumed_run_takes_the_embedded_skills_its_agent_is_registered_with() 
     );
 }
 
+/// A run saved with a list of the only skills it has (`only`, how a worker
+/// can be given fewer skills than its agent) keeps the list when it resumes
+/// with its saved configuration and gets the registered embedded skills
+/// again, which can't give it more.
+#[tokio::test]
+async fn a_resumed_run_keeps_its_only_list_when_the_embedded_skills_come_back() {
+    let server = serve_after_a_resume().await;
+    let workspace = Workspace::new();
+    let before = SkillsConfig {
+        embedded: vec![
+            skill("always", true, "version one"),
+            skill("review", false, "version one"),
+            skill("removed", false, "version one"),
+        ],
+        only: Some(vec!["always".into(), "review".into()]),
+        ..Default::default()
+    };
+    let workflow = builder_with(&server, &workspace, Some(before), None)
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "Hello.")).await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let saved = std::fs::read_to_string(latest_checkpoint(&workspace)).unwrap();
+    assert!(saved.contains("\"only\""), "the checkpoint holds the list");
+
+    // The agent is registered with more skills and no list now.
+    let after = SkillsConfig {
+        embedded: vec![
+            skill("always", true, "version two"),
+            skill("review", false, "version two"),
+            skill("added", false, "version two"),
+        ],
+        ..Default::default()
+    };
+    let resumed = builder_with(&server, &workspace, Some(after), None)
+        .keep_saved_configs(["lead"])
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    within(resumed.continue_agent(&restored, "Go on."))
+        .await
+        .unwrap();
+    let last = bodies_of(&server, "lead").pop().unwrap();
+    // The skill in the list has the new text.
+    assert_eq!(
+        output_of(&last, "c1"),
+        "--- BEGIN SKILL: review ---\nThe review version two.\n--- END SKILL: review ---"
+    );
+    // The others are not found, the new one included.
+    assert_eq!(
+        output_of(&last, "c2"),
+        "Skill 'added' not found. Available skills:\n- review"
+    );
+    assert_eq!(
+        output_of(&last, "c3"),
+        "Skill 'removed' not found. Available skills:\n- review"
+    );
+}
+
 /// A run saved by an agent that had no skills configuration resumes when
 /// the agent is registered with embedded skills, and has them.
 #[tokio::test]
@@ -306,6 +367,7 @@ async fn a_run_saved_without_skills_resumes_with_the_embedded_ones() {
             path: "/elsewhere".into(),
             include: None,
             exclude: None,
+            optional: false,
         }],
         ..Default::default()
     };

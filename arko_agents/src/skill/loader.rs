@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use super::config::{EmbeddedSkill, InvalidSkillPolicy, SkillSource, SkillsConfig};
 use super::frontmatter::parse_frontmatter;
 use super::types::{
-    AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillScan,
-    SkillSummary,
+    AutoLoadedSkillContent, LoadedSkill, SkillFrontmatter, SkillLoadError, SkillPromptContext,
+    SkillScan, SkillSummary,
 };
 use crate::error::ArkoAgentsError;
 
@@ -22,6 +22,9 @@ pub fn load_skills(
     let mut found = Vec::new();
     for (source, directory, label) in sources(config, workspace_root) {
         if !directory.is_dir() {
+            if source.optional && !directory.exists() {
+                continue;
+            }
             match config.on_invalid_skill {
                 InvalidSkillPolicy::Warn => {
                     log::warn!(
@@ -46,7 +49,7 @@ pub fn load_skills(
     found.extend(embedded_origin(config));
 
     let mut skills = Vec::new();
-    for settled in settle(found) {
+    for settled in settle(found, config) {
         match settled.outcome {
             Outcome::Loaded(skill) => skills.push(skill),
             Outcome::Invalid(error) => handle_skill_error(error, &config.on_invalid_skill)?,
@@ -56,10 +59,13 @@ pub fn load_skills(
                 }
                 InvalidSkillPolicy::Error => return Err(error),
             },
-            Outcome::LeftOut(..) | Outcome::Duplicate(..) | Outcome::Replaced(..) => {}
+            Outcome::LeftOut(..)
+            | Outcome::Duplicate(..)
+            | Outcome::Replaced(..)
+            | Outcome::Filtered(..) => {}
         }
     }
-    let prompt_context = build_prompt_context(&skills);
+    let prompt_context = build_prompt_context(&skills, config);
 
     Ok((skills, prompt_context))
 }
@@ -81,7 +87,10 @@ pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
         ));
     }
     found.extend(embedded_origin(config));
-    settle(found).into_iter().map(Settled::scan).collect()
+    settle(found, config)
+        .into_iter()
+        .map(|settled| settled.scan(config))
+        .collect()
 }
 
 /// The skill files and folders of the source directory `directory`, or,
@@ -167,7 +176,7 @@ struct Found {
 
 /// Why a skill file or folder can't be loaded. The policy skips or
 /// refuses either.
-enum Problem {
+pub(super) enum Problem {
     /// An invalid skill.
     Invalid(SkillLoadError),
     /// A file or folder that can't be read.
@@ -193,16 +202,22 @@ enum Outcome {
     /// An embedded skill that the folder skill loaded under its name, from
     /// this path, replaces.
     Replaced(LoadedSkill, PathBuf),
+    /// Left out by the configuration's `subagent` setting or `only` list,
+    /// which apply after the names are settled.
+    Filtered(LoadedSkill, &'static str),
 }
 
 impl Settled {
-    fn scan(self) -> SkillScan {
+    fn scan(self, config: &SkillsConfig) -> SkillScan {
         let scan = |skill: &LoadedSkill, skipped: Option<String>| SkillScan {
             path: self.path.clone(),
             embedded: self.embedded,
             name: skill.name.clone(),
             description: skill.description.clone(),
             auto_load: skill.auto_load,
+            models: skill.models.clone(),
+            workers: skill.workers,
+            listed: is_listed(skill, config),
             skipped,
         };
         let unread = |why: String| SkillScan {
@@ -211,6 +226,9 @@ impl Settled {
             name: self.fallback_name.clone(),
             description: String::new(),
             auto_load: false,
+            models: Vec::new(),
+            workers: true,
+            listed: false,
             skipped: Some(why),
         };
         match &self.outcome {
@@ -235,8 +253,26 @@ impl Settled {
                     by.display()
                 )),
             ),
+            Outcome::Filtered(skill, "subagent") => scan(
+                skill,
+                Some("for the main agent only (workers: false)".into()),
+            ),
+            Outcome::Filtered(skill, _) => scan(skill, Some("not in the agent's only list".into())),
         }
     }
+}
+
+/// The skill's content is in the system prompt, so `load_skill` doesn't load
+/// it: it loads automatically and is for the configuration's model.
+pub(super) fn content_in_prompt(skill: &LoadedSkill, config: &SkillsConfig) -> bool {
+    skill.auto_load && is_listed(skill, config)
+}
+
+/// The skill is for the configuration's model: its `models` match the
+/// model's names, or there are no names to filter by. The prompt lists only
+/// such skills, and `auto_load` applies only to them.
+pub(super) fn is_listed(skill: &LoadedSkill, config: &SkillsConfig) -> bool {
+    config.model_names.is_empty() || super::models_match(&skill.models, &config.model_names)
 }
 
 /// The skill files and folders in the source directory `directory`, in
@@ -314,8 +350,10 @@ fn survey_source(directory: &Path, source_label: &str) -> Result<Vec<Found>, Ark
 /// a duplicate, and one with the name of one loaded already is renamed
 /// (`name-2`). Earlier sources come first. The embedded skills come last
 /// and have the lowest priority. A folder skill's name replaces an embedded
-/// skill with that name, which is left out instead of renamed.
-fn settle(found: Vec<(Origin<'_>, Vec<Found>)>) -> Vec<Settled> {
+/// skill with that name, which is left out instead of renamed. The
+/// configuration's `subagent` setting and `only` list come last, so the
+/// names are those the agent that isn't a worker has.
+fn settle(found: Vec<(Origin<'_>, Vec<Found>)>, config: &SkillsConfig) -> Vec<Settled> {
     let mut settled = Vec::new();
     let mut name_registry: HashSet<String> = HashSet::new();
     // The path of each folder skill loaded, by the name it loaded under.
@@ -399,7 +437,17 @@ fn settle(found: Vec<(Origin<'_>, Vec<Found>)>) -> Vec<Settled> {
                 folder_skills.insert(skill.name.clone(), location);
             }
             content_hashes.insert(content_hash, skill.name.clone());
-            settled.push(settle(Outcome::Loaded(skill)));
+            if config.subagent && !skill.workers {
+                settled.push(settle(Outcome::Filtered(skill, "subagent")));
+            } else if config
+                .only
+                .as_ref()
+                .is_some_and(|only| !only.contains(&skill.name))
+            {
+                settled.push(settle(Outcome::Filtered(skill, "only")));
+            } else {
+                settled.push(settle(Outcome::Loaded(skill)));
+            }
         }
     }
 
@@ -425,7 +473,10 @@ fn left_out(skill: &LoadedSkill, source: &SkillSource) -> Option<&'static str> {
 
 /// The folder skill in `dir_path`: `None` when the folder has no
 /// `SKILL.md`.
-fn read_folder_skill(dir_path: &Path, source_label: &str) -> Option<Result<LoadedSkill, Problem>> {
+pub(super) fn read_folder_skill(
+    dir_path: &Path,
+    source_label: &str,
+) -> Option<Result<LoadedSkill, Problem>> {
     let skill_md_path = dir_path.join("SKILL.md");
     if !skill_md_path.exists() || !skill_md_path.is_file() {
         return None;
@@ -465,15 +516,7 @@ fn read_folder_skill(dir_path: &Path, source_label: &str) -> Option<Result<Loade
         return Some(Err(Problem::Unreadable(error)));
     }
 
-    Some(Ok(LoadedSkill {
-        name: frontmatter.name.clone(),
-        original_name: frontmatter.name,
-        description: frontmatter.description,
-        auto_load: frontmatter.auto_load,
-        content: body,
-        resources,
-        source_label: source_label.to_string(),
-    }))
+    Some(Ok(loaded(frontmatter, body, resources, source_label)))
 }
 
 fn collect_resources(
@@ -536,63 +579,98 @@ fn collect_resources(
 
 /// The bundle skill (a zip archive) in the file `file_path`.
 fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill, SkillLoadError> {
-    let data = match std::fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            let err = SkillLoadError::Io {
-                path: file_path.to_string_lossy().to_string(),
-                source: e,
-            };
-            return Err(err);
-        }
-    };
+    let path = file_path.to_string_lossy();
+    let data = std::fs::read(file_path).map_err(|e| SkillLoadError::Io {
+        path: path.to_string(),
+        source: e,
+    })?;
+    read_bundle_bytes(&data, &path, source_label, Bundle::Loading)
+}
 
-    let cursor = std::io::Cursor::new(data);
-    let mut archive = match zip::ZipArchive::new(cursor) {
-        Ok(a) => a,
-        Err(e) => {
-            let err = SkillLoadError::ZipError {
-                path: file_path.to_string_lossy().to_string(),
-                message: e.to_string(),
-            };
-            return Err(err);
-        }
-    };
+/// How far the entries of a bundle are checked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Bundle {
+    /// A bundle in a source directory. Its `.md` files that aren't UTF-8 text
+    /// are passed over, and its entries are only read into memory.
+    Loading,
+    /// A bundle offered to be saved as a skill, whose entries would be
+    /// written to a folder. An entry with an absolute path, a `..` or a link,
+    /// a `.md` file that isn't UTF-8 text, or more than
+    /// [`MAX_CANDIDATE_BYTES`] in all is refused.
+    Candidate,
+}
 
+/// The most that the entries of a bundle offered as a skill may hold when
+/// unpacked, so that a small file can't fill the memory.
+const MAX_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The bundle skill in the zip archive `data`, named `path` in errors.
+pub(super) fn read_bundle_bytes(
+    data: &[u8],
+    path: &str,
+    source_label: &str,
+    mode: Bundle,
+) -> Result<LoadedSkill, SkillLoadError> {
+    let zip_error = |message: String| SkillLoadError::ZipError {
+        path: path.to_string(),
+        message,
+    };
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| zip_error(e.to_string()))?;
+
+    let too_much = || {
+        zip_error(format!(
+            "The bundle holds more than {} MB unpacked.",
+            MAX_CANDIDATE_BYTES / (1024 * 1024)
+        ))
+    };
     let mut entries: Vec<(String, String)> = Vec::new();
+    // What the entries say they hold, and the text read from them.
+    let mut unpacked = 0u64;
+    let mut text_bytes = 0u64;
 
     for i in 0..archive.len() {
-        let mut zip_file = match archive.by_index(i) {
-            Ok(f) => f,
-            Err(e) => {
-                let err = SkillLoadError::ZipError {
-                    path: file_path.to_string_lossy().to_string(),
-                    message: format!("Failed to read zip entry {}: {}", i, e),
-                };
-                return Err(err);
-            }
-        };
+        let mut zip_file = archive
+            .by_index(i)
+            .map_err(|e| zip_error(format!("Failed to read zip entry {}: {}", i, e)))?;
+        let name = zip_file
+            .name()
+            .map_err(|e| zip_error(format!("Failed to read the name of zip entry {}: {}", i, e)))?
+            .replace('\\', "/");
 
-        if zip_file.is_dir() {
+        if mode == Bundle::Candidate {
+            check_candidate_entry(&zip_file, &name).map_err(&zip_error)?;
+            unpacked = unpacked.saturating_add(zip_file.size());
+            if unpacked > MAX_CANDIDATE_BYTES {
+                return Err(too_much());
+            }
+        }
+        // Only the skill's text is read.
+        if zip_file.is_dir() || !name.ends_with(".md") {
             continue;
         }
 
-        let name = match zip_file.name() {
-            Ok(name) => name.replace('\\', "/"),
-            Err(e) => {
-                let err = SkillLoadError::ZipError {
-                    path: file_path.to_string_lossy().to_string(),
-                    message: format!("Failed to read the name of zip entry {}: {}", i, e),
-                };
-                return Err(err);
-            }
-        };
         let mut content = String::new();
-        if let Err(e) = zip_file.read_to_string(&mut content) {
+        let read = match mode {
+            Bundle::Loading => zip_file.read_to_string(&mut content),
+            // However much an entry says it holds, no more than what is left
+            // of the limit is read.
+            Bundle::Candidate => (&mut zip_file)
+                .take(MAX_CANDIDATE_BYTES - text_bytes + 1)
+                .read_to_string(&mut content),
+        };
+        text_bytes += content.len() as u64;
+        if text_bytes > MAX_CANDIDATE_BYTES && mode == Bundle::Candidate {
+            return Err(too_much());
+        }
+        if let Err(e) = read {
+            if mode == Bundle::Candidate {
+                return Err(zip_error(format!("'{name}' is not UTF-8 text ({e}).")));
+            }
             log::debug!(
                 "Skipping non-UTF-8 zip entry '{}' in {:?}: {}",
                 name,
-                file_path,
+                path,
                 e
             );
             continue;
@@ -622,10 +700,6 @@ fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill
             continue;
         }
 
-        if !relative.ends_with(".md") {
-            continue;
-        }
-
         let parts: Vec<&str> = relative.split('/').collect();
         if parts.contains(&"scripts") {
             continue;
@@ -634,27 +708,41 @@ fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill
         resources.insert(relative, content.clone());
     }
 
-    let skill_md = match skill_md_content {
-        Some(c) => c,
-        None => {
-            let err = SkillLoadError::MissingSkillMd {
-                path: file_path.to_string_lossy().to_string(),
-            };
-            return Err(err);
+    let skill_md = skill_md_content.ok_or_else(|| SkillLoadError::MissingSkillMd {
+        path: path.to_string(),
+    })?;
+
+    let (frontmatter, body) = parse_frontmatter(&skill_md, path)?;
+
+    Ok(loaded(frontmatter, body, resources, source_label))
+}
+
+/// Why an entry of a bundle offered as a skill can't be written to a skill's
+/// folder, if it can't: its name leaves the folder, or it isn't a file or a
+/// folder.
+fn check_candidate_entry<R: Read + ?Sized>(
+    entry: &zip::read::ZipFile<'_, R>,
+    name: &str,
+) -> Result<(), String> {
+    let drive = name.as_bytes().get(1) == Some(&b':')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    if name.starts_with('/') || drive || name.contains('\0') {
+        return Err(format!("'{name}' has an absolute path."));
+    }
+    if name.split('/').any(|part| part == "..") || entry.enclosed_name().is_none() {
+        return Err(format!("'{name}' leaves the skill's folder."));
+    }
+    // The file type is in the mode's top bits: 0o10 a file, 0o04 a folder.
+    if let Some(mode) = entry.unix_mode() {
+        let kind = mode & 0o170000;
+        if kind == 0o120000 {
+            return Err(format!("'{name}' is a link."));
         }
-    };
-
-    let (frontmatter, body) = parse_frontmatter(&skill_md, &file_path.to_string_lossy())?;
-
-    Ok(LoadedSkill {
-        name: frontmatter.name.clone(),
-        original_name: frontmatter.name,
-        description: frontmatter.description,
-        auto_load: frontmatter.auto_load,
-        content: body,
-        resources,
-        source_label: source_label.to_string(),
-    })
+        if kind != 0 && kind != 0o100000 && kind != 0o040000 {
+            return Err(format!("'{name}' is neither a file nor a folder."));
+        }
+    }
+    Ok(())
 }
 
 fn determine_zip_root(entries: &[(String, String)]) -> String {
@@ -670,7 +758,10 @@ fn determine_zip_root(entries: &[(String, String)]) -> String {
 }
 
 /// The flat skill (a markdown file) in the file `file_path`.
-fn read_flat_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill, SkillLoadError> {
+pub(super) fn read_flat_skill(
+    file_path: &Path,
+    source_label: &str,
+) -> Result<LoadedSkill, SkillLoadError> {
     let content = std::fs::read_to_string(file_path).map_err(|e| SkillLoadError::Io {
         path: file_path.to_string_lossy().to_string(),
         source: e,
@@ -678,15 +769,7 @@ fn read_flat_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill, 
 
     let (frontmatter, body) = parse_frontmatter(&content, &file_path.to_string_lossy())?;
 
-    Ok(LoadedSkill {
-        name: frontmatter.name.clone(),
-        original_name: frontmatter.name,
-        description: frontmatter.description,
-        auto_load: frontmatter.auto_load,
-        content: body,
-        resources: HashMap::new(),
-        source_label: source_label.to_string(),
-    })
+    Ok(loaded(frontmatter, body, HashMap::new(), source_label))
 }
 
 /// The skill given in memory, read as a flat skill is, with no resources.
@@ -703,15 +786,27 @@ fn read_embedded_skill(embedded: &EmbeddedSkill) -> Result<LoadedSkill, SkillLoa
         );
     }
 
-    Ok(LoadedSkill {
+    Ok(loaded(frontmatter, body, HashMap::new(), EMBEDDED_LABEL))
+}
+
+/// The skill that the parsed front matter, the body and the resources make.
+fn loaded(
+    frontmatter: SkillFrontmatter,
+    content: String,
+    resources: HashMap<String, String>,
+    source_label: &str,
+) -> LoadedSkill {
+    LoadedSkill {
         name: frontmatter.name.clone(),
         original_name: frontmatter.name,
         description: frontmatter.description,
         auto_load: frontmatter.auto_load,
-        content: body,
-        resources: HashMap::new(),
-        source_label: EMBEDDED_LABEL.to_string(),
-    })
+        models: frontmatter.models,
+        workers: frontmatter.workers,
+        content,
+        resources,
+        source_label: source_label.to_string(),
+    }
 }
 
 fn compute_skill_content_hash(skill: &LoadedSkill) -> u64 {
@@ -726,11 +821,14 @@ fn compute_skill_content_hash(skill: &LoadedSkill) -> u64 {
     hasher.finish()
 }
 
-fn build_prompt_context(skills: &[LoadedSkill]) -> SkillPromptContext {
+/// What the prompt holds of the skills: the content of those that load
+/// automatically and the line of each other, for the skills that are for
+/// the configuration's model. The others are not in the prompt.
+fn build_prompt_context(skills: &[LoadedSkill], config: &SkillsConfig) -> SkillPromptContext {
     let mut on_demand = Vec::new();
     let mut auto_loaded = Vec::new();
 
-    for skill in skills {
+    for skill in skills.iter().filter(|skill| is_listed(skill, config)) {
         if skill.auto_load {
             auto_loaded.push(AutoLoadedSkillContent {
                 name: skill.name.clone(),
@@ -811,6 +909,7 @@ mod tests {
             path: path.display().to_string(),
             include: None,
             exclude: None,
+            optional: false,
         }
     }
 
@@ -842,11 +941,13 @@ mod tests {
                 path: ".skills".into(),
                 include: None,
                 exclude: Some(vec!["left".into()]),
+                optional: false,
             }),
             global_sources: vec![global(&second), global(&temp.0.join("missing"))],
             embedded: Vec::new(),
             on_invalid_skill: InvalidSkillPolicy::Warn,
             load_skill_interception: None,
+            ..Default::default()
         };
 
         let scanned = scan(&config, &workspace);
@@ -946,6 +1047,7 @@ mod tests {
             embedded: Vec::new(),
             on_invalid_skill: InvalidSkillPolicy::Warn,
             load_skill_interception: None,
+            ..Default::default()
         };
         let (loaded, _) = load_skills(&config, &temp.0).unwrap();
         let names: Vec<&str> = loaded.iter().map(|skill| skill.name.as_str()).collect();

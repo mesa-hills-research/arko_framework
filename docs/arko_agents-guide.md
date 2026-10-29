@@ -845,6 +845,61 @@ configuration. It returns the `SkillPromptContext` to pass to `run_task`. Auto-l
 skills are placed in the system prompt. The others are listed there by name and
 description and loaded on demand.
 
+`load_skill` reads the skill sources at each call, so it finds a skill written after the run
+started, finds an edit, and no longer finds a removed skill. The system prompt keeps the list
+it started with. A conversation that starts with no skills has no `load_skill` and gains the
+tool, and misses its prompt cache, when a skill appears later. Set
+`SkillsConfig::offer_when_empty` to register the tool with no skills. A `SkillSource` with
+`optional: true` may not exist yet. A missing one is empty, with no warning and no error under
+`InvalidSkillPolicy::Error`.
+
+#### Skills for some models and for the main agent
+
+A skill's front matter can set `models`, one pattern or a list, and `workers: false`.
+
+```yaml
+---
+name: haiku-tips
+description: Reminders for small models.
+models: [haiku, "gpt-6*"]
+workers: false
+---
+```
+
+`SkillsConfig::model_names` holds the names the agent's model goes by, which the host fills
+in. The system prompt lists only the skills whose `models` match a name, and `auto_load`
+applies only to those. Any other skill leaves the prompt and still loads by its exact name
+with `load_skill`, and the "not found" answer lists only the matching skills. A skill with no
+`models`, and an empty `model_names`, match everything.
+
+A pattern is matched against the whole name, ignoring case. `*` matches any run of
+characters and `?` one character. A name has one of three kinds, and a pattern reaches
+only names of its own kind.
+
+| Pattern starts with | Matches names of |
+|---|---|
+| `cc:` or `claude-code:` | A model run through Claude Code, such as `cc:haiku` |
+| `openrouter:` | The model's slug on OpenRouter, such as `openrouter:anthropic/claude-haiku-5.5` |
+| Anything else | A plain name, such as a model id or a short name for it |
+
+So `*haiku*` never reaches an OpenRouter slug. The host decides which names a model goes by
+and passes them in `model_names`, with the `cc:` and `openrouter:` prefixes on the names of
+those kinds. `skill::models_match(patterns, names)` is the matcher. Write a pattern that
+starts with `*` in quotes in YAML.
+
+`SkillsConfig::subagent` leaves out the skills with `workers: false`, for a worker. `only`
+is the list of the only skills the agent has, by the name they load under. Both apply after
+deduplication, to embedded skills too, so names mean what they mean to the main agent. `only`
+filters at load, so a resumed run that gets its embedded skills again has no more than the
+list. `skill::scan` reports `models`, `workers` and `listed`, and names the reason a skill
+was left out.
+
+`skill::read_candidate(path)` reads a skill folder, a `.md` file or a `.skill` or `.zip`
+bundle as loading reads it, and `skill::read_bundle(bytes)` reads a bundle already in memory.
+They return the `LoadedSkill`, so a host can check a skill before it saves one. A bundle with
+an absolute path, a `..` or a link in it, a `.md` file that isn't UTF-8 text, or more than
+16 MB unpacked is refused.
+
 A skill carries exact instructions, so `load_skill` results reach the agent as written,
 and a result interceptor, such as a workflow's distiller, doesn't see them. The opt-in
 `SkillsConfig::load_skill_interception: Some(policy)` lets it replace them, with `policy`

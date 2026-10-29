@@ -143,6 +143,56 @@ mod tests {
         assert!(fm.extra.contains_key("license"));
     }
 
+    fn parsed(extra: &str) -> SkillFrontmatter {
+        let content = format!("---\nname: n\ndescription: D\n{extra}---\nBody");
+        parse_frontmatter(&content, "test.md").unwrap().0
+    }
+
+    #[test]
+    fn models_is_a_string_or_a_list() {
+        assert_eq!(parsed("models: haiku\n").models, ["haiku"]);
+        assert_eq!(parsed("models: gpt-6*\n").models, ["gpt-6*"]);
+        assert_eq!(parsed("models: [haiku, luna]\n").models, ["haiku", "luna"]);
+        assert_eq!(
+            parsed("models:\n  - cc:haiku\n  - openrouter:openai/gpt-6*\n").models,
+            ["cc:haiku", "openrouter:openai/gpt-6*"]
+        );
+        // It is no longer in the other fields.
+        assert!(!parsed("models: haiku\n").extra.contains_key("models"));
+    }
+
+    #[test]
+    fn an_empty_models_field_counts_as_none() {
+        assert!(parsed("").models.is_empty());
+        assert!(parsed("models: []\n").models.is_empty());
+        assert!(parsed("models:\n").models.is_empty());
+        assert!(parsed("models: \"\"\n").models.is_empty());
+        assert!(parsed("models: [\"\", \"  \"]\n").models.is_empty());
+        assert_eq!(parsed("models: [\" haiku \", \"\"]\n").models, ["haiku"]);
+    }
+
+    #[test]
+    fn models_that_are_not_text_make_the_skill_invalid() {
+        for bad in ["models: 5\n", "models: {a: b}\n", "models: [[a]]\n"] {
+            let content = format!("---\nname: n\ndescription: D\n{bad}---\nBody");
+            assert!(
+                matches!(
+                    parse_frontmatter(&content, "test.md"),
+                    Err(SkillLoadError::FrontmatterParseError { .. })
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn workers_defaults_to_true() {
+        assert!(parsed("").workers);
+        assert!(parsed("workers: true\n").workers);
+        assert!(!parsed("workers: false\n").workers);
+        assert!(!parsed("workers: false\n").extra.contains_key("workers"));
+    }
+
     #[test]
     fn test_empty_body() {
         let content = "---\nname: no-body\ndescription: No body content\n---";
