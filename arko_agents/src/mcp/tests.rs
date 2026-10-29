@@ -342,6 +342,39 @@ async fn failures_show_no_secrets_and_the_log_shows_their_names() {
     hub.shutdown().await;
 }
 
+/// A secret the server inherits from the host, rather than from its own
+/// env, is kept out of the log too. A shared server's comes from the
+/// environment it was started with.
+#[tokio::test]
+async fn an_inherited_secret_is_kept_out_of_the_log() {
+    crate::test_log::install();
+    const INHERITED: &str = "fake-inherited-token-98765";
+    let mut config = McpServerConfig::new("inheriting", python()).with_args([
+        "-c",
+        "import os, sys\nsys.stderr.write('inherited ' + os.environ['FAKE_API_TOKEN'] + '\\n')\nsys.stderr.flush()\nsys.exit(3)",
+    ]);
+    config.shared = true;
+    let host: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .chain([("FAKE_API_TOKEN".into(), INHERITED.into())])
+        .collect();
+    let server = pool::acquire_in(&config, host, std::env::current_dir().ok());
+    assert_eq!(
+        server.start(TIMEOUT).await.unwrap_err(),
+        "it exited with code 3"
+    );
+    let logged = crate::test_log::logged(log::Level::Info, "MCP server 'inheriting'");
+    assert!(
+        logged.iter().all(|line| !line.contains(INHERITED)),
+        "{logged:#?}"
+    );
+    assert!(
+        logged
+            .iter()
+            .any(|line| line == "MCP server 'inheriting' stderr: inherited ${FAKE_API_TOKEN}"),
+        "{logged:#?}"
+    );
+}
+
 /// A server that doesn't answer in time is said to be so, also without
 /// what it wrote.
 #[tokio::test]

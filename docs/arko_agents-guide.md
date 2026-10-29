@@ -806,7 +806,10 @@ with a tool error, which the tool-error policy handles.
 
 A server can print its environment and arguments, so the log shows `${NAME}` in place of
 each value of its `env` and of `McpServerConfig::expanded`, the `${VAR}`s a host put into
-its command, arguments and environment (values shorter than 4 characters stay). The
+its command, arguments and environment (values shorter than 4 characters stay). The same goes
+for the variables it inherits from the host (a shared server's environment as it started)
+whose names hold `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`, or end in
+`PASS`, in any case, for values of 8 characters or more. The
 errors and failure reasons an agent reads hold neither the command nor what the server
 wrote, only fixed words such as "it exited with code 1" or "its program wasn't found".
 

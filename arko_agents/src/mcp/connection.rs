@@ -30,9 +30,15 @@ const STDERR_DRAIN: Duration = Duration::from_millis(250);
 /// How long a failed handshake waits for the server's exit to be reported,
 /// to give the exit as the reason.
 const EXIT_WAIT: Duration = Duration::from_millis(600);
-/// The shortest value [`Redactions`] keeps out of the log. Shorter ones
-/// (`1`, `on`) would blank out ordinary words and numbers.
+/// The shortest value of a server's own environment that [`Redactions`]
+/// keeps out of the log. Shorter ones (`1`, `on`) would blank out ordinary
+/// words and numbers.
 const SHORTEST_REDACTED: usize = 4;
+/// The shortest value of an inherited variable with a secret's name that
+/// [`Redactions`] keeps out of the log.
+const SHORTEST_INHERITED_SECRET: usize = 8;
+/// What the name of a variable holding a secret has in it, ignoring case.
+const SECRET_NAME_PARTS: [&str; 6] = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"];
 
 /// Why a server couldn't be opened.
 #[derive(Debug)]
@@ -75,6 +81,13 @@ impl OpenError {
     }
 }
 
+/// Whether the variable `name` looks like it holds a secret: its name has
+/// one of [`SECRET_NAME_PARTS`] in it, or ends in `PASS`, ignoring case.
+fn secret_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name.ends_with("PASS") || SECRET_NAME_PARTS.iter().any(|part| name.contains(part))
+}
+
 /// The program a server runs, by its file name (`npx`, `python3`), for the
 /// log only, as an expanded command can hold a secret.
 fn program(config: &McpServerConfig) -> String {
@@ -84,22 +97,38 @@ fn program(config: &McpServerConfig) -> String {
         .unwrap_or_else(|| config.command.clone())
 }
 
-/// The values a server's log lines must not show: those of its config's
+/// The values a server's log lines must not show, each shown as `${NAME}`
+/// instead. They are the values of its config's
 /// [`env`](McpServerConfig::env) and of the host's
-/// [`expanded`](McpServerConfig::expanded) variables, each shown as
-/// `${NAME}` instead. A server can print its own environment and arguments
+/// [`expanded`](McpServerConfig::expanded) variables, and those of the
+/// variables it inherits from the host whose names look secret (see
+/// [`secret_name`]). A server can print its own environment and arguments
 /// to stderr, a token among them.
 #[derive(Debug, Default)]
 pub(crate) struct Redactions(Vec<(String, String)>);
 
 impl Redactions {
-    pub(crate) fn of(config: &McpServerConfig) -> Self {
-        let mut values: Vec<(String, String)> = config
+    /// The redactions for `config`'s server, whose process also gets
+    /// `inherited`, the host's environment (a shared server's snapshot).
+    pub(crate) fn of(
+        config: &McpServerConfig,
+        inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Self {
+        let explicit = config
             .env
             .iter()
             .chain(&config.expanded)
             .filter(|(_, value)| value.chars().count() >= SHORTEST_REDACTED)
-            .map(|(name, value)| (value.clone(), format!("${{{name}}}")))
+            .map(|(name, value)| (name.clone(), value.clone()));
+        let inherited = inherited
+            .into_iter()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .filter(|(name, value)| {
+                secret_name(name) && value.chars().count() >= SHORTEST_INHERITED_SECRET
+            });
+        let mut values: Vec<(String, String)> = explicit
+            .chain(inherited)
+            .map(|(name, value)| (value, format!("${{{name}}}")))
             .collect();
         // The longest first, so a value holding another goes whole.
         values.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
@@ -229,6 +258,7 @@ pub(crate) struct Connection {
     watcher: Option<JoinHandle<Option<ServerExit>>>,
     /// How the process ended, once it ended on its own.
     exit: Arc<Mutex<Option<String>>>,
+    redactions: Arc<Redactions>,
 }
 
 impl Connection {
@@ -260,7 +290,10 @@ impl Connection {
         config: &McpServerConfig,
         launch: Option<&Launch>,
     ) -> Result<Self, OpenError> {
-        let redactions = Arc::new(Redactions::of(config));
+        let redactions = Arc::new(match launch {
+            Some(launch) => Redactions::of(config, launch.env.iter().cloned()),
+            None => Redactions::of(config, std::env::vars_os()),
+        });
         let opened = Self::open_with(config, launch, redactions.clone()).await;
         if let Err(error) = &opened {
             log::warn!(
@@ -312,7 +345,7 @@ impl Connection {
             child,
             tree,
             stderr,
-            redactions,
+            redactions.clone(),
             stopped,
             exit.clone(),
         );
@@ -344,11 +377,17 @@ impl Connection {
             stop: Some(stop),
             watcher: Some(watcher),
             exit,
+            redactions,
         })
     }
 
     pub(crate) fn peer(&self) -> Peer<RoleClient> {
         self.service.peer().clone()
+    }
+
+    /// What its log lines leave out.
+    pub(crate) fn redactions(&self) -> Arc<Redactions> {
+        self.redactions.clone()
     }
 
     /// The server's own instructions, from its handshake.
@@ -607,7 +646,7 @@ mod tests {
         let (_stop, stopped) = oneshot::channel();
         let (watcher, _) = watch_redacting(
             "echo 'token ghp_fake_token_1234, key sk-fake-key-5678, mode on' >&2; exit 1",
-            Redactions::of(&config),
+            Redactions::of(&config, []),
             stopped,
         );
         let exit = watcher.await.unwrap().unwrap();
@@ -647,11 +686,39 @@ mod tests {
         assert_eq!(launch.program("sh"), None);
     }
 
+    /// Of what the server inherits, the values of 8 characters or more of
+    /// the variables whose names look secret are kept out too. Its own
+    /// `env` goes from 4 characters, whatever the name.
+    #[test]
+    fn inherited_secrets_are_kept_out_by_their_names() {
+        let config = McpServerConfig::new("files", "sh").with_env([("MODE", "fast")]);
+        let inherited = [
+            ("FAKE_API_TOKEN", "fake-inherited-token-1234"),
+            ("db_password", "hunter2hunter2"),
+            ("SMTP_PASS", "longpassvalue"),
+            ("GH_AUTH", "authvalue123"),
+            ("SHORT_TOKEN", "abc1234"),
+            ("HOME", "/home/someone"),
+            ("PASSAGE", "notasecretvalue"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let redactions = Redactions::of(&config, inherited);
+        assert_eq!(
+            redactions.apply(
+                "fast fake-inherited-token-1234 hunter2hunter2 longpassvalue authvalue123 abc1234 /home/someone notasecretvalue"
+            ),
+            "${MODE} ${FAKE_API_TOKEN} ${db_password} ${SMTP_PASS} ${GH_AUTH} abc1234 /home/someone notasecretvalue"
+        );
+    }
+
     #[test]
     fn a_value_holding_another_is_replaced_whole() {
         let config =
             McpServerConfig::new("files", "sh").with_env([("A", "abcd"), ("AB", "abcdefgh")]);
-        assert_eq!(Redactions::of(&config).apply("abcdefgh abcd"), "${AB} ${A}");
+        assert_eq!(
+            Redactions::of(&config, []).apply("abcdefgh abcd"),
+            "${AB} ${A}"
+        );
     }
 
     /// Bytes that aren't UTF-8 don't stop the reading: the server can keep

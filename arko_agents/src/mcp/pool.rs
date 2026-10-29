@@ -18,7 +18,7 @@ use std::time::Duration;
 use rmcp::service::{Peer, RoleClient};
 
 use super::config::McpServerConfig;
-use super::connection::{Connection, Launch};
+use super::connection::{Connection, Launch, Redactions};
 
 /// What makes two servers the same: the command and arguments, as
 /// expanded, the whole environment and working directory they start with,
@@ -130,6 +130,14 @@ impl SharedServer {
     /// How the server ended on its own, while no hub has started it again.
     pub(crate) fn exited(&self) -> Option<String> {
         self.connection.lock().unwrap().as_ref()?.exited()
+    }
+
+    /// What its log lines leave out, from the environment it starts with.
+    pub(crate) fn redactions(&self) -> Arc<Redactions> {
+        Arc::new(Redactions::of(
+            &self.config,
+            self.launch.env.iter().cloned(),
+        ))
     }
 
     pub(crate) fn instructions(&self) -> Option<String> {

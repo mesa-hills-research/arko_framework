@@ -207,6 +207,14 @@ impl Link {
             Self::Shared(server) => server.exited(),
         }
     }
+
+    /// What its log lines leave out.
+    fn redactions(&self) -> Arc<Redactions> {
+        match self {
+            Self::Own(connection) => connection.redactions(),
+            Self::Shared(server) => server.redactions(),
+        }
+    }
 }
 
 impl Entry {
@@ -375,7 +383,7 @@ impl McpHub {
                 log::warn!(
                     "MCP server '{}': its tools couldn't be listed: {}",
                     config.name,
-                    Redactions::of(config).apply(&error.to_string())
+                    link.redactions().apply(&error.to_string())
                 );
                 "its tools couldn't be listed".to_string()
             })?;
