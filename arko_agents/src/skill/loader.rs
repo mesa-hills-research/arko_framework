@@ -595,14 +595,21 @@ pub(super) enum Bundle {
     Loading,
     /// A bundle offered to be saved as a skill, whose entries would be
     /// written to a folder. An entry with an absolute path, a `..` or a link,
-    /// a `.md` file that isn't UTF-8 text, or more than
-    /// [`MAX_CANDIDATE_BYTES`] in all is refused.
+    /// a `.md` file that isn't UTF-8 text, more than [`MAX_CANDIDATE_BYTES`]
+    /// or [`MAX_CANDIDATE_FILES`] in all, or local headers that don't match
+    /// the central directory is refused, and the entries outside the skill's
+    /// folder are left out.
     Candidate,
+    /// A candidate whose files are all kept, to be written to a folder.
+    Unpack,
 }
 
 /// The most that the entries of a bundle offered as a skill may hold when
 /// unpacked, so that a small file can't fill the memory.
 const MAX_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The most files a bundle offered as a skill may hold.
+const MAX_CANDIDATE_FILES: usize = 1000;
 
 /// The bundle skill in the zip archive `data`, named `path` in errors.
 pub(super) fn read_bundle_bytes(
@@ -611,12 +618,41 @@ pub(super) fn read_bundle_bytes(
     source_label: &str,
     mode: Bundle,
 ) -> Result<LoadedSkill, SkillLoadError> {
+    parse_bundle(data, path, source_label, mode).map(|(skill, _)| skill)
+}
+
+/// A file of a bundle, by its name from the skill's folder and its bytes.
+pub(super) type BundleFile = (String, Vec<u8>);
+
+/// The bundle skill in the zip archive `data`, named `path` in errors, and in
+/// `Unpack` mode every file of the skill's folder with its name relative to
+/// the folder.
+pub(super) fn parse_bundle(
+    data: &[u8],
+    path: &str,
+    source_label: &str,
+    mode: Bundle,
+) -> Result<(LoadedSkill, Vec<BundleFile>), SkillLoadError> {
     let zip_error = |message: String| SkillLoadError::ZipError {
         path: path.to_string(),
         message,
     };
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| zip_error(e.to_string()))?;
+
+    // An archive can name or size an entry one way in its local header and
+    // another in its central directory, so that what is checked is not what
+    // is written. The two must agree.
+    if mode != Bundle::Loading {
+        if archive.has_duplicate_names() {
+            return Err(zip_error("A name appears twice in the bundle.".to_string()));
+        }
+        archive.validate_header_consistency().map_err(|e| {
+            zip_error(format!(
+                "The local headers don't match the central directory ({e})."
+            ))
+        })?;
+    }
 
     let too_much = || {
         zip_error(format!(
@@ -625,9 +661,11 @@ pub(super) fn read_bundle_bytes(
         ))
     };
     let mut entries: Vec<(String, String)> = Vec::new();
-    // What the entries say they hold, and the text read from them.
+    let mut files: Vec<BundleFile> = Vec::new();
+    let mut file_count = 0usize;
+    // What the entries say they hold, and what was read from them.
     let mut unpacked = 0u64;
-    let mut text_bytes = 0u64;
+    let mut read_bytes = 0u64;
 
     for i in 0..archive.len() {
         let mut zip_file = archive
@@ -638,45 +676,69 @@ pub(super) fn read_bundle_bytes(
             .map_err(|e| zip_error(format!("Failed to read the name of zip entry {}: {}", i, e)))?
             .replace('\\', "/");
 
-        if mode == Bundle::Candidate {
+        if mode != Bundle::Loading {
             check_candidate_entry(&zip_file, &name).map_err(&zip_error)?;
             unpacked = unpacked.saturating_add(zip_file.size());
             if unpacked > MAX_CANDIDATE_BYTES {
                 return Err(too_much());
             }
+            if !zip_file.is_dir() {
+                file_count += 1;
+                if file_count > MAX_CANDIDATE_FILES {
+                    return Err(zip_error(format!(
+                        "The bundle holds more than {MAX_CANDIDATE_FILES} files."
+                    )));
+                }
+            }
         }
-        // Only the skill's text is read.
-        if zip_file.is_dir() || !name.ends_with(".md") {
+        // Only the skill's text is read, or all of it to unpack it.
+        let is_text = name.ends_with(".md");
+        if zip_file.is_dir() || !(is_text || mode == Bundle::Unpack) {
             continue;
         }
 
-        let mut content = String::new();
+        let mut bytes = Vec::new();
         let read = match mode {
-            Bundle::Loading => zip_file.read_to_string(&mut content),
+            Bundle::Loading => zip_file.read_to_end(&mut bytes),
             // However much an entry says it holds, no more than what is left
             // of the limit is read.
-            Bundle::Candidate => (&mut zip_file)
-                .take(MAX_CANDIDATE_BYTES - text_bytes + 1)
-                .read_to_string(&mut content),
+            _ => (&mut zip_file)
+                .take(MAX_CANDIDATE_BYTES - read_bytes + 1)
+                .read_to_end(&mut bytes),
         };
-        text_bytes += content.len() as u64;
-        if text_bytes > MAX_CANDIDATE_BYTES && mode == Bundle::Candidate {
+        read_bytes += bytes.len() as u64;
+        if mode != Bundle::Loading && read_bytes > MAX_CANDIDATE_BYTES {
             return Err(too_much());
         }
         if let Err(e) = read {
-            if mode == Bundle::Candidate {
-                return Err(zip_error(format!("'{name}' is not UTF-8 text ({e}).")));
+            if mode == Bundle::Loading {
+                log::debug!("Skipping zip entry '{}' in {:?}: {}", name, path, e);
+                continue;
             }
-            log::debug!(
-                "Skipping non-UTF-8 zip entry '{}' in {:?}: {}",
-                name,
-                path,
-                e
-            );
-            continue;
+            return Err(zip_error(format!("'{name}' can't be read ({e}).")));
         }
 
-        entries.push((name, content));
+        if !is_text {
+            files.push((name, bytes));
+            continue;
+        }
+        match String::from_utf8(bytes) {
+            Ok(content) => {
+                if mode == Bundle::Unpack {
+                    files.push((name.clone(), content.clone().into_bytes()));
+                }
+                entries.push((name, content));
+            }
+            Err(e) if mode == Bundle::Loading => {
+                log::debug!(
+                    "Skipping non-UTF-8 zip entry '{}' in {:?}: {}",
+                    name,
+                    path,
+                    e
+                );
+            }
+            Err(_) => return Err(zip_error(format!("'{name}' is not UTF-8 text."))),
+        }
     }
 
     let root_prefix = determine_zip_root(&entries);
@@ -687,8 +749,10 @@ pub(super) fn read_bundle_bytes(
     for (raw_name, content) in &entries {
         let relative = if raw_name.starts_with(&root_prefix) {
             raw_name[root_prefix.len()..].to_string()
-        } else {
+        } else if mode == Bundle::Loading {
             raw_name.clone()
+        } else {
+            continue;
         };
 
         if relative.is_empty() || relative.ends_with('/') {
@@ -714,7 +778,16 @@ pub(super) fn read_bundle_bytes(
 
     let (frontmatter, body) = parse_frontmatter(&skill_md, path)?;
 
-    Ok(loaded(frontmatter, body, resources, source_label))
+    // The files of the skill's folder only, named from the folder.
+    let files = files
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            let relative = name.strip_prefix(&root_prefix)?;
+            (!relative.is_empty()).then(|| (relative.to_string(), bytes))
+        })
+        .collect();
+
+    Ok((loaded(frontmatter, body, resources, source_label), files))
 }
 
 /// Why an entry of a bundle offered as a skill can't be written to a skill's

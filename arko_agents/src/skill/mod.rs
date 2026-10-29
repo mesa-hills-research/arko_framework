@@ -11,7 +11,7 @@ mod embedded_tests;
 #[cfg(test)]
 mod filter_tests;
 
-pub use candidate::{read_bundle, read_candidate};
+pub use candidate::{read_bundle, read_candidate, unpack_bundle};
 pub use config::{EmbeddedSkill, InvalidSkillPolicy, SkillSource, SkillsConfig};
 pub use load_skill::{LOAD_SKILL_TOOL_NAME, LoadSkillTool};
 pub use matcher::models_match;
