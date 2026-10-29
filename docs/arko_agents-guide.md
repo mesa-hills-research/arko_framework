@@ -898,7 +898,8 @@ was left out.
 bundle as loading reads it, and `skill::read_bundle(bytes)` reads a bundle already in memory.
 They return the `LoadedSkill`, so a host can check a skill before it saves one. A bundle with
 an absolute path, a `..` or a link in it, a `.md` file that isn't UTF-8 text, more than
-16 MB unpacked or more than 1,000 files is refused. `skill::unpack_bundle(bytes, dest)` checks
+16 MB unpacked, more than 1,000 files, or local headers that don't match its central
+directory is refused. `skill::unpack_bundle(bytes, dest)` checks
 a bundle the same way and then writes all its files to the new folder `dest`, without the
 executable bit. It writes to a hidden folder beside `dest` and renames it, so a failure leaves
 nothing at `dest`.

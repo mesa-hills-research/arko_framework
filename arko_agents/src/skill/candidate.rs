@@ -16,9 +16,7 @@ use crate::error::ArkoAgentsError;
 /// the form of the name, the number of files, or links in a folder.
 ///
 /// A bundle is checked further, because its entries would be written to a
-/// folder. An entry with an absolute path, a `..` or a link, a `.md` file
-/// that isn't UTF-8 text, more than 16 MB unpacked or more than 1,000 files
-/// refuses the whole bundle (see [`read_bundle`]).
+/// folder, so it is refused for the reasons [`read_bundle`] gives.
 pub fn read_candidate(path: impl AsRef<Path>) -> Result<LoadedSkill, SkillLoadError> {
     let path = path.as_ref();
     let text = path.to_string_lossy().to_string();
@@ -65,8 +63,9 @@ pub fn read_candidate(path: impl AsRef<Path>) -> Result<LoadedSkill, SkillLoadEr
 /// a bundle file, with the `SKILL.md` at the root or in one top folder.
 ///
 /// Refuses a bundle that has an entry with an absolute path, a `..` or a
-/// link, a `.md` file that isn't UTF-8 text, more than 16 MB unpacked or more
-/// than 1,000 files.
+/// link, a `.md` file that isn't UTF-8 text, more than 16 MB unpacked, more
+/// than 1,000 files, or a name or size that the local header and the central
+/// directory give differently.
 ///
 /// ```
 /// use arko_agents::skill::read_bundle;
@@ -86,7 +85,8 @@ pub fn read_bundle(bytes: &[u8]) -> Result<LoadedSkill, SkillLoadError> {
 ///
 /// The bundle is checked in full before anything is written, by the checks of
 /// [`read_bundle`] (an absolute path, a `..`, a link, text that isn't UTF-8,
-/// more than 16 MB unpacked or more than 1,000 files refuse it). The files
+/// more than 16 MB unpacked, more than 1,000 files or headers that disagree
+/// refuse it). The files
 /// are then written to a hidden folder beside `dest` and renamed to it, so a
 /// failure leaves nothing at `dest`. Missing parent folders are made. `dest`
 /// itself must not exist. Files are written without the executable bit,

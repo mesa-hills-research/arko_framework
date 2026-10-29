@@ -1152,3 +1152,84 @@ fn a_failed_write_removes_what_it_wrote() {
         0
     );
 }
+
+// An archive whose local headers and central directory disagree.
+
+/// Where `needle` is in `bytes`, the first time.
+fn find(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .unwrap()
+}
+
+/// A stored archive of a skill and a `reference/a.md`, and where the local
+/// header of the second entry starts.
+fn stored_bundle() -> (Vec<u8>, usize) {
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer.start_file("SKILL.md", stored).unwrap();
+    writer.write_all(skill_md("packed", "").as_bytes()).unwrap();
+    writer.start_file("reference/a.md", stored).unwrap();
+    writer.write_all(b"Reference text.").unwrap();
+    let bundle = writer.finish().unwrap().into_inner();
+    // The first local header starts at 0.
+    let second = bundle[4..]
+        .windows(4)
+        .position(|window| window == b"PK\x03\x04")
+        .map(|at| at + 4)
+        .unwrap();
+    (bundle, second)
+}
+
+#[test]
+fn a_bundle_whose_local_header_names_an_entry_otherwise_is_refused() {
+    let temp = Temp::new();
+    let (mut bundle, _) = stored_bundle();
+    // The local header says `reference/b.md`, the central directory `reference/a.md`.
+    let at = find(&bundle, b"reference/a.md");
+    bundle[at + "reference/".len()] = b'b';
+    let error = read_bundle(&bundle).unwrap_err();
+    assert!(
+        matches!(&error, SkillLoadError::ZipError { message, .. }
+            if message.contains("don't match the central directory")),
+        "{error}"
+    );
+    let dest = temp.0.join("skills/packed");
+    assert!(unpack_bundle(&bundle, &dest).is_err());
+    assert!(!temp.0.join("skills").exists());
+    // An unchanged one is fine.
+    let (bundle, _) = stored_bundle();
+    assert!(read_bundle(&bundle).is_ok());
+    assert!(unpack_bundle(&bundle, &dest).is_ok());
+}
+
+#[test]
+fn a_bundle_whose_local_header_sizes_an_entry_otherwise_is_refused() {
+    let temp = Temp::new();
+    let (mut bundle, second) = stored_bundle();
+    // The size of the second entry in its local header, a byte more than the
+    // central directory says.
+    let size_at = second + 22;
+    bundle[size_at] += 1;
+    let error = read_bundle(&bundle).unwrap_err();
+    assert!(matches!(error, SkillLoadError::ZipError { .. }), "{error}");
+    let dest = temp.0.join("packed");
+    assert!(unpack_bundle(&bundle, &dest).is_err());
+    assert!(!dest.exists());
+}
+
+#[test]
+fn a_bundle_in_a_source_folder_is_still_read_without_that_check() {
+    // Loading only reads text into memory, so it keeps reading what it did.
+    let temp = Temp::new();
+    let (mut bundle, _) = stored_bundle();
+    let at = find(&bundle, b"reference/a.md");
+    bundle[at + "reference/".len()] = b'b';
+    std::fs::write(temp.0.join("odd.skill"), &bundle).unwrap();
+    let config = SkillsConfig {
+        global_sources: vec![global(&temp.0)],
+        ..Default::default()
+    };
+    assert_eq!(loaded_names(&config, &temp.0), ["packed"]);
+}

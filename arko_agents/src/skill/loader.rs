@@ -595,9 +595,10 @@ pub(super) enum Bundle {
     Loading,
     /// A bundle offered to be saved as a skill, whose entries would be
     /// written to a folder. An entry with an absolute path, a `..` or a link,
-    /// a `.md` file that isn't UTF-8 text, or more
-    /// than [`MAX_CANDIDATE_BYTES`] or [`MAX_CANDIDATE_FILES`] in all is
-    /// refused, and the entries outside the skill's folder are left out.
+    /// a `.md` file that isn't UTF-8 text, more than [`MAX_CANDIDATE_BYTES`]
+    /// or [`MAX_CANDIDATE_FILES`] in all, or local headers that don't match
+    /// the central directory is refused, and the entries outside the skill's
+    /// folder are left out.
     Candidate,
     /// A candidate whose files are all kept, to be written to a folder.
     Unpack,
@@ -638,6 +639,20 @@ pub(super) fn parse_bundle(
     };
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| zip_error(e.to_string()))?;
+
+    // An archive can name or size an entry one way in its local header and
+    // another in its central directory, so that what is checked is not what
+    // is written. The two must agree.
+    if mode != Bundle::Loading {
+        if archive.has_duplicate_names() {
+            return Err(zip_error("A name appears twice in the bundle.".to_string()));
+        }
+        archive.validate_header_consistency().map_err(|e| {
+            zip_error(format!(
+                "The local headers don't match the central directory ({e})."
+            ))
+        })?;
+    }
 
     let too_much = || {
         zip_error(format!(
