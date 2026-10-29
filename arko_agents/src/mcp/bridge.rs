@@ -102,7 +102,9 @@ pub trait McpChanges: Send + Sync {
     async fn add(&self, ctx: &TaskContext<'_>, request: AddServer) -> Result<String, String>;
 
     /// Takes out a server an agent added (`why` says why) and calls
-    /// [`McpHub::remove`]. The text is the tool result.
+    /// [`McpHub::remove`]. The text is the tool result. `name` can be one
+    /// the hub doesn't have, such as a server that never started, so the
+    /// host checks that it knows it.
     async fn remove(&self, ctx: &TaskContext<'_>, name: &str, why: &str) -> Result<String, String>;
 }
 
@@ -342,7 +344,19 @@ impl McpBridgeTool {
             }
             "add" if lead => self.add(ctx, &params).await.map(ToolOutput::text),
             "remove" if lead => {
-                let server = self.server(ctx, &params)?;
+                // A server the host set up that the hub doesn't have (one
+                // that was never started) goes to the host, which knows it.
+                let server = match text(&params, "server") {
+                    Some(name)
+                        if self.hub.config(name).is_none()
+                            && self.access.servers_for(ctx).is_none_or(|allowed| {
+                                allowed.iter().any(|known| known == name)
+                            }) =>
+                    {
+                        name
+                    }
+                    _ => self.server(ctx, &params)?,
+                };
                 let why = text(&params, "why").unwrap_or_default();
                 let changes = self
                     .changes

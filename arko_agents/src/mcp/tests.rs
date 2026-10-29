@@ -87,6 +87,8 @@ struct Changes {
     hub: Mutex<Option<Arc<McpHub>>>,
     added: Mutex<Vec<AddServer>>,
     removed: Mutex<Vec<(String, String)>>,
+    /// Servers the host set up that the hub never got (they didn't start).
+    unstarted: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -112,6 +114,14 @@ impl McpChanges for Changes {
             .lock()
             .unwrap()
             .push((name.to_string(), why.to_string()));
+        let was_unstarted = {
+            let mut unstarted = self.unstarted.lock().unwrap();
+            let index = unstarted.iter().position(|known| known == name);
+            index.map(|index| unstarted.remove(index)).is_some()
+        };
+        if was_unstarted {
+            return Ok(format!("Removed {name}, which wasn't started."));
+        }
         let hub = self.hub.lock().unwrap().clone().unwrap();
         hub.remove(name).await?;
         Ok(format!("Removed {name}."))
@@ -721,9 +731,85 @@ async fn add_and_remove_go_through_the_hosts_changes() {
         changes.removed.lock().unwrap().clone(),
         [("tracker".to_string(), "Done.".to_string())]
     );
+    // A name the hub doesn't have goes to the host, which decides.
     assert_eq!(
         error(&bridge, json!({"action": "remove", "server": "tracker"})).await,
-        "There's no MCP server named tracker. Your servers are plain."
+        "There's no MCP server named tracker."
+    );
+    hub.shutdown().await;
+}
+
+/// A server the host set up that never started (so the hub doesn't have
+/// it) is removed through the tool, by the host. A run whose access
+/// doesn't name it can't, and a worker can't remove any.
+#[tokio::test]
+async fn remove_reaches_the_host_for_a_server_that_never_started() {
+    let hub = McpHub::new(vec![stub("issues", &[])]);
+    hub.start_all(TIMEOUT).await;
+    let changes = Arc::new(Changes::default());
+    *changes.hub.lock().unwrap() = Some(hub.clone());
+    changes.unstarted.lock().unwrap().push("later".into());
+    let narrow = uuid::Uuid::new_v4();
+    let access = Arc::new(ByTask(HashMap::from([(narrow, vec!["issues".into()])])));
+    let bridge = McpBridgeTool::lead(hub.clone(), access.clone(), changes.clone());
+    let workspace = workspace();
+    let remove = |task: uuid::Uuid, name: &str| {
+        let bridge = &bridge;
+        let workspace = &workspace;
+        let params: HashMap<String, Value> = serde_json::from_value(
+            json!({"action": "remove", "server": name, "why": "Not needed."}),
+        )
+        .unwrap();
+        async move {
+            let context = TaskContext::new(task, "tester", "test", workspace);
+            bridge
+                .execute(&context, params)
+                .await
+                .map_err(|error| match error {
+                    ToolError::ExecutionFailed(message) => message,
+                    other => other.to_string(),
+                })
+        }
+    };
+
+    // The lead lists it as the host does, and removes it.
+    let servers = text(&bridge, json!({"action": "servers"})).await;
+    assert!(!servers.contains("later"), "{servers}");
+    assert_eq!(
+        remove(narrow, "later").await.unwrap_err(),
+        "There's no MCP server named later. Your servers are issues."
+    );
+    assert!(changes.removed.lock().unwrap().is_empty());
+    let lead = uuid::Uuid::new_v4();
+    assert_eq!(
+        remove(lead, "later").await.unwrap(),
+        "Removed later, which wasn't started."
+    );
+    assert_eq!(
+        changes.removed.lock().unwrap().clone(),
+        [("later".to_string(), "Not needed.".to_string())]
+    );
+    assert!(changes.unstarted.lock().unwrap().is_empty());
+    // One the host doesn't know either gets the host's answer.
+    assert_eq!(
+        remove(lead, "later").await.unwrap_err(),
+        "There's no MCP server named later."
+    );
+    // A running server still goes through the hub's checks and the host.
+    assert_eq!(remove(lead, "issues").await.unwrap(), "Removed issues.");
+    assert!(hub.servers().is_empty());
+
+    let worker = McpBridgeTool::worker(hub.clone(), access);
+    let context = TaskContext::new(lead, "tester", "test", &workspace);
+    let params: HashMap<String, Value> =
+        serde_json::from_value(json!({"action": "remove", "server": "later"})).unwrap();
+    assert!(
+        worker
+            .execute(&context, params)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Only the main agent can remove MCP servers.")
     );
     hub.shutdown().await;
 }

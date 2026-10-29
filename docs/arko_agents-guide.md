@@ -853,7 +853,8 @@ The main agent's `add` takes `command`, `args`, `env`, `scope` (`project` or `us
 holds the names of environment variables and never their values. The host checks the request,
 asks the user, writes the entry, records it and calls `McpHub::add`, and the text it returns is
 what the agent reads. `remove` gets the server's name and `why`, and the host decides
-which servers may go.
+which servers may go. A name the hub doesn't have, such as a server that never started, goes
+to the host too, unless the run's `McpAccess` leaves it out.
 
 `servers` and `tools` calls, and `call` of a tool the server marks read-only, run beside
 other calls and run again after a crash (`Tool::parallel_safe_for`,
