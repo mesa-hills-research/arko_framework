@@ -902,7 +902,8 @@ an absolute path, a `..` or a link in it, a `.md` file that isn't UTF-8 text, mo
 directory is refused. `skill::unpack_bundle(bytes, dest)` checks
 a bundle the same way and then writes all its files to the new folder `dest`, without the
 executable bit. It writes to a hidden folder beside `dest` and renames it, so a failure leaves
-nothing at `dest`.
+nothing at `dest`. A `.skill` or `.zip` bundle in a source folder is skipped as an invalid skill
+when its local headers don't match its central directory or a name appears twice.
 
 A skill carries exact instructions, so `load_skill` results reach the agent as written,
 and a result interceptor, such as a workflow's distiller, doesn't see them. The opt-in

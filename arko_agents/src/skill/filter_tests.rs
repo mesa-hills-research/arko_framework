@@ -1220,13 +1220,62 @@ fn a_bundle_whose_local_header_sizes_an_entry_otherwise_is_refused() {
 }
 
 #[test]
-fn a_bundle_in_a_source_folder_is_still_read_without_that_check() {
-    // Loading only reads text into memory, so it keeps reading what it did.
+fn a_bundle_in_a_source_folder_with_mismatched_headers_is_skipped() {
     let temp = Temp::new();
-    let (mut bundle, _) = stored_bundle();
-    let at = find(&bundle, b"reference/a.md");
-    bundle[at + "reference/".len()] = b'b';
-    std::fs::write(temp.0.join("odd.skill"), &bundle).unwrap();
+    let (good, _) = stored_bundle();
+    let mut odd = good.clone();
+    let at = find(&odd, b"reference/a.md");
+    odd[at + "reference/".len()] = b'b';
+    std::fs::write(temp.0.join("good.skill"), &good).unwrap();
+    std::fs::write(temp.0.join("odd.skill"), &odd).unwrap();
+    let config = SkillsConfig {
+        global_sources: vec![global(&temp.0)],
+        ..Default::default()
+    };
+    // The odd one is skipped with a reason, and the other loads.
+    let scanned = scan(&config, &temp.0);
+    assert_eq!(scanned.len(), 2);
+    assert_eq!(scanned[0].skipped, None);
+    assert!(
+        scanned[1]
+            .skipped
+            .as_deref()
+            .is_some_and(|why| why.contains("don't match the central directory")),
+        "{:?}",
+        scanned[1].skipped
+    );
+    assert_eq!(
+        SkillManager::load(&config, &temp.0)
+            .unwrap()
+            .total_skill_count(),
+        1
+    );
+    // Under Error it is refused, as a broken skill is.
+    let strict = SkillsConfig {
+        on_invalid_skill: InvalidSkillPolicy::Error,
+        ..config
+    };
+    assert!(matches!(
+        SkillManager::load(&strict, &temp.0),
+        Err(ArkoAgentsError::Skill(SkillLoadError::ZipError { .. }))
+    ));
+}
+
+#[test]
+fn a_streamed_bundle_with_data_descriptors_loads() {
+    let mut writer = zip::ZipWriter::new_stream(Vec::new());
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    writer.start_file("SKILL.md", options).unwrap();
+    writer.write_all(skill_md("packed", "").as_bytes()).unwrap();
+    writer.start_file("reference/a.md", options).unwrap();
+    writer.write_all(b"Reference text.").unwrap();
+    let bundle = writer.finish().unwrap().get_ref().clone();
+    // The sizes follow the data, so the local headers hold none.
+    assert_ne!(bundle[6] & 0x08, 0, "no data descriptor");
+    let skill = read_bundle(&bundle).unwrap();
+    assert_eq!(skill.resources["reference/a.md"], "Reference text.");
+    let temp = Temp::new();
+    std::fs::write(temp.0.join("streamed.skill"), &bundle).unwrap();
     let config = SkillsConfig {
         global_sources: vec![global(&temp.0)],
         ..Default::default()
