@@ -1100,6 +1100,59 @@ async fn a_server_not_shared_runs_once_per_hub() {
     all_end(&pid_file).await;
 }
 
+/// A host whose own environment or working directory differs gets a shared
+/// server of its own, and the process starts with exactly the environment
+/// it was taken with. The same environment gets the same process.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_shared_server_is_one_process_per_host_environment() {
+    use std::ffi::OsString;
+    let (first_file, second_file) = (pid_file(), pid_file());
+    let mut shared = stub("files", &[]);
+    shared.shared = true;
+    // The pid file is named by the host's environment only, as an inherited
+    // DATABASE_URL would be, so a process that writes to it got that
+    // environment.
+    let host = |file: &std::path::Path| -> Vec<(OsString, OsString)> {
+        std::env::vars_os()
+            .chain([("MCP_STUB_PID_FILE".into(), file.into())])
+            .collect()
+    };
+    let dir = std::env::current_dir().ok();
+    let first = pool::acquire_in(&shared, host(&first_file), dir.clone());
+    let same = pool::acquire_in(&shared, host(&first_file), dir.clone());
+    let other = pool::acquire_in(&shared, host(&second_file), dir.clone());
+    assert!(Arc::ptr_eq(&first, &same));
+    assert!(!Arc::ptr_eq(&first, &other));
+    let elsewhere = pool::acquire_in(&shared, host(&first_file), Some(workspace().join("..")));
+    assert!(!Arc::ptr_eq(&first, &elsewhere));
+    drop(elsewhere);
+
+    first.start(TIMEOUT).await.unwrap();
+    same.start(TIMEOUT).await.unwrap();
+    other.start(TIMEOUT).await.unwrap();
+    assert_eq!(running(&first_file), 1);
+    assert_eq!(running(&second_file), 1);
+    // A config's env goes over the host's, and the environment the process
+    // gets is what counts, wherever its values came from.
+    let mut over = shared.clone();
+    over.env.insert(
+        "MCP_STUB_PID_FILE".into(),
+        second_file.display().to_string(),
+    );
+    let overridden = pool::acquire_in(&over, host(&first_file), dir);
+    assert!(Arc::ptr_eq(&overridden, &other));
+    let mut fresh = over.clone();
+    fresh.env.insert("MCP_STUB_FRESH".into(), "1".into());
+    let fresh = pool::acquire_in(&fresh, host(&first_file), std::env::current_dir().ok());
+    fresh.start(TIMEOUT).await.unwrap();
+    assert_eq!(running(&first_file), 1);
+    assert_eq!(running(&second_file), 2);
+    drop((first, same, other, overridden, fresh));
+    all_end(&first_file).await;
+    all_end(&second_file).await;
+}
+
 /// A shared server's process that ends is started again by the next call,
 /// for every hub.
 #[cfg(unix)]

@@ -3,6 +3,8 @@
 //! [`McpHub`](super::McpHub).
 
 use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,6 +119,107 @@ impl Redactions {
     }
 }
 
+/// What a server's process starts from, fixed when it is taken: the whole
+/// environment and the working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Launch {
+    /// Every variable the process gets, sorted by name.
+    pub(crate) env: Vec<(OsString, OsString)>,
+    pub(crate) dir: Option<PathBuf>,
+}
+
+impl Launch {
+    /// `config`'s launch from the host's `env` and working directory `dir`:
+    /// `env` with the config's `env` over it. On Windows, where names don't
+    /// differ by case, a config's `Path` replaces the host's `PATH`.
+    pub(crate) fn of(
+        config: &McpServerConfig,
+        env: impl IntoIterator<Item = (OsString, OsString)>,
+        dir: Option<PathBuf>,
+    ) -> Self {
+        let mut env: Vec<(OsString, OsString)> = env.into_iter().collect();
+        for (name, value) in &config.env {
+            env.retain(|(known, _)| !same_name(known, OsStr::new(name)));
+            env.push((name.into(), value.into()));
+        }
+        env.sort();
+        Self { env, dir }
+    }
+
+    /// The value of the variable `name`.
+    fn var(&self, name: &str) -> Option<&OsStr> {
+        self.env
+            .iter()
+            .find(|(known, _)| same_name(known, OsStr::new(name)))
+            .map(|(_, value)| value.as_os_str())
+    }
+
+    /// Where the process would find `command`: a path made absolute against
+    /// the working directory, or the first program of that name on the
+    /// launch's `PATH` (with `PATHEXT`'s extensions on Windows). `None` when
+    /// there's none.
+    pub(crate) fn program(&self, command: &str) -> Option<PathBuf> {
+        let absolute = |path: &Path| match &self.dir {
+            Some(dir) if path.is_relative() => dir.join(path),
+            _ => path.to_path_buf(),
+        };
+        let path = Path::new(command);
+        if path.is_absolute() || path.components().count() > 1 {
+            return Some(absolute(path));
+        }
+        let extensions: Vec<OsString> = if cfg!(windows) && path.extension().is_none() {
+            let listed = self
+                .var("PATHEXT")
+                .unwrap_or(OsStr::new(".COM;.EXE;.BAT;.CMD"));
+            listed
+                .to_string_lossy()
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(OsString::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        std::env::split_paths(self.var("PATH")?)
+            .map(|dir| absolute(&dir).join(command))
+            .flat_map(|found| {
+                let mut candidates = vec![found.clone()];
+                candidates.extend(extensions.iter().map(|extension| {
+                    let mut name = found.clone().into_os_string();
+                    name.push(extension);
+                    PathBuf::from(name)
+                }));
+                candidates
+            })
+            .find(|candidate| runnable(candidate))
+    }
+}
+
+/// Whether two variable names are the same. Windows ignores their case.
+fn same_name(a: &OsStr, b: &OsStr) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Whether `path` is a file the process could run.
+fn runnable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
 /// A server's process and the MCP session with it.
 pub(crate) struct Connection {
     name: String,
@@ -140,9 +243,21 @@ impl Connection {
     ///
     /// A failure is logged in full, with [`Redactions`] applied, and its
     /// [`reason`](OpenError::reason) says it in fixed words.
+    ///
+    /// The process inherits the host's environment, with the config's
+    /// `env` over it, and its working directory.
     pub(crate) async fn open(config: &McpServerConfig) -> Result<Self, OpenError> {
+        Self::open_in(config, None).await
+    }
+
+    /// [`open`](Self::open), with `launch`'s environment and working
+    /// directory, when given, in place of the host's.
+    pub(crate) async fn open_in(
+        config: &McpServerConfig,
+        launch: Option<&Launch>,
+    ) -> Result<Self, OpenError> {
         let redactions = Arc::new(Redactions::of(config));
-        let opened = Self::open_with(config, redactions.clone()).await;
+        let opened = Self::open_with(config, launch, redactions.clone()).await;
         if let Err(error) = &opened {
             log::warn!(
                 "MCP server '{}': {}",
@@ -155,6 +270,7 @@ impl Connection {
 
     async fn open_with(
         config: &McpServerConfig,
+        launch: Option<&Launch>,
         redactions: Arc<Redactions>,
     ) -> Result<Self, OpenError> {
         let mut cmd = Command::new(&config.command);
@@ -164,8 +280,18 @@ impl Connection {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .no_console_window();
-        for (key, value) in &config.env {
-            cmd.env(key, value);
+        match launch {
+            Some(launch) => {
+                cmd.env_clear().envs(launch.env.iter().cloned());
+                if let Some(dir) = &launch.dir {
+                    cmd.current_dir(dir);
+                }
+            }
+            None => {
+                for (key, value) in &config.env {
+                    cmd.env(key, value);
+                }
+            }
         }
 
         let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(OpenError::Spawn)?;
@@ -485,6 +611,36 @@ mod tests {
             exit.stderr_tail,
             ["token ${GITHUB_TOKEN}, key ${API_KEY}, mode on"]
         );
+    }
+
+    /// A launch finds its program on its own `PATH`, and a path against its
+    /// own working directory.
+    #[test]
+    fn a_launch_finds_its_program_on_its_own_path() {
+        let config = McpServerConfig::new("files", "sh");
+        let launch = |path: &str| {
+            Launch::of(
+                &config,
+                [("PATH".into(), path.into())],
+                Some("/work".into()),
+            )
+        };
+        let found = launch("/nonexistent:/bin:/usr/bin").program("sh").unwrap();
+        assert!(found.is_absolute() && found.ends_with("sh"), "{found:?}");
+        assert_eq!(launch("/nonexistent").program("sh"), None);
+        assert_eq!(
+            launch("/bin").program("./run"),
+            Some(PathBuf::from("/work/./run"))
+        );
+        assert_eq!(
+            launch("/bin").program("/opt/run"),
+            Some(PathBuf::from("/opt/run"))
+        );
+        // The config's env goes over the host's.
+        let over = McpServerConfig::new("files", "sh").with_env([("PATH", "/nonexistent")]);
+        let launch = Launch::of(&over, [("PATH".into(), "/bin".into())], None);
+        assert_eq!(launch.env, [("PATH".into(), "/nonexistent".into())]);
+        assert_eq!(launch.program("sh"), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The servers shared by the hubs of a process (`"shared": true`): one
-//! process per command line, kept while a hub uses it.
+//! process per command line and environment, kept while a hub uses it.
 //!
 //! The pool is process-wide, behind a static, rather than an object a host
 //! passes to each hub. A process can have only one meaningful pool, and a
@@ -10,35 +10,35 @@
 //! it.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use rmcp::service::{Peer, RoleClient};
 
 use super::config::McpServerConfig;
-use super::connection::Connection;
+use super::connection::{Connection, Launch};
 
-/// What makes two servers the same: the command, arguments and
-/// environment, as expanded.
+/// What makes two servers the same: the command and arguments, as
+/// expanded, the whole environment and working directory they start with,
+/// and the program the command finds. A host whose own environment changed
+/// (another `PATH`, another `DATABASE_URL`) gets a process of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     command: String,
     args: Vec<String>,
-    env: Vec<(String, String)>,
+    program: Option<PathBuf>,
+    launch: Launch,
 }
 
 impl Key {
-    fn of(config: &McpServerConfig) -> Self {
-        let mut env: Vec<(String, String)> = config
-            .env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        env.sort();
+    fn of(config: &McpServerConfig, launch: &Launch) -> Self {
         Self {
             command: config.command.clone(),
             args: config.args.clone(),
-            env,
+            program: launch.program(&config.command),
+            launch: launch.clone(),
         }
     }
 }
@@ -61,10 +61,23 @@ fn pool() -> &'static Pool {
     })
 }
 
-/// The pool's server for `config`'s command line, the one other hubs use
-/// if any does. The server stops when the last hub drops it.
+/// The pool's server for `config`'s command line in the host's environment
+/// and working directory as they are now, the one other hubs use if any
+/// does. The server stops when the last hub drops it.
 pub(crate) fn acquire(config: &McpServerConfig) -> Arc<SharedServer> {
-    let key = Key::of(config);
+    acquire_in(config, std::env::vars_os(), std::env::current_dir().ok())
+}
+
+/// [`acquire`] with `env` as the host's environment and `dir` as its
+/// working directory. A new server keeps them, and starts with them each
+/// time.
+pub(crate) fn acquire_in(
+    config: &McpServerConfig,
+    env: impl IntoIterator<Item = (OsString, OsString)>,
+    dir: Option<PathBuf>,
+) -> Arc<SharedServer> {
+    let launch = Launch::of(config, env, dir);
+    let key = Key::of(config, &launch);
     let mut servers = pool().servers.lock().unwrap();
     servers.retain(|_, server| server.strong_count() > 0);
     if let Some(server) = servers.get(&key).and_then(Weak::upgrade) {
@@ -72,6 +85,7 @@ pub(crate) fn acquire(config: &McpServerConfig) -> Arc<SharedServer> {
     }
     let server = Arc::new(SharedServer {
         config: config.clone(),
+        launch,
         lifecycle: tokio::sync::Mutex::new(()),
         connection: Mutex::new(None),
     });
@@ -79,20 +93,25 @@ pub(crate) fn acquire(config: &McpServerConfig) -> Arc<SharedServer> {
     server
 }
 
-/// How many hubs use the server `config` names, for tests.
+/// How many hubs use the server `config` names in the host's environment,
+/// for tests.
 #[cfg(all(test, unix))]
 pub(crate) fn users(config: &McpServerConfig) -> usize {
+    let launch = Launch::of(config, std::env::vars_os(), std::env::current_dir().ok());
     pool()
         .servers
         .lock()
         .unwrap()
-        .get(&Key::of(config))
+        .get(&Key::of(config, &launch))
         .map_or(0, Weak::strong_count)
 }
 
 /// One server of the pool. It runs while any hub holds it.
 pub(crate) struct SharedServer {
     config: McpServerConfig,
+    /// The environment and working directory it starts with, as the first
+    /// hub to use it had them.
+    launch: Launch,
     /// Held while the server starts.
     lifecycle: tokio::sync::Mutex<()>,
     connection: Mutex<Option<Connection>>,
@@ -132,13 +151,15 @@ impl SharedServer {
         }
         let ended = self.connection.lock().unwrap().take();
         let config = self.config.clone();
+        let launch = self.launch.clone();
         let opened = pool()
             .runtime
             .spawn(async move {
                 if let Some(mut ended) = ended {
                     ended.stop().await;
                 }
-                match tokio::time::timeout(timeout, Connection::open(&config)).await {
+                let opening = Connection::open_in(&config, Some(&launch));
+                match tokio::time::timeout(timeout, opening).await {
                     Ok(opened) => opened.map_err(|error| error.reason()),
                     Err(_) => Err(format!("it didn't start within {} s", timeout.as_secs())),
                 }

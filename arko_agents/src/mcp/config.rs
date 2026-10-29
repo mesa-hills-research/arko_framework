@@ -26,8 +26,10 @@ pub struct McpServerConfig {
     pub workers: bool,
     /// Whether one process serves every [`McpHub`](super::McpHub) of the
     /// process that names the same command, arguments and environment, as
-    /// sessions open at the same time do. Only for a server that keeps
-    /// nothing per client. Defaults to `false`, a process per hub.
+    /// sessions open at the same time do. The host's own environment and
+    /// working directory count too, as they were when the server was first
+    /// started. Only for a server that keeps nothing per client. Defaults to
+    /// `false`, a process per hub.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
     /// What the server is for, in a sentence (such as why an agent added

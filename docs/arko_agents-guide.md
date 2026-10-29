@@ -865,7 +865,11 @@ same tools with the same definitions, and their calls also refuse a server whose
 sets `workers: false` when the call is made.
 
 A server whose config sets `shared: true` runs once per process for every hub that names
-the same command, arguments and environment, on a runtime of its own. `stop` and `start`
+the same command, arguments and environment, on a runtime of its own. The host's
+environment and working directory, and the program the command finds on `PATH`, count
+too. The process starts with exactly the environment and working directory the host had
+when the server was first started, so a host whose environment changed since gets a
+process of its own. `stop` and `start`
 change only the calling hub's use of it, and its process stops, with what it started,
 when the last hub lets go. A shared server mixes sessions up if it keeps anything for a
 client or a session, so share only one that keeps nothing. The `shared` parameter of `add` tells

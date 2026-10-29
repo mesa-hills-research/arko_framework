@@ -142,7 +142,10 @@ pub fn direct_tool_name(server: &str, tool: &str) -> String {
 /// [`McpManager`](super::McpManager). Its process runs on the runtime that
 /// started it, and ends with it. A [shared](McpServerConfig::shared) server
 /// is one process for every hub of the process that names the same
-/// command, arguments and environment, on a runtime of its own. It stops
+/// command, arguments and environment, on a runtime of its own. The host's
+/// environment and working directory count too. The process gets exactly
+/// those it was first started with, and a hub that starts the server in
+/// another environment gets a process of its own. It stops
 /// when no hub uses it any more, and [`stop`](Self::stop) and
 /// [`start`](Self::start) change only this hub's use of it.
 ///
