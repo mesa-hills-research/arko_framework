@@ -106,16 +106,29 @@ impl AgentLoop {
         })
     }
 
-    /// Whether calls to a tool may run beside other parallel-safe calls:
-    /// the tool is parallel-safe and the agent doesn't ask for one call per
-    /// turn.
-    pub(super) fn runs_in_parallel(&self, definition: &ToolDefinition) -> bool {
+    /// Whether a call to `tool` with `params` may run beside other
+    /// parallel-safe calls: the agent's per-tool override says so, or else
+    /// the call ([`Tool::parallel_safe_for`]) or else the tool's definition,
+    /// and the agent doesn't ask for one call per turn.
+    pub(super) fn runs_in_parallel(
+        &self,
+        tool: &dyn Tool,
+        params: &HashMap<String, Value>,
+    ) -> bool {
         let config = &self.task.agent_config;
+        let definition = tool.definition();
         // `complete_task` ends the turn, so it always runs alone, after the
         // calls before it (whatever an override says).
-        definition.name != COMPLETE_TASK_TOOL_NAME
-            && !config.asks_one_tool_call_per_turn()
-            && config.is_parallel_safe(definition)
+        if definition.name == COMPLETE_TASK_TOOL_NAME || config.asks_one_tool_call_per_turn() {
+            return false;
+        }
+        config
+            .tool_config
+            .tool_specific_configs
+            .get(&definition.name)
+            .and_then(|override_config| override_config.parallel_safe)
+            .or_else(|| tool.parallel_safe_for(params))
+            .unwrap_or(definition.parallel_safe)
     }
 
     /// A call to `tool` to run, under the agent's time limit and
@@ -140,7 +153,7 @@ impl AgentLoop {
             timeout: config
                 .tool_config
                 .tool_timeout(tool_name, tool.uses_host_timeout()),
-            parallel_safe: self.runs_in_parallel(&tool.definition()),
+            parallel_safe: self.runs_in_parallel(tool.as_ref(), &params),
             interception: self.interception_for(tool_name, tool.as_ref()),
             interruptible: tool.interruptible(),
             background: tool.background_mode(),
@@ -201,7 +214,8 @@ impl AgentLoop {
             }
         }
         let durable = runs.iter().any(|run| {
-            run.custom_output.is_some() || run.tool.recovery_mode() != ToolRecovery::Rerun
+            run.custom_output.is_some()
+                || run.tool.recovery_mode_for(&run.params) != ToolRecovery::Rerun
         });
         self.report_task(durable).await;
         let interruptible = runs.iter().all(|run| run.interruptible);

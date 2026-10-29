@@ -13,12 +13,9 @@ fn stub_config() -> McpConfig {
         .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stub_server.py");
     McpConfig {
-        mcp_servers: vec![McpServerConfig {
-            name: "stub".into(),
-            command: python,
-            args: vec![script.display().to_string()],
-            env: HashMap::new(),
-        }],
+        mcp_servers: vec![
+            McpServerConfig::new("stub", python).with_args([script.display().to_string()]),
+        ],
     }
 }
 

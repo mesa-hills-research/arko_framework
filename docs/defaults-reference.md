@@ -42,6 +42,10 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   agent rearms it. Its warning before the end wakes an idle agent, before its prompt
   cache expires if the host says when that is, and only for 2 hours after the user last
   wrote (`set_warning_wakes_within`). See [Monitors](interactive-terminals.md#monitors).
+- An `McpHub` runs its own process of each MCP server (`McpServerConfig::shared`,
+  `false`), gives a server 60 s to start and list its tools, and lets workers reach it
+  through the `mcp` tool (`McpServerConfig::workers`, `true`). See
+  [The MCP hub and the mcp tool](arko_agents-guide.md#the-mcp-hub-and-the-mcp-tool).
 
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
 installs an ordered list. The list fails over only when the backend refuses an account (a usage limit, or

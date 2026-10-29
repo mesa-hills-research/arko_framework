@@ -1091,9 +1091,9 @@ impl ClaudeCodeRun {
             && if running.built_in {
                 crate::claude_code::READ_ONLY_BUILT_IN_TOOLS.contains(&running.tool_name.as_str())
             } else {
-                self.registry
-                    .get(&running.tool_name)
-                    .is_some_and(|tool| tool.recovery_mode() == ToolRecovery::Rerun)
+                self.registry.get(&running.tool_name).is_some_and(|tool| {
+                    tool.recovery_mode_for(&running.parameters) == ToolRecovery::Rerun
+                })
             };
         self.task
             .running_tool_calls
@@ -1291,7 +1291,7 @@ impl ClaudeCodeRun {
                 });
             let mode = match (&tool, &call.custom_output) {
                 (Some(_), Some(_)) => ToolRecovery::Rerun,
-                (Some(tool), None) => tool.recovery_mode(),
+                (Some(tool), None) => tool.recovery_mode_for(&call.parameters),
                 (None, _) => ToolRecovery::InDoubt,
             };
             let Some(tool) = tool.filter(|_| mode != ToolRecovery::InDoubt) else {

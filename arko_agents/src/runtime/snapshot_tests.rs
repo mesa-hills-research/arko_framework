@@ -60,6 +60,9 @@ struct Probe {
     parallel_safe: bool,
     seen: Arc<Mutex<Vec<Seen>>>,
     recorder: Option<Arc<Recorder>>,
+    /// A call whose `what` starts with `read` runs again after a stop, and
+    /// any other is in doubt, whatever `mode` says.
+    by_call: bool,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -76,6 +79,7 @@ impl Probe {
             parallel_safe: false,
             seen: Arc::default(),
             recorder: None,
+            by_call: false,
         }
     }
 }
@@ -104,6 +108,18 @@ impl Tool for Probe {
 
     fn recovery_mode(&self) -> ToolRecovery {
         self.mode
+    }
+
+    fn recovery_mode_for(&self, params: &HashMap<String, Value>) -> ToolRecovery {
+        if !self.by_call {
+            return self.mode;
+        }
+        let what = params.get("what").and_then(Value::as_str);
+        if what.is_some_and(|what| what.starts_with("read")) {
+            ToolRecovery::Rerun
+        } else {
+            ToolRecovery::InDoubt
+        }
     }
 
     async fn execute(
@@ -477,6 +493,67 @@ async fn open_native_calls_are_settled_by_their_tools_recovery_modes() {
         AgentEvent::ToolRejected { tool_call_id, reason: Some(reason), .. }
             if *tool_call_id == write_id && reason == RESTARTED_CALL
     )));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A tool whose calls differ settles each open call by the call: a read
+/// runs again and a write is in doubt. A read is reported without waiting
+/// for the save, and a write waits.
+#[tokio::test]
+async fn open_calls_are_settled_by_each_calls_recovery_mode() {
+    let workspace = workspace();
+    let recorder = Arc::new(Recorder::default());
+    let probe = Arc::new(Probe {
+        by_call: true,
+        recorder: Some(recorder.clone()),
+        ..Probe::new("probe", ToolRecovery::InDoubt)
+    });
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["probe"]),
+        registry(vec![probe.clone()]),
+        &workspace,
+    );
+    let write = native_call("write", "probe", serde_json::json!({"what": "write"}));
+    let read = native_call("read", "probe", serde_json::json!({"what": "read"}));
+    saved_native_task(&mut agent, vec![write, read]);
+    let (write_id, read_id) = (Uuid::new_v4(), Uuid::new_v4());
+    agent.task.running_tool_calls = vec![
+        running(write_id, Some("write"), "probe", "write"),
+        running(read_id, Some("read"), "probe", "read"),
+    ];
+    agent.task = reloaded(&agent.task);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "again",
+            "probe",
+            serde_json::json!({"what": "read again"}),
+        )]),
+        turn(vec![native_call(
+            "later",
+            "probe",
+            serde_json::json!({"what": "write later"}),
+        )]),
+        complete(),
+    ]);
+    with_sink(&mut agent, &recorder);
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let output = |call: &str| result_for(&task.conversation, call)[0].clone();
+    assert_eq!(output("write").output, RESTARTED_CALL);
+    assert_eq!(output("read").output, "probe ran read");
+    let seen = probe.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].tool_call_id, Some(read_id));
+    assert!(seen[0].recovering);
+    // The read's write-ahead report doesn't wait for the save; the write's
+    // does.
+    for (index, durable) in [(1, false), (2, true)] {
+        let (_, reported_durable) = seen[index].snapshot.clone().unwrap();
+        assert_eq!(reported_durable, durable, "call {index}");
+    }
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
