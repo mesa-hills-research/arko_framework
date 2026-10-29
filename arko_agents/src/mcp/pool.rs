@@ -152,29 +152,38 @@ impl SharedServer {
         let ended = self.connection.lock().unwrap().take();
         let config = self.config.clone();
         let launch = self.launch.clone();
-        let opened = pool()
-            .runtime
-            .spawn(async move {
-                if let Some(mut ended) = ended {
-                    ended.stop().await;
-                }
-                let opening = Connection::open_in(&config, Some(&launch));
-                match tokio::time::timeout(timeout, opening).await {
-                    Ok(opened) => opened.map_err(|error| error.reason()),
-                    Err(_) => Err(format!("it didn't start within {} s", timeout.as_secs())),
-                }
-            })
-            .await
-            .map_err(|error| {
-                log::warn!(
-                    "MCP server '{}': its start was stopped ({error})",
-                    self.config.name
-                );
-                "its start was stopped".to_string()
-            })??;
+        // A caller that goes away (its start was cancelled, or timed out)
+        // takes the start with it. The process the start spawned belongs to
+        // its stop handle from the spawn on, so it ends with the start.
+        let mut opening = AbortOnDrop(pool().runtime.spawn(async move {
+            if let Some(mut ended) = ended {
+                ended.stop().await;
+            }
+            let opening = Connection::open_in(&config, Some(&launch));
+            match tokio::time::timeout(timeout, opening).await {
+                Ok(opened) => opened.map_err(|error| error.reason()),
+                Err(_) => Err(format!("it didn't start within {} s", timeout.as_secs())),
+            }
+        }));
+        let opened = (&mut opening.0).await.map_err(|error| {
+            log::warn!(
+                "MCP server '{}': its start was stopped ({error})",
+                self.config.name
+            );
+            "its start was stopped".to_string()
+        })??;
         let peer = opened.peer();
         *self.connection.lock().unwrap() = Some(opened);
         Ok(peer)
+    }
+}
+
+/// Aborts its task when dropped, as when the future awaiting it is.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

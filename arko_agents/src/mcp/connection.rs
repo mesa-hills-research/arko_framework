@@ -246,6 +246,10 @@ impl Connection {
     ///
     /// The process inherits the host's environment, with the config's
     /// `env` over it, and its working directory.
+    ///
+    /// The process belongs to its stop handle from the moment it's spawned,
+    /// so dropping the future before the handshake ends kills it, with what
+    /// it started.
     pub(crate) async fn open(config: &McpServerConfig) -> Result<Self, OpenError> {
         Self::open_in(config, None).await
     }

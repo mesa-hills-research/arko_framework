@@ -1153,6 +1153,37 @@ async fn a_shared_server_is_one_process_per_host_environment() {
     all_end(&second_file).await;
 }
 
+/// A shared server's start that is cancelled while the server is silent
+/// takes its process with it, long before the start would time out.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_shared_start_ends_its_process() {
+    let pid_file = pid_file();
+    let mut silent = McpServerConfig::new("silent", "sh").with_args([
+        "-c".to_string(),
+        "echo $$ >> \"$0\"; exec sleep 300".to_string(),
+        pid_file.display().to_string(),
+    ]);
+    silent.shared = true;
+    let hub = McpHub::new(vec![silent]);
+    let starting = tokio::spawn({
+        let hub = hub.clone();
+        async move { hub.start("silent").await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while pids(&pid_file).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the server starts");
+    starting.abort();
+    assert!(starting.await.unwrap_err().is_cancelled());
+    drop(hub);
+    // The start would wait 60 s for the handshake.
+    all_end(&pid_file).await;
+}
+
 /// A shared server's process that ends is started again by the next call,
 /// for every hub.
 #[cfg(unix)]

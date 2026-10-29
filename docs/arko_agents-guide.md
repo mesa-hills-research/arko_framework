@@ -871,7 +871,8 @@ too. The process starts with exactly the environment and working directory the h
 when the server was first started, so a host whose environment changed since gets a
 process of its own. `stop` and `start`
 change only the calling hub's use of it, and its process stops, with what it started,
-when the last hub lets go. A shared server mixes sessions up if it keeps anything for a
+when the last hub lets go. A start that is cancelled before the server answers ends the
+process it started. A shared server mixes sessions up if it keeps anything for a
 client or a session, so share only one that keeps nothing. The `shared` parameter of `add` tells
 the agent to set it only after checking that the server keeps no state per client or session,
 holds no browser or open files, uses no per-project paths, environment or credentials and
