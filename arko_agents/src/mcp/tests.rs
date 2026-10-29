@@ -721,7 +721,7 @@ async fn reads_run_beside_other_calls_and_again_after_a_crash() {
 async fn direct_tools_keep_their_names_and_call_through_the_hub() {
     let hub = McpHub::new(vec![stub("issues", &[]), missing("figma")]);
     hub.start_all(TIMEOUT).await;
-    let direct = hub.direct_tools();
+    let direct = hub.direct_tools(Arc::new(AllServers));
     let names: Vec<String> = direct.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,
@@ -747,6 +747,85 @@ async fn direct_tools_keep_their_names_and_call_through_the_hub() {
         .await
         .unwrap();
     assert_eq!(output, "echo: direct");
+    hub.shutdown().await;
+}
+
+/// A direct tool reaches only the servers its run may reach, as the bridge
+/// does, when it's called: the access's servers, and for a worker never one
+/// kept to the main agent. The definitions stay those the conversation was
+/// saved with.
+#[tokio::test]
+async fn direct_tools_check_the_runs_servers_when_called() {
+    let mut kept = stub("kept", &[]);
+    kept.workers = false;
+    let hub = McpHub::new(vec![stub("issues", &[]), stub("other", &[]), kept]);
+    hub.start_all(TIMEOUT).await;
+    let (narrow, wide, lead) = (
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    );
+    let access = Arc::new(ByTask(HashMap::from([
+        (narrow, vec!["issues".to_string()]),
+        (wide, vec!["issues".into(), "other".into(), "kept".into()]),
+    ])));
+    let main = hub.direct_tools(access.clone());
+    let workers = hub.worker_direct_tools(access);
+    let definitions = |tools: &[Arc<dyn Tool>]| -> Vec<String> {
+        tools
+            .iter()
+            .map(|tool| serde_json::to_string(&tool.definition()).unwrap())
+            .collect()
+    };
+    assert_eq!(definitions(&main), definitions(&workers));
+    assert_eq!(main.len(), 9);
+    let echo = |tools: &[Arc<dyn Tool>], server: &str| {
+        let name = direct_tool_name(server, "echo");
+        tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap()
+            .clone()
+    };
+    let call = |tool: Arc<dyn Tool>, task: uuid::Uuid| async move {
+        let workspace = workspace();
+        let context = TaskContext::new(task, "tester", "test", &workspace);
+        tool.execute(&context, HashMap::from([("text".into(), json!("hi"))]))
+            .await
+            .map_err(|error| error.to_string())
+    };
+
+    // The main agent's run has no list, so it reaches every server.
+    assert_eq!(call(echo(&main, "kept"), lead).await.unwrap(), "echo: hi");
+    assert_eq!(
+        call(echo(&main, "issues"), narrow).await.unwrap(),
+        "echo: hi"
+    );
+    let refused = call(echo(&main, "other"), narrow).await.unwrap_err();
+    assert!(
+        refused.contains("other isn't one of your MCP servers."),
+        "{refused}"
+    );
+    // A worker's never reaches a server kept to the main agent, even when
+    // its list names it.
+    assert_eq!(
+        call(echo(&workers, "other"), wide).await.unwrap(),
+        "echo: hi"
+    );
+    let refused = call(echo(&workers, "kept"), wide).await.unwrap_err();
+    assert!(
+        refused.contains("kept isn't one of your MCP servers."),
+        "{refused}"
+    );
+    let refused = call(echo(&workers, "kept"), lead).await.unwrap_err();
+    assert!(refused.contains("kept isn't one"), "{refused}");
+    // The config when the call is made counts.
+    let mut now_kept = stub("other", &[]);
+    now_kept.workers = false;
+    hub.add(now_kept).await.unwrap();
+    let refused = call(echo(&workers, "other"), wide).await.unwrap_err();
+    assert!(refused.contains("other isn't one"), "{refused}");
+    assert_eq!(call(echo(&main, "other"), wide).await.unwrap(), "echo: hi");
     hub.shutdown().await;
 }
 

@@ -851,9 +851,12 @@ which servers may go.
 
 `servers` and `tools` calls, and `call` of a tool the server marks read-only, run beside
 other calls and run again after a crash (`Tool::parallel_safe_for`,
-`Tool::recovery_mode_for`). Other calls run alone and are in doubt. `direct_tools`
+`Tool::recovery_mode_for`). Other calls run alone and are in doubt. `direct_tools(access)`
 returns a tool per server tool (`mcp__<server>__<tool>`, see `direct_tool_name`), with
-calls made through the hub, for conversations saved with them.
+calls made through the hub, for conversations saved with them. Each call checks
+`access.servers_for` first, as `mcp` does. `worker_direct_tools(access)` gives workers the
+same tools with the same definitions, and their calls also refuse a server whose config
+sets `workers: false` when the call is made.
 
 A server whose config sets `shared: true` runs once per process for every hub that names
 the same command, arguments and environment, on a runtime of its own. `stop` and `start`

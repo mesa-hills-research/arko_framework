@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use rmcp::service::{Peer, RoleClient};
 use serde_json::{Map, Value};
 
+use super::bridge::McpAccess;
 use super::call::{CallFailure, call_tool};
 use super::config::McpServerConfig;
 use super::connection::Connection;
@@ -563,7 +564,29 @@ impl McpHub {
     /// description and schema, and its calls made through the hub. Servers
     /// whose tools were never listed (they didn't start) give none. A name
     /// taken by an earlier tool is left out.
-    pub fn direct_tools(self: &Arc<Self>) -> Vec<Arc<dyn Tool>> {
+    ///
+    /// These are the main agent's. Each call first asks `access` whether
+    /// its run may reach the server, as [`McpBridgeTool`](super::McpBridgeTool)
+    /// does, and fails if it may not. Give workers
+    /// [`worker_direct_tools`](Self::worker_direct_tools).
+    pub fn direct_tools(self: &Arc<Self>, access: Arc<dyn McpAccess>) -> Vec<Arc<dyn Tool>> {
+        self.direct_tools_for(access, false)
+    }
+
+    /// The [`direct_tools`](Self::direct_tools) for workers, with the same
+    /// names and definitions, so a conversation saved with them keeps its
+    /// tool list. A call also fails when the server's config sets
+    /// [`workers`](McpServerConfig::workers) off, as the config is when the
+    /// call is made.
+    pub fn worker_direct_tools(self: &Arc<Self>, access: Arc<dyn McpAccess>) -> Vec<Arc<dyn Tool>> {
+        self.direct_tools_for(access, true)
+    }
+
+    fn direct_tools_for(
+        self: &Arc<Self>,
+        access: Arc<dyn McpAccess>,
+        worker: bool,
+    ) -> Vec<Arc<dyn Tool>> {
         let entries: Vec<Arc<Entry>> = self.entries.lock().unwrap().clone();
         let mut taken = HashSet::new();
         let mut direct: Vec<Arc<dyn Tool>> = Vec::new();
@@ -583,6 +606,8 @@ impl McpHub {
                 }
                 direct.push(Arc::new(DirectTool {
                     hub: self.clone(),
+                    access: access.clone(),
+                    worker,
                     server: server.clone(),
                     tool: tool.name.clone(),
                     definition: mcp_definition(name, &server, tool),
@@ -601,12 +626,33 @@ impl McpHub {
     }
 }
 
-/// A tool of a server as a tool of its own, called through the hub.
+/// A tool of a server as a tool of its own, called through the hub, for the
+/// runs `access` lets reach the server.
 struct DirectTool {
     hub: Arc<McpHub>,
+    access: Arc<dyn McpAccess>,
+    /// A worker's: a server kept to the main agent is refused.
+    worker: bool,
     server: String,
     tool: String,
     definition: ToolDefinition,
+}
+
+impl DirectTool {
+    /// Whether `ctx`'s run may reach the server now.
+    fn reaches(&self, ctx: &TaskContext<'_>) -> bool {
+        if self.worker
+            && self
+                .hub
+                .config(&self.server)
+                .is_some_and(|config| !config.workers)
+        {
+            return false;
+        }
+        self.access
+            .servers_for(ctx)
+            .is_none_or(|allowed| allowed.contains(&self.server))
+    }
 }
 
 impl std::fmt::Debug for DirectTool {
@@ -654,6 +700,12 @@ impl Tool for DirectTool {
         context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<ToolOutput, ToolError> {
+        if !self.reaches(context) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{} isn't one of your MCP servers.",
+                self.server
+            )));
+        }
         self.hub
             .call(
                 context,
