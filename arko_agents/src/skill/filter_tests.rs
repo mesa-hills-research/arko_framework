@@ -1236,6 +1236,84 @@ fn a_bundle_in_a_source_folder_with_mismatched_headers_is_skipped() {
     ));
 }
 
+/// A bundle in a source folder is read within the limits of one offered to
+/// be saved: 16 MB unpacked, 1,000 files, and a file no larger than that
+/// could make. Over them, it's skipped as a broken skill is.
+#[test]
+fn a_bundle_in_a_source_folder_over_the_limits_is_skipped() {
+    let temp = Temp::new();
+    let deflated =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let bundle = |files: &[(&str, &[u8])]| {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in files {
+            writer.start_file(*name, deflated).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    };
+    let (good, _) = stored_bundle();
+    std::fs::write(temp.0.join("good.skill"), &good).unwrap();
+    // 17 MB of text deflated to a few kilobytes.
+    let text = vec![b'a'; 17 * 1024 * 1024];
+    let bomb = bundle(&[
+        ("SKILL.md", skill_md("bomb", "").as_bytes()),
+        ("reference/a.md", &text),
+    ]);
+    assert!(bomb.len() < 1024 * 1024, "{}", bomb.len());
+    std::fs::write(temp.0.join("bomb.skill"), &bomb).unwrap();
+    let names: Vec<String> = (0..1000).map(|i| format!("reference/{i}.md")).collect();
+    let skill = skill_md("many", "");
+    let mut files: Vec<(&str, &[u8])> = vec![("SKILL.md", skill.as_bytes())];
+    files.extend(names.iter().map(|name| (name.as_str(), &b"x"[..])));
+    std::fs::write(temp.0.join("many.skill"), bundle(&files)).unwrap();
+    std::fs::write(temp.0.join("large.skill"), vec![0u8; 18 * 1024 * 1024]).unwrap();
+    let config = SkillsConfig {
+        global_sources: vec![global(&temp.0)],
+        ..Default::default()
+    };
+
+    let skipped = |file: &str| -> String {
+        scan(&config, &temp.0)
+            .into_iter()
+            .find(|found| found.path.ends_with(file))
+            .unwrap_or_else(|| panic!("{file} isn't listed"))
+            .skipped
+            .unwrap_or_default()
+    };
+    assert_eq!(skipped("good.skill"), "");
+    assert!(
+        skipped("bomb.skill").contains("more than 16 MB unpacked"),
+        "{}",
+        skipped("bomb.skill")
+    );
+    assert!(
+        skipped("many.skill").contains("more than 1000 files"),
+        "{}",
+        skipped("many.skill")
+    );
+    assert!(
+        skipped("large.skill").contains("larger than 17 MB"),
+        "{}",
+        skipped("large.skill")
+    );
+    assert_eq!(
+        SkillManager::load(&config, &temp.0)
+            .unwrap()
+            .total_skill_count(),
+        1
+    );
+    // Under Error it is refused, as a broken skill is.
+    let strict = SkillsConfig {
+        on_invalid_skill: InvalidSkillPolicy::Error,
+        ..config
+    };
+    assert!(matches!(
+        SkillManager::load(&strict, &temp.0),
+        Err(ArkoAgentsError::Skill(SkillLoadError::ZipError { .. }))
+    ));
+}
+
 #[test]
 fn a_streamed_bundle_with_data_descriptors_loads() {
     let mut writer = zip::ZipWriter::new_stream(Vec::new());

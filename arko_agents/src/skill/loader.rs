@@ -580,11 +580,32 @@ fn collect_resources(
 /// The bundle skill (a zip archive) in the file `file_path`.
 fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill, SkillLoadError> {
     let path = file_path.to_string_lossy();
-    let data = std::fs::read(file_path).map_err(|e| SkillLoadError::Io {
-        path: path.to_string(),
-        source: e,
-    })?;
+    let data = read_bundle_file(file_path)?;
     read_bundle_bytes(&data, &path, source_label, Bundle::Loading)
+}
+
+/// The bytes of the bundle file `file_path`, or an error for one larger
+/// than a bundle within the limits could be, without reading it whole.
+pub(super) fn read_bundle_file(file_path: &Path) -> Result<Vec<u8>, SkillLoadError> {
+    let path = file_path.to_string_lossy().to_string();
+    let io = |source| SkillLoadError::Io {
+        path: path.clone(),
+        source,
+    };
+    let mut data = Vec::new();
+    std::fs::File::open(file_path)
+        .and_then(|file| file.take(MAX_BUNDLE_FILE_BYTES + 1).read_to_end(&mut data))
+        .map_err(io)?;
+    if data.len() as u64 > MAX_BUNDLE_FILE_BYTES {
+        return Err(SkillLoadError::ZipError {
+            path,
+            message: format!(
+                "The bundle is larger than {} MB.",
+                MAX_BUNDLE_FILE_BYTES / (1024 * 1024)
+            ),
+        });
+    }
+    Ok(data)
 }
 
 /// How far the entries of a bundle are checked.
@@ -592,7 +613,9 @@ fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill
 pub(super) enum Bundle {
     /// A bundle in a source directory. Its `.md` files that aren't UTF-8 text
     /// are passed over, and its entries are only read into memory. Its
-    /// local headers must match the central directory, like a candidate's.
+    /// local headers must match the central directory, and it holds at most
+    /// [`MAX_CANDIDATE_BYTES`] and [`MAX_CANDIDATE_FILES`], like a
+    /// candidate's.
     Loading,
     /// A bundle offered to be saved as a skill, whose entries would be
     /// written to a folder. An entry with an absolute path, a `..` or a link,
@@ -605,12 +628,16 @@ pub(super) enum Bundle {
     Unpack,
 }
 
-/// The most that the entries of a bundle offered as a skill may hold when
-/// unpacked, so that a small file can't fill the memory.
+/// The most that the entries of a bundle may hold when unpacked, so that a
+/// small file can't fill the memory.
 const MAX_CANDIDATE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// The most files a bundle offered as a skill may hold.
+/// The most files a bundle may hold.
 const MAX_CANDIDATE_FILES: usize = 1000;
+
+/// The largest bundle file read, which is what its entries may hold and
+/// room for the headers of as many files as it may hold.
+const MAX_BUNDLE_FILE_BYTES: u64 = MAX_CANDIDATE_BYTES + 1024 * 1024;
 
 /// The bundle skill in the zip archive `data`, named `path` in errors.
 pub(super) fn read_bundle_bytes(
@@ -677,17 +704,17 @@ pub(super) fn parse_bundle(
 
         if mode != Bundle::Loading {
             check_candidate_entry(&zip_file, &name).map_err(&zip_error)?;
-            unpacked = unpacked.saturating_add(zip_file.size());
-            if unpacked > MAX_CANDIDATE_BYTES {
-                return Err(too_much());
-            }
-            if !zip_file.is_dir() {
-                file_count += 1;
-                if file_count > MAX_CANDIDATE_FILES {
-                    return Err(zip_error(format!(
-                        "The bundle holds more than {MAX_CANDIDATE_FILES} files."
-                    )));
-                }
+        }
+        unpacked = unpacked.saturating_add(zip_file.size());
+        if unpacked > MAX_CANDIDATE_BYTES {
+            return Err(too_much());
+        }
+        if !zip_file.is_dir() {
+            file_count += 1;
+            if file_count > MAX_CANDIDATE_FILES {
+                return Err(zip_error(format!(
+                    "The bundle holds more than {MAX_CANDIDATE_FILES} files."
+                )));
             }
         }
         // Only the skill's text is read, or all of it to unpack it.
@@ -696,17 +723,14 @@ pub(super) fn parse_bundle(
             continue;
         }
 
+        // However much an entry says it holds, no more than what is left of
+        // the limit is read.
         let mut bytes = Vec::new();
-        let read = match mode {
-            Bundle::Loading => zip_file.read_to_end(&mut bytes),
-            // However much an entry says it holds, no more than what is left
-            // of the limit is read.
-            _ => (&mut zip_file)
-                .take(MAX_CANDIDATE_BYTES - read_bytes + 1)
-                .read_to_end(&mut bytes),
-        };
+        let read = (&mut zip_file)
+            .take(MAX_CANDIDATE_BYTES - read_bytes + 1)
+            .read_to_end(&mut bytes);
         read_bytes += bytes.len() as u64;
-        if mode != Bundle::Loading && read_bytes > MAX_CANDIDATE_BYTES {
+        if read_bytes > MAX_CANDIDATE_BYTES {
             return Err(too_much());
         }
         if let Err(e) = read {

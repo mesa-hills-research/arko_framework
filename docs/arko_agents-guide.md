@@ -984,11 +984,12 @@ bundle as loading reads it, and `skill::read_bundle(bytes)` reads a bundle alrea
 They return the `LoadedSkill`, so a host can check a skill before it saves one. A bundle with
 an absolute path, a `..` or a link in it, a `.md` file that isn't UTF-8 text, more than
 16 MB unpacked, more than 1,000 files, or local headers that don't match its central
-directory is refused. `skill::unpack_bundle(bytes, dest)` checks
+directory is refused, and so is a bundle file larger than 17 MB. `skill::unpack_bundle(bytes, dest)` checks
 a bundle the same way and then writes all its files to the new folder `dest`, without the
 executable bit. It writes to a hidden folder beside `dest` and renames it, so a failure leaves
 nothing at `dest`. A `.skill` bundle in a source folder is skipped as an invalid skill
-when its local headers don't match its central directory or a name appears twice.
+when its local headers don't match its central directory, a name appears twice, or it is over
+the same limits (16 MB unpacked, 1,000 files, a 17 MB file).
 
 A skill carries exact instructions, so `load_skill` results reach the agent as written,
 and a result interceptor, such as a workflow's distiller, doesn't see them. The opt-in

@@ -16,7 +16,8 @@ use crate::error::ArkoAgentsError;
 /// the form of the name, the number of files, or links in a folder.
 ///
 /// A bundle is checked further, because its entries would be written to a
-/// folder, so it is refused for the reasons [`read_bundle`] gives.
+/// folder, so it is refused for the reasons [`read_bundle`] gives, and when
+/// its file is larger than 17 MB.
 pub fn read_candidate(path: impl AsRef<Path>) -> Result<LoadedSkill, SkillLoadError> {
     let path = path.as_ref();
     let text = path.to_string_lossy().to_string();
@@ -49,10 +50,7 @@ pub fn read_candidate(path: impl AsRef<Path>) -> Result<LoadedSkill, SkillLoadEr
     if name.ends_with(".md") {
         loader::read_flat_skill(path, &label)
     } else if name.ends_with(".skill") || name.ends_with(".zip") {
-        let data = std::fs::read(path).map_err(|source| SkillLoadError::Io {
-            path: text.clone(),
-            source,
-        })?;
+        let data = loader::read_bundle_file(path)?;
         loader::read_bundle_bytes(&data, &text, &label, Bundle::Candidate)
     } else {
         Err(SkillLoadError::NotASkill { path: text })
