@@ -30,13 +30,10 @@ const STDERR_DRAIN: Duration = Duration::from_millis(250);
 /// How long a failed handshake waits for the server's exit to be reported,
 /// to give the exit as the reason.
 const EXIT_WAIT: Duration = Duration::from_millis(600);
-/// The shortest value of a server's own environment that [`Redactions`]
-/// keeps out of the log. Shorter ones (`1`, `on`) would blank out ordinary
-/// words and numbers.
+/// The shortest value that [`Redactions`] keeps out of the log, of a
+/// server's own environment and of an inherited variable with a secret's
+/// name. Shorter ones (`1`, `on`) would blank out ordinary words and numbers.
 const SHORTEST_REDACTED: usize = 4;
-/// The shortest value of an inherited variable with a secret's name that
-/// [`Redactions`] keeps out of the log.
-const SHORTEST_INHERITED_SECRET: usize = 8;
 /// What the name of a variable holding a secret has in it, ignoring case.
 const SECRET_NAME_PARTS: [&str; 6] = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"];
 
@@ -124,7 +121,7 @@ impl Redactions {
             .into_iter()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .filter(|(name, value)| {
-                secret_name(name) && value.chars().count() >= SHORTEST_INHERITED_SECRET
+                secret_name(name) && value.chars().count() >= SHORTEST_REDACTED
             });
         let mut values: Vec<(String, String)> = explicit
             .chain(inherited)
@@ -686,9 +683,9 @@ mod tests {
         assert_eq!(launch.program("sh"), None);
     }
 
-    /// Of what the server inherits, the values of 8 characters or more of
-    /// the variables whose names look secret are kept out too. Its own
-    /// `env` goes from 4 characters, whatever the name.
+    /// Of what the server inherits, the values of 4 characters or more of
+    /// the variables whose names look secret are kept out too, as its own
+    /// `env` is, whatever the name.
     #[test]
     fn inherited_secrets_are_kept_out_by_their_names() {
         let config = McpServerConfig::new("files", "sh").with_env([("MODE", "fast")]);
@@ -698,6 +695,7 @@ mod tests {
             ("SMTP_PASS", "longpassvalue"),
             ("GH_AUTH", "authvalue123"),
             ("SHORT_TOKEN", "abc1234"),
+            ("TINY_KEY", "xyz"),
             ("HOME", "/home/someone"),
             ("PASSAGE", "notasecretvalue"),
         ]
@@ -705,9 +703,9 @@ mod tests {
         let redactions = Redactions::of(&config, inherited);
         assert_eq!(
             redactions.apply(
-                "fast fake-inherited-token-1234 hunter2hunter2 longpassvalue authvalue123 abc1234 /home/someone notasecretvalue"
+                "fast fake-inherited-token-1234 hunter2hunter2 longpassvalue authvalue123 abc1234 xyz /home/someone notasecretvalue"
             ),
-            "${MODE} ${FAKE_API_TOKEN} ${db_password} ${SMTP_PASS} ${GH_AUTH} abc1234 /home/someone notasecretvalue"
+            "${MODE} ${FAKE_API_TOKEN} ${db_password} ${SMTP_PASS} ${GH_AUTH} ${SHORT_TOKEN} xyz /home/someone notasecretvalue"
         );
     }
 

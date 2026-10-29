@@ -809,7 +809,7 @@ each value of its `env` and of `McpServerConfig::expanded`, the `${VAR}`s a host
 its command, arguments and environment (values shorter than 4 characters stay). The same goes
 for the variables it inherits from the host (a shared server's environment as it started)
 whose names hold `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`, or end in
-`PASS`, in any case, for values of 8 characters or more. The
+`PASS`, in any case, for values of 4 characters or more. The
 errors and failure reasons an agent reads hold neither the command nor what the server
 wrote, only fixed words such as "it exited with code 1" or "its program wasn't found".
 
