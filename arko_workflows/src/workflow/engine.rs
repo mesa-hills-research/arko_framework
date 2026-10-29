@@ -2879,9 +2879,9 @@ impl WorkflowEngine {
     /// A subagent's `load_skill` never loads a skill kept to the main agent
     /// (`workers: false`), also when its configuration was saved before
     /// [`SkillsConfig::subagent`](arko_agents::skill::SkillsConfig::subagent)
-    /// was set, or inherited from one that was. Only the tool's own copy of
-    /// the configuration says so, so a saved conversation keeps its prompt
-    /// and its tool list.
+    /// was set. Only the tool's own copy of the configuration says so, so a
+    /// saved conversation keeps its prompt and its tool list. A new run's
+    /// configuration has it set already (`prepare_agent_config_for`).
     fn setup_skills(
         config: &mut AgentConfig,
         registry: &mut ToolRegistry,
@@ -3113,6 +3113,15 @@ impl WorkflowEngine {
         role: RunRole,
     ) -> AgentConfig {
         let mut config = base_config.clone();
+        // The prompt written from this configuration is a new one, so a
+        // subagent's lists and holds no skill kept to the main agent, also
+        // when the host left `subagent` off. (A saved prompt stays, and only
+        // its `load_skill` is narrowed, in `setup_skills`.)
+        if role.subagent
+            && let Some(skills) = config.skills_config.as_mut()
+        {
+            skills.subagent = true;
+        }
         // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
         // workflow's tools.
         if config.tool_config.chat {

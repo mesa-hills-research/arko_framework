@@ -925,10 +925,11 @@ A workflow does this for its agents. A run it continues, resumes or recovers tak
 embedded skills its agent is registered with now (a run the host reconfigured, only when its
 skills configuration is set), and `resume_from` ignores them, so a built-in skill that
 changed between versions doesn't stop a resume. A subagent has the skills of its own agent's
-configuration, not its lead's. Its `load_skill` never loads a skill with `workers: false`, even
-when its configuration leaves `SkillsConfig::subagent` off (one saved before it existed, say).
-Only the tool's copy of the configuration changes, so a continued or recovered run keeps its
-prompt and tool list.
+configuration, not its lead's. A workflow turns `SkillsConfig::subagent` on for a new subagent
+run, so its prompt neither lists nor holds a skill with `workers: false`, even when the host left
+it off. A subagent continued or recovered from a configuration saved with it off (before it
+existed, say) keeps its prompt and tool list, and only its `load_skill`'s copy of the
+configuration turns it on, so it never loads such a skill either.
 
 When there are on-demand skills, `SkillManager::setup`, given the tool registry and the
 `AgentConfig`, registers the `load_skill` tool and adds it to the agent's tools with

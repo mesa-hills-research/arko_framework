@@ -48,10 +48,10 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   [The MCP hub and the mcp tool](arko_agents-guide.md#the-mcp-hub-and-the-mcp-tool).
 - Skills are listed for every model and every agent, unless a skill's `models` or
   `workers: false` says otherwise. `SkillsConfig::model_names` is empty (no model filter),
-  `subagent` is `false` (a workflow's subagent runs still never load a `workers: false`
-  skill), `only` is `None` and `offer_when_empty` is `false`, so a conversation that starts
-  with no skill has no `load_skill`. `load_skill` reads the skill sources at each call, and
-  a missing `SkillSource` directory warns unless it is `optional`. See
+  `subagent` is `false` (a workflow turns it on for its subagent runs), `only` is `None` and
+  `offer_when_empty` is `false`, so a conversation that starts with no skill has no
+  `load_skill`. `load_skill` reads the skill sources at each call, and a missing
+  `SkillSource` directory warns unless it is `optional`. See
   [Skills](arko_agents-guide.md#skills).
 
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
