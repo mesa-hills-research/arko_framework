@@ -27,6 +27,8 @@ pub mod stop;
 pub mod task;
 #[cfg(any(unix, windows))]
 pub mod terminal;
+#[cfg(test)]
+mod test_log;
 pub mod tool;
 pub mod utils;
 
@@ -44,7 +46,9 @@ pub use error::ArkoAgentsError;
 pub use handover::{
     HandoverConfig, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed, HandoverThreshold,
 };
-pub use mcp::{McpConfig, McpManager, McpServerConfig};
+pub use mcp::{
+    McpAccess, McpBridgeTool, McpChanges, McpConfig, McpHub, McpManager, McpServerConfig,
+};
 pub use parsing::{
     ParsedToolCall, RawParserEvent, ToolAssemblyError, ToolCallGroup, ToolCallParser,
     ToolParsingConfig, assemble_tool_calls, strip_output_based_only_blocks,

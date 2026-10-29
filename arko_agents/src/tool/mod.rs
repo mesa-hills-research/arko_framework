@@ -445,6 +445,29 @@ pub trait Tool: Debug + Send + Sync {
         ToolRecovery::InDoubt
     }
 
+    /// [`recovery_mode`](Self::recovery_mode) for one call, given its
+    /// arguments, for a tool whose calls differ (one that reads or writes by
+    /// its arguments). The runtime asks this, and the default gives
+    /// `recovery_mode`.
+    fn recovery_mode_for(&self, params: &HashMap<String, Value>) -> ToolRecovery {
+        let _ = params;
+        self.recovery_mode()
+    }
+
+    /// Whether this call may run beside other parallel-safe calls of a
+    /// response, given its arguments, for a tool whose calls differ. `None`
+    /// leaves it to the definition's
+    /// [`parallel_safe`](ToolDefinition::parallel_safe), as the default
+    /// does. An agent's per-tool
+    /// [`parallel_safe`](crate::agent_config::PerToolConfigOverride::parallel_safe)
+    /// still overrides both. Native calls go by it, and a batch of
+    /// output-based calls by the definition. A Claude Code agent's calls
+    /// run as Claude Code schedules them.
+    fn parallel_safe_for(&self, params: &HashMap<String, Value>) -> Option<bool> {
+        let _ = params;
+        None
+    }
+
     /// How a running call of this tool can move to the background, when its
     /// runtime has a terminal manager for background jobs
     /// ([`AgentRuntime::with_background_jobs`](crate::runtime::AgentRuntime::with_background_jobs)).

@@ -1,21 +1,26 @@
+mod candidate;
 pub mod config;
 mod frontmatter;
 pub mod load_skill;
 mod loader;
+mod matcher;
 pub mod types;
 
 #[cfg(test)]
 mod embedded_tests;
+#[cfg(test)]
+mod filter_tests;
 
+pub use candidate::{read_bundle, read_candidate, unpack_bundle};
 pub use config::{EmbeddedSkill, InvalidSkillPolicy, SkillSource, SkillsConfig};
 pub use load_skill::{LOAD_SKILL_TOOL_NAME, LoadSkillTool};
+pub use matcher::models_match;
 pub use types::{
     AutoLoadedSkillContent, LoadedSkill, SkillLoadError, SkillPromptContext, SkillScan,
     SkillSummary,
 };
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::agent_config::{AgentConfig, PerToolConfigOverride};
@@ -43,37 +48,47 @@ pub fn scan(config: &SkillsConfig, workspace_root: &Path) -> Vec<SkillScan> {
 /// - A `SkillPromptContext` for the `PromptBuilder`
 /// - The tool name to add to `available_tool_names`
 pub struct SkillManager {
-    on_demand_skills: Arc<HashMap<String, LoadedSkill>>,
+    config: SkillsConfig,
+    workspace: PathBuf,
     prompt_context: SkillPromptContext,
+    /// The skills loaded.
+    total: usize,
+    /// How many of them `load_skill` loads: all but those whose content is
+    /// in the prompt.
+    loadable: usize,
 }
 
 impl SkillManager {
     /// Loads skills from the given config, resolving workspace paths relative
     /// to `workspace_root`. The folder sources come first, then the embedded
-    /// skills, which a folder skill of the same name replaces.
+    /// skills, which a folder skill of the same name replaces. The config's
+    /// `subagent` setting and `only` list then leave some out, and its
+    /// `model_names` decide which the prompt lists.
     ///
     /// Returns `Err` only if `config.on_invalid_skill` is `Error` and a
     /// skill (an embedded one too) is invalid, can't be read, or a source
-    /// directory is missing or can't be read. Under `Warn` those are logged
-    /// and skipped.
+    /// directory is missing (unless its `optional` is set) or can't be read.
+    /// Under `Warn` those are logged and skipped.
     pub fn load(config: &SkillsConfig, workspace_root: &Path) -> Result<Self, ArkoAgentsError> {
         let (all_skills, prompt_context) = loader::load_skills(config, workspace_root)?;
-
-        let on_demand_map: HashMap<String, LoadedSkill> = all_skills
-            .into_iter()
-            .filter(|s| !s.auto_load)
-            .map(|s| (s.name.clone(), s))
-            .collect();
+        let loadable = all_skills
+            .iter()
+            .filter(|skill| !loader::content_in_prompt(skill, config))
+            .count();
 
         Ok(Self {
-            on_demand_skills: Arc::new(on_demand_map),
+            config: config.clone(),
+            workspace: workspace_root.to_path_buf(),
             prompt_context,
+            total: all_skills.len(),
+            loadable,
         })
     }
 
-    /// Creates the `LoadSkillTool` instance.
+    /// Creates the `LoadSkillTool` instance. It reads the skills again at
+    /// each call, so it sees changes made after this manager loaded them.
     pub fn create_tool(&self) -> LoadSkillTool {
-        LoadSkillTool::new(Arc::clone(&self.on_demand_skills))
+        LoadSkillTool::new(self.config.clone(), self.workspace.clone())
     }
 
     /// Registers the `load_skill` tool in the given registry.
@@ -92,9 +107,11 @@ impl SkillManager {
         &self.prompt_context
     }
 
-    /// Returns true if there are any on-demand skills available.
+    /// Returns true if `load_skill` has any skill to load: one that isn't
+    /// auto-loaded into the prompt. That includes skills for other models,
+    /// which load by name without being listed.
     pub fn has_on_demand_skills(&self) -> bool {
-        !self.on_demand_skills.is_empty()
+        self.loadable > 0
     }
 
     /// Returns true if there are any auto-loaded skills.
@@ -104,12 +121,13 @@ impl SkillManager {
 
     /// Returns the total number of loaded skills (on-demand + auto-loaded).
     pub fn total_skill_count(&self) -> usize {
-        self.on_demand_skills.len() + self.prompt_context.auto_loaded_skills.len()
+        self.total
     }
 
     /// Sets up on-demand skills and returns the `SkillPromptContext`.
     ///
-    /// When on-demand skills exist, it performs these steps:
+    /// When on-demand skills exist, or the config's `offer_when_empty` is
+    /// set, it performs these steps:
     /// - Registers the `load_skill` tool in the registry.
     /// - Adds the tool name to the agent config's available tools.
     /// - Adds an auto-approve override for `load_skill` if it has no
@@ -119,7 +137,7 @@ impl SkillManager {
         registry: &mut ToolRegistry,
         agent_config: &mut AgentConfig,
     ) -> SkillPromptContext {
-        if self.has_on_demand_skills() {
+        if self.has_on_demand_skills() || self.config.offer_when_empty {
             self.register_tool(registry);
 
             let tool_name = LOAD_SKILL_TOOL_NAME.to_string();

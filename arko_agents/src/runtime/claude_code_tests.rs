@@ -5964,3 +5964,91 @@ async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
         "{last}"
     );
 }
+
+/// The MCP bridge reaches a Claude Code agent as `mcp__arko__mcp`, served
+/// with its schema, and its calls reach the session's servers. A call of a
+/// tool the server marks read-only is recorded without waiting for the
+/// save, and a call that writes waits.
+#[tokio::test]
+async fn a_claude_code_agent_reaches_mcp_servers_through_the_bridge() {
+    let python = std::env::var("ARKO_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let stub = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stub_server.py");
+    let hub = crate::mcp::McpHub::new(vec![
+        crate::mcp::McpServerConfig::new("stub", python).with_args([stub.display().to_string()]),
+    ]);
+    hub.start_all(Duration::from_secs(30)).await;
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__mcp", "input": {"action": "servers"}, "id": "toolu_servers"},
+        {
+            "tool": "mcp__arko__mcp",
+            "input": {"action": "call", "server": "stub", "tool": "echo", "arguments": {"text": "hi"}},
+            "id": "toolu_echo",
+        },
+        {
+            "tool": "mcp__arko__mcp",
+            "input": {"action": "call", "server": "stub", "tool": "write_note", "arguments": {"text": "n"}},
+            "id": "toolu_note",
+        },
+        complete("done"),
+    ]]));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::mcp::McpBridgeTool::worker(
+        hub.clone(),
+        Arc::new(crate::mcp::AllServers),
+    )));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["mcp"]),
+        "Use the server.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (events, commands, handle) =
+        recording(&recorder).run_task(task, Arc::new(registry), None, false, None, None, None);
+    let (task, _) = Run {
+        events,
+        commands,
+        handle,
+    }
+    .finish()
+    .await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+
+    let served = &fake.logged("tools")[0]["tools"];
+    let mcp = served
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "mcp")
+        .expect("the bridge is served");
+    assert_eq!(
+        mcp["inputSchema"]["properties"]["action"]["enum"],
+        json!(["servers", "tools", "call", "start"])
+    );
+    let posts = fake.logged("post");
+    assert_eq!(posts[0]["tool"], "mcp__arko__mcp");
+    assert_eq!(posts[0]["output"], "stub  running, 2 tools");
+    assert_eq!(posts[1]["output"], "echo: hi");
+    assert_eq!(posts[2]["output"], "echo: n");
+    let first_report = |call: &str| {
+        recorder
+            .snapshots()
+            .into_iter()
+            .find(|(task, _)| {
+                task.running_tool_calls
+                    .iter()
+                    .any(|running| running.call_id.as_deref() == Some(call))
+            })
+            .map(|(_, durable)| durable)
+            .expect("the call is recorded")
+    };
+    assert!(!first_report("toolu_servers"));
+    assert!(!first_report("toolu_echo"));
+    assert!(first_report("toolu_note"));
+    hub.shutdown().await;
+}

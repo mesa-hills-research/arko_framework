@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use super::types::LoadedSkill;
+use super::config::{InvalidSkillPolicy, SkillsConfig};
+use super::loader;
 use crate::tool::{
     TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
     ToolTypeDetails,
@@ -14,20 +15,32 @@ pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 const NAME_PARAM: &str = "name";
 const RESOURCE_PARAM: &str = "resource";
 
-/// Built-in tool that loads on-demand skill content into the agent's context.
+/// Built-in tool that loads a skill's content into the agent's context.
 ///
-/// The tool holds a reference-counted map of all on-demand skills (those with
-/// `auto_load: false`). Auto-loaded skills are not in this map because their
-/// content is already injected into the system prompt.
+/// The tool reads the skill sources of its [`SkillsConfig`] at each call, by
+/// the code that loads skills at the start of a run, so it finds a skill
+/// written since the run started and an edit to one, and no longer finds one
+/// that was removed. It loads any skill the configuration gives the agent by
+/// its name, whether or not the model matches the skill's `models`. It
+/// doesn't load a skill whose content is in the system prompt (`auto_load`
+/// on a matching model). A skill that can't be loaded now is skipped, as
+/// under [`InvalidSkillPolicy::Warn`].
 #[derive(Debug, Clone)]
 pub struct LoadSkillTool {
-    skills: Arc<HashMap<String, LoadedSkill>>,
+    config: SkillsConfig,
+    workspace: PathBuf,
 }
 
 impl LoadSkillTool {
-    /// Creates a new LoadSkillTool with the given on-demand skills.
-    pub fn new(skills: Arc<HashMap<String, LoadedSkill>>) -> Self {
-        Self { skills }
+    /// Creates a tool that reads the sources of `config`, resolving workspace
+    /// paths relative to `workspace` as [`SkillManager::load`](super::SkillManager::load)
+    /// does.
+    pub fn new(mut config: SkillsConfig, workspace: impl Into<PathBuf>) -> Self {
+        config.on_invalid_skill = InvalidSkillPolicy::Warn;
+        Self {
+            config,
+            workspace: workspace.into(),
+        }
     }
 }
 
@@ -43,9 +56,10 @@ impl Tool for LoadSkillTool {
         ToolDefinition {
             name: LOAD_SKILL_TOOL_NAME.to_string(),
             description: "Load a skill's full content on-demand. Available skills are listed \
-                in the system prompt under 'Available Skills'. Use this tool when a skill's \
-                domain is relevant to your current task. Some skills have additional sub-resources \
-                that are listed when the main skill is loaded."
+                in the system prompt under 'Available Skills'. Skills added since the \
+                conversation started aren't in that list but load by name too. Use this tool \
+                when a skill's domain is relevant to your current task. Some skills have \
+                additional sub-resources that are listed when the main skill is loaded."
                 .to_string(),
             output_based_example: Some(
                 "<load_skill>\n<name>frontend-design</name>\n</load_skill>".to_string(),
@@ -110,15 +124,27 @@ impl Tool for LoadSkillTool {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty());
 
-        let skill = match self.skills.get(skill_name) {
+        let (skills, _) = loader::load_skills(&self.config, &self.workspace)
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+        let loadable =
+            |skill: &&super::types::LoadedSkill| !loader::content_in_prompt(skill, &self.config);
+        let skill = match skills
+            .iter()
+            .filter(loadable)
+            .find(|skill| skill.name == skill_name)
+        {
             Some(s) => s,
             None => {
-                let available: Vec<&str> = self.skills.keys().map(|k| k.as_str()).collect();
-                let listing = if available.is_empty() {
+                // The skills the system prompt lists, which are for the model.
+                let mut names: Vec<&str> = skills
+                    .iter()
+                    .filter(|skill| !skill.auto_load && loader::is_listed(skill, &self.config))
+                    .map(|skill| skill.name.as_str())
+                    .collect();
+                names.sort();
+                let listing = if names.is_empty() {
                     "No on-demand skills are currently available.".to_string()
                 } else {
-                    let mut names: Vec<&str> = available;
-                    names.sort();
                     names
                         .iter()
                         .map(|n| format!("- {}", n))

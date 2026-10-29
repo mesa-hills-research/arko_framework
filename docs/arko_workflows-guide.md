@@ -938,7 +938,9 @@ embedded skills its agent is registered with now when its task holds none, as a 
 from a save does. A task still in memory keeps the ones it holds. A subagent hook's changes to the
 configuration aren't seen there. A run the host reconfigured gets them when its own skills
 configuration is set, and has none when it isn't. A subagent has the skills of its own
-agent's configuration, not its lead's. A run keeps the system prompt it started with, so an
+agent's configuration, not its lead's. A run saved with a list of the only skills it has
+(`SkillsConfig::only`) keeps the list when its embedded skills come back, so they can't give it
+more. A run keeps the system prompt it started with, so an
 auto-loaded skill in the prompt and the list of on-demand skills stay as they were, and
 `load_skill` returns the current text.
 

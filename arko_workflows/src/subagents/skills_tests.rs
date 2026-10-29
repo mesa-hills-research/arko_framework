@@ -268,6 +268,67 @@ async fn a_resumed_run_takes_the_embedded_skills_its_agent_is_registered_with() 
     );
 }
 
+/// A run saved with a list of the only skills it has (`only`, how a worker
+/// can be given fewer skills than its agent) keeps the list when it resumes
+/// with its saved configuration and gets the registered embedded skills
+/// again, which can't give it more.
+#[tokio::test]
+async fn a_resumed_run_keeps_its_only_list_when_the_embedded_skills_come_back() {
+    let server = serve_after_a_resume().await;
+    let workspace = Workspace::new();
+    let before = SkillsConfig {
+        embedded: vec![
+            skill("always", true, "version one"),
+            skill("review", false, "version one"),
+            skill("removed", false, "version one"),
+        ],
+        only: Some(vec!["always".into(), "review".into()]),
+        ..Default::default()
+    };
+    let workflow = builder_with(&server, &workspace, Some(before), None)
+        .build()
+        .unwrap();
+    let first = within(workflow.run_agent("lead", "Hello.")).await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let saved = std::fs::read_to_string(latest_checkpoint(&workspace)).unwrap();
+    assert!(saved.contains("\"only\""), "the checkpoint holds the list");
+
+    // The agent is registered with more skills and no list now.
+    let after = SkillsConfig {
+        embedded: vec![
+            skill("always", true, "version two"),
+            skill("review", false, "version two"),
+            skill("added", false, "version two"),
+        ],
+        ..Default::default()
+    };
+    let resumed = builder_with(&server, &workspace, Some(after), None)
+        .keep_saved_configs(["lead"])
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    within(resumed.continue_agent(&restored, "Go on."))
+        .await
+        .unwrap();
+    let last = bodies_of(&server, "lead").pop().unwrap();
+    // The skill in the list has the new text.
+    assert_eq!(
+        output_of(&last, "c1"),
+        "--- BEGIN SKILL: review ---\nThe review version two.\n--- END SKILL: review ---"
+    );
+    // The others are not found, the new one included.
+    assert_eq!(
+        output_of(&last, "c2"),
+        "Skill 'added' not found. Available skills:\n- review"
+    );
+    assert_eq!(
+        output_of(&last, "c3"),
+        "Skill 'removed' not found. Available skills:\n- review"
+    );
+}
+
 /// A run saved by an agent that had no skills configuration resumes when
 /// the agent is registered with embedded skills, and has them.
 #[tokio::test]
@@ -306,6 +367,7 @@ async fn a_run_saved_without_skills_resumes_with_the_embedded_ones() {
             path: "/elsewhere".into(),
             include: None,
             exclude: None,
+            optional: false,
         }],
         ..Default::default()
     };
@@ -667,4 +729,198 @@ async fn skills_set_while_runs_go_reach_only_the_runs_that_start_after() {
         .unwrap();
     assert!(again.contains("The lead-new text."), "{again}");
     assert!(!again.contains("lead-old"), "{again}");
+}
+
+/// Skills kept to the main agent (`workers: false`), one auto-loaded and
+/// one loaded on demand, and one for every agent, with `subagent` off, as a
+/// host may leave it or a configuration saved before it was.
+fn kept_skills() -> SkillsConfig {
+    let kept = |name: &str, extra: &str| {
+        EmbeddedSkill::new(
+            name,
+            format!(
+                "---\nname: {name}\ndescription: The {name} skill.\nworkers: false\n{extra}---\nThe {name} text.\n"
+            ),
+        )
+    };
+    let skills = SkillsConfig {
+        embedded: vec![
+            kept("kept-always", "auto_load: true\n"),
+            kept("kept", ""),
+            skill("open", false, "text"),
+        ],
+        ..Default::default()
+    };
+    assert!(!skills.subagent);
+    skills
+}
+
+/// A new subagent's prompt neither holds nor lists a skill kept to the main
+/// agent, and its `load_skill` doesn't load one, also when its agent's
+/// configuration leaves `subagent` off. The lead has them.
+#[tokio::test]
+async fn a_new_subagent_has_no_skill_kept_to_the_main_agent() {
+    let server = serve(vec![
+        ("lead", vec![load("kept"), start("Review it."), wait()]),
+        ("r1", vec![load("kept"), load("open")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(
+        &server,
+        &workspace,
+        Some(kept_skills()),
+        Some(kept_skills()),
+    )
+    .build()
+    .unwrap();
+    let lead = within(workflow.run_agent("lead", "Delegate the review."))
+        .await
+        .unwrap();
+    assert_eq!(lead.summary, "lead done");
+    let bodies = bodies_of(&server, "lead");
+    assert!(bodies[0].contains("The kept-always text."), "{}", bodies[0]);
+    assert!(
+        bodies[0].contains("**kept**: The kept skill."),
+        "{}",
+        bodies[0]
+    );
+    assert_eq!(
+        result_of(&bodies[1], "lead", 0),
+        "--- BEGIN SKILL: kept ---\nThe kept text.\n--- END SKILL: kept ---"
+    );
+
+    let worker = bodies_of(&server, "r1");
+    assert!(!worker[0].contains("kept"), "{}", worker[0]);
+    assert!(
+        worker[0].contains("**open**: The open skill."),
+        "{}",
+        worker[0]
+    );
+    let refused = result_of(&worker[1], "r1", 0);
+    assert!(refused.starts_with("Skill 'kept' not found."), "{refused}");
+    assert_eq!(
+        result_of(&worker[2], "r1", 1),
+        "--- BEGIN SKILL: open ---\nThe open text.\n--- END SKILL: open ---"
+    );
+}
+
+/// A subagent saved with `subagent` off (before the setting existed) and
+/// continued later keeps its prompt and its tools, and its `load_skill`
+/// still doesn't load a skill kept to the main agent.
+#[tokio::test]
+async fn a_saved_subagent_never_loads_a_skill_kept_to_the_main_agent() {
+    let server = serve(vec![
+        ("lead", vec![start("Review it."), wait()]),
+        (
+            "r1",
+            vec![
+                load("open"),
+                ("complete_task", json!({ "summary": "Loaded one." })),
+                load("kept"),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder_with(
+        &server,
+        &workspace,
+        Some(kept_skills()),
+        Some(kept_skills()),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate the review."))
+        .await
+        .unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // The saved runs as ones saved before `subagent` existed.
+    fn forget_subagent(value: &mut Value, found: &mut usize) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Object(skills)) = map.get_mut("skills_config")
+                    && skills.remove("subagent").is_some()
+                {
+                    *found += 1;
+                }
+                map.values_mut()
+                    .for_each(|value| forget_subagent(value, found));
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|value| forget_subagent(value, found)),
+            _ => {}
+        }
+    }
+    fn json_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(json_files(&path));
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                found.push(path);
+            }
+        }
+        found
+    }
+    let mut found = 0;
+    for file in json_files(&workspace.0.join(".run")) {
+        let mut saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        forget_subagent(&mut saved, &mut found);
+        std::fs::write(&file, serde_json::to_string(&saved).unwrap()).unwrap();
+    }
+    assert!(found > 0, "the saved worker had subagent on");
+    let path = latest_checkpoint(&workspace);
+
+    let resumed = builder_with(
+        &server,
+        &workspace,
+        Some(kept_skills()),
+        Some(kept_skills()),
+    )
+    .resume_from(path)
+    .build()
+    .unwrap();
+    let r1 = resumed.subagents()[0].run_id;
+    let restored = resumed.agent_result(r1).unwrap();
+    let skills = restored.task().unwrap().agent_config.skills_config.clone();
+    assert!(!skills.unwrap().subagent, "saved without subagent");
+    resumed
+        .message_subagent(
+            "r1",
+            "Load it again.",
+            "The user sent you a message:",
+            "The user messaged r1 (a copy for you):",
+        )
+        .unwrap();
+    super::tests::until(|| {
+        resumed
+            .subagents()
+            .first()
+            .is_some_and(|record| record.report.as_deref() == Some("r1 done"))
+    })
+    .await;
+
+    let worker = bodies_of(&server, "r1");
+    let continued = worker.last().unwrap();
+    assert!(continued.contains("Load it again."), "{continued}");
+    let refused = result_of(continued, "r1", 2);
+    assert!(refused.starts_with("Skill 'kept' not found."), "{refused}");
+    // The same prompt and tools as when it started.
+    let instructions = |body: &str| {
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["instructions"].clone()
+    };
+    assert!(instructions(&worker[0]).is_string());
+    assert_eq!(instructions(&worker[0]), instructions(continued));
+    assert_eq!(offered(&worker[0]), offered(continued));
+    assert_eq!(resumed.subagents().len(), 1, "continued, not started again");
 }

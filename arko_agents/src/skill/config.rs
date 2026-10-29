@@ -30,6 +30,12 @@ pub struct SkillSource {
     /// Acts as a blacklist. Applied after `include` (if both are set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
+
+    /// The directory may not exist yet. A missing one has no skills, with no
+    /// warning, and under [`InvalidSkillPolicy::Error`] no error. A path that
+    /// exists but isn't a directory is still a problem.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 /// A skill held in memory, such as one built into a program, instead of read
@@ -116,4 +122,37 @@ pub struct SkillsConfig {
     /// itself.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_skill_interception: Option<crate::tool::InterceptionFailurePolicy>,
+
+    /// The names the agent's model goes by, which the `models` of a skill
+    /// are matched against (see [`models_match`](super::models_match)).
+    /// The system prompt lists only the skills that match, and `auto_load`
+    /// applies only to those. A skill that doesn't match is not listed and
+    /// loads on demand by its name. Empty, the default, is no filter, so every
+    /// skill is listed.
+    ///
+    /// The host fills it from the model it runs the agent on. A plain name is
+    /// the model's id or a short name for it, `cc:` marks a name for a model
+    /// run through Claude Code, and `openrouter:` the model's slug on
+    /// OpenRouter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_names: Vec<String>,
+
+    /// The agent is a worker, so skills with `workers: false` are left out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent: bool,
+
+    /// If set, the only skills the agent has, by the name they load under.
+    /// It applies after the sources' lists and deduplication, to embedded
+    /// skills too, and at every load, so a run that goes on with embedded
+    /// skills given again has no more than this. A name that no skill has
+    /// is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+
+    /// Offer `load_skill` even when there are no skills to load. Without
+    /// it the tool exists only while some skill can be loaded, so a
+    /// conversation that starts with none gains the tool, and misses its
+    /// prompt cache, when a skill is added later.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub offer_when_empty: bool,
 }

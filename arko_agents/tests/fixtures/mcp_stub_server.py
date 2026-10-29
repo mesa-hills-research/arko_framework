@@ -6,11 +6,21 @@ call asks it to (`echo` with text "exit"). A call with text "hang" gets no
 answer until the client cancels it (`notifications/cancelled`), and a call
 with text "cancelled" answers with the IDs of the requests it cancelled.
 With MCP_STUB_IGNORE_EOF set it keeps running when its input ends.
+
+For the hub's tests: MCP_STUB_PID_FILE names a file it appends its process
+ID to as it starts. MCP_STUB_ISSUES adds instructions and a `create_issue`
+tool that requires `title` and answers JSON-RPC "invalid params" (-32602)
+when the title isn't text. MCP_STUB_EXTRA_TOOLS=N adds N more tools, and
+MCP_STUB_GROWS adds one more tool at each listing.
 """
 import json
 import os
 import sys
 import time
+
+if os.environ.get("MCP_STUB_PID_FILE"):
+    with open(os.environ["MCP_STUB_PID_FILE"], "a") as pid_file:
+        pid_file.write(f"{os.getpid()}\n")
 
 # Distinct base64 payloads make byte preservation and image order observable.
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJb8AAAAASUVORK5CYII="
@@ -32,6 +42,32 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
     },
 ]
+ISSUES = bool(os.environ.get("MCP_STUB_ISSUES"))
+if ISSUES:
+    TOOLS.append(
+        {
+            "name": "create_issue",
+            "description": "Creates an issue in the tracker. The issue gets a number.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string"},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "title": {"type": "string"},
+                },
+                "required": ["title"],
+            },
+        }
+    )
+for number in range(int(os.environ.get("MCP_STUB_EXTRA_TOOLS", "0"))):
+    TOOLS.append(
+        {
+            "name": f"extra_{number:03}",
+            "description": f"Extra tool {number}.",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+    )
+listings = 0
 
 
 def reply(message_id, result):
@@ -134,16 +170,38 @@ for line in sys.stdin:
     if "id" not in message:
         continue
     if method == "initialize":
-        reply(
-            message["id"],
-            {
-                "protocolVersion": message["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "stub", "version": "1"},
-            },
-        )
+        result = {
+            "protocolVersion": message["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "stub", "version": "1"},
+        }
+        if ISSUES:
+            result["instructions"] = "Tracks issues for tests. Use create_issue to file one."
+        reply(message["id"], result)
     elif method == "tools/list":
-        reply(message["id"], {"tools": TOOLS})
+        tools = list(TOOLS)
+        if os.environ.get("MCP_STUB_GROWS"):
+            tools += [
+                {"name": f"grown_{n}", "inputSchema": {"type": "object"}} for n in range(listings)
+            ]
+        listings += 1
+        reply(message["id"], {"tools": tools})
+    elif method == "tools/call" and message["params"]["name"] == "create_issue":
+        title = message["params"].get("arguments", {}).get("title")
+        if not isinstance(title, str):
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "error": {"code": -32602, "message": "title must be text."},
+                    }
+                )
+                + "\n"
+            )
+            sys.stdout.flush()
+            continue
+        reply(message["id"], {"content": [{"type": "text", "text": "Created issue 1: " + title}]})
     elif method == "tools/call":
         text = message["params"].get("arguments", {}).get("text", "")
         if text == "exit":
