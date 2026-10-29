@@ -2,19 +2,12 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, CancelledNotification, CancelledNotificationParam,
-    ClientRequest, RawContent, RequestId, ResourceContents, ServerResult,
-};
-use rmcp::service::{Peer, PeerRequestOptions, RoleClient, ServiceError};
+use rmcp::service::{Peer, RoleClient};
 
 use crate::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolImage, ToolOutput, ToolParameterDefinition,
+    TaskContext, Tool, ToolDefinition, ToolError, ToolOutput, ToolParameterDefinition,
     ToolParameterType, ToolTypeDetails,
 };
-
-/// The image types accepted from MCP tools.
-const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// An MCP tool exposed by a remote MCP server, wrapped to implement the
 /// `arko_agents::Tool` trait.
@@ -45,29 +38,11 @@ impl McpTool {
     pub fn new(server_name: String, mcp_tool: &rmcp::model::Tool, peer: Peer<RoleClient>) -> Self {
         let remote_tool_name = mcp_tool.name.to_string();
         let qualified_name = format!("mcp__{}__{}", server_name, remote_tool_name);
-        let description = mcp_tool.description.as_deref().unwrap_or("").to_string();
-
-        let raw_schema = Value::Object(mcp_tool.input_schema.as_ref().clone());
-        let parameters = extract_parameters_from_schema(&raw_schema);
-
-        // As Codex does: only a tool the server marks read-only runs at the
-        // same time as other calls ("Correctly implemented MCP servers should
-        // tolerate parallel calls to tools that advertise themselves as
-        // read-only"); any other runs alone, in call order.
-        let read_only = mcp_tool
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.read_only_hint)
-            == Some(true);
-        let definition = ToolDefinition {
-            name: qualified_name,
-            description: format!("[MCP:{}] {}", server_name, description),
-            output_based_example: None,
-            parameters,
-            parallel_safe: read_only,
-            tool_type_details: ToolTypeDetails::DeveloperDefined,
-            raw_json_schema_override: Some(raw_schema),
-        };
+        let definition = mcp_definition(
+            qualified_name,
+            &server_name,
+            &super::McpToolInfo::from_listed(mcp_tool),
+        );
 
         Self {
             server_name,
@@ -83,6 +58,30 @@ impl McpTool {
 
     pub fn remote_tool_name(&self) -> &str {
         &self.remote_tool_name
+    }
+}
+
+/// The definition of `tool` of `server` as a tool named `name`: its
+/// description marked with the server's name, its raw input schema, and
+/// parallel-safe when the server marks it read-only.
+pub(crate) fn mcp_definition(
+    name: String,
+    server_name: &str,
+    tool: &super::McpToolInfo,
+) -> ToolDefinition {
+    let parameters = extract_parameters_from_schema(&tool.input_schema);
+    ToolDefinition {
+        name,
+        description: format!("[MCP:{}] {}", server_name, tool.description),
+        output_based_example: None,
+        parameters,
+        // As Codex does: only a tool the server marks read-only runs at the
+        // same time as other calls ("Correctly implemented MCP servers should
+        // tolerate parallel calls to tools that advertise themselves as
+        // read-only"); any other runs alone, in call order.
+        parallel_safe: tool.read_only,
+        tool_type_details: ToolTypeDetails::DeveloperDefined,
+        raw_json_schema_override: Some(tool.input_schema.clone()),
     }
 }
 
@@ -176,152 +175,13 @@ impl Tool for McpTool {
         params: HashMap<String, Value>,
     ) -> Result<ToolOutput, ToolError> {
         let arguments: serde_json::Map<String, Value> = params.into_iter().collect();
-
-        let call_params =
-            CallToolRequestParams::new(self.remote_tool_name.clone()).with_arguments(arguments);
-
-        let failed = |e: ServiceError| {
-            ToolError::ExecutionFailed(format!(
-                "MCP tool '{}' on server '{}' call failed: {}",
-                self.remote_tool_name, self.server_name, e
-            ))
-        };
-        let request = ClientRequest::CallToolRequest(CallToolRequest::new(call_params));
-        let handle = self
-            .peer
-            .send_cancellable_request(request, PeerRequestOptions::no_options())
-            .await
-            .map_err(failed)?;
-        let mut cancel = CancelOnDrop {
-            peer: self.peer.clone(),
-            request: Some(handle.id.clone()),
-        };
-        let response = handle.await_response().await;
-        // Answered, or the server is gone: there's nothing to cancel.
-        cancel.request = None;
-        let result = match response.map_err(failed)? {
-            ServerResult::CallToolResult(result) => result,
-            _ => return Err(failed(ServiceError::UnexpectedResponse)),
-        };
-
-        let mut output = ToolOutput::default();
-        let mut push = |text: &str| {
-            if !output.text.is_empty() {
-                output.text.push('\n');
-            }
-            output.text.push_str(text);
-        };
-        let mut images = Vec::new();
-        for content in &result.content {
-            match &content.raw {
-                RawContent::Text(text) => push(&text.text),
-                RawContent::Image(image) => match image_type(&image.mime_type) {
-                    Some(mime_type) => images.push(ToolImage::base64(
-                        format!("image {} ({mime_type})", images.len() + 1),
-                        image.data.clone(),
-                        mime_type,
-                    )),
-                    None => push(&format!(
-                        "[An image of type {} that the model can't be shown.]",
-                        image.mime_type
-                    )),
-                },
-                RawContent::Resource(resource) => match &resource.resource {
-                    ResourceContents::TextResourceContents { uri, text, .. } => {
-                        push(&format!("Resource {uri}:\n{text}"))
-                    }
-                    ResourceContents::BlobResourceContents {
-                        uri,
-                        mime_type,
-                        blob,
-                        ..
-                    } => match mime_type.as_deref().and_then(image_type) {
-                        Some(mime_type) => {
-                            images.push(ToolImage::base64(uri.clone(), blob.clone(), mime_type))
-                        }
-                        None => push(&format!(
-                            "[Resource {uri} has binary content ({}) that can't be shown.]",
-                            mime_type.as_deref().unwrap_or("of an unknown type")
-                        )),
-                    },
-                },
-                RawContent::Audio(audio) => push(&format!(
-                    "[Audio ({}) that the model can't be given.]",
-                    audio.mime_type
-                )),
-                RawContent::ResourceLink(link) => {
-                    push(&format!("Resource link: {} ({})", link.uri, link.name))
-                }
-            }
-        }
-        output.images = images;
-
-        if result.is_error == Some(true) {
-            return Err(ToolError::ExecutionFailed(if output.text.is_empty() {
-                format!(
-                    "MCP tool '{}' returned an error with no text content",
-                    self.remote_tool_name
-                )
-            } else {
-                output.text
-            }));
-        }
-
-        // Descriptions synthesized for non-text content must not hide the
-        // server's structured result when it supplied no text equivalent.
-        let has_text = result
-            .content
-            .iter()
-            .any(|content| matches!(&content.raw, RawContent::Text(text) if !text.text.is_empty()));
-        if !has_text && let Some(ref structured) = result.structured_content {
-            if !output.text.is_empty() {
-                output.text.push_str("\n\n");
-            }
-            output
-                .text
-                .push_str(&serde_json::to_string_pretty(structured).unwrap_or_default());
-        }
-
-        Ok(output)
+        super::call::call_tool(
+            &self.peer,
+            &self.server_name,
+            &self.remote_tool_name,
+            arguments,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
-}
-
-/// Cancels a request on the server (MCP's `notifications/cancelled`) when
-/// the call awaiting it is dropped first: it was stopped, ran past its time
-/// limit, or its task was cancelled. The server can then stop working on
-/// it, and a server that handles one request at a time takes the next.
-struct CancelOnDrop {
-    peer: Peer<RoleClient>,
-    request: Option<RequestId>,
-}
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        let Some(request_id) = self.request.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let peer = self.peer.clone();
-        runtime.spawn(async move {
-            let notification = CancelledNotification::new(CancelledNotificationParam {
-                request_id,
-                reason: Some("The call was stopped.".into()),
-            });
-            let _ = peer.send_notification(notification.into()).await;
-        });
-    }
-}
-
-/// `mime_type` as one of [`IMAGE_TYPES`] (`image/jpg` read as JPEG), or
-/// `None` for a type the providers don't take.
-fn image_type(mime_type: &str) -> Option<&'static str> {
-    let mime_type = mime_type.trim().to_ascii_lowercase();
-    let mime_type = if mime_type == "image/jpg" {
-        "image/jpeg".to_string()
-    } else {
-        mime_type
-    };
-    IMAGE_TYPES.into_iter().find(|known| *known == mime_type)
 }

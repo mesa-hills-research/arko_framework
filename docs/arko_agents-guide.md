@@ -241,7 +241,8 @@ runs them. A parallel-safe call starts once every earlier call that isn't parall
 finished, and any other call once every earlier call has finished. So `[read, read]` run
 together, and `[read, write, read]` runs the first read, then the write, then the second
 read. A tool is parallel-safe when its definition sets
-`parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise.
+`parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise. A
+tool whose calls differ answers for each call with `Tool::parallel_safe_for`.
 The built-in `read_file`, `list_files`, `message_user`, and `load_skill` are parallel-safe. `write_file`,
 `edit_file`, `apply_diff`, `ask_user`, and `complete_task` are not. An MCP tool is parallel-safe only
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
@@ -795,6 +796,49 @@ to the host's stderr. A server that exits while the manager still uses it is rep
 once, with a warning giving its exit status and last stderr lines. Its tools then fail
 with a tool error, which the tool-error policy handles.
 
+### The MCP hub and the mcp tool
+
+`McpHub` holds a session's servers and changes them while agents run. Agents reach every
+server through one tool, `McpBridgeTool`, named `mcp`, so a conversation's tool list
+stays the same while servers start, stop, come and go, and big servers' schemas stay out
+of every request.
+
+```rust
+let hub = McpHub::new(configs);
+hub.start_all(DEFAULT_START_TIMEOUT).await;
+registry.register(Arc::new(McpBridgeTool::lead(hub.clone(), Arc::new(AllServers), changes)));
+// A worker's mcp takes servers, tools, call and start.
+let worker_mcp = McpBridgeTool::worker(hub.clone(), access);
+// At the session's end.
+hub.shutdown().await;
+```
+
+| Action | What it does |
+| --- | --- |
+| `servers` | One line per server with its state, tool count and what it's for |
+| `tools` | One line per tool, at most 60, narrowed by `filter`, and the full input schema of the tools named in `schema` |
+| `call` | Runs a tool, starting a server that isn't running, with results as `McpTool` gives them |
+| `start`, `stop` | Starts or stops a server for this hub |
+| `add`, `remove` | Passed to the host's `McpChanges`, which asks the user, writes the entry and calls `McpHub::add` or `remove` |
+
+`tools` asks the server each time, so a server that changes its tools needs no
+notification. A `call` checks the tool's required arguments first, and a missing one or
+the server's "invalid params" error (`-32602`) comes back with the tool's schema.
+`McpAccess::servers_for` limits the servers a run reaches (`None` for all), and a
+worker's tool never reaches a server whose config sets `workers: false`. `with_note`
+adds a fixed sentence to the description, such as where added servers are written.
+
+`servers` and `tools` calls, and `call` of a tool the server marks read-only, run beside
+other calls and run again after a crash (`Tool::parallel_safe_for`,
+`Tool::recovery_mode_for`). Other calls run alone and are in doubt. `direct_tools`
+returns a tool per server tool (`mcp__<server>__<tool>`, see `direct_tool_name`), with
+calls made through the hub, for conversations saved with them.
+
+A server whose config sets `shared: true` runs once per process for every hub that names
+the same command, arguments and environment, on a runtime of its own. `stop` and `start`
+change only the calling hub's use of it, and its process stops, with what it started,
+when the last hub lets go. Share only a server that keeps nothing per client or session.
+
 ### Skills
 
 `SkillManager::load(&skills_config, workspace_root)` reads the skills an agent's
@@ -1114,7 +1158,7 @@ task saved while it waited for an approval, an answer or a recovery decision wai
 again.
 
 When a task with running calls runs again, each is settled first, by its tool's
-`Tool::recovery_mode`:
+`Tool::recovery_mode_for` (`recovery_mode` unless the tool answers per call):
 
 | `ToolRecovery` | The call |
 | --- | --- |
