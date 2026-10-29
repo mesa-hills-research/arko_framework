@@ -920,3 +920,235 @@ fn a_bundle_with_text_that_is_not_utf8_or_too_much_of_it_is_refused() {
         "{error}"
     );
 }
+
+// Unpacking a bundle.
+
+/// The names of the entries under `dir`, with `/` between folders.
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .into_iter()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            entry
+                .path()
+                .strip_prefix(dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+#[test]
+fn unpacking_writes_every_file_and_returns_the_skill() {
+    let temp = Temp::new();
+    let executable = SimpleFileOptions::default().unix_permissions(0o755);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, content) in [
+        (
+            "SKILL.md",
+            skill_md("packed", "models: haiku\n").into_bytes(),
+        ),
+        ("reference/style.md", b"Style.".to_vec()),
+        ("scripts/run.sh", b"#!/bin/sh\necho hi".to_vec()),
+        ("data/table.bin", vec![0xff, 0x00, 0x01]),
+        (".hidden", b"Hidden.".to_vec()),
+    ] {
+        writer.start_file(name, executable).unwrap();
+        writer.write_all(&content).unwrap();
+    }
+    writer.add_directory("empty/", executable).unwrap();
+    let bundle = writer.finish().unwrap().into_inner();
+
+    // The parents are made, and `dest` is.
+    let dest = temp.0.join("skills/nested/packed");
+    let skill = unpack_bundle(&bundle, &dest).unwrap();
+    assert_eq!(skill.name, "packed");
+    assert_eq!(skill.models, ["haiku"]);
+    assert_eq!(
+        files_under(&dest),
+        [
+            ".hidden",
+            "SKILL.md",
+            "data/table.bin",
+            "reference/style.md",
+            "scripts/run.sh"
+        ]
+    );
+    assert_eq!(
+        std::fs::read(dest.join("data/table.bin")).unwrap(),
+        [0xff, 0x00, 0x01]
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("scripts/run.sh")).unwrap(),
+        "#!/bin/sh\necho hi"
+    );
+    // Nothing else is left beside it.
+    assert_eq!(
+        std::fs::read_dir(dest.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    // Loading the folder gives the skill that was returned.
+    let from_folder = read_candidate(&dest).unwrap();
+    assert_eq!(from_folder.content, skill.content);
+    assert_eq!(from_folder.resources, skill.resources);
+    assert_eq!(from_folder.models, skill.models);
+    assert_eq!(
+        skill.resources.keys().collect::<Vec<_>>(),
+        ["reference/style.md"]
+    );
+
+    // The bundle's executable bit is not kept.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in files_under(&dest) {
+            let mode = std::fs::metadata(dest.join(&file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0, "{file} is executable");
+        }
+    }
+}
+
+#[test]
+fn unpacking_a_bundle_with_one_top_folder_writes_that_folder_only() {
+    let temp = Temp::new();
+    let bundle = zip_of(&[
+        ("packed/SKILL.md", skill_md("packed", "").as_bytes()),
+        ("packed/reference/a.md", b"A."),
+        ("packed/scripts/run.sh", b"echo hi"),
+        ("__MACOSX/packed/._SKILL.md", b"Not part of it."),
+        ("notes.md", b"Beside it."),
+    ]);
+    let dest = temp.0.join("out");
+    let skill = unpack_bundle(&bundle, &dest).unwrap();
+    assert_eq!(
+        files_under(&dest),
+        ["SKILL.md", "reference/a.md", "scripts/run.sh"]
+    );
+    // The entries outside the folder aren't resources either, as `read_bundle` says.
+    assert_eq!(
+        skill.resources.keys().collect::<Vec<_>>(),
+        ["reference/a.md"]
+    );
+    assert_eq!(
+        read_bundle(&bundle)
+            .unwrap()
+            .resources
+            .keys()
+            .collect::<Vec<_>>(),
+        ["reference/a.md"]
+    );
+}
+
+#[test]
+fn a_bundle_that_is_refused_leaves_nothing_behind() {
+    let temp = Temp::new();
+    let skill = skill_md("packed", "");
+    let parent = temp.0.join("skills");
+    let dest = parent.join("packed");
+    let with = |name: &str| zip_of(&[("SKILL.md", skill.as_bytes()), (name, b"Text.")]);
+
+    let mut refused: Vec<(&str, Vec<u8>)> = vec![
+        ("a ..", with("../outside.md")),
+        ("a nested ..", with("reference/../../outside.md")),
+        ("an absolute path", with("/etc/outside.md")),
+        ("a drive", with("C:/outside.md")),
+        ("no SKILL.md", zip_of(&[("README.md", b"No skill.")])),
+        (
+            "a bad front matter",
+            zip_of(&[("SKILL.md", b"No front matter.")]),
+        ),
+        (
+            "text that isn't UTF-8",
+            zip_of(&[
+                ("SKILL.md", skill.as_bytes()),
+                ("a.md", &[0xff, 0xfe, 0x00]),
+            ]),
+        ),
+        ("not a zip", b"just text".to_vec()),
+    ];
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file("SKILL.md", SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(skill.as_bytes()).unwrap();
+    writer
+        .add_symlink("link", "/etc/passwd", SimpleFileOptions::default())
+        .unwrap();
+    refused.push(("a link", writer.finish().unwrap().into_inner()));
+    // Too many files.
+    let many: Vec<(String, &[u8])> = (0..1001)
+        .map(|i| (format!("f{i}.txt"), &b"x"[..]))
+        .collect();
+    let many: Vec<(&str, &[u8])> = std::iter::once(("SKILL.md", skill.as_bytes()))
+        .chain(many.iter().map(|(name, data)| (name.as_str(), *data)))
+        .collect();
+    refused.push(("too many files", zip_of(&many)));
+    // Too much text.
+    let zeros = vec![0u8; 17 * 1024 * 1024];
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file("SKILL.md", SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(skill.as_bytes()).unwrap();
+    writer
+        .start_file(
+            "big.dat",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+    writer.write_all(&zeros).unwrap();
+    refused.push(("too much", writer.finish().unwrap().into_inner()));
+
+    for (why, bundle) in &refused {
+        assert!(unpack_bundle(bundle, &dest).is_err(), "{why}");
+        // Not even the parent folder.
+        assert!(!parent.exists(), "{why}");
+        assert!(!temp.0.join("outside.md").exists(), "{why}");
+    }
+}
+
+#[test]
+fn unpacking_into_a_folder_that_exists_changes_nothing() {
+    let temp = Temp::new();
+    let dest = temp.0.join("packed");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(dest.join("old.md"), "Old.").unwrap();
+    let bundle = zip_of(&[("SKILL.md", skill_md("packed", "").as_bytes())]);
+    let error = unpack_bundle(&bundle, &dest).unwrap_err();
+    assert!(
+        matches!(&error, SkillLoadError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::AlreadyExists),
+        "{error}"
+    );
+    assert_eq!(files_under(&dest), ["old.md"]);
+    assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+}
+
+#[test]
+fn a_failed_write_removes_what_it_wrote() {
+    let temp = Temp::new();
+    // A file and a folder with the same name can't both be written.
+    let bundle = zip_of(&[
+        ("SKILL.md", skill_md("packed", "").as_bytes()),
+        ("data", b"A file."),
+        ("data/table.bin", b"In a folder."),
+    ]);
+    let dest = temp.0.join("skills/packed");
+    let error = unpack_bundle(&bundle, &dest).unwrap_err();
+    assert!(matches!(error, SkillLoadError::Io { .. }), "{error}");
+    assert!(!dest.exists());
+    // The folder beside it holds no hidden leftover.
+    assert_eq!(
+        std::fs::read_dir(dest.parent().unwrap()).unwrap().count(),
+        0
+    );
+}
