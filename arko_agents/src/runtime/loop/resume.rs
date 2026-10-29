@@ -141,7 +141,7 @@ impl AgentLoop {
         let mode = if call.custom_output.is_some() {
             ToolRecovery::Rerun
         } else {
-            tool.recovery_mode()
+            tool.recovery_mode_for(&call.parameters)
         };
         (Some(tool), mode)
     }

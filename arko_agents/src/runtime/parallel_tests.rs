@@ -27,6 +27,9 @@ struct Probe {
     delay: Duration,
     uses_host_timeout: bool,
     record: Arc<Record>,
+    /// A call whose label starts with `r` is parallel-safe, and any other
+    /// isn't, whatever the definition says.
+    by_label: bool,
 }
 
 impl Probe {
@@ -37,6 +40,7 @@ impl Probe {
             delay: Duration::from_millis(60),
             uses_host_timeout: true,
             record: record.clone(),
+            by_label: false,
         }
     }
 }
@@ -65,6 +69,15 @@ impl Tool for Probe {
 
     fn uses_host_timeout(&self) -> bool {
         self.uses_host_timeout
+    }
+
+    fn parallel_safe_for(&self, params: &HashMap<String, Value>) -> Option<bool> {
+        self.by_label.then(|| {
+            params
+                .get("label")
+                .and_then(Value::as_str)
+                .is_some_and(|label| label.starts_with('r'))
+        })
     }
 
     async fn execute(
@@ -614,6 +627,61 @@ async fn a_held_call_is_answered_when_the_approval_wait_is_cancelled() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A tool whose calls differ decides each call's parallel safety: its
+/// reads run together, and its writes alone, in call order. A per-tool
+/// override still decides for every call.
+#[tokio::test]
+async fn a_tool_decides_each_calls_parallel_safety() {
+    for overridden in [false, true] {
+        let workspace = workspace();
+        let record = Arc::new(Record::default());
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Probe {
+            by_label: true,
+            ..Probe::new("probe_mixed", false, &record)
+        }));
+        let mut config = config(ToolCallingMode::Native, &["probe_mixed"]);
+        if overridden {
+            config.tool_config.tool_specific_configs.insert(
+                "probe_mixed".into(),
+                PerToolConfigOverride {
+                    parallel_safe: Some(false),
+                    ..Default::default()
+                },
+            );
+        }
+        let (mut agent, _events, _commands) = agent(config, registry, &workspace);
+        agent.scripted_responses.get_mut().unwrap().extend([
+            turn(vec![
+                probe_call("r1", "probe_mixed"),
+                probe_call("r2", "probe_mixed"),
+                probe_call("w1", "probe_mixed"),
+                probe_call("r3", "probe_mixed"),
+            ]),
+            complete(),
+        ]);
+        let task = timeout(Duration::from_secs(10), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_calls_paired(&task.conversation);
+        let log = record.log.lock().unwrap().clone();
+        if overridden {
+            assert_eq!(record.most.load(Ordering::SeqCst), 1);
+        } else {
+            assert_eq!(record.most.load(Ordering::SeqCst), 2);
+            assert!(
+                position(&log, "start r2") < position(&log, "end r1"),
+                "{log:?}"
+            );
+            for (before, after) in [("end r2", "start w1"), ("end w1", "start r3")] {
+                assert!(position(&log, before) < position(&log, after), "{log:?}");
+            }
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
 /// A per-tool override makes a tool parallel-safe or not.
 #[tokio::test]
 async fn a_per_tool_override_decides_parallel_safety() {
@@ -762,6 +830,7 @@ async fn a_call_past_the_host_time_limit_is_stopped_and_reported() {
         delay: Duration::from_secs(30 * 60),
         uses_host_timeout: !exempt,
         record: record.clone(),
+        by_label: false,
     };
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(slow("slow", false)));

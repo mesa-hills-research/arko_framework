@@ -835,7 +835,7 @@ impl AgentLoop {
             .should_auto_approve_tool(&ai_tool_call.name);
 
         if outside_workspace.is_some() || normal_approval_needed {
-            let exclusive = !self.runs_in_parallel(&tool_definition);
+            let exclusive = !self.runs_in_parallel(tool_arc.as_ref(), &params_map);
             self.task
                 .pending_native_tool_calls
                 .insert(tool_call_id, ai_tool_call.clone());
