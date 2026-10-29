@@ -591,7 +591,8 @@ fn read_bundle_skill(file_path: &Path, source_label: &str) -> Result<LoadedSkill
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Bundle {
     /// A bundle in a source directory. Its `.md` files that aren't UTF-8 text
-    /// are passed over, and its entries are only read into memory.
+    /// are passed over, and its entries are only read into memory. Its
+    /// local headers must match the central directory, like a candidate's.
     Loading,
     /// A bundle offered to be saved as a skill, whose entries would be
     /// written to a folder. An entry with an absolute path, a `..` or a link,
@@ -641,18 +642,16 @@ pub(super) fn parse_bundle(
         zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| zip_error(e.to_string()))?;
 
     // An archive can name or size an entry one way in its local header and
-    // another in its central directory, so that what is checked is not what
-    // is written. The two must agree.
-    if mode != Bundle::Loading {
-        if archive.has_duplicate_names() {
-            return Err(zip_error("A name appears twice in the bundle.".to_string()));
-        }
-        archive.validate_header_consistency().map_err(|e| {
-            zip_error(format!(
-                "The local headers don't match the central directory ({e})."
-            ))
-        })?;
+    // another in its central directory. The two must agree, so that what is
+    // checked or read is what another tool would write or show.
+    if archive.has_duplicate_names() {
+        return Err(zip_error("A name appears twice in the bundle.".to_string()));
     }
+    archive.validate_header_consistency().map_err(|e| {
+        zip_error(format!(
+            "The local headers don't match the central directory ({e})."
+        ))
+    })?;
 
     let too_much = || {
         zip_error(format!(
