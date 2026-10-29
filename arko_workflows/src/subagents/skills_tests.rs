@@ -306,6 +306,7 @@ async fn a_run_saved_without_skills_resumes_with_the_embedded_ones() {
             path: "/elsewhere".into(),
             include: None,
             exclude: None,
+            optional: false,
         }],
         ..Default::default()
     };

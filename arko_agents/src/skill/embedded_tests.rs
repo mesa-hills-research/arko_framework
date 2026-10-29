@@ -12,19 +12,19 @@ use crate::parsing::PromptBuilder;
 use crate::tool::{TaskContext, Tool, ToolRegistry};
 
 /// The text of a `SKILL.md` for the skill `name`.
-fn text(name: &str, extra: &str, body: &str) -> String {
+pub(super) fn text(name: &str, extra: &str, body: &str) -> String {
     format!("---\nname: {name}\ndescription: The {name} skill.\n{extra}---\n{body}\n")
 }
 
-fn embedded(name: &str, extra: &str, body: &str) -> EmbeddedSkill {
+pub(super) fn embedded(name: &str, extra: &str, body: &str) -> EmbeddedSkill {
     EmbeddedSkill::new(name, text(name, extra, body))
 }
 
 /// A temporary directory, removed when dropped.
-struct Temp(std::path::PathBuf);
+pub(super) struct Temp(pub(super) std::path::PathBuf);
 
 impl Temp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("arko-embedded-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
@@ -38,17 +38,18 @@ impl Drop for Temp {
 }
 
 /// A folder skill `name` in the folder `folder`.
-fn folder_skill(folder: &Path, name: &str, body: &str) {
+pub(super) fn folder_skill(folder: &Path, name: &str, body: &str) {
     let dir = folder.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), text(name, "", body)).unwrap();
 }
 
-fn global(path: &Path) -> SkillSource {
+pub(super) fn global(path: &Path) -> SkillSource {
     SkillSource {
         path: path.display().to_string(),
         include: None,
         exclude: None,
+        optional: false,
     }
 }
 
@@ -68,7 +69,7 @@ async fn load_skill(manager: &SkillManager, name: &str, resource: Option<&str>) 
         .unwrap()
 }
 
-fn agent_config() -> AgentConfig {
+pub(super) fn agent_config() -> AgentConfig {
     AgentConfig::builder(
         "reviewer".into(),
         "Reviewer".into(),
@@ -177,6 +178,7 @@ async fn a_folder_skill_replaces_the_embedded_skill_of_its_name() {
             path: ".skills".into(),
             include: None,
             exclude: None,
+            optional: false,
         }),
         global_sources: vec![global(&global_folder)],
         embedded: vec![
@@ -258,6 +260,7 @@ fn a_folder_skill_left_out_does_not_replace_the_embedded_one() {
             path: temp.0.display().to_string(),
             include: None,
             exclude: Some(vec!["review".into()]),
+            optional: false,
         }],
         embedded: vec![embedded("review", "", "Built-in review.")],
         ..Default::default()

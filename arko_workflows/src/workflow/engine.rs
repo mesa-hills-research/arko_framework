@@ -5518,11 +5518,13 @@ mod tests {
                 path: ".skills".into(),
                 include: None,
                 exclude: None,
+                optional: false,
             }),
             global_sources: vec![],
             embedded: vec![],
             on_invalid_skill: InvalidSkillPolicy::Error,
             load_skill_interception: None,
+            ..Default::default()
         });
         let mut registry = ToolRegistry::new();
         let context = WorkflowEngine::setup_skills(&mut config, &mut registry, &workspace)
