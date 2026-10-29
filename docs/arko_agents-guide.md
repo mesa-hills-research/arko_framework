@@ -242,7 +242,9 @@ finished, and any other call once every earlier call has finished. So `[read, re
 together, and `[read, write, read]` runs the first read, then the write, then the second
 read. A tool is parallel-safe when its definition sets
 `parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise. A
-tool whose calls differ answers for each call with `Tool::parallel_safe_for`.
+tool whose calls differ overrides the definition for a call with `Tool::parallel_safe_for`,
+which returns `Some(bool)` from the call's arguments (`None`, the default, leaves it to the
+definition). An entry in `tool_specific_configs` still wins over both.
 The built-in `read_file`, `list_files`, `message_user`, and `load_skill` are parallel-safe. `write_file`,
 `edit_file`, `apply_diff`, `ask_user`, and `complete_task` are not. An MCP tool is parallel-safe only
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
@@ -772,6 +774,12 @@ discovers its tools, named `mcp__<server>__<tool>`:
 }
 ```
 
+An entry can also set `workers` (`false` keeps the server from workers, `true` by default),
+`shared` (`false` by default) and `description` (what the server is for). The
+[hub](#the-mcp-hub-and-the-mcp-tool) uses all three. `McpServerConfig` is `#[non_exhaustive]`,
+so outside the crate build one with `McpServerConfig::new(name, command)`, `with_args` and
+`with_env`.
+
 An MCP tool is parallel-safe only when its server marks it `readOnlyHint: true`. Its
 calls otherwise run one at a time. A call that ends before the server answers (it was
 stopped, ran past its time limit, or its task was cancelled) cancels its request with
@@ -799,25 +807,31 @@ with a tool error, which the tool-error policy handles.
 ### The MCP hub and the mcp tool
 
 `McpHub` holds a session's servers and changes them while agents run. Agents reach every
-server through one tool, `McpBridgeTool`, named `mcp`, so a conversation's tool list
-stays the same while servers start, stop, come and go, and big servers' schemas stay out
-of every request.
+server through one tool, `McpBridgeTool`, named `mcp` (`MCP_TOOL_NAME`), so a conversation's
+tool list stays the same while servers start, stop, come and go, and big servers' schemas stay
+out of every request.
 
 ```rust
-let hub = McpHub::new(configs);
+use arko_agents::mcp::{AllServers, DEFAULT_START_TIMEOUT};
+use arko_agents::{McpBridgeTool, McpHub};
+
+let hub = McpHub::new(configs); // a Vec<McpServerConfig>
 hub.start_all(DEFAULT_START_TIMEOUT).await;
+// The main agent's tool takes every action. `changes` is your McpChanges.
 registry.register(Arc::new(McpBridgeTool::lead(hub.clone(), Arc::new(AllServers), changes)));
-// A worker's mcp takes servers, tools, call and start.
+// A worker's takes servers, tools, call and start, for the servers `access` allows.
 let worker_mcp = McpBridgeTool::worker(hub.clone(), access);
 // At the session's end.
 hub.shutdown().await;
 ```
 
+Like any tool, `mcp` must be in the agent's `available_tool_names`.
+
 | Action | What it does |
 | --- | --- |
-| `servers` | One line per server with its state, tool count and what it's for |
+| `servers` | One line per server with its state, tool count and what it's for (its `description`, else the first sentence of its own instructions) |
 | `tools` | One line per tool, at most 60, narrowed by `filter`, and the full input schema of the tools named in `schema` |
-| `call` | Runs a tool, starting a server that isn't running, with results as `McpTool` gives them |
+| `call` | Runs a tool with `arguments`, starting a server that isn't running, with results as `McpTool` gives them |
 | `start`, `stop` | Starts or stops a server for this hub |
 | `add`, `remove` | Passed to the host's `McpChanges`, which asks the user, writes the entry and calls `McpHub::add` or `remove` |
 
@@ -828,6 +842,13 @@ the server's "invalid params" error (`-32602`) comes back with the tool's schema
 worker's tool never reaches a server whose config sets `workers: false`. `with_note`
 adds a fixed sentence to the description, such as where added servers are written.
 
+The main agent's `add` takes `command`, `args`, `env`, `scope` (`project` or `user`),
+`workers`, `shared` and `why`, and gives them to `McpChanges::add` as an `AddServer`. `env`
+holds the names of environment variables and never their values. The host checks the request,
+asks the user, writes the entry, records it and calls `McpHub::add`, and the text it returns is
+what the agent reads. `remove` gets the server's name and `why`, and the host decides
+which servers may go.
+
 `servers` and `tools` calls, and `call` of a tool the server marks read-only, run beside
 other calls and run again after a crash (`Tool::parallel_safe_for`,
 `Tool::recovery_mode_for`). Other calls run alone and are in doubt. `direct_tools`
@@ -837,18 +858,24 @@ calls made through the hub, for conversations saved with them.
 A server whose config sets `shared: true` runs once per process for every hub that names
 the same command, arguments and environment, on a runtime of its own. `stop` and `start`
 change only the calling hub's use of it, and its process stops, with what it started,
-when the last hub lets go. Share only a server that keeps nothing per client or session.
+when the last hub lets go. A shared server mixes sessions up if it keeps anything for a
+client or a session, so share only one that keeps nothing. The `shared` parameter of `add` tells
+the agent to set it only after checking that the server keeps no state per client or session,
+holds no browser or open files, uses no per-project paths, environment or credentials and
+behaves the same in every session, and to say in `why` what it checked.
 
 ### Skills
 
 `SkillManager::load(&skills_config, workspace_root)` reads the skills an agent's
 `SkillsConfig` names from a `workspace_source` (relative to `workspace_root`) and any
 `global_sources`, each with
-optional `include` and `exclude` name lists. A skill is a directory with a `SKILL.md`
+optional `include` and `exclude` name lists and an `optional` flag for a directory that may
+not exist yet. A skill is a directory with a `SKILL.md`
 (other Markdown files in it, outside `scripts/`, become loadable resources), a `.skill` zip
 bundle of the same layout, or a single Markdown file other than `README.md`. Its YAML
-front matter sets `name`, `description`, and `auto_load`. Identical skills are loaded
-once, and other name collisions get a numeric suffix. Invalid skills
+front matter sets `name`, `description` and `auto_load`, and optionally `models` and `workers`
+(see [Skills for some models](#skills-for-some-models-and-for-the-main-agent)). Identical skills
+are loaded once, and other name collisions get a numeric suffix. Invalid skills
 are skipped with a warning unless `on_invalid_skill` is `Error`.
 
 `SkillsConfig::embedded` holds skills given in memory, such as ones built into a
@@ -946,7 +973,7 @@ an absolute path, a `..` or a link in it, a `.md` file that isn't UTF-8 text, mo
 directory is refused. `skill::unpack_bundle(bytes, dest)` checks
 a bundle the same way and then writes all its files to the new folder `dest`, without the
 executable bit. It writes to a hidden folder beside `dest` and renames it, so a failure leaves
-nothing at `dest`. A `.skill` or `.zip` bundle in a source folder is skipped as an invalid skill
+nothing at `dest`. A `.skill` bundle in a source folder is skipped as an invalid skill
 when its local headers don't match its central directory or a name appears twice.
 
 A skill carries exact instructions, so `load_skill` results reach the agent as written,
@@ -1523,9 +1550,10 @@ let config = AgentConfig::builder(id, name, AgentLLMConfig {
 
 The agent's arko tools (`complete_task`, `ask_user`, `message_user`, a
 workflow's `send_message`, custom tools) are served to Claude Code in-process as the MCP
-server `arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so).
-They run as for any agent, with the execution middleware, result interception and time
-limits. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
+server `arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so). A
+hub's `mcp` tool is served the same way, as `mcp__arko__mcp`, and is how a Claude Code agent
+reaches its servers. They run as for any agent, with the execution middleware, result
+interception and time limits, and a call is settled after a stop by `Tool::recovery_mode_for`. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
 its final text as `MessageToUser` before the runtime's note. With `text_reply_ends_task`
 on, a turn that ends with text completes the task with it, and `complete_task` isn't
 served. The turns Claude Code is told to end (after an `ask_user` that waits, for a
