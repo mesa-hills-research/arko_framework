@@ -647,17 +647,20 @@ impl NoteBoard {
         drop(state);
         // Read outside the lock: an image may come from its file. The text
         // follows, since it says which images can't be given.
-        let model = ctx
-            .agent_configs
-            .get(agent)
-            .map(|config| &config.llm_config.model);
         taken.map(|(taken, more)| {
             let with_images = taken
                 .iter()
                 .filter(|posted| !posted.images.is_empty())
                 .map(|posted| (posted.seq, posted.images.clone()))
                 .collect::<Vec<_>>();
-            let (images, lost) = self.context_images(&with_images, model);
+            // Fitted to the run's model, which may not be its agent's.
+            let model = if with_images.is_empty() {
+                None
+            } else {
+                ctx.run_llm_config(agent, task_id)
+                    .map(|config| config.model)
+            };
+            let (images, lost) = self.context_images(&with_images, model.as_ref());
             let seqs = taken.iter().map(|posted| posted.seq).collect();
             let (operator, others): (Vec<_>, Vec<_>) = taken
                 .iter()

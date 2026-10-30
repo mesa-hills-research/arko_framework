@@ -100,7 +100,9 @@ impl Workflow {
     }
 
     /// [`run_agent`](Self::run_agent) with `options`, such as a working
-    /// directory of the run's own ([`RunOptions::workspace`]).
+    /// directory of the run's own ([`RunOptions::workspace`]) or a
+    /// configuration other than the agent's registered one
+    /// ([`RunOptions::config`]).
     pub async fn run_agent_with(
         &self,
         agent_name: &str,
@@ -447,7 +449,9 @@ impl Workflow {
     }
 
     /// [`spawn_agent`](Self::spawn_agent) with `options`, such as a working
-    /// directory of the run's own ([`RunOptions::workspace`]).
+    /// directory of the run's own ([`RunOptions::workspace`]) or a
+    /// configuration other than the agent's registered one
+    /// ([`RunOptions::config`]).
     pub async fn spawn_agent_with(
         &self,
         agent_name: &str,
@@ -2850,6 +2854,7 @@ impl WorkflowBuilder {
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
+            run_llm_configs: parking_lot::RwLock::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             resume_only_tools: self.resume_only_tools,

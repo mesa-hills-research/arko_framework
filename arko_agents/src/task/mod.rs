@@ -529,7 +529,8 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_fork_of: Option<String>,
     /// The task runs with a configuration its host gave it after it started
-    /// ([`Task::reconfigure`]), not the one it was started with. A workflow
+    /// ([`Task::reconfigure`]), or at its start in place of its agent's
+    /// registered one (an arko_workflows `RunOptions::config`). A workflow
     /// resumed from a checkpoint keeps it, without comparing it with the
     /// agent's registered configuration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

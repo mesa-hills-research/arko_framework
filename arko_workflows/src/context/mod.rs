@@ -38,6 +38,9 @@ pub struct SharedContext {
     /// The skills configurations the host set after the build, by agent.
     /// `None` is no skills.
     pub(crate) agent_skills: RwLock<HashMap<String, Option<SkillsConfig>>>,
+    /// The model settings each run started or went on with, by run, which
+    /// may not be its agent's registered ones. Read through `run_llm_config`.
+    pub(crate) run_llm_configs: RwLock<HashMap<uuid::Uuid, arko_agents::AgentLLMConfig>>,
     pub global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     pub agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     /// The (agent, tool name) pairs of `agent_tools` that new and
@@ -126,6 +129,31 @@ impl SharedContext {
         let mut config = self.agent_configs.get(agent)?.clone();
         config.skills_config = self.registered_skills(agent);
         Some(config)
+    }
+
+    /// The model settings run `task_id` of `agent` works with, which may
+    /// not be the agent's registered ones
+    /// ([`RunOptions::config`](crate::RunOptions::config)). The registered
+    /// ones for a run that hasn't started.
+    pub(crate) fn run_llm_config(
+        &self,
+        agent: &str,
+        task_id: uuid::Uuid,
+    ) -> Option<arko_agents::AgentLLMConfig> {
+        if let Some(config) = self.run_llm_configs.read().get(&task_id) {
+            return Some(config.clone());
+        }
+        Some(self.agent_configs.get(agent)?.llm_config.clone())
+    }
+
+    /// Records the model settings run `task_id` works with, as it starts or
+    /// goes on, for [`run_llm_config`](Self::run_llm_config).
+    pub(crate) fn note_run_llm_config(
+        &self,
+        task_id: uuid::Uuid,
+        config: &arko_agents::AgentLLMConfig,
+    ) {
+        self.run_llm_configs.write().insert(task_id, config.clone());
     }
 
     /// The skills configuration `agent` is registered with now.

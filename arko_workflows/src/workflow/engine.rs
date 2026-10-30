@@ -1526,8 +1526,12 @@ pub(crate) struct StartOptions {
     /// [`crate::subagents`]).
     pub subagent: bool,
     /// The configuration it starts with, instead of its agent's registered
-    /// one (a subagent's, as the host's hook changed it).
+    /// one (a subagent's, as the host's hook changed it, or the host's own,
+    /// see `host_config`).
     pub config: Option<AgentConfig>,
+    /// `config` is the host's ([`RunOptions::config`](super::RunOptions::config)):
+    /// the task keeps it as one the host gave it ([`Task::reconfigured`]).
+    pub host_config: bool,
     /// Images that go with the prompt (see
     /// [`RunOptions::images`](super::RunOptions::images)).
     pub images: Vec<arko_ai::Image>,
@@ -1800,6 +1804,7 @@ impl Default for StartOptions {
             workspace: None,
             subagent: false,
             config: None,
+            host_config: false,
             images: Vec::new(),
         }
     }
@@ -3336,6 +3341,7 @@ impl WorkflowEngine {
 
         let mut task = Task::new(config, String::new(), workspace, None);
         task.parent = options.parent;
+        task.reconfigured = options.host_config;
         task.initial_task_images = options.images;
         match options.reserved {
             Some(task_id) => task.id = task_id,
@@ -3384,6 +3390,7 @@ impl WorkflowEngine {
         let interceptor_config = self.build_interceptor_config(agent_name, load_skill_policy, ctx);
         let execution_middleware = self.build_execution_middleware(agent_name, ctx, depth);
         let agent_run_id = task.id;
+        ctx.note_run_llm_config(agent_run_id, &task.agent_config.llm_config);
         ctx.registry
             .set_parent(agent_run_id, task.parent.map(|parent| parent.task_id));
         let started_task = task.clone();
@@ -3491,6 +3498,8 @@ impl WorkflowEngine {
         let options = StartOptions {
             workspace: options.workspace,
             images: options.images,
+            host_config: options.config.is_some(),
+            config: options.config,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -3781,6 +3790,8 @@ impl WorkflowEngine {
             driven: false,
             workspace: options.workspace,
             images: options.images,
+            host_config: options.config.is_some(),
+            config: options.config,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;

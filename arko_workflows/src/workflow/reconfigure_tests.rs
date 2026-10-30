@@ -437,3 +437,126 @@ async fn a_kept_claude_code_configuration_needs_its_host_tools() {
         "{refused}"
     );
 }
+
+/// A new run started on a configuration of its own (`RunOptions::config`),
+/// here on another model, without rebuilding the workflow: its requests go
+/// to that model with that configuration's tools and instructions. The
+/// task keeps it, also across a resume from a checkpoint that doesn't keep
+/// saved configurations, while new runs take the registered one.
+#[tokio::test]
+async fn a_new_run_starts_on_another_model_and_keeps_it_across_a_resume() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let sol = arko_ai::Model::openai_gpt_6_1_sol();
+    let luna = chat().llm_config.model;
+    let mut own = agent();
+    own.llm_config.model = sol.clone();
+    let first = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(own))
+        .await
+        .unwrap();
+    assert!(first.task().unwrap().reconfigured);
+    let bodies = || -> Vec<Value> {
+        server
+            .bodies()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect()
+    };
+    let started = &bodies()[0];
+    assert_eq!(started["model"], sol.id.as_str(), "{started}");
+    assert_eq!(tool_names(started), ["probe"]);
+    assert!(
+        started["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Work on the user's task.")
+    );
+
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = builder(&server, &workspace)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.info().agent_config.llm_config.model.id, sol.id);
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    let continued = bodies().pop().unwrap();
+    assert_eq!(continued["model"], sol.id.as_str(), "{continued}");
+    assert_eq!(tool_names(&continued), ["probe"]);
+    resumed.run_agent("main", "Start over.").await.unwrap();
+    let fresh = bodies().pop().unwrap();
+    assert_eq!(fresh["model"], luna.id.as_str(), "{fresh}");
+    assert!(tool_names(&fresh).is_empty(), "{fresh}");
+}
+
+/// A run started on a Claude Code configuration while its agent is
+/// registered with an API model runs in Claude Code, and the other way
+/// round. Each resumes from a checkpoint on its own configuration.
+#[tokio::test]
+async fn a_new_run_moves_between_an_api_model_and_claude_code() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(serde_json::json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Done in Claude Code."}}],
+    ]));
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let in_claude_code = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(fake.agent()))
+        .await
+        .unwrap();
+    assert_eq!(in_claude_code.status, AgentRunStatus::Completed);
+    assert_eq!(in_claude_code.summary, "Done in Claude Code.");
+    assert_eq!(server.requests(), 0);
+    assert_eq!(fake.logged("user").len(), 1);
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = builder(&server, &workspace)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(in_claude_code.agent_run_id).unwrap();
+    assert_eq!(
+        restored.info().agent_config.llm_config.model.provider,
+        arko_ai::Provider::ClaudeCode
+    );
+    drop(resumed);
+
+    // Registered in Claude Code, a run starts on an API model.
+    let workspace = Workspace::new();
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", fake.agent())
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let on_the_api = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(chat()))
+        .await
+        .unwrap();
+    assert_eq!(on_the_api.summary, "Sure.");
+    assert_eq!(server.requests(), 1);
+    assert_eq!(fake.logged("user").len(), 1);
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", fake.agent())
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(on_the_api.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    assert_eq!(server.requests(), 2);
+    assert_eq!(fake.logged("user").len(), 1);
+}

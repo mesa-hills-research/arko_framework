@@ -443,6 +443,29 @@ async fn an_automatic_limit_counts_from_the_last_model_request() {
     }
 }
 
+/// An automatic limit follows the prompt cache of the model the run works
+/// with, which may not be its agent's (`RunOptions::config`).
+#[tokio::test(start_paused = true)]
+async fn an_automatic_limit_follows_the_run_s_own_model() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace, &["lead", "worker"]).build().unwrap();
+    let context = workflow.context();
+    let lead = run(&workflow, "lead");
+    // Claude's 5-minute cache gives a 270-second limit, where the agent's
+    // GPT-5.6 Luna gives 27 minutes.
+    let mut own = agent("lead").llm_config;
+    own.model = arko_ai::Model::anthropic_claude_opus_5_5();
+    context.note_run_llm_config(lead.id, &own);
+    let tool = WaitForMessageTool::new(
+        context.clone(),
+        "lead".to_string(),
+        Arc::new(LLMClient::new()),
+    );
+    let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
+    let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
+    assert_eq!(result, "No messages after 270 s.");
+}
+
 /// However long ago the run's last model request was, an automatic limit
 /// leaves a wait a second.
 #[tokio::test(start_paused = true)]

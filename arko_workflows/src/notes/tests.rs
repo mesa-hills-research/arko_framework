@@ -444,6 +444,40 @@ async fn notes_with_images_are_one_time_and_for_models_that_take_them() {
     assert!(plain.get("images").is_none(), "{plain}");
 }
 
+/// A run started on a model of its own (`RunOptions::config`) gets a note's
+/// images by that model, not by its agent's: a model that takes no images
+/// gets the line saying the image can't be shown.
+#[tokio::test]
+async fn a_note_s_images_go_by_the_run_s_own_model() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = builder(&server, &workspace, &["worker"]).build().unwrap();
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let first = workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(blind),
+        )
+        .await
+        .unwrap();
+    workflow
+        .post_note(
+            Note::new("See this.")
+                .once()
+                .to(["worker"])
+                .images([png("eA==")]),
+        )
+        .unwrap();
+    workflow.continue_agent(&first, "Go on.").await.unwrap();
+    let body = server.bodies().pop().unwrap();
+    let text = user_text(&body);
+    assert!(text.contains("See this."), "{text}");
+    assert!(text.contains("(Its image can't be shown.)"), "{text}");
+    assert!(!body.contains("input_image"), "{body}");
+}
+
 /// A standing note is in the initial prompt of every later run, newest
 /// first; a one-time note isn't, and reaches a run that had started when it
 /// was posted once, when that run is continued.
