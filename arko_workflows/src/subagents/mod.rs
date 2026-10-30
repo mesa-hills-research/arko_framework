@@ -776,12 +776,6 @@ pub struct SubagentsSnapshot {
     /// may not hold them yet (its run hasn't ended since).
     #[serde(default)]
     pub mail: Vec<MailItem>,
-    /// The delivered items a run's end found it holding, kept until a
-    /// checkpoint saves a task of the run that holds them. A resume from a
-    /// checkpoint whose task of the run lacks one (its save failed, say)
-    /// gives it again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub settled: Vec<MailItem>,
     /// The number of the last run id handed out (`r<n>`).
     #[serde(default)]
     pub last_handle: u32,

@@ -826,21 +826,6 @@ impl PersistenceManager {
         };
         let plan_budget = ctx.budget.plan_state();
         let notes = ctx.notes.snapshot();
-        // Settled mail a saved task of its recipient holds needn't be kept.
-        let saved = {
-            let results = ctx.agent_results.read();
-            let tasks = self.saved_tasks.lock();
-            results
-                .iter()
-                .filter(|result| {
-                    tasks
-                        .get(&result.agent_run_id)
-                        .is_some_and(|saved| saved.unsaved.is_none() && saved.file.is_some())
-                })
-                .map(|result| (result.agent_run_id, result.clone()))
-                .collect::<HashMap<_, _>>()
-        };
-        ctx.subagents.prune_settled(|run| saved.get(&run).cloned());
         let subagents = ctx.subagents.snapshot();
         let shared = self.images.with(|| {
             fingerprint(&(
