@@ -21,8 +21,8 @@ pub use calls::{
 pub use detection::PromptRule;
 pub use guard::{CommandGuard, CommandRefusal, CommandRule, RuleAction, ShellDialect};
 pub use monitor::{
-    AlertKind, CheckChange, JobAlert, MonitorInfo, MonitorLimits, MonitorOptions, MonitorStarted,
-    MonitorTrigger,
+    AlertKind, CheckChange, JobAlert, MonitorInfo, MonitorLifetime, MonitorLimits, MonitorOptions,
+    MonitorStarted, MonitorTrigger, WORKERS_RECHECK, WorkerLiveness,
 };
 pub use monitor_tools::MonitorTool;
 pub use outbox::note_wakes;
@@ -487,6 +487,9 @@ pub struct TerminalManager {
     wake_rules: Mutex<warnings::WakeRules>,
     /// Changes when monitors should plan their timed events again.
     monitor_timing: watch::Sender<u64>,
+    /// What says whether owners' workers run, for the monitors that last
+    /// while they do, held weakly.
+    worker_liveness: Mutex<Vec<Weak<dyn WorkerLiveness>>>,
     _directory_lock: Arc<std::fs::File>,
     /// Which open of the directory this manager is (see `OPENS`).
     generation: u64,
@@ -551,6 +554,7 @@ impl TerminalManager {
             monitor_limits: Mutex::default(),
             wake_rules: Mutex::default(),
             monitor_timing: watch::Sender::new(0),
+            worker_liveness: Mutex::default(),
             _directory_lock: Arc::new(lock),
             generation,
         });

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arko_ai::process::NoConsoleWindow;
+use arko_ai::process_tree::exited;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
@@ -399,13 +400,16 @@ async fn wait_with_stop(
     grace: Duration,
     terminate_grace: Duration,
 ) -> io::Result<(ExitStatus, Option<ChildStop>)> {
+    // The child is collected only once its group is disarmed (and killed,
+    // after a stop), while the group's ID can't have passed to another
+    // program.
     tokio::select! {
         biased;
-        status = child.wait() => {
+        () = exited(child) => {
             // Ended without a stop: what it started is its own business, as
             // with a plain command.
             group.disarm();
-            return Ok((status?, None));
+            return Ok((child.wait().await?, None));
         }
         () = stop.stopping() => {}
     }
@@ -416,34 +420,27 @@ async fn wait_with_stop(
         );
     }
     let mut how = ChildStop::Exited;
-    let ended = tokio::time::timeout(grace, child.wait()).await.ok();
+    let ended = tokio::time::timeout(grace, exited(child)).await.is_ok();
     #[cfg(unix)]
-    let ended = if ended.is_none() {
+    let ended = ended || {
         group.signal(nix::sys::signal::Signal::SIGTERM);
         how = ChildStop::Terminated;
-        tokio::time::timeout(terminate_grace, child.wait())
+        tokio::time::timeout(terminate_grace, exited(child))
             .await
-            .ok()
-    } else {
-        ended
+            .is_ok()
     };
     #[cfg(not(unix))]
     let _ = terminate_grace;
-    let status = match ended {
-        Some(status) => status?,
-        None => {
-            how = ChildStop::Killed;
-            group.kill();
-            // Already gone: the wait below reports how it ended.
-            let _ = child.start_kill();
-            child.wait().await?
-        }
-    };
-    // What the child started ends with it. Its group can't have been reused
-    // yet: a process ID is handed out again only after the kernel has cycled
-    // through the others.
+    if !ended {
+        how = ChildStop::Killed;
+        group.kill();
+        // Already gone: the wait below reports how it ended.
+        let _ = child.start_kill();
+    }
+    // What the child started ends with it.
     group.kill();
     group.disarm();
+    let status = child.wait().await?;
     Ok((status, Some(how)))
 }
 

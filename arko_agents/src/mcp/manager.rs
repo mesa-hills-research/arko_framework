@@ -28,7 +28,9 @@ use crate::tool::{Tool, ToolRegistry};
 /// manager kills them at once. A host that is killed outright, or ends with
 /// `std::process::exit`, runs neither. On Windows the job object still ends
 /// the servers. On Unix they end when they notice their input has closed, so
-/// one that ignores that keeps running.
+/// one that ignores that keeps running, unless a host about to call
+/// `std::process::exit` calls [`kill_mcp_servers`](crate::kill_mcp_servers)
+/// first.
 pub struct McpManager {
     servers: Vec<Connection>,
     tools: Vec<Arc<McpTool>>,
@@ -284,6 +286,201 @@ pub(crate) mod tests {
         };
         assert!(McpManager::from_config(&config).await.is_err());
         Program::read(&pid_file).ends().await;
+    }
+
+    /// Set in the child process of
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: the files its
+    /// server writes its own and its program's process IDs to.
+    const EXIT_PIDS_ENV: &str = "ARKO_TEST_MCP_EXIT_PIDS";
+    /// Set there to `after` for the child to call `kill_mcp_servers` after
+    /// it starts its server and before it exits, to `before` to call it
+    /// before it starts one, and to `during` to call it while the start is
+    /// paused between the spawn and the listing.
+    const EXIT_KILLS_ENV: &str = "ARKO_TEST_MCP_EXIT_KILLS";
+
+    /// Runs the child process of
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`] with `kills`,
+    /// returns its exit code and the files its server writes its own and its
+    /// program's process IDs to.
+    fn exit_helper(kills: &str) -> (Option<i32>, PathBuf, PathBuf) {
+        let id = uuid::Uuid::new_v4();
+        let server_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.server"));
+        let program_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.program"));
+        let helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "mcp::manager::tests::exits_with_mcp_servers_running",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(
+                EXIT_PIDS_ENV,
+                std::env::join_paths([&server_pid, &program_pid]).unwrap(),
+            )
+            .env(EXIT_KILLS_ENV, kills)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            matches!(helper.status.code(), Some(7 | 8)),
+            "the helper exited: {}{}",
+            String::from_utf8_lossy(&helper.stdout),
+            String::from_utf8_lossy(&helper.stderr)
+        );
+        (helper.status.code(), server_pid, program_pid)
+    }
+
+    /// `kill_mcp_servers` ends each server's whole process group, the server
+    /// behind its launcher and the program it started, before an exit that
+    /// runs no destructor. Without it both outlive the host, as the server
+    /// ignores the end of its input. Run in a child process of this test
+    /// binary, since it kills every server of its process.
+    #[test]
+    fn kill_mcp_servers_ends_the_servers_before_an_exit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        for kills in ["no", "after"] {
+            let (code, server_pid, program_pid) = exit_helper(kills);
+            assert_eq!(code, Some(7));
+            let server = Program::read(&server_pid);
+            let program = Program::read(&program_pid);
+            if kills == "after" {
+                runtime.block_on(async {
+                    server.ends().await;
+                    program.ends().await;
+                });
+            } else {
+                std::thread::sleep(Duration::from_millis(500));
+                assert!(
+                    !server.has_ended() && !program.has_ended(),
+                    "they outlive a host that doesn't kill them"
+                );
+                // Dropping them kills them.
+            }
+        }
+    }
+
+    /// A server that starts after `kill_mcp_servers` (one starting as the
+    /// host exits) is killed as it starts, so its start fails and nothing
+    /// it started goes on.
+    #[test]
+    fn a_server_started_after_kill_mcp_servers_is_killed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (code, server_pid, program_pid) = exit_helper("before");
+        assert_eq!(code, Some(8), "the start failed");
+        // The launcher may have been killed before it wrote them.
+        for pid_file in [server_pid, program_pid] {
+            let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            let _ = std::fs::remove_file(&pid_file);
+            if let Ok(pid) = pid.trim().parse() {
+                runtime.block_on(Program(pid).ends());
+            }
+        }
+    }
+
+    /// The child process of
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: starts a server
+    /// behind a `sh -c` launcher, which ignores the end of its input and
+    /// leaves a program running, writes their process IDs, kills the servers
+    /// when asked, and exits at once, with status 7 when the server started
+    /// and 8 when it didn't. Does nothing in a normal test run.
+    #[tokio::test]
+    async fn exits_with_mcp_servers_running() {
+        let Some(paths) = std::env::var_os(EXIT_PIDS_ENV) else {
+            return;
+        };
+        let paths: Vec<PathBuf> = std::env::split_paths(&paths).collect();
+        let python = std::env::var("ARKO_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let config = McpConfig {
+            mcp_servers: vec![
+                McpServerConfig::new("lasting", "sh")
+                    .with_args([
+                        "-c".into(),
+                        "sleep 300 & echo $! > \"$1\"; echo $$ > \"$2\"; shift 2; exec \"$@\""
+                            .into(),
+                        "sh".into(),
+                        paths[1].display().to_string(),
+                        paths[0].display().to_string(),
+                        python,
+                        STUB.into(),
+                    ])
+                    .with_env(HashMap::from([(
+                        "MCP_STUB_IGNORE_EOF".to_string(),
+                        "1".to_string(),
+                    )])),
+            ],
+        };
+        let kills = std::env::var(EXIT_KILLS_ENV).unwrap_or_default();
+        if kills == "during" {
+            exit_during_a_start(config, &paths[0]);
+        }
+        if kills == "before" {
+            crate::kill_mcp_servers();
+        }
+        let Ok(_manager) = McpManager::from_config(&config).await else {
+            std::process::exit(8);
+        };
+        if kills == "after" {
+            crate::kill_mcp_servers();
+        }
+        std::process::exit(7);
+    }
+
+    /// Starts a server on a thread of its own, with the start paused between
+    /// its spawn and its listing, writes the server's process ID to
+    /// `server_pid`, and calls `kill_mcp_servers` meanwhile. If the kill
+    /// returns within 300 ms, the host exits at once, as a host would.
+    /// Otherwise it waits for the start, which goes on, and exits once the
+    /// kill returns. Exits with status 7.
+    fn exit_during_a_start(config: McpConfig, server_pid: &Path) -> ! {
+        let (spawned, spawn) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel();
+        *super::super::connection::PAUSE_AFTER_SPAWN.lock().unwrap() = Some((spawned, wait));
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let manager = runtime.block_on(McpManager::from_config(&config));
+            std::mem::forget(manager);
+            loop {
+                std::thread::park();
+            }
+        });
+        let pid = spawn.recv().unwrap();
+        std::fs::write(server_pid, pid.to_string()).unwrap();
+        let kill = std::thread::spawn(crate::kill_mcp_servers);
+        std::thread::sleep(Duration::from_millis(300));
+        if !kill.is_finished() {
+            let _ = go.send(());
+            kill.join().unwrap();
+        }
+        std::process::exit(7);
+    }
+
+    /// `kill_mcp_servers`, called while a server's start is between its spawn
+    /// and its listing, returns only once the server is listed, and kills
+    /// it, so a host that exits as soon as it returns leaves nothing running.
+    #[test]
+    fn kill_mcp_servers_kills_a_server_whose_start_is_under_way() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (code, server_pid, program_pid) = exit_helper("during");
+        assert_eq!(code, Some(7));
+        let server = Program::read(&server_pid);
+        runtime.block_on(server.ends());
+        // The launcher may have been killed before it wrote it.
+        let program = std::fs::read_to_string(&program_pid).unwrap_or_default();
+        let _ = std::fs::remove_file(&program_pid);
+        if let Ok(pid) = program.trim().parse() {
+            runtime.block_on(Program(pid).ends());
+        }
     }
 
     /// So does a runtime that ends before the manager is dropped, which

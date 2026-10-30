@@ -54,6 +54,7 @@ impl Tool for ListFilesTool {
             }],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::BuiltIn,
+            read_only: true,
             raw_json_schema_override: None,
         }
     }

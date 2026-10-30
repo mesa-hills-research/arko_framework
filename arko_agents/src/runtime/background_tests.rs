@@ -27,6 +27,7 @@ impl Tool for WaitsForContext {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -303,6 +304,7 @@ impl Tool for Slow {
             parameters: vec![],
             parallel_safe: self.parallel_safe,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -960,6 +962,7 @@ fn command_template_tools_can_move_and_built_ins_cant() {
             tool_type_details: ToolTypeDetails::EndUserDefined {
                 command_template: "make".into(),
             },
+            read_only: false,
             raw_json_schema_override: None,
         })
         .unwrap();

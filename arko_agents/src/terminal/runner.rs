@@ -191,12 +191,13 @@ pub(super) async fn run(
     let mut stop = None;
     let mut exit_code = None;
     let mut failure = None;
-    // A monitor that lasted as long as it was armed for.
-    let mut expired = false;
+    // How a monitor ended by itself, other than by its command's exit.
+    let mut done: Option<monitor::Done> = None;
     let mut timing = monitor
         .as_ref()
         .and(manager.upgrade())
         .map(|manager| manager.watch_monitor_timing());
+    let mut workers = workers_watch(&manager, monitor.as_ref().map(|watch| &watch.running));
     while stop.is_none() {
         let wait_deadline = async {
             match deadline {
@@ -229,6 +230,9 @@ pub(super) async fn run(
                         };
                         if let Err(error) = result { failure = Some(error.to_string()); stop = Some(JobState::Failed); }
                         if let Some(watch) = &mut monitor { watch.output(&manager, &bytes, offset); }
+                        if stop.is_none() && monitor.as_ref().is_some_and(monitor::LineWatch::is_done) {
+                            done = Some(monitor::Done::Alerted); stop = Some(JobState::Succeeded);
+                        }
                         last_output = Instant::now(); check_prompt = options.detect_prompts;
                     }
                     Some(ReadEvent::Declaration(bytes)) => {
@@ -274,16 +278,23 @@ pub(super) async fn run(
                 }
             }
             () = monitor_event => {
-                if monitor.as_ref().is_some_and(|watch| watch.running.timed_event(&manager, &data, &config)) {
-                    expired = true;
-                    stop = Some(JobState::TimedOut);
+                if let Some(ended) = monitor.as_ref().and_then(|watch| watch.running.timed_event(&manager, &data, &config)) {
+                    done = Some(ended);
+                    stop = Some(ended.state());
                 }
             }
             () = partial_line => {
                 if let Some(watch) = &mut monitor { watch.flush(&manager); }
+                if monitor.as_ref().is_some_and(monitor::LineWatch::is_done) {
+                    done = Some(monitor::Done::Alerted); stop = Some(JobState::Succeeded);
+                }
             }
             // Planned again.
-            () = retimed(&mut timing) => {}
+            () = retimed(&mut timing) => {
+                workers = workers_watch(&manager, monitor.as_ref().map(|watch| &watch.running));
+            }
+            // Workers started or ended.
+            () = workers_changed(&mut workers) => {}
             control = controls.recv() => {
                 match control {
                     Some(Control::Input { revision, text, response }) => {
@@ -375,16 +386,16 @@ pub(super) async fn run(
         let ending = monitor.as_ref().map(|_| {
             monitor::end_reason(
                 data.record.state,
-                expired,
+                done,
                 data.stopped_by,
                 exit_code,
                 failure.as_deref(),
             )
         });
         if monitor.is_some() && failure.is_none() {
-            failure = match data.stopped_by {
-                _ if expired => Some("expired".into()),
-                Some(calls::StopCause::OwnerEnded) => {
+            failure = match (done, data.stopped_by) {
+                (Some(done), _) => done.error(),
+                (None, Some(calls::StopCause::OwnerEnded)) => {
                     Some("stopped because its agent's run ended".into())
                 }
                 _ => None,
@@ -474,6 +485,38 @@ pub(super) async fn retimed(timing: &mut Option<watch::Receiver<u64>>) {
         return;
     }
     std::future::pending().await
+}
+
+/// What tells a monitor that lasts while its owner's workers run that they
+/// started or ended, one for each [`WorkerLiveness`](monitor::WorkerLiveness),
+/// or none for another monitor.
+pub(super) fn workers_watch(
+    manager: &Weak<TerminalManager>,
+    running: Option<&monitor::Running>,
+) -> Vec<watch::Receiver<u64>> {
+    running
+        .filter(|running| running.lifetime == monitor::MonitorLifetime::WhileWorkersRun)
+        .and(manager.upgrade())
+        .map(|manager| manager.worker_changes())
+        .unwrap_or_default()
+}
+
+/// Resolves when one of `workers` changes, and once more when one closes,
+/// which is then left out. Never without any.
+pub(super) async fn workers_changed(workers: &mut Vec<watch::Receiver<u64>>) {
+    if workers.is_empty() {
+        return std::future::pending().await;
+    }
+    let (closed, index) = {
+        let changes = workers
+            .iter_mut()
+            .map(|receiver| Box::pin(receiver.changed()));
+        let (result, index, _) = futures::future::select_all(changes).await;
+        (result.is_err(), index)
+    };
+    if closed {
+        workers.swap_remove(index);
+    }
 }
 
 /// Resolves at `deadline`, or never without one.

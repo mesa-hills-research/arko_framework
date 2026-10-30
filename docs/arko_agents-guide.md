@@ -500,6 +500,7 @@ impl Tool for WordCount {
                 default_value: None,
             }],
             parallel_safe: true,
+            read_only: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -523,7 +524,9 @@ registry.register(Arc::new(WordCount));
 The runtime does not check arguments against the definition before calling `execute`.
 `ToolDefinition::validate_params` is available for tools that want the check. Set
 `parallel_safe` only for tools whose calls don't affect each other, such as reads (see
-[Several calls in one response](#several-calls-in-one-response)). A tool can opt out of
+[Several calls in one response](#several-calls-in-one-response)), and `read_only` only for
+tools whose calls change nothing, whatever their arguments. Claude Code runs a response's
+calls to read-only tools together (see [Claude Code models](#claude-code-models)). A tool can opt out of
 the agent's time limit with `uses_host_timeout`, and out of being stopped mid-call by
 `CancelTask` or `SuspendTask` with `interruptible`, when it winds its own work down (see
 [Stopping tool calls](#stopping-tool-calls)). It
@@ -795,8 +798,11 @@ or dropping it ends the programs it started too. A server behind a launcher such
 in the background. The same happens when the server exits by itself. A host that is
 killed outright, or ends with `std::process::exit`, runs no destructor. On Windows the
 job object still ends the servers. On Unix they end once they notice their input has
-closed, so a server that ignores that keeps running. Out of the terminal's foreground
-group, a server doesn't get the terminal's Ctrl-C.
+closed, so a server that ignores that keeps running. A host about to call
+`std::process::exit` calls `kill_mcp_servers()` first, which kills every server's
+process group in the process at once, as `kill_stop_aware_commands()` does for commands.
+It also kills a server whose start is under way, and keeps any more from starting.
+Out of the terminal's foreground group, a server doesn't get the terminal's Ctrl-C.
 
 A server's stderr goes to the log (the `log` crate) at info level, a line at a time,
 tagged with the server's name (`MCP server 'filesystem' stderr: ...`). It is not printed
@@ -1576,7 +1582,12 @@ workflow's `send_message`, custom tools) are served to Claude Code in-process as
 server `arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so). A
 hub's `mcp` tool is served the same way, as `mcp__arko__mcp`, and is how a Claude Code agent
 reaches its servers. They run as for any agent, with the execution middleware, result
-interception and time limits, and a call is settled after a stop by `Tool::recovery_mode_for`. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
+interception and time limits, and a call is settled after a stop by `Tool::recovery_mode_for`.
+A tool whose definition sets `read_only` is served with the MCP annotation `readOnlyHint`, and
+Claude Code runs a response's calls to such tools at the same time instead of one after
+another. The built-in `read_file`, `list_files`, `load_skill` and `terminal_status`, a
+workflow's `read_memory`, `list_memories`, `list_recipients` and `list_agents`, and the MCP
+tools their servers mark read-only set it. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
 its final text as `MessageToUser` before the runtime's note. With `text_reply_ends_task`
 on, a turn that ends with text completes the task with it, and `complete_task` isn't
 served. The turns Claude Code is told to end (after an `ask_user` that waits, for a

@@ -255,6 +255,7 @@ impl arko_agents::Tool for Gate {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: arko_agents::ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

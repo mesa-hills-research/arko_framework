@@ -653,6 +653,8 @@ struct ServedTool {
     name: String,
     description: String,
     schema: Value,
+    /// The definition's [`read_only`](crate::tool::ToolDefinition::read_only).
+    read_only: bool,
     host: Arc<ToolHost>,
 }
 
@@ -666,6 +668,9 @@ impl cc::ClaudeTool for ServedTool {
     }
     fn input_schema(&self) -> Value {
         self.schema.clone()
+    }
+    fn read_only(&self) -> bool {
+        self.read_only
     }
     async fn call(&self, arguments: Value) -> cc::ToolOutput {
         self.host.call(&self.name, arguments).await
@@ -1923,14 +1928,15 @@ impl ClaudeCodeRun {
             let Some(tool) = self.registry.get(&name) else {
                 continue;
             };
-            let definition = config
-                .offered_tool_definition(tool.definition())
-                .to_arko_ai_tool_definition();
+            let offered = config.offered_tool_definition(tool.definition());
+            let read_only = offered.read_only;
+            let definition = offered.to_arko_ai_tool_definition();
             served.push(definition.clone());
             server = server.tool(Arc::new(ServedTool {
                 name: definition.name,
                 description: definition.description,
                 schema: definition.parameters,
+                read_only,
                 host: host.clone(),
             }));
         }

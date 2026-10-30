@@ -165,6 +165,7 @@ impl Tool for Gate {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -197,6 +198,7 @@ impl Tool for Where {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

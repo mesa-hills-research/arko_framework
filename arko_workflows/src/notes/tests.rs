@@ -963,6 +963,59 @@ async fn a_note_posted_under_an_id_is_posted_once() {
     assert_eq!(other.seq, 2);
 }
 
+/// Posts under one id made at the same time post one note. Each returns
+/// it, it takes one number, the event log has it once, and its image is
+/// saved once.
+#[tokio::test]
+async fn posts_under_one_id_at_the_same_time_post_one_note() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = builder(&server, &workspace, &["worker"])
+        .persistence(PersistenceConfig::new(run_dir(&workspace)))
+        .build()
+        .unwrap();
+    let handle = workflow.notes_handle();
+    let id = uuid::Uuid::new_v4();
+    const POSTS: usize = 8;
+    let start = Arc::new(std::sync::Barrier::new(POSTS));
+    let posts: Vec<_> = (0..POSTS)
+        .map(|post| {
+            let (handle, start) = (handle.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                handle.post_once(
+                    id,
+                    Note::new(format!("The user answered q1 (post {post})."))
+                        .once()
+                        .images([png("eA==")]),
+                )
+            })
+        })
+        .collect();
+    let posted: Vec<PostedNote> = posts
+        .into_iter()
+        .map(|post| post.join().unwrap().unwrap())
+        .collect();
+    assert!(posted.iter().all(|note| *note == posted[0]), "{posted:#?}");
+    assert_eq!((posted[0].id, posted[0].seq), (id, 1));
+    assert_eq!(workflow.notes(), [posted[0].clone()]);
+    assert_eq!(workflow.post_note(Note::new("Next.")).unwrap().seq, 2);
+    workflow.checkpoint().await.unwrap();
+    let logged: Vec<u64> = std::fs::read_to_string(run_dir(&workspace).join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter_map(|line| line["note"]["seq"].as_u64())
+        .collect();
+    assert_eq!(logged, [1, 2]);
+    let images: Vec<_> =
+        std::fs::read_dir(run_dir(&workspace).join(crate::persistence::images::IMAGES_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+    assert_eq!(images.len(), 1, "{images:?}");
+}
+
 /// Notes are saved in checkpoints: a resumed workflow has them, a new run
 /// gets the standing ones, and a restored run continued after the resume
 /// isn't given again what it had been given, only what was posted since.

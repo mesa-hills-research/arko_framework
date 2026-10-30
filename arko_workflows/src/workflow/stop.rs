@@ -352,8 +352,10 @@ pub(crate) fn continued_message(result: &AgentResult, note: &str) -> String {
 /// The first signal stops the run with `request`. The second ends a
 /// wrap-up in progress at once (the run is cancelled, its agents still get
 /// the grace period). A third kills the children of running
-/// [`StopAwareCommand`](arko_agents::StopAwareCommand)s (on Unix,
-/// [`kill_stop_aware_commands`](arko_agents::kill_stop_aware_commands))
+/// [`StopAwareCommand`](arko_agents::StopAwareCommand)s and the MCP
+/// servers with what they started (on Unix,
+/// [`kill_stop_aware_commands`](arko_agents::kill_stop_aware_commands) and
+/// [`kill_mcp_servers`](arko_agents::kill_mcp_servers))
 /// and exits the process at once with status `128 + the signal's number`
 /// (130 for Ctrl-C), as an unhandled signal would end it. Handles Ctrl-C (`SIGINT`) and `SIGTERM` on Unix, and
 /// Ctrl-C and Ctrl-Break on Windows.
@@ -394,9 +396,11 @@ pub fn stop_on_signals(
                 }
                 _ => {
                     log::warn!("Signal {number} a third time. Exiting.");
-                    // Exiting runs no destructors: the commands' children,
-                    // in their own process groups, would outlive it.
+                    // Exiting runs no destructors: the commands' children
+                    // and the MCP servers, in their own process groups,
+                    // would outlive it.
                     arko_agents::kill_stop_aware_commands();
+                    arko_agents::kill_mcp_servers();
                     std::process::exit(128 + number);
                 }
             }

@@ -35,6 +35,7 @@ impl Tool for Slow {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -225,4 +226,215 @@ fn job_named(text: &str) -> uuid::Uuid {
         .split_once(arko_agents::terminal::IN_THE_BACKGROUND)
         .expect("a moved result");
     rest[..36].parse().unwrap()
+}
+
+/// A server whose worker calls `slow`, then completes.
+#[cfg(unix)]
+async fn slow_worker_server() -> ResponsesServer {
+    ResponsesServer::start(|_, body| {
+        let turn = body.matches("\"function_call_output\"").count();
+        Some(match turn {
+            0 => tool_call_turn("w0", "slow", json!({})),
+            _ => complete_turn("w1", "worker done"),
+        })
+    })
+    .await
+}
+
+/// A workflow with a lead and a worker that calls `slow`, whose jobs are
+/// `jobs`, with subagents when `subagents` is set.
+#[cfg(unix)]
+fn lead_and_worker(
+    server: &ResponsesServer,
+    workspace: &Workspace,
+    slow: &Arc<Slow>,
+    jobs: &Arc<TerminalManager>,
+    subagents: bool,
+) -> Workflow {
+    let builder = Workflow::builder()
+        .name("worker-lifetime-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Lead"))
+        .agent("worker", worker())
+        .global_tool(slow.clone())
+        .background_jobs(jobs.clone());
+    let builder = if subagents {
+        builder
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_target("worker"),
+            )
+            .subagents(crate::subagents::SubagentsConfig::default())
+    } else {
+        builder
+    };
+    builder.build().unwrap()
+}
+
+/// Starts a worker of `workflow` for a lead run `lead`, and waits until its
+/// `slow` call runs.
+#[cfg(unix)]
+async fn start_worker(workflow: &Workflow, workspace: &Workspace, slow: &Slow, lead: uuid::Uuid) {
+    let ctx = workflow.context();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Run it.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    within(slow.started.notified()).await;
+}
+
+/// Starts a monitor of `lead` that lasts a second, and while its workers
+/// run.
+#[cfg(unix)]
+async fn kept_monitor(
+    jobs: &Arc<TerminalManager>,
+    workspace: &Workspace,
+    lead: uuid::Uuid,
+) -> uuid::Uuid {
+    use arko_agents::terminal::{MonitorLifetime, MonitorOptions};
+    let context = TaskContext::new(lead, "lead", "Lead it.", &workspace.0);
+    jobs.start_monitor(
+        &context,
+        "sleep 60",
+        MonitorOptions::lines(None)
+            .with_expiry(Duration::from_secs(1))
+            .with_lifetime(MonitorLifetime::WhileWorkersRun),
+    )
+    .await
+    .unwrap()
+    .job_id
+}
+
+/// Waits for `lead`'s monitor `id` to end, and checks that it ended after
+/// its workers.
+#[cfg(unix)]
+async fn ended_after_workers(jobs: &TerminalManager, lead: uuid::Uuid, id: uuid::Uuid) {
+    let ended = within(async {
+        loop {
+            let ended = jobs.status(lead, id, None).unwrap();
+            if ended.state.is_terminal() {
+                return ended;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        (ended.state, ended.error.as_deref()),
+        (
+            JobState::TimedOut,
+            Some("ended after its agent's workers finished")
+        )
+    );
+}
+
+/// Whether `monitor_start` offers `lasts`.
+#[cfg(unix)]
+fn offers_lasts(jobs: &Arc<TerminalManager>) -> bool {
+    arko_agents::terminal::MonitorTool::all(jobs.clone())[0]
+        .definition()
+        .parameters
+        .iter()
+        .any(|param| param.name == "lasts")
+}
+
+/// With subagents, the manager learns whether an agent's workers run. A
+/// monitor of a lead that lasts while they do goes on past its time while
+/// its worker runs, and ends when the worker finishes. `monitor_start`
+/// offers that lifetime.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_leads_monitor_lasts_while_its_worker_runs() {
+    let workspace = Workspace::new();
+    let server = slow_worker_server().await;
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
+    assert!(!offers_lasts(&jobs));
+    let slow = Arc::new(Slow::default());
+    let workflow = lead_and_worker(&server, &workspace, &slow, &jobs, true);
+    assert!(offers_lasts(&jobs));
+    let lead = uuid::Uuid::new_v4();
+    start_worker(&workflow, &workspace, &slow, lead).await;
+    let monitor = kept_monitor(&jobs, &workspace, lead).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        jobs.status(lead, monitor, None).unwrap().state,
+        JobState::Running
+    );
+    slow.release.notify_one();
+    ended_after_workers(&jobs, lead, monitor).await;
+    assert!(
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| !run.state.is_active())
+    );
+}
+
+/// A workflow that is dropped has no workers running, even while its host
+/// still holds its context, so the monitors its workers kept end.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_workflows_workers_keep_no_monitor() {
+    let workspace = Workspace::new();
+    let server = slow_worker_server().await;
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
+    let slow = Arc::new(Slow::default());
+    let workflow = lead_and_worker(&server, &workspace, &slow, &jobs, true);
+    let lead = uuid::Uuid::new_v4();
+    start_worker(&workflow, &workspace, &slow, lead).await;
+    let monitor = kept_monitor(&jobs, &workspace, lead).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let context = workflow.context().clone();
+    drop(workflow);
+    ended_after_workers(&jobs, lead, monitor).await;
+    assert!(!offers_lasts(&jobs));
+    drop(context);
+}
+
+/// Workflows that share a manager each tell it of their own workers. A
+/// lead's monitor is kept by its own workflow's worker whichever workflow
+/// was built last, and a workflow without subagents takes nothing away.
+#[cfg(unix)]
+#[tokio::test]
+async fn workflows_that_share_a_manager_keep_their_own_monitors() {
+    let workspace = Workspace::new();
+    let server = slow_worker_server().await;
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
+    let first_slow = Arc::new(Slow::default());
+    let first = lead_and_worker(&server, &workspace, &first_slow, &jobs, true);
+    let lead = uuid::Uuid::new_v4();
+    start_worker(&first, &workspace, &first_slow, lead).await;
+    let monitor = kept_monitor(&jobs, &workspace, lead).await;
+    let second_slow = Arc::new(Slow::default());
+    let _second = lead_and_worker(&server, &workspace, &second_slow, &jobs, true);
+    let _plain = lead_and_worker(
+        &server,
+        &workspace,
+        &Arc::new(Slow::default()),
+        &jobs,
+        false,
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        jobs.status(lead, monitor, None).unwrap().state,
+        JobState::Running
+    );
+    assert!(offers_lasts(&jobs));
+    first_slow.release.notify_one();
+    ended_after_workers(&jobs, lead, monitor).await;
 }

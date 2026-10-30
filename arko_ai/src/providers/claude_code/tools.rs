@@ -16,6 +16,13 @@ pub trait ClaudeTool: Send + Sync {
     fn description(&self) -> String;
     /// JSON Schema of the arguments.
     fn input_schema(&self) -> Value;
+    /// Whether the tool only reads, changing nothing whatever its arguments
+    /// (default `false`). `tools/list` then gives it the MCP annotation
+    /// `readOnlyHint`, and Claude Code runs its calls at the same time as
+    /// the response's other read-only calls instead of one after another.
+    fn read_only(&self) -> bool {
+        false
+    }
     async fn call(&self, arguments: Value) -> ToolOutput;
 }
 
@@ -133,11 +140,17 @@ impl ToolServer {
                 "tools": self
                     .tools
                     .iter()
-                    .map(|tool| json!({
-                        "name": tool.name(),
-                        "description": tool.description(),
-                        "inputSchema": tool.input_schema(),
-                    }))
+                    .map(|tool| {
+                        let mut listed = json!({
+                            "name": tool.name(),
+                            "description": tool.description(),
+                            "inputSchema": tool.input_schema(),
+                        });
+                        if tool.read_only() {
+                            listed["annotations"] = json!({"readOnlyHint": true});
+                        }
+                        listed
+                    })
                     .collect::<Vec<_>>(),
             })),
             "tools/call" => {
@@ -230,6 +243,60 @@ mod tests {
                 })
             );
         }
+    }
+
+    struct ReadOnly;
+
+    #[async_trait]
+    impl ClaudeTool for ReadOnly {
+        fn name(&self) -> String {
+            "look".into()
+        }
+
+        fn description(&self) -> String {
+            "Reads something.".into()
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        fn read_only(&self) -> bool {
+            true
+        }
+
+        async fn call(&self, _arguments: Value) -> ToolOutput {
+            ToolOutput::text("seen")
+        }
+    }
+
+    /// A read-only tool is listed with the MCP `readOnlyHint`, so Claude
+    /// Code may run its calls together. Other tools have no annotations.
+    #[tokio::test]
+    async fn read_only_tools_are_listed_with_the_read_only_hint() {
+        let server = ToolServer::new("test")
+            .tool(Arc::new(ImageTool))
+            .tool(Arc::new(ReadOnly));
+        let response = server
+            .handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            response["result"]["tools"],
+            json!([
+                {
+                    "name": "image",
+                    "description": "Returns an image for testing.",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "look",
+                    "description": "Reads something.",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "annotations": {"readOnlyHint": true},
+                },
+            ])
+        );
     }
 
     #[test]

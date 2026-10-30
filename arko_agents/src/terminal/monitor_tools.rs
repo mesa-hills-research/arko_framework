@@ -1,7 +1,7 @@
 //! `monitor_start` and `monitor_control`, the tools an agent watches
 //! commands with.
 
-use super::monitor::{CheckChange, clock, minutes_left};
+use super::monitor::{CheckChange, MonitorLifetime, clock, minutes_left};
 use super::tools::{number, parameter, string, tool_error};
 use super::*;
 use crate::tool::{Tool, ToolDefinition, ToolError, ToolParameterType, ToolTypeDetails};
@@ -75,11 +75,19 @@ impl Tool for MonitorTool {
             60 => "once a minute".to_string(),
             _ => format!("once each {}", calls::describe(limits.alert_interval)),
         };
+        // Monitors can last while workers run only where the host says
+        // whether they do.
+        let workers = self.manager.has_worker_liveness();
         let (name, description, mut parameters) = match self.operation {
             Operation::Start => (
                 Self::NAMES[0],
                 format!(
-                    "Watches a command for you and alerts you while the monitor lasts, so you don't have to poll. Without every_seconds, the command runs until it exits or the monitor ends (a dev server, a build, `tail -F` on a log), and each output line that matches pattern is an alert. With every_seconds, the command is a check that runs again and again (`curl -sf localhost:3000/health`), and you're alerted when its result changes, not while it stays the same. Alerts reach you as notes while you work, and start a turn when you're idle. To save turns they come at most {interval}, with the lines since the last one. A monitor lasts expires_minutes ({longest} at most). Before it ends you're asked whether to keep it, and monitor_control rearm keeps it longer. terminal_status reads its whole output."
+                    "Watches a command for you and alerts you while the monitor lasts, so you don't have to poll. Without every_seconds, the command runs until it exits or the monitor ends (a dev server, a build, `tail -F` on a log), and each output line that matches pattern is an alert. With every_seconds, the command is a check that runs again and again (`curl -sf localhost:3000/health`), and you're alerted when its result changes, not while it stays the same. Alerts reach you as notes while you work, and start a turn when you're idle. To save turns they come at most {interval}, with the lines since the last one. A monitor lasts expires_minutes ({longest} at most). Before it ends you're asked whether to keep it, and monitor_control rearm keeps it longer.{} terminal_status reads its whole output.",
+                    if workers {
+                        " For an event that happens once, such as a CI run finishing, a file appearing or a server starting to answer, set once, and the monitor ends after its first alert. For a watch you need while your workers run, such as disk space or memory during their builds or a dev server's errors, set lasts to while_workers_run. It then needs no rearm, and ends after the last worker finishes."
+                    } else {
+                        " For an event that happens once, such as a CI run finishing, a file appearing or a server starting to answer, set once, and the monitor ends after its first alert."
+                    }
                 ),
                 vec![
                     parameter(
@@ -108,16 +116,43 @@ impl Tool for MonitorTool {
                     ),
                     parameter(
                         "expires_minutes",
-                        &format!(
-                            "How long the monitor lasts, from 1 to {longest} minutes ({longest} by default)."
-                        ),
+                        &if workers {
+                            format!(
+                                "How long the monitor lasts, from 1 to {longest} minutes ({longest} by default). With lasts, at least this long."
+                            )
+                        } else {
+                            format!(
+                                "How long the monitor lasts, from 1 to {longest} minutes ({longest} by default)."
+                            )
+                        },
                         false,
                     ),
-                ],
+                    parameter(
+                        "once",
+                        "true ends the monitor and its command after its first alert. For a check that alerts on success or failure, a first result that is already the one it waits for ends it at once.",
+                        false,
+                    ),
+                ]
+                .into_iter()
+                .chain(workers.then(|| {
+                    parameter(
+                        "lasts",
+                        "while_workers_run keeps the monitor going past expires_minutes while any of your workers run. It ends after the last one finishes, without a warning. Leave it out for a monitor that lasts expires_minutes.",
+                        false,
+                    )
+                }))
+                .collect(),
             ),
             Operation::Control => (
                 Self::NAMES[1],
-                "Lists your monitors (action list), keeps one going for longer (rearm), or stops one and its command (stop). rearm sets its end to minutes from now.".to_string(),
+                format!(
+                    "Lists your monitors (action list), keeps one going for longer (rearm), or stops one and its command (stop). rearm sets its end to minutes from now.{}",
+                    if workers {
+                        " A monitor that lasts while your workers run goes on past that while they do."
+                    } else {
+                        ""
+                    }
+                ),
                 vec![
                     parameter("action", "list, rearm or stop.", true),
                     parameter("job_id", "The monitor's job ID (not for list).", false),
@@ -132,11 +167,12 @@ impl Tool for MonitorTool {
             ),
         };
         for param in &mut parameters {
-            if matches!(
-                param.name.as_str(),
-                "every_seconds" | "expires_minutes" | "minutes"
-            ) {
-                param.param_type = ToolParameterType::Integer;
+            match param.name.as_str() {
+                "every_seconds" | "expires_minutes" | "minutes" => {
+                    param.param_type = ToolParameterType::Integer
+                }
+                "once" => param.param_type = ToolParameterType::Bool,
+                _ => {}
             }
         }
         ToolDefinition {
@@ -146,6 +182,7 @@ impl Tool for MonitorTool {
             output_based_example: None,
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -211,6 +248,12 @@ impl Tool for MonitorTool {
                 options = options.with_expiry(
                     minutes(&params, "expires_minutes", longest)?.unwrap_or(limits.longest),
                 );
+                if super::tools::boolean(&params, "once", false)? {
+                    options = options.once();
+                }
+                if let Some(lasts) = optional_string(&params, "lasts")? {
+                    options = options.with_lifetime(self.lifetime(lasts)?);
+                }
                 Ok(self
                     .manager
                     .start_monitor(context, command, options)
@@ -236,12 +279,33 @@ impl Tool for MonitorTool {
                                     )),
                                     error => tool_error(error),
                                 })?;
+                        let (once, lifetime) = self
+                            .manager
+                            .owned(context.task_id, id)
+                            .ok()
+                            .and_then(|job| {
+                                let data = job.data.lock().unwrap();
+                                let monitor = data.record.monitor.as_ref()?;
+                                Some((monitor.once, monitor.lifetime))
+                            })
+                            .unwrap_or_default();
                         Ok(format!(
-                            "Monitor {id} now ends at {}, in {}.",
+                            "Monitor {id} now ends at {}, in {}{}.{}",
                             clock(ends),
                             minutes_left(
                                 ends.duration_since(SystemTime::now()).unwrap_or_default()
-                            )
+                            ),
+                            match lifetime {
+                                MonitorLifetime::WhileWorkersRun => {
+                                    ", or later while your workers run"
+                                }
+                                _ => "",
+                            },
+                            if once {
+                                " Its first alert ends it sooner."
+                            } else {
+                                ""
+                            }
                         ))
                     }
                     "stop" => {
@@ -277,21 +341,70 @@ impl Tool for MonitorTool {
 }
 
 impl MonitorTool {
-    /// `owner`'s running monitors, as `monitor_control list` gives them.
+    /// The lifetime `lasts` names. `while_workers_run` (with spaces or
+    /// hyphens too) is the only one, and only where the host says whether
+    /// workers run.
+    fn lifetime(&self, lasts: &str) -> std::result::Result<MonitorLifetime, ToolError> {
+        let name = lasts.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        if name != "while_workers_run" {
+            return Err(ToolError::ParameterValidation {
+                param_name: "lasts".into(),
+                message: "lasts takes while_workers_run, or leave it out".into(),
+            });
+        }
+        if !self.manager.has_worker_liveness() {
+            return Err(ToolError::ParameterValidation {
+                param_name: "lasts".into(),
+                message: "you have no workers here, so leave out lasts".into(),
+            });
+        }
+        Ok(MonitorLifetime::WhileWorkersRun)
+    }
+
+    /// `owner`'s running monitors, as `monitor_control list` gives them. A
+    /// monitor that alerts once says so, and one that lasts while workers
+    /// run says that too, and after its time, while they do, when it ends.
     fn list(&self, owner: Uuid) -> Vec<Value> {
         let now = SystemTime::now();
+        let workers = self.manager.workers_running(owner);
         self.manager
             .jobs()
             .into_iter()
             .filter(|job| job.owner == owner)
             .filter_map(|job| match job.kind {
-                JobKind::Monitor(info) => Some(json!({
-                    "job_id": job.job_id,
-                    "command": job.label,
-                    "watching": info.trigger.watching(),
-                    "alerts": info.alerts,
-                    "ends_in_minutes": (info.expires_at.duration_since(now).unwrap_or_default().as_secs() + 30) / 60,
-                })),
+                JobKind::Monitor(info) => {
+                    let mut entry = json!({
+                        "job_id": job.job_id,
+                        "command": job.label,
+                        "watching": info.trigger.watching(),
+                        "alerts": info.alerts,
+                    });
+                    let left = info.expires_at.duration_since(now).unwrap_or_default();
+                    let while_workers = info.lifetime == MonitorLifetime::WhileWorkersRun;
+                    // Past its time, by the clock its timing goes by.
+                    let past = || {
+                        self.manager.owned(owner, job.job_id).is_ok_and(|job| {
+                            job.data
+                                .lock()
+                                .unwrap()
+                                .monitor
+                                .as_ref()
+                                .is_some_and(|arming| arming.expires <= tokio::time::Instant::now())
+                        })
+                    };
+                    if while_workers && workers && past() {
+                        entry["ends"] = json!("after your last worker finishes");
+                    } else {
+                        entry["ends_in_minutes"] = json!((left.as_secs() + 30) / 60);
+                    }
+                    if while_workers {
+                        entry["lasts"] = json!("while_workers_run");
+                    }
+                    if info.once {
+                        entry["once"] = json!(true);
+                    }
+                    Some(entry)
+                }
                 _ => None,
             })
             .collect()

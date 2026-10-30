@@ -48,6 +48,7 @@ pub use handover::{
 };
 pub use mcp::{
     McpAccess, McpBridgeTool, McpChanges, McpConfig, McpHub, McpManager, McpServerConfig,
+    kill_mcp_servers,
 };
 pub use parsing::{
     ParsedToolCall, RawParserEvent, ToolAssemblyError, ToolCallGroup, ToolCallParser,

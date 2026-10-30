@@ -69,6 +69,7 @@ fn definition(
         parameters,
         parallel_safe,
         tool_type_details: ToolTypeDetails::DeveloperDefined,
+        read_only: false,
         raw_json_schema_override: None,
     }
 }
@@ -484,12 +485,15 @@ impl std::fmt::Debug for ListAgentsTool {
 #[async_trait]
 impl Tool for ListAgentsTool {
     fn definition(&self) -> ToolDefinition {
-        definition(
-            LIST_AGENTS_TOOL_NAME,
-            "Lists the agent runs you started: what each is doing or reported, for how long, and where it works.",
-            vec![],
-            true,
-        )
+        ToolDefinition {
+            read_only: true,
+            ..definition(
+                LIST_AGENTS_TOOL_NAME,
+                "Lists the agent runs you started: what each is doing or reported, for how long, and where it works.",
+                vec![],
+                true,
+            )
+        }
     }
 
     fn recovery_mode(&self) -> ToolRecovery {

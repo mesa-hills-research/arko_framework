@@ -39,7 +39,9 @@ These defaults change what an agent sees of its tool results, in arko's own runt
 - Monitors (`monitor_start`, `TerminalManager::start_monitor`) are offered only when an
   agent's allowlist names their tools. An agent gets at most one note of monitor news a
   minute, however many monitors it has, and a monitor lasts at most 30 minutes unless the
-  agent rearms it. Its warning before the end wakes an idle agent, before its prompt
+  agent rearms it, or asked it to last while its workers run (`lasts`, offered where the
+  host says whether workers run, as a workflow with subagents does). A monitor goes on
+  after its alerts unless the agent set `once`. Its warning before the end wakes an idle agent, before its prompt
   cache expires if the host says when that is, and only for 2 hours after the user last
   wrote (`set_warning_wakes_within`). See [Monitors](interactive-terminals.md#monitors).
 - An `McpHub` runs its own process of each MCP server (`McpServerConfig::shared`,

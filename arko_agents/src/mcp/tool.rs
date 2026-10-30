@@ -63,7 +63,7 @@ impl McpTool {
 
 /// The definition of `tool` of `server` as a tool named `name`: its
 /// description marked with the server's name, its raw input schema, and
-/// parallel-safe when the server marks it read-only.
+/// parallel-safe and read-only when the server marks it read-only.
 pub(crate) fn mcp_definition(
     name: String,
     server_name: &str,
@@ -81,6 +81,7 @@ pub(crate) fn mcp_definition(
         // read-only"); any other runs alone, in call order.
         parallel_safe: tool.read_only,
         tool_type_details: ToolTypeDetails::DeveloperDefined,
+        read_only: tool.read_only,
         raw_json_schema_override: Some(tool.input_schema.clone()),
     }
 }

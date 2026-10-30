@@ -58,10 +58,15 @@ pub struct Workflow {
     config: WorkflowConfig,
     engine: WorkflowEngine,
     context: Arc<SharedContext>,
+    /// What tells the `background_jobs` manager whether the agents' workers
+    /// run, which counts while the workflow lives.
+    #[cfg(any(unix, windows))]
+    _worker_runs: Option<Arc<crate::subagents::WorkerRuns>>,
 }
 
 /// Dropping the workflow aborts its background subagents' drivers (see
 /// [`crate::subagents`]): their runs stop where they are, as after a crash.
+/// The monitors its workers kept see no workers from then on.
 impl Drop for Workflow {
     fn drop(&mut self) {
         self.context.subagents.abort_all();
@@ -2049,7 +2054,11 @@ impl WorkflowBuilder {
     /// (it finished, failed or was stopped), its moved calls and monitors
     /// stop, since their notes would reach no one. Its commands keep
     /// running. Pass the manager whose terminal tools the agents use, if
-    /// they have them. See
+    /// they have them. With [`subagents`](Self::subagents), the manager
+    /// also learns whether each agent's workers run, for as long as the
+    /// workflow lives, so a monitor can last while they do
+    /// (`monitor_start`'s `lasts`, see `TerminalManager::add_worker_liveness`).
+    /// Workflows that share a manager each tell it of their own. See
     /// [`AgentRuntime::with_background_jobs`](arko_agents::AgentRuntime::with_background_jobs).
     #[cfg(any(unix, windows))]
     pub fn background_jobs(mut self, jobs: Arc<arko_agents::terminal::TerminalManager>) -> Self {
@@ -2934,6 +2943,17 @@ impl WorkflowBuilder {
                 WorkflowError::BuilderInvalid("workflow services initialized twice".to_string())
             })?;
         }
+        // The agents' monitors can last while their workers run.
+        #[cfg(any(unix, windows))]
+        let worker_runs = match &context.background_jobs {
+            Some(jobs) if context.subagents.config().is_some() => {
+                let runs = Arc::new(crate::subagents::WorkerRuns::of(&context));
+                let weak: std::sync::Weak<crate::subagents::WorkerRuns> = Arc::downgrade(&runs);
+                jobs.add_worker_liveness(weak);
+                Some(runs)
+            }
+            _ => None,
+        };
 
         let engine = WorkflowEngine::new(llm_client, persistence);
         fire_hooks_on_context(&context, HookPoint::PreWorkflow, |_| {})?;
@@ -2946,6 +2966,8 @@ impl WorkflowBuilder {
             },
             engine,
             context,
+            #[cfg(any(unix, windows))]
+            _worker_runs: worker_runs,
         })
     }
 }

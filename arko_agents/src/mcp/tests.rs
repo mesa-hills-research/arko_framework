@@ -974,7 +974,10 @@ async fn direct_tools_keep_their_names_and_call_through_the_hub() {
     let echo = &direct[0];
     let definition = echo.definition();
     assert_eq!(definition.description, "[MCP:issues] Echoes text.");
-    assert!(definition.parallel_safe);
+    // The server marks it read-only, and Claude Code is told so.
+    assert!(definition.parallel_safe && definition.read_only);
+    let write = direct[1].definition();
+    assert!(!write.parallel_safe && !write.read_only);
     assert_eq!(echo.recovery_mode(), ToolRecovery::Rerun);
     assert_eq!(direct[1].recovery_mode(), ToolRecovery::InDoubt);
     assert_eq!(echo.background_mode(), crate::tool::ToolBackground::Detach);

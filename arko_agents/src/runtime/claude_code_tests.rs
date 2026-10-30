@@ -275,6 +275,39 @@ async fn an_agent_completes_through_its_arko_tool() {
     }));
 }
 
+/// The tools that only read are served with the MCP `readOnlyHint`, so
+/// Claude Code runs a response's calls to them together. The others have
+/// no annotations.
+#[tokio::test]
+async fn read_only_tools_are_served_with_the_read_only_hint() {
+    let fake = Fake::new(json!([[complete("Done")]]));
+    let task = Task::new(
+        config(&fake, &["read_file", "list_files", "write_file"]),
+        "Look around.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let served = &fake.logged("tools")[0]["tools"];
+    let hints: Vec<(&str, &Value)> = served
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| (tool["name"].as_str().unwrap(), &tool["annotations"]))
+        .collect();
+    let read_only = json!({"readOnlyHint": true});
+    assert_eq!(
+        hints,
+        [
+            ("complete_task", &Value::Null),
+            ("list_files", &read_only),
+            ("read_file", &read_only),
+            ("write_file", &Value::Null),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_turn_without_complete_task_gets_a_note() {
     let fake = Fake::new(json!([
@@ -5445,6 +5478,7 @@ impl crate::tool::Tool for WaitsForContext {
             parameters: vec![],
             parallel_safe: false,
             tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

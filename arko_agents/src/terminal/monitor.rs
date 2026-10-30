@@ -101,6 +101,52 @@ impl CheckChange {
     }
 }
 
+/// How long a monitor lasts, besides its time
+/// ([`MonitorOptions::expires_in`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MonitorLifetime {
+    /// Its time, from its start or latest rearm. The default.
+    #[default]
+    Timed,
+    /// Its time, and longer while any of its owner's workers run, as the
+    /// host's [`WorkerLiveness`] says. Once its time has passed it ends when
+    /// the last worker finishes. While workers run it gives no warning
+    /// before its end. With no worker running it ends at its time, as a
+    /// timed monitor does. A host that adds no `WorkerLiveness` has no
+    /// workers, so the monitor ends at its time.
+    WhileWorkersRun,
+}
+
+impl MonitorLifetime {
+    fn is_timed(&self) -> bool {
+        *self == Self::Timed
+    }
+}
+
+/// Says whether an agent's workers (subagents) run, for the monitors that
+/// last while they do ([`MonitorLifetime::WhileWorkersRun`]). A host that
+/// runs workers adds one with [`TerminalManager::add_worker_liveness`] and
+/// keeps it while its workers can run. Each arko_workflows workflow with
+/// subagents adds its own to the manager given to its `background_jobs`.
+pub trait WorkerLiveness: Send + Sync {
+    /// Whether any worker that `owner` (a task) started runs now, or waits
+    /// to start. It is asked often, so it should answer quickly, and never
+    /// call back into the terminal manager.
+    fn has_running_workers(&self, owner: Uuid) -> bool;
+
+    /// What changes whenever a worker starts or ends, so monitors don't
+    /// wait to notice. A host that drops its `WorkerLiveness` changes it or
+    /// closes it, so its monitors notice it no longer counts. Monitors also
+    /// ask again each [`WORKERS_RECHECK`] while workers keep them.
+    fn changes(&self) -> watch::Receiver<u64>;
+}
+
+/// How often a monitor kept by running workers asks again whether they run,
+/// in case the [`WorkerLiveness`] misses a change (1 minute).
+pub const WORKERS_RECHECK: Duration = Duration::from_secs(60);
+
 /// What a monitor watches and for how long, for
 /// [`TerminalManager::start_monitor`]. Made with [`lines`](Self::lines) or
 /// [`check`](Self::check).
@@ -114,6 +160,15 @@ pub struct MonitorOptions {
     /// What lists show instead of the command (default `None`, the
     /// command).
     pub label: Option<String>,
+    /// The monitor ends after its first alert, stopping its command
+    /// (default `false`). For an event that happens once, such as a CI run
+    /// that finishes or a server that starts to answer. A check monitor
+    /// whose first check already gives the result it waits for
+    /// ([`CheckChange::Success`] or [`CheckChange::Failure`]) ends at once.
+    pub once: bool,
+    /// Whether it also lasts while its owner's workers run (default
+    /// [`MonitorLifetime::Timed`]).
+    pub lifetime: MonitorLifetime,
 }
 
 impl MonitorOptions {
@@ -124,6 +179,8 @@ impl MonitorOptions {
             trigger: MonitorTrigger::Lines { pattern },
             expires_in: MonitorLimits::default().longest,
             label: None,
+            once: false,
+            lifetime: MonitorLifetime::Timed,
         }
     }
 
@@ -150,6 +207,19 @@ impl MonitorOptions {
         self.label = Some(label.into());
         self
     }
+
+    /// These options with the monitor ending after its first alert. See
+    /// [`once`](Self::once).
+    pub fn once(mut self) -> Self {
+        self.once = true;
+        self
+    }
+
+    /// These options with the monitor lasting as `lifetime` says.
+    pub fn with_lifetime(mut self, lifetime: MonitorLifetime) -> Self {
+        self.lifetime = lifetime;
+        self
+    }
 }
 
 /// A monitor, as [`JobKind::Monitor`] describes it.
@@ -157,10 +227,15 @@ impl MonitorOptions {
 #[non_exhaustive]
 pub struct MonitorInfo {
     pub trigger: MonitorTrigger,
-    /// When it ends, as last armed.
+    /// When it ends, as last armed. A monitor that lasts while workers run
+    /// goes on past it while they do.
     pub expires_at: SystemTime,
     /// How many of its owner's notes carried its alerts.
     pub alerts: u32,
+    /// It ends after its first alert ([`MonitorOptions::once`]).
+    pub once: bool,
+    /// Whether it also lasts while its owner's workers run.
+    pub lifetime: MonitorLifetime,
 }
 
 /// News of a monitor that went to no runtime, because none was bound for
@@ -337,6 +412,11 @@ pub(super) struct MonitorRecord {
     /// Its warning for this arm went.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) warned: bool,
+    /// It ends after its first alert.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) once: bool,
+    #[serde(default, skip_serializing_if = "MonitorLifetime::is_timed")]
+    pub(super) lifetime: MonitorLifetime,
 }
 
 /// A monitor's saved state, or `None` for one this version can't read, such
@@ -366,6 +446,39 @@ pub(super) struct Arming {
     /// It is ending (it expired, or it was stopped), so it can't be
     /// rearmed.
     pub(super) ending: bool,
+    /// Its time passed while its owner's workers ran, which kept it.
+    pub(super) held: bool,
+}
+
+/// How a monitor ended by itself, other than by its command's exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Done {
+    /// It lasted as long as it was armed for.
+    Expired,
+    /// Its time had passed, and the last of its owner's workers finished.
+    WorkersFinished,
+    /// It alerted once, which was all it was for.
+    Alerted,
+}
+
+impl Done {
+    /// The state its job ends in. A monitor that did what it was for
+    /// succeeded.
+    pub(super) fn state(self) -> JobState {
+        match self {
+            Self::Expired | Self::WorkersFinished => JobState::TimedOut,
+            Self::Alerted => JobState::Succeeded,
+        }
+    }
+
+    /// What its record says of the end, as its error.
+    pub(super) fn error(self) -> Option<String> {
+        match self {
+            Self::Expired => Some("expired".into()),
+            Self::WorkersFinished => Some("ended after its agent's workers finished".into()),
+            Self::Alerted => None,
+        }
+    }
 }
 
 /// What a running monitor is, for its actor.
@@ -373,23 +486,47 @@ pub(super) struct Running {
     pub(super) header: Header,
     pub(super) owner: Uuid,
     pub(super) limits: MonitorLimits,
+    /// It ends after its first alert.
+    pub(super) once: bool,
+    pub(super) lifetime: MonitorLifetime,
 }
 
 impl Running {
-    /// When its next timed event is due, its warning or its end.
+    /// When its next timed event is due, its warning or its end. While its
+    /// owner's workers keep it, that is its time or the next look at the
+    /// workers.
     pub(super) fn next_event(
         &self,
         manager: &Weak<TerminalManager>,
         data: &Mutex<JobData>,
     ) -> Option<Instant> {
         let inputs = self.wake_inputs(manager);
+        // Asked before the job's lock is taken.
+        let kept = self.kept_by_workers(manager);
         let data = data.lock().unwrap();
         let arming = data.monitor.as_ref()?;
+        if kept {
+            let recheck = Instant::now() + WORKERS_RECHECK;
+            return Some(if arming.held {
+                recheck
+            } else {
+                arming.expires.min(recheck)
+            });
+        }
         Some(
             arming
                 .warning(&self.limits, inputs)
                 .map_or(arming.expires, |warning| warning.min(arming.expires)),
         )
+    }
+
+    /// Whether its owner's workers keep it: it lasts while they run, and
+    /// one does.
+    fn kept_by_workers(&self, manager: &Weak<TerminalManager>) -> bool {
+        self.lifetime == MonitorLifetime::WhileWorkersRun
+            && manager
+                .upgrade()
+                .is_some_and(|manager| manager.workers_running(self.owner))
     }
 
     fn wake_inputs(&self, manager: &Weak<TerminalManager>) -> warnings::WakeInputs {
@@ -400,30 +537,38 @@ impl Running {
     }
 
     /// Runs its timed event if it's due, which warns its owner that it ends
-    /// soon or ends it. Returns whether the monitor expired, in which case it can
-    /// no longer be rearmed.
+    /// soon or ends it. Returns how the monitor ended, if it did, in which
+    /// case it can no longer be rearmed. One whose owner's workers keep it
+    /// neither warns nor ends.
     pub(super) fn timed_event(
         &self,
         manager: &Weak<TerminalManager>,
         data: &Mutex<JobData>,
         config: &TerminalConfig,
-    ) -> bool {
+    ) -> Option<Done> {
         let inputs = self.wake_inputs(manager);
+        let kept = self.kept_by_workers(manager);
         let now = Instant::now();
         let ends_at = {
             let mut data = data.lock().unwrap();
-            let Some(arming) = data.monitor.as_mut() else {
-                return false;
-            };
+            let arming = data.monitor.as_mut()?;
+            if kept {
+                arming.held |= now >= arming.expires;
+                return None;
+            }
             if now >= arming.expires {
                 arming.ending = true;
-                return true;
+                return Some(if arming.held {
+                    Done::WorkersFinished
+                } else {
+                    Done::Expired
+                });
             }
             if arming
                 .warning(&self.limits, inputs)
                 .is_none_or(|warning| now < warning)
             {
-                return false;
+                return None;
             }
             arming.warned = true;
             let ends_at = SystemTime::now() + (arming.expires - now);
@@ -445,7 +590,7 @@ impl Running {
                 longest: self.limits.longest,
             },
         );
-        false
+        None
     }
 
     /// Marks the monitor as ending, so it can't be rearmed.
@@ -468,6 +613,10 @@ impl Running {
 pub(super) enum EndReason {
     /// It lasted as long as it was armed for.
     Expired,
+    /// Its time had passed, and the last of its owner's workers finished.
+    WorkersFinished,
+    /// It alerted once, as it was asked to.
+    Alerted,
     /// Its command exited on its own.
     Exited { code: Option<i32> },
     /// Its owner stopped it.
@@ -481,25 +630,28 @@ pub(super) enum EndReason {
     Failed { error: String },
 }
 
-/// How a monitor that ended in `state` ended, `stopped_by` whom, or `None`
-/// when its host's exit stopped it, which tells no one.
+/// How a monitor that ended in `state` ended, `done` by itself or
+/// `stopped_by` whom, or `None` when its host's exit stopped it, which tells
+/// no one.
 pub(super) fn end_reason(
     state: JobState,
-    expired: bool,
+    done: Option<Done>,
     stopped_by: Option<calls::StopCause>,
     exit_code: Option<i32>,
     error: Option<&str>,
 ) -> Option<EndReason> {
-    Some(match state {
-        JobState::TimedOut if expired => EndReason::Expired,
-        JobState::Cancelled => match stopped_by {
+    Some(match (state, done) {
+        (JobState::TimedOut, Some(Done::Expired)) => EndReason::Expired,
+        (JobState::TimedOut, Some(Done::WorkersFinished)) => EndReason::WorkersFinished,
+        (JobState::Succeeded, Some(Done::Alerted)) => EndReason::Alerted,
+        (JobState::Cancelled, _) => match stopped_by {
             Some(calls::StopCause::Owner) => EndReason::StoppedByOwner,
             Some(calls::StopCause::User) => EndReason::StoppedByUser,
             Some(calls::StopCause::OwnerEnded) => EndReason::OwnerEnded,
             None => return None,
         },
-        JobState::Succeeded => EndReason::Exited { code: exit_code },
-        JobState::Failed if error.is_none() => EndReason::Exited { code: exit_code },
+        (JobState::Succeeded, _) => EndReason::Exited { code: exit_code },
+        (JobState::Failed, _) if error.is_none() => EndReason::Exited { code: exit_code },
         _ => EndReason::Failed {
             error: error.unwrap_or("it stopped unexpectedly").to_string(),
         },
@@ -676,6 +828,8 @@ pub(super) struct LineWatch {
     pub(super) running: Running,
     splitter: LineSplitter,
     matcher: Matcher,
+    /// A monitor that alerts once has alerted, and takes no more lines.
+    alerted: bool,
 }
 
 impl LineWatch {
@@ -684,7 +838,13 @@ impl LineWatch {
             splitter: LineSplitter::new(running.limits.line_bytes),
             matcher: Matcher::new(regex, &running.limits),
             running,
+            alerted: false,
         }
+    }
+
+    /// Whether the monitor alerted once and is done.
+    pub(super) fn is_done(&self) -> bool {
+        self.alerted
     }
 
     /// Reads `bytes`, the output at `offset`, and tells the owner of the
@@ -709,6 +869,9 @@ impl LineWatch {
     }
 
     fn matched(&mut self, manager: &Weak<TerminalManager>, lines: Vec<Line>, now: Instant) {
+        if self.alerted {
+            return;
+        }
         let matched: Vec<Line> = lines
             .into_iter()
             .filter(|line| self.matcher.matches(&line.text, now))
@@ -723,6 +886,7 @@ impl LineWatch {
                     at: SystemTime::now(),
                 },
             );
+            self.alerted = self.running.once;
         }
     }
 }
@@ -772,12 +936,15 @@ impl Watching {
                 expires_at: SystemTime::now() + options.expires_in,
                 alerts: 0,
                 warned: false,
+                once: options.once,
+                lifetime: options.lifetime,
             },
             arming: Arming {
                 expires: Instant::now() + options.expires_in,
                 lasts: options.expires_in,
                 warned: false,
                 ending: false,
+                held: false,
             },
             regex,
             limits: limits.clone(),
@@ -794,6 +961,8 @@ impl Watching {
             },
             owner,
             limits: self.limits.clone(),
+            once: self.record.once,
+            lifetime: self.record.lifetime,
         }
     }
 
@@ -880,6 +1049,54 @@ impl TerminalManager {
         self.monitor_limits.lock().unwrap().clone()
     }
 
+    /// Adds what says whether some agents' workers run, for the monitors
+    /// that last while they do ([`MonitorLifetime::WhileWorkersRun`]). The
+    /// manager holds it weakly, so it counts until its host drops it. Each
+    /// workflow that shares the manager adds its own, and a monitor is kept
+    /// while any of them says its owner has a worker running.
+    /// `monitor_start` offers its `lasts` parameter while one counts. Running
+    /// monitors plan their timed events again.
+    pub fn add_worker_liveness(&self, liveness: Weak<dyn WorkerLiveness>) {
+        {
+            let mut all = self.worker_liveness.lock().unwrap();
+            all.retain(|liveness| liveness.strong_count() > 0);
+            all.push(liveness);
+        }
+        self.monitor_timing_changed();
+    }
+
+    /// The [`WorkerLiveness`]es that count, those whose hosts still hold
+    /// them.
+    fn live_worker_liveness(&self) -> Vec<Arc<dyn WorkerLiveness>> {
+        let mut all = self.worker_liveness.lock().unwrap();
+        all.retain(|liveness| liveness.strong_count() > 0);
+        all.iter().filter_map(Weak::upgrade).collect()
+    }
+
+    /// Whether a [`WorkerLiveness`] counts, so monitors can last while
+    /// workers run.
+    pub(super) fn has_worker_liveness(&self) -> bool {
+        !self.live_worker_liveness().is_empty()
+    }
+
+    /// Whether `owner` has workers running, as any [`WorkerLiveness`] says.
+    /// Never asked with a job's lock held, as it may take the hosts' own
+    /// locks.
+    pub(super) fn workers_running(&self, owner: Uuid) -> bool {
+        self.live_worker_liveness()
+            .iter()
+            .any(|liveness| liveness.has_running_workers(owner))
+    }
+
+    /// What changes as workers start and end, one for each
+    /// [`WorkerLiveness`] that counts.
+    pub(super) fn worker_changes(&self) -> Vec<watch::Receiver<u64>> {
+        self.live_worker_liveness()
+            .iter()
+            .map(|liveness| liveness.changes())
+            .collect()
+    }
+
     /// The news of monitors that went to no runtime from now on, because
     /// none was bound for its owner, when it should wake the owner. A host
     /// can start a turn of the owner's idle agent for it, and the runtime it
@@ -944,6 +1161,20 @@ impl TerminalManager {
                     checks::command_checker(config, command, cwd, directory, keep)
                 })
                 .await?;
+            if let (true, MonitorTrigger::Check { when, .. }, Some(run)) =
+                (options.once, &options.trigger, &first)
+                && checks::awaited(*when, run.success)
+            {
+                let already = if run.success { "succeeds" } else { "fails" };
+                return Ok(MonitorStarted {
+                    job_id: id,
+                    expires_at,
+                    summary: format!(
+                        "Monitor {id} ended at once, because its check `{label}` already {already}. {}",
+                        run.first_sentence(&limits)
+                    ),
+                });
+            }
             let first = match first {
                 Some(run) => run.first_sentence(&limits),
                 // Stopped (by the user, or the host's exit) before its first
@@ -954,6 +1185,22 @@ impl TerminalManager {
                 {
                     "It was stopped before its first check ended.".to_string()
                 }
+                // A monitor that alerts once of a result alerts of it even
+                // as the first.
+                None if options.once => match &options.trigger {
+                    MonitorTrigger::Check {
+                        when: CheckChange::Success,
+                        ..
+                    } => "Its first check is still running, and if it succeeds, that is its alert."
+                        .to_string(),
+                    MonitorTrigger::Check {
+                        when: CheckChange::Failure,
+                        ..
+                    } => "Its first check is still running, and if it fails, that is its alert."
+                        .to_string(),
+                    _ => "Its first check is still running, and changes are judged against its result."
+                        .to_string(),
+                },
                 None => {
                     "Its first check is still running, and changes are judged against its result."
                         .to_string()
@@ -964,7 +1211,7 @@ impl TerminalManager {
                 expires_at,
                 summary: format!(
                     "{} {first}",
-                    started_sentence(id, &label, &options.trigger, expires_at, options.expires_in)
+                    started_sentence(id, &label, &options, expires_at)
                 ),
             });
         }
@@ -990,7 +1237,18 @@ impl TerminalManager {
             let _ = tokio::time::timeout(limits.start_wait, done.wait_for(|done| *done)).await;
         }
         let snapshot = self.status(context.task_id, id, None)?;
-        let summary = if snapshot.state.is_terminal() {
+        // Killed after its first alert, not exited.
+        let alerted =
+            options.once && snapshot.state == JobState::Succeeded && snapshot.exit_code.is_none();
+        let summary = if alerted {
+            // The start says it alerted and ended, so its note would only
+            // repeat it.
+            self.drop_news(context.task_id, id);
+            format!(
+                "Monitor {id} ended after its first alert, which came at once. {}",
+                output_so_far(&snapshot, "Its output follows.", "It printed nothing.")
+            )
+        } else if snapshot.state.is_terminal() {
             // The start says it ended, so its note would only repeat it.
             self.drop_news(context.task_id, id);
             let how = match snapshot.exit_code {
@@ -1004,7 +1262,7 @@ impl TerminalManager {
         } else {
             format!(
                 "{} {}",
-                started_sentence(id, &label, &options.trigger, expires_at, options.expires_in),
+                started_sentence(id, &label, &options, expires_at),
                 output_so_far(
                     &snapshot,
                     "Its output so far follows.",
@@ -1086,16 +1344,15 @@ pub(super) fn validate(
     }
 }
 
-/// The first sentence of `monitor_start`'s result, up to what it says of
+/// The first sentences of `monitor_start`'s result, up to what it says of
 /// the output or first check.
 pub(super) fn started_sentence(
     id: Uuid,
     command: &str,
-    trigger: &MonitorTrigger,
+    options: &MonitorOptions,
     expires_at: SystemTime,
-    lasts: Duration,
 ) -> String {
-    let watches = match trigger {
+    let watches = match &options.trigger {
         MonitorTrigger::Lines {
             pattern: Some(pattern),
         } => format!("and alerts you of lines that match `{pattern}`"),
@@ -1108,10 +1365,19 @@ pub(super) fn started_sentence(
             when.alerts_you()
         ),
     };
+    let workers = match options.lifetime {
+        MonitorLifetime::WhileWorkersRun => ", and longer while your workers run",
+        MonitorLifetime::Timed => "",
+    };
+    let once = if options.once {
+        " It ends after its first alert."
+    } else {
+        ""
+    };
     format!(
-        "Monitor {id} started. It runs `{command}` {watches}, until {} ({}).",
+        "Monitor {id} started. It runs `{command}` {watches}, until {} ({}){workers}.{once}",
         clock(expires_at),
-        calls::describe(lasts)
+        calls::describe(options.expires_in)
     )
 }
 
@@ -1285,6 +1551,36 @@ mod tests {
         assert_eq!(minutes_left(Duration::from_secs(59)), "less than a minute");
         assert_eq!(minutes_left(Duration::from_secs(299)), "5 min");
         assert_eq!(minutes_left(Duration::from_secs(22 * 60 + 10)), "22 min");
+    }
+
+    /// A monitor that alerts once or lasts while workers run is saved so.
+    /// A record without them, as earlier versions saved it, reads as a timed
+    /// monitor that alerts every time.
+    #[test]
+    fn once_and_the_lifetime_are_saved_when_set() {
+        let record = |once, lifetime| MonitorRecord {
+            trigger: MonitorTrigger::Lines { pattern: None },
+            expires_at: SystemTime::UNIX_EPOCH,
+            alerts: 0,
+            warned: false,
+            once,
+            lifetime,
+        };
+        let saved = serde_json::to_value(record(false, MonitorLifetime::Timed)).unwrap();
+        assert_eq!(saved.get("once"), None);
+        assert_eq!(saved.get("lifetime"), None);
+        let read: MonitorRecord = serde_json::from_value(saved).unwrap();
+        assert!(!read.once && read.lifetime == MonitorLifetime::Timed);
+        let saved = serde_json::to_value(record(true, MonitorLifetime::WhileWorkersRun)).unwrap();
+        assert_eq!(
+            (&saved["once"], &saved["lifetime"]),
+            (
+                &serde_json::json!(true),
+                &serde_json::json!("while_workers_run")
+            )
+        );
+        let read: MonitorRecord = serde_json::from_value(saved).unwrap();
+        assert!(read.once && read.lifetime == MonitorLifetime::WhileWorkersRun);
     }
 
     /// The trigger is saved by kind, and records saved without its

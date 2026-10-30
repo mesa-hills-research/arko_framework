@@ -32,6 +32,7 @@ impl Tool for Counter {
             }],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -2157,6 +2158,7 @@ async fn output_based_end_user_tools_receive_boolean_parameters() {
             tool_type_details: ToolTypeDetails::EndUserDefined {
                 command_template: "echo".into(),
             },
+            read_only: false,
             raw_json_schema_override: None,
         })
         .unwrap();

@@ -16,6 +16,7 @@ pub use bridge::{
     AddServer, AllServers, MCP_TOOL_NAME, McpAccess, McpBridgeTool, McpChanges, McpScope,
 };
 pub use config::{McpConfig, McpServerConfig};
+pub use connection::kill_mcp_servers;
 pub use hub::{
     DEFAULT_START_TIMEOUT, McpHub, McpToolInfo, ServerFacts, ServerState, direct_tool_name,
 };

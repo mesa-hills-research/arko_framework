@@ -298,9 +298,23 @@ impl Board {
         }
     }
 
-    fn bump(&self) {
+    pub(crate) fn bump(&self) {
         self.version
             .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Whether any run `caller` started is queued or running.
+    pub(crate) fn has_active_workers(&self, caller: Uuid) -> bool {
+        self.state
+            .lock()
+            .runs
+            .iter()
+            .any(|run| run.caller_run_id == caller && run.state.is_active())
+    }
+
+    /// What changes at every change of the board's runs and mail.
+    pub(crate) fn changes(&self) -> watch::Receiver<u64> {
+        self.version.subscribe()
     }
 
     fn emit(&self, record: &SubagentRecord, kind: SubagentEventKind) {

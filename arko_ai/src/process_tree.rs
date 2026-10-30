@@ -24,6 +24,12 @@
 //! # }
 //! ```
 //!
+//! Kill the tree before collecting the child's exit status, as
+//! [`ProcessTree::wait`] does. On Unix the group's ID is the child's process
+//! ID, which is free for another program once the child is collected, and a
+//! later kill could then reach that program's group. [`exited`] waits for the
+//! child to exit without collecting it.
+//!
 //! # Limits
 //!
 //! A host that is killed outright (`SIGKILL`) or calls `std::process::exit`
@@ -36,8 +42,76 @@
 //! started before then stays out.
 
 use std::io;
+use std::process::ExitStatus;
 
 use tokio::process::{Child, Command};
+
+/// Waits until `child` has exited without collecting its exit status, so
+/// its process ID stays taken until its `wait` collects it. On Unix that is
+/// also the ID of a process group the child leads, as a [`ProcessTree`]'s
+/// does, so the group can be killed safely until then. A child already
+/// collected counts as exited. Elsewhere it waits for the child's exit, which
+/// frees nothing there.
+#[cfg(unix)]
+pub async fn exited(child: &mut Child) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let Some(pid) = child.id() else {
+        return;
+    };
+    // Listening first, so an exit between the look and the wait isn't
+    // missed. Without the signal, or should one be missed, it looks again
+    // at intervals.
+    let mut exits = signal(SignalKind::child()).ok();
+    loop {
+        if has_exited(pid) {
+            return;
+        }
+        match exits.as_mut() {
+            Some(exits) => {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), exits.recv()).await;
+            }
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    }
+}
+
+/// Waits until `child` has exited, without collecting its exit status
+/// where that frees its process ID (Unix).
+#[cfg(not(unix))]
+pub async fn exited(child: &mut Child) {
+    let _ = child.wait().await;
+}
+
+/// Whether child `pid` has exited (or isn't a child any more), leaving it
+/// uncollected.
+#[cfg(unix)]
+fn has_exited(pid: u32) -> bool {
+    use nix::libc;
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: `info` is a zeroed `siginfo_t` that outlives the call,
+        // which only writes to it. A zero `si_pid` after `WNOHANG` means no
+        // change, as waitid(2) advises.
+        let (result, info) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let result = libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            (result, info)
+        };
+        if result == 0 {
+            // SAFETY: the call filled in `info` for a child that changed.
+            return unsafe { info.si_pid() } != 0;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            // Not a child of this process, or collected already.
+            return true;
+        }
+    }
+}
 
 /// A child's process group, killed by [`kill`](Self::kill) or when dropped.
 #[cfg(unix)]
@@ -62,6 +136,8 @@ impl ProcessTree {
     }
 
     /// Kills every process of the tree at once. Later calls do nothing.
+    /// Call it before the child's exit status is collected (see the
+    /// module's notes).
     pub fn kill(&mut self) {
         if let Some(group) = self.group.take() {
             // The group is gone once all its processes have exited.
@@ -145,6 +221,18 @@ impl ProcessTree {
     }
 }
 
+impl ProcessTree {
+    /// Waits for `child`, the command the tree started, to exit, kills what
+    /// it left running in the tree, and then collects its exit status. The
+    /// tree is killed while the child is still uncollected, so its group
+    /// can't have passed to another program.
+    pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+        exited(child).await;
+        self.kill();
+        child.wait().await
+    }
+}
+
 /// Other systems have no process tree to end, so this ends nothing.
 #[cfg(not(any(unix, windows)))]
 #[derive(Debug)]
@@ -212,6 +300,43 @@ mod tests {
     }
 
     const BACKGROUND: &str = "sleep 300 & echo $!; wait";
+
+    /// `exited` returns once the child has exited, and leaves it
+    /// uncollected, so its process ID stays taken until `wait` collects it.
+    #[tokio::test]
+    async fn exited_leaves_the_child_uncollected() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 0.2; exit 3"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = nix::unistd::Pid::from_raw(child.id().unwrap() as i32);
+        tokio::time::timeout(Duration::from_secs(10), exited(&mut child))
+            .await
+            .expect("it exits");
+        assert!(
+            nix::sys::signal::kill(pid, None).is_ok(),
+            "the exited child still holds its ID"
+        );
+        assert_eq!(child.wait().await.unwrap().code(), Some(3));
+        assert!(nix::sys::signal::kill(pid, None).is_err());
+        // Collected, it counts as exited.
+        exited(&mut child).await;
+    }
+
+    /// `wait` kills what the child left running before it collects the
+    /// child.
+    #[tokio::test]
+    async fn wait_kills_the_tree_before_collecting_the_child() {
+        let (mut child, mut tree, program) = start("sleep 300 & echo $!; exit 4").await;
+        let status = tokio::time::timeout(Duration::from_secs(10), tree.wait(&mut child))
+            .await
+            .expect("it exits")
+            .unwrap();
+        assert_eq!(status.code(), Some(4));
+        ends(program).await;
+    }
 
     #[tokio::test]
     async fn kill_ends_the_programs_the_child_started() {

@@ -505,6 +505,8 @@ async fn monitors_stopped_by_a_restart_are_listed_and_never_run_again() {
                 trigger: MonitorTrigger::Lines { pattern: None },
                 expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 alerts: 3,
+                once: false,
+                lifetime: MonitorLifetime::Timed,
             })
         )
     );
@@ -1611,4 +1613,520 @@ async fn a_monitor_of_an_unknown_kind_reads_as_a_job() {
         manager.status(f.owner, id, None).unwrap().state,
         JobState::Interrupted
     );
+}
+
+/// A line monitor that alerts once ends after its first alert and stops its
+/// command, so the lines that come after reach no one. Its end comes with
+/// the alert.
+#[tokio::test]
+async fn a_line_monitor_that_alerts_once_ends_after_its_first_alert() {
+    let f = fixture(quick());
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let started = monitor(
+        &f,
+        "time.sleep(1)\nfor i in range(20):\n    print(f'error {i}', flush=True)\n    time.sleep(0.2)\ntime.sleep(60)",
+        lines("error").once(),
+    )
+    .await;
+    let id = started.job_id;
+    assert!(
+        started
+            .summary
+            .contains(" UTC (30 min). It ends after its first alert. It has printed nothing yet."),
+        "{}",
+        started.summary
+    );
+    let mut notes = Vec::new();
+    while let Some(text) = note_within(&mut receiver, Duration::from_secs(3)).await {
+        notes.push(text);
+    }
+    let all = notes.join("\n\n");
+    // Lines that came in the same read as the first are in its alert, and
+    // none come after it.
+    assert_eq!(all.matches("Monitor alert.").count(), 1, "{all}");
+    assert!(
+        all.contains("\n  error 0") && !all.contains("It ends in"),
+        "{all}"
+    );
+    assert!(
+        all.ends_with(&format!(
+            "Monitor {id} (`dev server`) ended after its first alert, and its command was stopped."
+        )),
+        "{all}"
+    );
+    let done = ended(&f, id).await;
+    assert_eq!(
+        (done.state, done.exit_code, done.error),
+        (JobState::Succeeded, None, None)
+    );
+}
+
+/// A check that alerts once ends after its first alert, and runs no more
+/// checks. A first check that already gives the result it waits for ends
+/// it at once.
+#[tokio::test(start_paused = true)]
+async fn a_check_that_alerts_once_ends_after_its_first_alert() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let quick = Duration::from_millis(100);
+    let (checker, _) = scripted(vec![
+        (false, "down", quick),
+        (false, "down", quick),
+        (true, "up", quick),
+        (false, "down", quick),
+        (true, "up", quick),
+    ]);
+    let options = MonitorOptions::check(10, CheckChange::Change)
+        .with_label("health")
+        .once();
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "health".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(!first.unwrap().success);
+    let text = next_note(&mut receiver).await;
+    assert_eq!(text.matches("Monitor alert.").count(), 1, "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "Monitor alert. The check of job {id} (`health`, every 10 s) started succeeding at "
+        )) && text.ends_with(&format!(
+            "\n\nMonitor {id} (`health`) ended after its first alert, and its checks stopped."
+        )),
+        "{text}"
+    );
+    let done = ended_paused(&f, id).await;
+    assert_eq!(
+        (done.state, done.error.as_deref()),
+        (JobState::Succeeded, None)
+    );
+    assert_eq!(
+        note_within(&mut receiver, Duration::from_secs(600)).await,
+        None
+    );
+    let history = f.manager.status(f.owner, id, Some(0)).unwrap().output.text;
+    assert_eq!(history.matches(" UTC] ").count(), 3, "{history}");
+
+    // What it waits for is already there.
+    for (when, success) in [(CheckChange::Success, true), (CheckChange::Failure, false)] {
+        let (checker, _) = scripted(vec![(success, "now", quick)]);
+        let options = MonitorOptions::check(10, when).with_label("ready").once();
+        let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+        let (id, first) = f
+            .manager
+            .start_check(&f.context(), "ready".into(), watching, move |_| checker)
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap().success, success);
+        assert_eq!(ended_paused(&f, id).await.state, JobState::Succeeded);
+        // The start says so, so no note repeats it.
+        assert_eq!(
+            note_within(&mut receiver, Duration::from_secs(600)).await,
+            None
+        );
+    }
+}
+
+/// A check that alerts once of a result, whose first result comes after its
+/// start stopped waiting and already is that result, alerts of it with its
+/// end, which wakes its idle owner.
+#[tokio::test(start_paused = true)]
+async fn a_late_first_check_with_the_awaited_result_alerts() {
+    let f = Fixture::new(|_| {});
+    let limits = f.manager.monitor_limits();
+    let mut alerts = f.manager.subscribe_alerts();
+    let slow = limits.first_check_wait + Duration::from_secs(5);
+    let (checker, _) = scripted(vec![(true, "ready", slow)]);
+    let options = MonitorOptions::check(30, CheckChange::Success)
+        .with_label("ready")
+        .once();
+    let watching = monitor::Watching::new(&options, None, &limits);
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "ready".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(first.is_none(), "the start stopped waiting");
+    let alert = timeout(Duration::from_secs(600), alerts.recv())
+        .await
+        .expect("an alert")
+        .unwrap();
+    assert_eq!((alert.job_id, alert.kind), (id, AlertKind::Check));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let text = next_note(&mut receiver).await;
+    assert_eq!(text.matches("Monitor alert.").count(), 1, "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "Monitor alert. The first check of job {id} (`ready`, every 30 s) succeeded at "
+        )) && text.contains(" UTC. Its output follows.\n  ready\n")
+            && text.ends_with(&format!(
+                "\n\nMonitor {id} (`ready`) ended after its first alert, and its checks stopped."
+            )),
+        "{text}"
+    );
+    assert_eq!(ended_paused(&f, id).await.state, JobState::Succeeded);
+}
+
+/// A [`WorkerLiveness`] a test drives: the owners whose workers run.
+struct Workers {
+    running: Mutex<HashSet<Uuid>>,
+    changes: watch::Sender<u64>,
+}
+
+impl Workers {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            running: Mutex::default(),
+            changes: watch::Sender::new(0),
+        })
+    }
+
+    /// Whether `owner` has workers running from now, as a host announces it.
+    fn set(&self, owner: Uuid, running: bool) {
+        let mut owners = self.running.lock().unwrap();
+        if running {
+            owners.insert(owner);
+        } else {
+            owners.remove(&owner);
+        }
+        drop(owners);
+        self.changes.send_modify(|count| *count += 1);
+    }
+}
+
+impl Workers {
+    /// What the manager holds of it.
+    fn weak(self: &Arc<Self>) -> Weak<dyn WorkerLiveness> {
+        let weak: Weak<Self> = Arc::downgrade(self);
+        weak
+    }
+}
+
+impl WorkerLiveness for Workers {
+    fn has_running_workers(&self, owner: Uuid) -> bool {
+        self.running.lock().unwrap().contains(&owner)
+    }
+
+    fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+}
+
+/// Starts a check monitor that lasts `lasts` and while its owner's workers
+/// run, with checks every 10 minutes that give `script`, then succeed.
+async fn kept_check(
+    f: &Fixture,
+    lasts: Duration,
+    script: Vec<(bool, &'static str, Duration)>,
+) -> Uuid {
+    let options = MonitorOptions::check(600, CheckChange::Change)
+        .with_label("health")
+        .with_expiry(lasts)
+        .with_lifetime(MonitorLifetime::WhileWorkersRun);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (checker, _) = scripted(script);
+    f.manager
+        .start_check(&f.context(), "health".into(), watching, move |_| checker)
+        .await
+        .unwrap()
+        .0
+}
+
+/// `monitor_control list`'s entry for monitor `id`.
+async fn listed(f: &Fixture, id: Uuid) -> serde_json::Value {
+    use crate::tool::Tool;
+    let tools = MonitorTool::all(f.manager.clone());
+    let listed: Vec<serde_json::Value> = serde_json::from_str(
+        &tools[1]
+            .execute(&f.context(), params(json!({"action": "list"})))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    listed
+        .into_iter()
+        .find(|monitor| monitor["job_id"] == id.to_string())
+        .expect("listed")
+}
+
+/// A monitor that lasts while its owner's workers run gives no warning and
+/// goes on past its time while one runs, and ends as soon as the last one
+/// finishes. Its alerts and its list entry say how long it lasts.
+#[tokio::test(start_paused = true)]
+async fn a_monitor_lasts_while_its_owners_workers_run() {
+    let f = Fixture::new(|_| {});
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    workers.set(f.owner, true);
+    let quick = Duration::from_millis(100);
+    // Up, then down for good.
+    let mut script = vec![(true, "up", quick)];
+    script.extend([(false, "down", quick); 30]);
+    let id = kept_check(&f, minutes(30), script).await;
+    let alert = next_note(&mut receiver).await;
+    assert!(
+        alert.starts_with(&format!(
+            "Monitor alert. The check of job {id} (`health`, every 600 s) started failing at "
+        )) && alert.ends_with("\nIt lasts while your workers run."),
+        "{alert}"
+    );
+    let entry = listed(&f, id).await;
+    assert_eq!(
+        (&entry["lasts"], entry.get("ends")),
+        (&json!("while_workers_run"), None)
+    );
+
+    // Its time passes, with no warning, and it goes on.
+    assert_eq!(note_within(&mut receiver, minutes(90)).await, None);
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    let entry = listed(&f, id).await;
+    assert_eq!(entry["ends"], "after your last worker finishes");
+    assert_eq!(entry.get("ends_in_minutes"), None);
+
+    let finished = Instant::now();
+    workers.set(f.owner, false);
+    let end = next_note(&mut receiver).await;
+    assert!(finished.elapsed() <= Duration::from_secs(3));
+    assert!(
+        end.starts_with(&format!("Monitor {id} (`health`) ended at "))
+            && end.ends_with(
+                " UTC because your workers finished, and its checks stopped. It alerted once."
+            ),
+        "{end}"
+    );
+    let done = ended_paused(&f, id).await;
+    assert_eq!(
+        (done.state, done.error.as_deref()),
+        (
+            JobState::TimedOut,
+            Some("ended after its agent's workers finished")
+        )
+    );
+
+    // Several hosts share the manager. A monitor is kept while any of them
+    // says its owner has workers running, and one whose host dropped it no
+    // longer counts.
+    let other = Workers::new();
+    f.manager.add_worker_liveness(other.weak());
+    other.set(f.owner, true);
+    let id = kept_check(&f, minutes(10), Vec::new()).await;
+    tokio::time::sleep(minutes(20)).await;
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    drop(other);
+    let end = next_note(&mut receiver).await;
+    assert!(
+        end.contains(" UTC because your workers finished, and its checks stopped."),
+        "{end}"
+    );
+}
+
+/// With no worker running, a monitor that lasts while workers run ends at
+/// its time with the usual warning. A worker that starts before then keeps
+/// it, and one that finishes before then doesn't.
+#[tokio::test(start_paused = true)]
+async fn without_running_workers_a_monitor_ends_at_its_time() {
+    let f = Fixture::new(|_| {});
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    let start = Instant::now();
+    let id = kept_check(&f, minutes(30), Vec::new()).await;
+    let warning = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(25) + Duration::from_secs(2));
+    assert!(warning.contains(" ends in 5 min, at "), "{warning}");
+    let end = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(30) + Duration::from_secs(2));
+    assert!(
+        end.ends_with(" UTC, and its checks stopped. It didn't alert."),
+        "{end}"
+    );
+    assert_eq!(ended_paused(&f, id).await.error.as_deref(), Some("expired"));
+
+    // A worker that starts later keeps it past its time.
+    let id = kept_check(&f, minutes(30), Vec::new()).await;
+    let start = Instant::now();
+    tokio::time::sleep(minutes(10)).await;
+    workers.set(f.owner, true);
+    assert_eq!(note_within(&mut receiver, minutes(50)).await, None);
+    workers.set(f.owner, false);
+    let end = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(60) + Duration::from_secs(2));
+    assert!(
+        end.starts_with(&format!("Monitor {id} (`health`) ended at "))
+            && end.contains(" because your workers finished"),
+        "{end}"
+    );
+
+    // One that finishes before its time leaves it to end at its time.
+    workers.set(f.owner, true);
+    let start = Instant::now();
+    let id = kept_check(&f, minutes(30), Vec::new()).await;
+    tokio::time::sleep(minutes(5)).await;
+    workers.set(f.owner, false);
+    let warning = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(25) + Duration::from_secs(2));
+    assert!(warning.contains(&format!("Monitor {id} (`health`) ends in 5 min")));
+    let end = next_note(&mut receiver).await;
+    assert_eq!(start.elapsed(), minutes(30) + Duration::from_secs(2));
+    assert!(end.ends_with(" UTC, and its checks stopped. It didn't alert."));
+    // Monitors of other owners are left alone.
+    assert!(!workers.has_running_workers(Uuid::new_v4()));
+}
+
+/// `monitor_start` takes `once`, and `lasts` only where the host says
+/// whether workers run, and its description says which to use when.
+/// `monitor_control` describes such monitors.
+#[tokio::test]
+async fn the_monitor_tools_take_once_and_lasts() {
+    use crate::tool::{Tool, ToolParameterType};
+    let f = fixture(quick());
+    let tools = MonitorTool::all(f.manager.clone());
+    let (start, control) = (&tools[0], &tools[1]);
+    let parameter = |tool: &MonitorTool, name: &str| {
+        tool.definition()
+            .parameters
+            .into_iter()
+            .find(|param| param.name == name)
+    };
+    assert_eq!(
+        parameter(start, "once").map(|param| (param.required, param.param_type)),
+        Some((false, ToolParameterType::Bool))
+    );
+    assert!(parameter(start, "lasts").is_none());
+    let description = start.definition().description;
+    assert!(
+        description.contains(
+            "such as a CI run finishing, a file appearing or a server starting to answer, set once"
+        ) && !description.contains("while_workers_run"),
+        "{description}"
+    );
+    let refused = start
+        .execute(
+            &f.context(),
+            params(json!({"command": "x", "lasts": "while_workers_run"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("you have no workers here"),
+        "{refused}"
+    );
+
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    assert_eq!(
+        parameter(start, "lasts").map(|param| (param.required, param.param_type)),
+        Some((false, ToolParameterType::String))
+    );
+    let description = start.definition().description;
+    assert!(
+        description.contains("such as disk space or memory during their builds or a dev server's errors, set lasts to while_workers_run")
+            && control.definition().description.contains(
+                "A monitor that lasts while your workers run goes on past that while they do."
+            ),
+        "{description}"
+    );
+    let refused = start
+        .execute(
+            &f.context(),
+            params(json!({"command": "x", "lasts": "forever"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("lasts takes while_workers_run"),
+        "{refused}"
+    );
+
+    let started = start
+        .execute(
+            &f.context(),
+            params(json!({
+                "command": f.command("time.sleep(60)"),
+                "pattern": "error",
+                "once": true,
+                "lasts": "while workers run",
+                "expires_minutes": 20
+            })),
+        )
+        .await
+        .unwrap();
+    let id: Uuid = started
+        .strip_prefix("Monitor ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        started.contains(
+            " UTC (20 min), and longer while your workers run. It ends after its first alert. "
+        ),
+        "{started}"
+    );
+    let JobKind::Monitor(info) = &f.manager.jobs()[0].kind else {
+        panic!("not a monitor")
+    };
+    assert!(info.once && info.lifetime == MonitorLifetime::WhileWorkersRun);
+    let entry = listed(&f, id).await;
+    assert_eq!(
+        (&entry["once"], &entry["lasts"], &entry["ends_in_minutes"]),
+        (&json!(true), &json!("while_workers_run"), &json!(20))
+    );
+    let rearmed = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": id.to_string(), "minutes": 10})),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rearmed.ends_with(
+            " UTC, in 10 min, or later while your workers run. Its first alert ends it sooner."
+        ),
+        "{rearmed}"
+    );
+    f.manager.cancel(f.owner, id).unwrap();
+
+    // A check whose first result is already the one it waits for.
+    let check = start
+        .execute(
+            &f.context(),
+            params(json!({
+                "command": f.command("sys.exit(0)"),
+                "every_seconds": 10,
+                "alert_when": "success",
+                "once": "true"
+            })),
+        )
+        .await
+        .unwrap();
+    let id: Uuid = check
+        .strip_prefix("Monitor ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        check.starts_with(&format!("Monitor {id} ended at once, because its check `"))
+            && check.contains("` already succeeds. Its first check succeeded in "),
+        "{check}"
+    );
+    assert_eq!(ended(&f, id).await.state, JobState::Succeeded);
 }
