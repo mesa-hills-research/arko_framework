@@ -937,7 +937,8 @@ impl Task {
     /// keeps the request and the report. Context that arrives meanwhile waits
     /// for the task's next run. An agent that compacts in Claude Code
     /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
-    /// writes the report all the same, and the run doesn't wait for a plan's
+    /// writes the report all the same, in a copy of the task's session (a
+    /// fork) that the task goes on in, and the run doesn't wait for a plan's
     /// usage limit to reset
     /// ([`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)).
     /// It takes a task between turns, one completed, awaiting the user's
@@ -965,6 +966,14 @@ impl Task {
             ));
         }
         self.set_state(TaskState::InProgress);
+        // Claude Code writes it in a copy of the session, which the task
+        // goes on in. The session stays as it was, so a host that puts the
+        // task back as it was before the request has it as it was too.
+        if let Some(own) = self.claude_code_session.take() {
+            let parent = self.claude_code_fork_of.take().unwrap_or(own);
+            self.claude_code_fork_of = Some(parent);
+            self.claude_code_session = Some(Uuid::new_v4().to_string());
+        }
         self.handover_requested = Some(crate::handover::HandoverRequest {
             report_only: true,
             request,

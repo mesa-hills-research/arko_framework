@@ -2481,8 +2481,9 @@ async fn a_handover_s_fresh_session_brings_the_configuration_s_skills() {
     }
 }
 
-/// A report asked for alone goes into the task's session as its next input,
-/// also for an agent that compacts in Claude Code (no `/compact` is sent).
+/// A report asked for alone goes into a copy of the task's session as its
+/// next input, also for an agent that compacts in Claude Code (no
+/// `/compact` is sent).
 /// Calls are held for it, `complete_task` too, and the task completes with
 /// the reply as its summary, without a handover.
 #[tokio::test]
@@ -2512,9 +2513,18 @@ async fn a_report_asked_for_alone_is_written_in_the_session() {
     );
     assert!(task.handovers.is_empty());
     assert!(task.handover_requested.is_none());
-    assert_eq!(task.claude_code_session.as_deref(), Some(session.as_str()));
+    // Written in a copy of the session, which the task goes on in.
+    let fork = task.claude_code_session.clone().unwrap();
+    assert_ne!(fork, session);
+    assert!(task.claude_code_fork_of.is_none());
     let users = user_texts(&fake);
     assert_eq!(users.len(), 2, "{users:?}");
+    assert!(
+        fake.logged("user")[1]["history"]
+            .to_string()
+            .contains("Start."),
+        "the copy holds the conversation"
+    );
     assert!(
         users[1].contains(crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST),
         "{}",
@@ -2538,6 +2548,8 @@ async fn a_report_asked_for_alone_is_written_in_the_session() {
     );
     let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
     assert!(argv.contains(&format!("--resume={session}")), "{argv:?}");
+    assert!(argv.contains(&"--fork-session".to_string()), "{argv:?}");
+    assert!(argv.contains(&format!("--session-id={fork}")), "{argv:?}");
 }
 
 /// The host's threshold replaces the configured one, larger or smaller.

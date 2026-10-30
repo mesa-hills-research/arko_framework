@@ -302,8 +302,8 @@ async fn a_report_is_cancelled_by_stopping_the_run() {
     workflow.continue_agent(&restored, "Go on.").await.unwrap();
 }
 
-/// A Claude Code agent writes the report in its session, as a reply, also
-/// when it compacts in Claude Code, and no fresh session starts.
+/// A Claude Code agent writes the report in a copy of its session, as a
+/// reply, also when it compacts in Claude Code, and no fresh session starts.
 #[tokio::test]
 async fn a_claude_code_agent_writes_a_report_on_request_in_its_session() {
     use super::recovery_tests::FakeClaude;
@@ -326,7 +326,8 @@ async fn a_claude_code_agent_writes_a_report_on_request_in_its_session() {
     assert_eq!(result.summary, "REPORT: started the work.");
     let task = result.task().unwrap();
     assert!(task.handovers.is_empty());
-    assert_eq!(task.claude_code_session.as_deref(), Some(session.as_str()));
+    // Written in a copy of the session, which the run goes on in.
+    assert_ne!(task.claude_code_session.as_deref(), Some(session.as_str()));
     let users = fake.logged("user");
     assert_eq!(users.len(), 2, "{users:?}");
     let input = users[1]["text"].as_str().unwrap();
@@ -568,32 +569,47 @@ async fn a_claude_code_report_s_failure_says_why_under_every_error_policy() {
     }
 }
 
-/// A Claude Code report that doesn't come leaves the session as it was:
-/// the run's next input resumes it before the report's request, so the
-/// session holds neither the request nor what the model wrote of it.
+/// A Claude Code report that doesn't come leaves the session as it was,
+/// since it was written in a copy: the run's next input goes on in the
+/// session it had, which holds neither the request nor what the model wrote
+/// of it. That holds for a session the runtime recorded no transcript entries
+/// of too (saved by an older version, or compacted), which can't be cut back.
 #[tokio::test]
 async fn a_claude_code_report_that_doesn_t_come_leaves_the_session_as_it_was() {
     use super::recovery_tests::FakeClaude;
-    let fake = FakeClaude::new(json!([
-        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Started."}}],
-        [{"api_error": "authentication_failed", "text": "Not logged in · Please run /login", "status": null}],
-        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Went on."}}],
-    ]));
-    let workspace = Workspace::new();
-    let server =
-        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
-    let workflow = builder(&server, &workspace, fake.agent()).build().unwrap();
-    let first = workflow.run_agent("main", "Start.").await.unwrap();
-    workflow.request_report(&first, None).await.unwrap_err();
-    let restored = workflow.agent_result(first.agent_run_id).unwrap();
-    let result = workflow.continue_agent(&restored, "Go on.").await.unwrap();
-    assert_eq!(result.summary, "Went on.");
-    let users = fake.logged("user");
-    assert_eq!(users.len(), 3, "{users:?}");
-    let history = users[2]["history"].to_string();
-    assert!(!history.contains("Write a report"), "{history}");
-    assert!(!history.contains("Not logged in"), "{history}");
-    assert!(history.contains("Start."), "{history}");
-    let argv = fake.logged("argv")[2]["argv"].to_string();
-    assert!(argv.contains("--resume-session-at="), "{argv}");
+    for entries in [true, false] {
+        let fake = FakeClaude::new(json!([
+            [{"tool": "mcp__arko__complete_task", "input": {"summary": "Started."}}],
+            [{"api_error": "authentication_failed", "text": "Not logged in · Please run /login", "status": null}],
+            [{"tool": "mcp__arko__complete_task", "input": {"summary": "Went on."}}],
+        ]));
+        let workspace = Workspace::new();
+        let server =
+            ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+        let workflow = builder(&server, &workspace, fake.agent()).build().unwrap();
+        let mut first = workflow.run_agent("main", "Start.").await.unwrap();
+        let session = first.task().unwrap().claude_code_session.clone().unwrap();
+        if !entries {
+            let mut task = first.task().unwrap().clone();
+            task.claude_code_entries.clear();
+            first = AgentResult::of_task(first.agent_name.clone(), task);
+        }
+        workflow.request_report(&first, None).await.unwrap_err();
+        let restored = workflow.agent_result(first.agent_run_id).unwrap();
+        assert_eq!(
+            restored.task().unwrap().claude_code_session.as_deref(),
+            Some(session.as_str())
+        );
+        let result = workflow.continue_agent(&restored, "Go on.").await.unwrap();
+        assert_eq!(result.summary, "Went on.");
+        let users = fake.logged("user");
+        assert_eq!(users.len(), 3, "{users:?}");
+        let history = users[2]["history"].to_string();
+        assert!(!history.contains("Write a report"), "{history}");
+        assert!(!history.contains("Not logged in"), "{history}");
+        assert!(history.contains("Start."), "{history}");
+        let argv = fake.logged("argv")[2]["argv"].to_string();
+        assert!(argv.contains(&format!("--resume={session}")), "{argv}");
+        assert!(!argv.contains("--fork-session"), "{argv}");
+    }
 }

@@ -4043,8 +4043,9 @@ impl WorkflowEngine {
     /// Puts run `previous` back as it was before a report was asked of it,
     /// which didn't come: its task without the request, still counting the
     /// model calls the request made, and holding the context that reached
-    /// it meanwhile for its next turn. A Claude Code session resumes before
-    /// the request. Recorded, saved and checkpointed with persistence.
+    /// it meanwhile for its next turn. A Claude Code session is the one it
+    /// had, since the report was written in a copy of it. Recorded, saved and
+    /// checkpointed with persistence.
     async fn restore_after_report(&self, previous: &AgentResult, ctx: &Arc<SharedContext>) {
         let Ok(previous_task) = previous.task() else {
             return;
@@ -4069,17 +4070,6 @@ impl WorkflowEngine {
             task.pending_context_injections = attempt.pending_context_injections;
             task.pending_context_images = attempt.pending_context_images;
             task.raise_context_marks(&attempt.context_marks);
-            // The session holds the request, and what the model wrote of
-            // the report: the next run resumes it before them.
-            if attempt.claude_code_session.is_some()
-                && let Err(error) = task.rewind_claude_code_session()
-            {
-                log::warn!(
-                    "Workflow '{}': agent run {}'s Claude Code session keeps the report's request, since it can't resume before it: {error}",
-                    ctx.workflow_name,
-                    previous.agent_run_id
-                );
-            }
         }
         let mut restored = AgentResult::of_task(previous.agent_name.clone(), task);
         restored.stopped_by = previous.stopped_by.clone();

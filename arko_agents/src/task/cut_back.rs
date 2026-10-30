@@ -301,19 +301,6 @@ impl Task {
         Ok(())
     }
 
-    /// Has the task's Claude Code session resume at the end of the task's
-    /// conversation as it is now, without what the session received or
-    /// produced after that point, such as a turn a host undid by putting
-    /// back an earlier copy of the task. The next launch resumes the session
-    /// at the transcript entry of the last message the task holds an entry
-    /// for, and the host's messages after it are sent again, as after
-    /// [`cut_back`](Self::cut_back). Nothing changes for a task without a
-    /// session. Returns `InvalidTaskState` when a message after that entry
-    /// isn't the host's.
-    pub fn rewind_claude_code_session(&mut self) -> Result<(), ArkoAgentsError> {
-        self.cut_claude_code_session(self.conversation.messages.len())
-    }
-
     /// Where a cut back to just before message `index` leaves the Claude
     /// Code session: resumed at the last entry before it, with the host's
     /// messages after that entry sent again, or, with no entry before it,
