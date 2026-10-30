@@ -255,9 +255,15 @@ impl Workflow {
     /// workflow stops (its process ends, say) leaves the run as it was, and a
     /// resume from such a checkpoint has nothing to resume. Those checkpoints
     /// hold no report task, so earlier versions of the crate read them too.
-    /// Dropping the call puts the run back as it was, as an error does. The
-    /// report run's model calls stay in the cost ledger and the budgets, which
-    /// checkpoints save, and the run put back counts them in its own usage.
+    /// Dropping the call puts the run back as it was, as an error does, with
+    /// the model calls and context its report run took by its latest turn,
+    /// and a report that came is recorded even when the call is dropped
+    /// while its result is saved. The run never shows as running for its
+    /// report ([`agent_status`](Self::agent_status)), and a report that
+    /// doesn't come leaves its status and what it read (context freshness)
+    /// as they were. The report run's model calls stay in the cost ledger and
+    /// the budgets, which checkpoints save, and the run put back counts them
+    /// in its own usage.
     /// A process that ends during a report loses them from the run's own
     /// usage, though. A recovery refuses a task that still asks for a report
     /// (`BuilderInvalid`), since a report is never resumed.
