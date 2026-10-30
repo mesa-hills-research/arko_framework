@@ -2624,6 +2624,54 @@ async fn a_report_asked_for_alone_is_written_in_the_session() {
     assert!(argv.contains(&format!("--session-id={fork}")), "{argv:?}");
 }
 
+/// A report asked of a branch whose session isn't copied yet (it hasn't
+/// run) is written in a copy of the session the branch comes from, at the
+/// branch's point, and the branch goes on in it.
+#[tokio::test]
+async fn a_report_asked_of_a_branch_that_hasn_t_run_copies_the_original_session() {
+    let fake = Fake::new(json!([
+        [complete("First")],
+        [{"text": "REPORT: the branch did the first part."}],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Start.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    let mut branch = task.branch(task.conversation.messages.len()).unwrap();
+    assert_eq!(
+        branch.claude_code_fork_of.as_deref(),
+        Some(session.as_str())
+    );
+    branch.request_report(None).unwrap();
+    assert_eq!(
+        branch.claude_code_fork_of.as_deref(),
+        Some(session.as_str())
+    );
+    let (branch, _) = start(branch).finish().await;
+    assert!(
+        matches!(&branch.current_state, TaskState::Completed { summary } if summary == "REPORT: the branch did the first part."),
+        "{:?}",
+        branch.current_state
+    );
+    let copy = branch.claude_code_session.clone().unwrap();
+    assert_ne!(copy, session);
+    assert!(branch.claude_code_fork_of.is_none());
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    assert!(argv.contains(&format!("--resume={session}")), "{argv:?}");
+    assert!(argv.contains(&"--fork-session".to_string()), "{argv:?}");
+    assert!(argv.contains(&format!("--session-id={copy}")), "{argv:?}");
+    assert!(
+        fake.logged("user")[1]["history"]
+            .to_string()
+            .contains("Start."),
+        "the copy holds the conversation"
+    );
+}
+
 /// The host's threshold replaces the configured one, larger or smaller.
 #[tokio::test]
 async fn the_hosts_threshold_moves_the_handover_both_ways() {

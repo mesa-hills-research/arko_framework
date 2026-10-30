@@ -797,3 +797,43 @@ async fn a_report_saved_without_the_run_before_it_isnt_recovered() {
     );
     assert_eq!(limited.requests(), 0);
 }
+
+/// After a Claude Code report that came, the run goes on in the copy of its
+/// session the report was written in, also after a resume from a checkpoint.
+#[tokio::test]
+async fn a_claude_code_run_goes_on_in_its_report_s_copy_after_a_resume() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Started."}}],
+        [{"text": "REPORT: started the work."}],
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Went on."}}],
+    ]));
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace, fake.agent()).build().unwrap();
+    let first = workflow.run_agent("main", "Start.").await.unwrap();
+    let session = first.task().unwrap().claude_code_session.clone().unwrap();
+    let result = workflow.request_report(&first, None).await.unwrap();
+    let copy = result.task().unwrap().claude_code_session.clone().unwrap();
+    assert_ne!(copy, session);
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = builder(&server, &workspace, fake.agent())
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(
+        restored.task().unwrap().claude_code_session.as_deref(),
+        Some(copy.as_str())
+    );
+    let went_on = resumed.continue_agent(&restored, "Go on.").await.unwrap();
+    assert_eq!(went_on.summary, "Went on.");
+    let argv = fake.logged("argv")[2]["argv"].to_string();
+    assert!(argv.contains(&format!("--resume={copy}")), "{argv}");
+    assert!(!argv.contains("--fork-session"), "{argv}");
+    let history = fake.logged("user")[2]["history"].to_string();
+    assert!(history.contains("Write a report"), "{history}");
+    assert!(history.contains("REPORT: started the work."), "{history}");
+}
