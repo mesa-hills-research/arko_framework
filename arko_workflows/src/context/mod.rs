@@ -158,6 +158,17 @@ impl SharedContext {
         recorded.or_else(|| Some(self.agent_configs.get(agent)?.llm_config.clone()))
     }
 
+    /// The models `agent`'s runs that started, went on or were handed over
+    /// work with.
+    pub(crate) fn run_models_of(&self, agent: &str) -> Vec<arko_ai::Model> {
+        self.run_llm_configs
+            .read()
+            .values()
+            .filter(|(of, _)| of == agent)
+            .map(|(_, config)| config.model.clone())
+            .collect()
+    }
+
     /// Records the model settings run `task_id` of `agent` works with, as
     /// it starts, goes on or is handed over, for
     /// [`run_llm_config`](Self::run_llm_config).
