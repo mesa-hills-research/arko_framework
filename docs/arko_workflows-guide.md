@@ -843,6 +843,9 @@ moves it to the background, after what it collected.
 - Subagent costs go into the workflow's ledger. The runs,
   their mailboxes and workspaces are saved in checkpoints, and
   `resume_subagents()` relaunches the runs a stop or crash ended.
+  Mail a run held when it ended leaves the mailbox then. If that run's task fails to
+  save and the process ends before a later save, a resume has the run's older task
+  without that mail, and the mail isn't given again.
 
 `WorkflowBuilder::background_jobs(manager)` lets every agent's long tool calls move to the
 background as jobs of an arko_agents terminal manager, which the host moves them with (see

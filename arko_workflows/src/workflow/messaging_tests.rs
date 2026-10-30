@@ -1180,3 +1180,79 @@ fn a_distiller_cant_target_a_claude_code_built_in() {
         built.err()
     );
 }
+
+/// A message a run read in a conversation it handed over, and so holds, is
+/// given again once on resume when the run's task in the checkpoint is
+/// older than that handover (the newer task wasn't saved), and isn't when
+/// the task has the handover.
+#[tokio::test]
+async fn a_message_read_before_a_handover_the_checkpoint_lacks_is_given_again() {
+    for saved_handover in [false, true] {
+        let workspace = Workspace::new();
+        let run_dir = workspace.0.join(".run");
+        let server = ResponsesServer::start(|_, _| Some(complete_turn("done", "ok"))).await;
+        let build = || {
+            builder_with(server.client(), &workspace, &["lead", "writer"])
+                .persistence(crate::persistence::PersistenceConfig::new(&run_dir))
+        };
+        let workflow = build().build().unwrap();
+        let first = workflow.run_agent("writer", "Draft it.").await.unwrap();
+        let context = workflow.context();
+        let message = context
+            .messages
+            .send(
+                "lead",
+                None,
+                "writer",
+                "Use British spelling.".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        // Read in a conversation the run hands over.
+        let mut read = first.task().unwrap().conversation.clone();
+        read.messages.push(arko_ai::Message::new_user(&format!(
+            "{}\nUse British spelling.",
+            crate::messaging::prompt_block_marker(message.id, "lead")
+        )));
+        context
+            .messages
+            .hand_over("writer", first.agent_run_id, &read, &[]);
+        assert!(context.messages.pending("writer")[0].is_held_by(first.agent_run_id));
+        if saved_handover {
+            let mut handed = first.task().unwrap().clone();
+            handed.handovers.push(arko_agents::HandoverRecord {
+                at: chrono::Utc::now(),
+                input_tokens: 0,
+                replaced_messages: read.messages.len(),
+                report: "REPORT: drafted it.".into(),
+            });
+            workflow
+                .engine
+                .persistence()
+                .unwrap()
+                .record_result(context, AgentResult::of_task("writer".into(), handed))
+                .await;
+        }
+        workflow.checkpoint().await.unwrap();
+        drop(workflow);
+
+        let name = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+        let resumed = build()
+            .resume_from(run_dir.join(name.trim()))
+            .build()
+            .unwrap();
+        let restored = resumed.agent_result(first.agent_run_id).unwrap();
+        assert_eq!(
+            restored.task().unwrap().handovers.len(),
+            usize::from(saved_handover)
+        );
+        resumed.continue_agent(&restored, "Go on.").await.unwrap();
+        let body = server.bodies().pop().unwrap();
+        assert_eq!(
+            user_text(&body).matches("Use British spelling.").count(),
+            usize::from(!saved_handover),
+            "saved handover {saved_handover}: {body}"
+        );
+    }
+}

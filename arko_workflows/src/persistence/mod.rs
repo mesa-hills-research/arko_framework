@@ -164,6 +164,26 @@ pub struct PersistenceManager {
     /// Where [`crash_at`](Self::crash_at) crashes.
     #[cfg(test)]
     crash_point: Arc<parking_lot::Mutex<Option<CrashPoint>>>,
+    /// Set by [`abort_report_commits`](Self::abort_report_commits).
+    #[cfg(test)]
+    abort_report_commits: Arc<AtomicBool>,
+    /// The tasks recording reports that came, for a test to abort.
+    #[cfg(test)]
+    report_commits: Arc<parking_lot::Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// Set by [`pause_next_build`](Self::pause_next_build).
+    #[cfg(test)]
+    build_pause: Arc<parking_lot::Mutex<Option<BuildPause>>>,
+}
+
+/// Where a checkpoint's build waits for a test (see
+/// [`PersistenceManager::pause_next_build`]).
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct BuildPause {
+    /// Notified once the build waits.
+    pub reached: Arc<tokio::sync::Notify>,
+    /// Notified by the test to let it go on.
+    pub resume: Arc<tokio::sync::Notify>,
 }
 
 /// A point of the finalization of an agent run a test can crash at. See
@@ -185,6 +205,14 @@ impl PersistenceManager {
     /// is dropped, as a long write would.
     pub(crate) async fn hold_writes(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.write_lock.clone().lock_owned().await
+    }
+
+    /// Holds off writing the event log until the guard is dropped, as a
+    /// slow disk would.
+    pub(crate) async fn hold_event_log(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, Option<tokio::fs::File>> {
+        self.events.file.lock().await
     }
 
     /// From now on nothing is written, renamed or deleted: the run
@@ -210,6 +238,34 @@ impl PersistenceManager {
         if *self.crash_point.lock() == Some(point) {
             self.simulate_crash();
         }
+    }
+
+    /// Aborts the next tasks recording a report that came as they are
+    /// spawned, before they first run.
+    pub(crate) fn abort_report_commits(&self) {
+        self.abort_report_commits.store(true, Ordering::SeqCst);
+    }
+
+    /// A task recording a report that came was spawned.
+    pub(crate) fn spawned_report_commit(&self, task: &tokio::task::JoinHandle<()>) {
+        if self.abort_report_commits.load(Ordering::SeqCst) {
+            task.abort();
+        }
+        self.report_commits.lock().push(task.abort_handle());
+    }
+
+    /// The tasks recording reports that came, spawned so far.
+    pub(crate) fn report_commits(&self) -> Vec<tokio::task::AbortHandle> {
+        self.report_commits.lock().clone()
+    }
+
+    /// The next checkpoint's build waits once it has written the task
+    /// versions it needed, before it reads the shared state and the
+    /// results, until the test lets it go on.
+    pub(crate) fn pause_next_build(&self) -> BuildPause {
+        let pause = BuildPause::default();
+        *self.build_pause.lock() = Some(pause.clone());
+        pause
     }
 }
 
@@ -523,6 +579,12 @@ impl PersistenceManager {
             crashed: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             crash_point: Arc::default(),
+            #[cfg(test)]
+            abort_report_commits: Arc::default(),
+            #[cfg(test)]
+            report_commits: Arc::default(),
+            #[cfg(test)]
+            build_pause: Arc::default(),
         })
     }
 
@@ -565,14 +627,12 @@ impl PersistenceManager {
     /// saved, such as a run put back as it was before a report on request
     /// (with the model calls and the context the report run took), so the
     /// next checkpoint saves it as a new version. Until one does,
-    /// checkpoints refer to the version last saved.
-    pub(crate) fn mark_task_changed(&self, id: uuid::Uuid) {
+    /// checkpoints refer to the version last saved, and say why its latest
+    /// state is missing with `why`.
+    pub(crate) fn mark_task_changed(&self, id: uuid::Uuid, why: &str) {
         let mut saved = self.saved_tasks.lock();
         let entry = saved.entry(id).or_default();
-        entry.unsaved = Some(
-            "it was put back as it was before a report that didn't come, and isn't saved as a version yet"
-                .to_string(),
-        );
+        entry.unsaved = Some(format!("{why}, and isn't saved as a version yet"));
     }
 
     /// Records a finalized agent result in `ctx`, replacing an earlier one
@@ -739,6 +799,14 @@ impl PersistenceManager {
                     .map_err(|error| error.to_string());
                 live_versions.insert(id, saved);
             }
+        }
+
+        #[cfg(test)]
+        let pause = self.build_pause.lock().take();
+        #[cfg(test)]
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
         }
 
         // The state shared by the agents, which the fingerprint covers.
