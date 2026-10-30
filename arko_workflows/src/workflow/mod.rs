@@ -249,6 +249,15 @@ impl Workflow {
     /// so do the other errors a request can end in. The report can be
     /// cancelled by stopping the run ([`stop_run`](Self::stop_run)), which
     /// returns [`WorkflowError::AgentStopped`].
+    ///
+    /// A report under way when the workflow stops (its process ends, say) is
+    /// never resumed. Checkpoints keep the run as it was before the request,
+    /// and a resume from one puts it back so, with the model calls and the
+    /// context the report run took, and logs that the report was
+    /// interrupted. The run isn't listed as interrupted, and recovering a
+    /// result read before returns the run as it was. A run a checkpoint saved
+    /// writing a report without the run as it was before (when that couldn't
+    /// be saved) isn't recovered either (`BuilderInvalid`).
     pub async fn request_report(
         &self,
         previous: &AgentResult,
@@ -2674,10 +2683,15 @@ impl WorkflowBuilder {
         };
         // The checkpoint's results, their tasks read from the task files it
         // refers to (in the checkpoint's directory).
+        // A run that was writing a report on request resumes as it was
+        // before the report.
+        let mut reports_rolled_back = Vec::new();
         let resumed_results = match (&resume_state, &self.resume_from) {
             (Some(state), Some(path)) => {
                 let run_dir = path.parent().unwrap_or(std::path::Path::new("."));
-                state.agent_results_in(run_dir)?
+                let mut results = state.agent_results_in(run_dir)?;
+                reports_rolled_back = state.roll_back_reports(run_dir, &mut results)?;
+                results
             }
             _ => Vec::new(),
         };
@@ -2776,6 +2790,8 @@ impl WorkflowBuilder {
                         .iter()
                         .map(|run| (run.agent_run_id, run.task_file.clone())),
                 );
+                // Saved by the next checkpoint, as put back.
+                persistence.mark_tasks_unsaved(reports_rolled_back.iter().cloned());
             } else {
                 // The next checkpoint writes every task into this other run
                 // directory, so a task that can't be read fails the resume.
@@ -2909,7 +2925,7 @@ impl WorkflowBuilder {
             agent_configs: self.agents.iter().cloned().collect(),
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
             run_llm_configs: parking_lot::RwLock::new(HashMap::new()),
-            report_runs: parking_lot::Mutex::new(HashSet::new()),
+            report_baselines: parking_lot::Mutex::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             resume_only_tools: self.resume_only_tools,

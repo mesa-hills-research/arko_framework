@@ -796,6 +796,32 @@ fn count_failed_request(
     }
 }
 
+/// The task of a run that wrote no report on request, put back as it was
+/// `before` the request: still counting the model calls the report run
+/// (`attempt`) made, and holding the context that reached it meanwhile for
+/// its next turn. The report run held that context back (its end recorded
+/// the messages among it as held by the run), so all of it is still to be
+/// given, with the marks of what it took. A Claude Code session is the one
+/// the run had, since the report was written in a copy of it.
+pub(crate) fn report_rollback(before: Task, attempt: &Task) -> Task {
+    let mut task = before;
+    let calls = task.usage_history.len();
+    task.usage_history
+        .extend(attempt.usage_history.iter().skip(calls).cloned());
+    let model_calls = task.model_call_usage_history.len();
+    task.model_call_usage_history.extend(
+        attempt
+            .model_call_usage_history
+            .iter()
+            .skip(model_calls)
+            .cloned(),
+    );
+    task.pending_context_injections = attempt.pending_context_injections.clone();
+    task.pending_context_images = attempt.pending_context_images.clone();
+    task.raise_context_marks(&attempt.context_marks);
+    task
+}
+
 /// Answers `error`, reported at an error-recovery pause, under the
 /// workflow's error recovery policy and the pause's cause: continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
@@ -828,7 +854,7 @@ async fn answer_recovery_pause(
     }
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
     // A report asked for alone goes back to its caller at once.
-    if ctx.report_runs.lock().contains(&agent_run_id) {
+    if ctx.report_baselines.lock().contains_key(&agent_run_id) {
         return pause_for_caller(
             agent_name,
             agent_run_id,
@@ -4011,8 +4037,16 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
-        // Its error-recovery pauses come back to the caller at once.
-        ctx.report_runs.lock().insert(task.id);
+        // Its error-recovery pauses come back to the caller at once, and
+        // checkpoints keep the run as it was, which a resume puts back. It is
+        // recorded as it was first, so that the version checkpoints refer to
+        // is that one (a host may pass a result other than the recorded one).
+        if let Some(persistence) = &self.persistence {
+            persistence.record_result(ctx, previous.clone()).await;
+        }
+        ctx.report_baselines
+            .lock()
+            .insert(task.id, previous.clone());
         let run = self.launch(
             agent_name,
             task,
@@ -4025,7 +4059,7 @@ impl WorkflowEngine {
             false,
         );
         let outcome = drive_to_result(run, ctx, self.persistence.as_ref()).await;
-        ctx.report_runs.lock().remove(&previous.agent_run_id);
+        ctx.report_baselines.lock().remove(&previous.agent_run_id);
         if outcome.is_err() {
             self.restore_after_report(previous, ctx).await;
         }
@@ -4042,27 +4076,12 @@ impl WorkflowEngine {
         let Ok(previous_task) = previous.task() else {
             return;
         };
-        let mut task = previous_task.clone();
         let attempt = recorded_result(ctx, previous.agent_run_id)
             .and_then(|result| result.task().ok().cloned());
-        if let Some(attempt) = attempt {
-            let calls = task.usage_history.len();
-            task.usage_history
-                .extend(attempt.usage_history.into_iter().skip(calls));
-            let model_calls = task.model_call_usage_history.len();
-            task.model_call_usage_history.extend(
-                attempt
-                    .model_call_usage_history
-                    .into_iter()
-                    .skip(model_calls),
-            );
-            // The attempt held back the context that arrived (its end
-            // recorded the messages among it as held by the run), so all of
-            // it is still to be given, with the marks of what it took.
-            task.pending_context_injections = attempt.pending_context_injections;
-            task.pending_context_images = attempt.pending_context_images;
-            task.raise_context_marks(&attempt.context_marks);
-        }
+        let task = match attempt {
+            Some(attempt) => report_rollback(previous_task.clone(), &attempt),
+            None => previous_task.clone(),
+        };
         let mut restored = AgentResult::of_task(previous.agent_name.clone(), task);
         restored.stopped_by = previous.stopped_by.clone();
         ctx.registry
@@ -4692,6 +4711,18 @@ impl WorkflowEngine {
                 return Err(running());
             }
             let agent_name = &current.agent_name;
+            // A report on request is never resumed. A resume puts a run that
+            // was writing one back as it was before, when that was saved.
+            if current
+                .task()?
+                .handover_requested
+                .as_ref()
+                .is_some_and(|request| request.report_only)
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "agent run {agent_run_id} was writing a report on request when it stopped, and the run as it was before the report wasn't saved, so it isn't recovered (a report is never resumed)"
+                )));
+            }
             self.admit(agent_name, Some(agent_run_id), false, ctx)?;
             let mut task = current.task()?.clone();
             let mut registry = self.build_tool_registry(

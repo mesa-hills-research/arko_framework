@@ -47,6 +47,12 @@ pub struct WorkflowState {
     /// the checkpoint restores them as last saved, with a warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_task_states: Vec<MissingTaskState>,
+    /// The runs that were writing a report on request
+    /// (`Workflow::request_report`), each as it was before the report. A
+    /// resume puts such a run, recorded running, back as it was, since a
+    /// report is never resumed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_baselines: Vec<AgentRunRecord>,
     #[serde(default)]
     pub verification_records: Vec<crate::verification::VerificationRecord>,
     #[serde(default)]
@@ -338,6 +344,54 @@ impl WorkflowState {
         }
         Ok((results, warnings))
     }
+
+    /// Puts each run in `results` that was writing a report on request when
+    /// the checkpoint recorded it running back as it was before the report
+    /// ([`report_baselines`](Self::report_baselines)), with the model calls
+    /// and the context the report run took (see
+    /// [`report_rollback`](crate::workflow::engine::report_rollback)), and
+    /// a warning. Returns those runs, each with the task file its state
+    /// before the report was saved in, which it isn't saved in now.
+    pub(crate) fn roll_back_reports(
+        &self,
+        run_dir: &std::path::Path,
+        results: &mut [AgentResult],
+    ) -> Result<Vec<(uuid::Uuid, String)>, crate::WorkflowError> {
+        let run_dir = &std::path::absolute(if run_dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            run_dir
+        })?;
+        let images = super::images::ImageFiles::in_run_dir(run_dir);
+        let mut rolled_back = Vec::new();
+        for baseline in &self.report_baselines {
+            let Some(result) = results.iter_mut().find(|result| {
+                result.agent_run_id == baseline.agent_run_id
+                    && result.status == AgentRunStatus::Interrupted
+            }) else {
+                continue;
+            };
+            let mut warnings = Vec::new();
+            let before = TaskFile::of(baseline, run_dir, &images)
+                .read(&mut warnings)
+                .map_err(crate::WorkflowError::Persistence)?;
+            for warning in warnings {
+                log::warn!("{warning}");
+            }
+            let task = crate::workflow::engine::report_rollback(before, result.task()?);
+            let mut restored = AgentResult::of_task(result.agent_name.clone(), task);
+            restored.stopped_by = baseline.stopped_by.clone();
+            log::warn!(
+                "Agent '{}' ({}) was writing a report on request when the workflow stopped. The report was interrupted, so the run resumes as it was before it, {:?}.",
+                result.agent_name,
+                result.agent_run_id,
+                restored.status
+            );
+            *result = restored;
+            rolled_back.push((baseline.agent_run_id, baseline.task_file.clone()));
+        }
+        Ok(rolled_back)
+    }
 }
 
 /// Lightweight serializable agent result for checkpoints.
@@ -377,6 +431,7 @@ mod tests {
             agent_results: Vec::new(),
             agent_runs: Vec::new(),
             missing_task_states: Vec::new(),
+            report_baselines: Vec::new(),
             verification_records: Vec::new(),
             distillation_records: Vec::new(),
             completed_agents: Vec::new(),

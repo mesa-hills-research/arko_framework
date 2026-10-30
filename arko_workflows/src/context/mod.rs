@@ -43,8 +43,10 @@ pub struct SharedContext {
     /// `run_llm_config`.
     pub(crate) run_llm_configs: RwLock<HashMap<uuid::Uuid, (String, arko_agents::AgentLLMConfig)>>,
     /// The runs writing a report asked for alone (`Workflow::request_report`),
-    /// whose error-recovery pauses go back to the caller.
-    pub(crate) report_runs: parking_lot::Mutex<std::collections::HashSet<uuid::Uuid>>,
+    /// each with its result as it was before, whose error-recovery pauses go
+    /// back to the caller, and which checkpoints keep, for a resume to put
+    /// the run back as it was.
+    pub(crate) report_baselines: parking_lot::Mutex<HashMap<uuid::Uuid, crate::AgentResult>>,
     pub global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     pub agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     /// The (agent, tool name) pairs of `agent_tools` that new and
