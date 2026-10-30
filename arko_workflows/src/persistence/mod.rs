@@ -187,6 +187,14 @@ impl PersistenceManager {
         self.write_lock.clone().lock_owned().await
     }
 
+    /// Holds off writing the event log until the guard is dropped, as a
+    /// slow disk would.
+    pub(crate) async fn hold_event_log(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, Option<tokio::fs::File>> {
+        self.events.file.lock().await
+    }
+
     /// From now on nothing is written, renamed or deleted: the run
     /// directory stays as a process killed now would leave it.
     pub(crate) fn simulate_crash(&self) {

@@ -1152,3 +1152,317 @@ async fn a_dropped_report_keeps_what_the_run_read() {
     );
     assert!(input.contains("notes.txt"), "{input}");
 }
+
+/// Waits until the report of the run has come and its result is being
+/// recorded.
+async fn report_came(workflow: &Workflow) {
+    let came = tokio::time::timeout(Duration::from_secs(10), async {
+        while !workflow.context().reports_in_flight.lock().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(came.is_ok());
+}
+
+/// A run whose report came counts as running until its result is saved:
+/// a continuation and another report asked meanwhile (the save held up
+/// here) are refused, as for any running run, and the run goes on once
+/// it is saved.
+#[tokio::test]
+async fn a_run_whose_report_came_runs_until_its_result_is_saved() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let server = edge_server(|_| Some(Reply::Stream(report_turn()))).await;
+    let workflow = Arc::new(report_builder(&server, &run_dir).build().unwrap());
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let hold = workflow.engine.persistence().unwrap().hold_writes().await;
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    server.wait_for_requests(2).await;
+    report_came(&workflow).await;
+    let continued = tokio::time::timeout(
+        Duration::from_secs(5),
+        workflow.continue_agent(&first, "Go on."),
+    )
+    .await;
+    let reported = tokio::time::timeout(
+        Duration::from_secs(5),
+        workflow.request_report(&first, None),
+    )
+    .await;
+    for refused in [continued, reported] {
+        assert!(
+            matches!(&refused, Ok(Err(WorkflowError::BuilderInvalid(message))) if message.contains("running already")),
+            "{refused:?}"
+        );
+    }
+    drop(hold);
+    let result = tokio::time::timeout(Duration::from_secs(20), report)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.summary, "REPORT: said hello.");
+    let recorded = workflow.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(recorded.summary, "REPORT: said hello.");
+    let went_on = workflow.continue_agent(&recorded, "Go on.").await.unwrap();
+    assert_eq!(went_on.summary, "Sure.");
+}
+
+/// A checkpoint taken while the result of a report that came is recorded
+/// (here, queued for the save before it) records the run and its messages
+/// as they were before: a peer's message the report run held back is given
+/// once when the run goes on after a resume from it.
+#[tokio::test]
+async fn a_checkpoint_crossing_a_report_s_save_keeps_its_messages() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server = {
+        let release = release.clone();
+        ResponsesServer::start_async(move |index, body| {
+            let release = release.clone();
+            Box::pin(async move {
+                if body.contains(REQUESTED) && !body.contains("Go on.") {
+                    // The report comes once the peer's message is in.
+                    release.notified().await;
+                    return Some(Reply::Stream(report_turn()));
+                }
+                Some(Reply::Stream(text_turn(&format!("t{index}"), "Sure.")))
+            })
+        })
+        .await
+    };
+    let build = || report_builder(&server, &run_dir).agent("peer", agent_config("Peer"));
+    let workflow = Arc::new(build().build().unwrap());
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    server.wait_for_requests(2).await;
+    workflow
+        .context()
+        .messages
+        .send("peer", None, "main", "Use British spelling.".into(), vec![])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let hold = workflow.engine.persistence().unwrap().hold_writes().await;
+    let checkpoint = tokio::spawn({
+        let persistence = workflow.engine.persistence().unwrap().clone();
+        let context = workflow.context().clone();
+        async move { persistence.save_checkpoint(&context).await }
+    });
+    // Queued for the writes before the report's result is.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    release.notify_one();
+    report_came(&workflow).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(hold);
+    let crossing = checkpoint.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), report)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(workflow);
+
+    let resumed = build().resume_from(&crossing).build().unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.summary, "Sure.");
+    resumed.continue_agent(&restored, "Go on.").await.unwrap();
+    let input = bodies(&server).pop().unwrap()["input"].to_string();
+    assert_eq!(input.matches("Use British spelling.").count(), 1, "{input}");
+}
+
+/// A streamed model turn calling the probe `count` times.
+fn probe_calls_turn(count: usize) -> String {
+    let mut events = (0..count)
+        .map(|index| {
+            json!({"type": "response.output_item.done", "output_index": index, "item": {
+                "type": "function_call", "id": format!("fc_m{index}"),
+                "call_id": format!("call_m{index}"), "name": "probe", "arguments": "{}",
+                "status": "completed",
+            }})
+        })
+        .collect::<Vec<_>>();
+    events.push(json!({"type": "response.completed", "response": {
+        "id": "resp_many", "object": "response", "created_at": 0, "status": "completed",
+        "model": "gpt-5.6-luna", "output": [], "usage": {"input_tokens": 10, "output_tokens": 5},
+        "metadata": {},
+    }}));
+    events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect()
+}
+
+/// A report run the workflow's stop aborts after its grace period, after
+/// a turn that took a peer's message, gives the run put back the model
+/// call and the message, from the latest task its runtime reported. The
+/// run misses the stop: its driver is held up writing the event log, so the
+/// run's events fill their channel and it waits to send more, and messages
+/// fill its command channel, so the stop can't queue its cancellation.
+#[tokio::test]
+async fn a_report_run_aborted_after_the_grace_period_gives_back_what_it_took() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let releases = [
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    ];
+    let server = {
+        let releases = releases.clone();
+        ResponsesServer::start_async(move |index, body| {
+            let releases = releases.clone();
+            Box::pin(async move {
+                if body.contains(REQUESTED) && !body.contains("Go on.") {
+                    return match body.matches("function_call_output").count() {
+                        // The first waits for the peer's message, then calls.
+                        0 => {
+                            releases[0].notified().await;
+                            Some(Reply::Stream(tool_call_turn("p1", "probe", json!({}))))
+                        }
+                        // The second makes many calls once the event log is
+                        // held up.
+                        1 => {
+                            releases[1].notified().await;
+                            Some(Reply::Stream(probe_calls_turn(60)))
+                        }
+                        // The next hangs until the run is aborted.
+                        _ => None,
+                    };
+                }
+                Some(Reply::Stream(text_turn(&format!("t{index}"), "Sure.")))
+            })
+        })
+        .await
+    };
+    let build = |grace: Duration| {
+        report_builder(&server, &run_dir)
+            .agent("peer", agent_config("Peer"))
+            // Every event is written as it comes.
+            .persistence(
+                PersistenceConfig::new(&run_dir)
+                    .keep_last_checkpoints(100)
+                    .event_flush_interval(Duration::ZERO),
+            )
+            .cancel_grace_period(grace)
+    };
+    let workflow = Arc::new(build(Duration::from_millis(100)).build().unwrap());
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    let send = |content: String| {
+        let workflow = workflow.clone();
+        async move {
+            workflow
+                .context()
+                .messages
+                .send("peer", None, "main", content, vec![])
+                .await
+                .unwrap();
+        }
+    };
+    server.wait_for_requests(2).await;
+    send("Use British spelling.".into()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    releases[0].notify_one();
+    server.wait_for_requests(3).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let persistence = workflow.engine.persistence().unwrap().clone();
+    let held = persistence.hold_event_log().await;
+    releases[1].notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for index in 0..12 {
+        send(format!("Note {index}.")).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(workflow.cancel());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    drop(held);
+    let error = tokio::time::timeout(Duration::from_secs(20), report)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, WorkflowError::Cancelled), "{error}");
+
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.status, AgentRunStatus::Completed);
+    let (was, now) = (first.task().unwrap(), restored.task().unwrap());
+    assert_eq!(
+        now.conversation.messages.len(),
+        was.conversation.messages.len()
+    );
+    assert!(now.usage_history.len() > was.usage_history.len());
+    assert!(
+        now.pending_context_injections
+            .iter()
+            .any(|context| context.contains("Use British spelling.")),
+        "{:?}",
+        now.pending_context_injections
+    );
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = build(Duration::from_secs(10))
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "Go on.").await.unwrap();
+    let input = bodies(&server).pop().unwrap()["input"].to_string();
+    assert_eq!(input.matches("Use British spelling.").count(), 1, "{input}");
+}
+
+/// Stopping the agent stops its run that writes a report, as stopping the
+/// run does, though the run doesn't show as running.
+#[tokio::test]
+async fn stopping_the_agent_stops_its_report() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let server = edge_server(|_| None).await;
+    let workflow = Arc::new(report_builder(&server, &run_dir).build().unwrap());
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    server.wait_for_requests(2).await;
+    assert_eq!(
+        workflow.agent_status("main"),
+        Some(crate::messaging::registry::AgentStatus::Finished(
+            AgentRunStatus::Completed
+        ))
+    );
+    let stopped = workflow
+        .stop_agent(
+            "main",
+            StopRequest::new(crate::workflow::stop::StopKind::Operator, "Ctrl-C"),
+            RunStopIntent::Relaunch,
+        )
+        .unwrap();
+    assert_eq!(stopped, vec![first.agent_run_id]);
+    let error = tokio::time::timeout(Duration::from_secs(20), report)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowError::AgentStopped { .. }),
+        "{error}"
+    );
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.status, AgentRunStatus::Completed);
+    assert!(restored.stopped_by.is_none());
+    assert_eq!(
+        restored.task().unwrap().conversation.messages.len(),
+        first.task().unwrap().conversation.messages.len()
+    );
+}

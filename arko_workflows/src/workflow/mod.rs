@@ -247,8 +247,11 @@ impl Workflow {
     /// (with the limit's reset when known) or whose `error_kind` is
     /// [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication), and
     /// so do the other errors a request can end in. The report can be
-    /// cancelled by stopping the run ([`stop_run`](Self::stop_run)), which
-    /// returns [`WorkflowError::AgentStopped`].
+    /// cancelled by stopping the run ([`stop_run`](Self::stop_run)) or its
+    /// agent ([`stop_agent`](Self::stop_agent)), which returns
+    /// [`WorkflowError::AgentStopped`]. Until the run's outcome is recorded
+    /// (and saved, with persistence), another report or a continuation of
+    /// it returns `BuilderInvalid`, as for a running run.
     ///
     /// A report run is never saved. Until the report comes, checkpoints keep
     /// recording the run as it was last saved, so a report under way when the
@@ -767,10 +770,10 @@ impl Workflow {
         self.cancel_handle().stop_run(agent_run_id, request, intent)
     }
 
-    /// Stops every running run of `agent_name` alone, as
-    /// [`stop_run`](Self::stop_run) does, and returns the runs whose stop
-    /// began (none when none runs). An unknown agent returns
-    /// `AgentNotFound`.
+    /// Stops every running run of `agent_name` alone (one writing a report
+    /// on request included), as [`stop_run`](Self::stop_run) does, and
+    /// returns the runs whose stop began (none when none runs). An unknown
+    /// agent returns `AgentNotFound`.
     pub fn stop_agent(
         &self,
         agent_name: &str,

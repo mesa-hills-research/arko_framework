@@ -181,9 +181,11 @@ struct RegistryState {
     saved: RegistrySnapshot,
     runs: HashMap<Uuid, Run>,
     /// The runs writing a report on request (`Workflow::request_report`),
-    /// by task ID, with their agents. They count as running for their own
-    /// ID alone, not as runs of their agents: the agents' records, statuses
-    /// and starts, and so checkpoints, stay as they were.
+    /// by task ID, with their agents, until the report's outcome is
+    /// recorded. They count as running for their own ID, and stopping their
+    /// agent stops them. Otherwise they aren't runs of their agents, so the
+    /// agents' records, statuses and starts, and with them checkpoints, stay
+    /// as they were.
     reports: HashMap<Uuid, String>,
     /// Per run being recovered (see
     /// [`AgentRegistry::claim_recovery`]), a receiver that closes when its
@@ -328,7 +330,10 @@ impl AgentRegistry {
     /// Marks run `task_id` of `agent` running to write a report on request,
     /// unless it is running already, without changing the agent's record.
     /// Returns whether it was marked. [`finish`](Self::finish) and
-    /// [`abandon`](Self::abandon) unmark it, again without a change.
+    /// [`abandon`](Self::abandon) leave it marked, so that no other run of
+    /// its ID starts until the report's outcome is recorded, and
+    /// [`end_report`](Self::end_report) unmarks it then, again without a
+    /// change.
     pub(crate) fn start_report_unless_running(&self, task_id: Uuid, agent: &str) -> bool {
         let mut state = self.state.lock();
         if state.runs.contains_key(&task_id) || state.reports.contains_key(&task_id) {
@@ -336,6 +341,12 @@ impl AgentRegistry {
         }
         state.reports.insert(task_id, agent.to_string());
         true
+    }
+
+    /// Unmarks run `task_id`, which wrote a report on request, once its
+    /// outcome is recorded.
+    pub(crate) fn end_report(&self, task_id: Uuid) {
+        self.state.lock().reports.remove(&task_id);
     }
 
     /// Whether run `task_id` is marked running to write a report on request.
@@ -360,14 +371,22 @@ impl AgentRegistry {
         }
     }
 
-    /// The runs of `agent` marked running.
+    /// The runs of `agent` marked running, those writing a report on
+    /// request included.
     pub fn runs_of(&self, agent: &str) -> Vec<Uuid> {
-        self.state
-            .lock()
+        let state = self.state.lock();
+        state
             .runs
             .iter()
             .filter(|(_, run)| run.agent == agent)
             .map(|(task_id, _)| *task_id)
+            .chain(
+                state
+                    .reports
+                    .iter()
+                    .filter(|(_, report_agent)| *report_agent == agent)
+                    .map(|(task_id, _)| *task_id),
+            )
             .collect()
     }
 
@@ -440,7 +459,7 @@ impl AgentRegistry {
     pub fn abandon(&self, task_id: Uuid) {
         let mut guard = self.state.lock();
         let state = &mut *guard;
-        if state.reports.remove(&task_id).is_some() {
+        if state.reports.contains_key(&task_id) {
             return;
         }
         let Some(run) = state.runs.remove(&task_id) else {
@@ -463,9 +482,10 @@ impl AgentRegistry {
     pub fn finish(&self, task_id: Uuid, outcome: AgentRunStatus) {
         let mut guard = self.state.lock();
         let state = &mut *guard;
-        // A report run's end changes nothing of its agent's (see
+        // A report run's end changes nothing of its agent's, and it stays
+        // marked until its outcome is recorded (see
         // `start_report_unless_running`).
-        if state.reports.remove(&task_id).is_some() {
+        if state.reports.contains_key(&task_id) {
             return;
         }
         let continuable = matches!(
