@@ -717,6 +717,39 @@ async fn a_report_asked_for_alone_comes_as_a_reply_without_the_report_tool() {
     assert!(texts(&task).contains(&crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST.to_string()));
 }
 
+/// Context waiting in a task asked for a report alone stays waiting, text
+/// and images, also when the run stops before the report's request is in
+/// the conversation.
+#[tokio::test]
+async fn context_waits_for_the_next_run_when_a_report_alone_stops_at_once() {
+    let (agent, mut events, _commands) = tool_harness();
+    let mut task = completed(agent, &mut events).await;
+    let before = task.conversation.messages.len();
+    task.pending_context_injections = vec!["A note: use tabs.".into()];
+    task.pending_context_images = vec![crate::runtime::ContextImage::new(
+        "The image of note 3:",
+        ai::Image::new_base64("cGl4ZWxz", "image/png"),
+    )];
+    task.request_report(None).unwrap();
+    let (agent, mut events, commands) = loop_for(task);
+    commands.try_send(UserCommand::CancelTask).unwrap();
+    let (task, _) = run(agent, &mut events).await;
+    assert!(
+        matches!(task.current_state, TaskState::Cancelled { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.pending_context_injections, ["A note: use tabs."]);
+    assert_eq!(task.pending_context_images.len(), 1);
+    let texts = texts(&task);
+    assert!(
+        texts[before..]
+            .iter()
+            .all(|text| !text.contains("use tabs")),
+        "{texts:#?}"
+    );
+}
+
 /// A report is asked for between turns only, with a request that says
 /// something.
 #[test]

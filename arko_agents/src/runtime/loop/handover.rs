@@ -26,6 +26,14 @@ impl AgentLoop {
             .is_some_and(|request| request.report_requested)
     }
 
+    /// Whether context waits for later: while a handover report is due,
+    /// and from the start of a run asked for a report alone, whose context
+    /// waits for the task's next run (also when the run stops before the
+    /// request is in the conversation).
+    pub(super) fn context_held(&self) -> bool {
+        self.handover_report_due() || self.task.report_only()
+    }
+
     /// Whether the agent gives its report with the `handover_report` tool,
     /// which its native requests then offer: native tool calling with
     /// `handover` set, for an agent offered other tools. Otherwise the report
