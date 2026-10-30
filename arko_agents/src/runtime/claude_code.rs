@@ -5404,6 +5404,9 @@ impl ClaudeCodeRun {
                     failure_policy: interceptor.failure_policy.clone(),
                 });
         }
+        if let Some(hook) = &self.handover_hook {
+            hook.handover_config_taken(&self.task);
+        }
         let prompt = self.system_prompt()?;
         self.task.conversation.system_message = Some(prompt);
         Ok(())

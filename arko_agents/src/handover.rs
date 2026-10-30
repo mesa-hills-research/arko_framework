@@ -625,6 +625,16 @@ pub trait HandoverHook: Send + Sync {
         None
     }
 
+    /// The runtime took the configuration
+    /// [`handover_config`](Self::handover_config) gave, which `task` now
+    /// holds, for its fresh conversation. A host that keeps settings of
+    /// its own by the run's configuration (a prompt cache lifetime, say)
+    /// changes them here, so that a configuration the runtime left out
+    /// changes nothing. The default does nothing.
+    fn handover_config_taken(&self, task: &Task) {
+        let _ = task;
+    }
+
     /// Claude Code compacted `task`'s conversation. Its summary replaced the
     /// earlier messages in the session (`task` keeps them all). Returns
     /// context to give the agent again with its next input, such as

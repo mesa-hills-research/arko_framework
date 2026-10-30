@@ -298,6 +298,9 @@ impl AgentLoop {
             }
         }
         self.tool_registry = Arc::new(registry);
+        if let Some(hook) = &self.handover_hook {
+            hook.handover_config_taken(&self.task);
+        }
         self.write_system_prompt()
     }
 
