@@ -2049,7 +2049,10 @@ impl WorkflowBuilder {
     /// (it finished, failed or was stopped), its moved calls and monitors
     /// stop, since their notes would reach no one. Its commands keep
     /// running. Pass the manager whose terminal tools the agents use, if
-    /// they have them. See
+    /// they have them. With [`subagents`](Self::subagents), the manager
+    /// also learns whether each agent's workers run, so a monitor can last
+    /// while they do (`monitor_start`'s `lasts`, see
+    /// `TerminalManager::set_worker_liveness`). See
     /// [`AgentRuntime::with_background_jobs`](arko_agents::AgentRuntime::with_background_jobs).
     #[cfg(any(unix, windows))]
     pub fn background_jobs(mut self, jobs: Arc<arko_agents::terminal::TerminalManager>) -> Self {
@@ -2933,6 +2936,13 @@ impl WorkflowBuilder {
             context.workflow_services.set(services).map_err(|_| {
                 WorkflowError::BuilderInvalid("workflow services initialized twice".to_string())
             })?;
+        }
+        // The agents' monitors can last while their workers run.
+        #[cfg(any(unix, windows))]
+        if let Some(jobs) = &context.background_jobs
+            && context.subagents.config().is_some()
+        {
+            jobs.set_worker_liveness(Some(Arc::new(crate::subagents::WorkerRuns::of(&context))));
         }
 
         let engine = WorkflowEngine::new(llm_client, persistence);

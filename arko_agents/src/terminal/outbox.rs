@@ -5,8 +5,8 @@
 //! once with a [`JobAlert`], and the runtime it binds next gets the news.
 
 use super::monitor::{
-    AlertKind, CheckChange, EndReason, JobAlert, Line, MonitorLimits, MonitorTrigger, clock,
-    clock_seconds, minutes_left,
+    AlertKind, CheckChange, EndReason, JobAlert, Line, MonitorLifetime, MonitorLimits,
+    MonitorTrigger, clock, clock_seconds, minutes_left,
 };
 use super::*;
 use std::time::SystemTime;
@@ -349,30 +349,51 @@ impl Outbox {
     }
 }
 
-/// The note for `parts`. `monitors` gives each monitor's end, as last
-/// armed, and its count of alerts, this note's included.
-pub(super) fn note(
-    parts: &[Part],
-    monitors: &HashMap<Uuid, (SystemTime, u32)>,
-    now: SystemTime,
-) -> String {
+/// A monitor as its note describes it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Standing {
+    /// When it ends, as last armed.
+    pub(super) expires_at: SystemTime,
+    /// Its count of alerts, this note's included.
+    pub(super) alerts: u32,
+    /// It ends after its first alert.
+    pub(super) once: bool,
+    /// It lasts while its owner's workers run, and one does.
+    pub(super) kept: bool,
+}
+
+/// The note for `parts`. `monitors` gives each monitor as it stands.
+pub(super) fn note(parts: &[Part], monitors: &HashMap<Uuid, Standing>, now: SystemTime) -> String {
     parts
         .iter()
-        .map(|part| {
-            // A job forgotten before its note went has no count.
-            let (expires_at, alerts) = monitors
-                .get(&part.header.job_id)
-                .map_or((now, None), |(expires_at, alerts)| {
-                    (*expires_at, Some(*alerts))
-                });
-            part_text(part, expires_at, alerts, now)
-        })
+        .map(|part| part_text(part, monitors.get(&part.header.job_id), now))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-/// The text of one monitor's part of a note.
-fn part_text(part: &Part, expires_at: SystemTime, alerts: Option<u32>, now: SystemTime) -> String {
+/// What an alert says of when its monitor ends, unless the note says that
+/// it ended or ends soon. A monitor that alerts once ends with its alert,
+/// and one whose owner's workers keep it lasts while they run. One
+/// forgotten before its note went ends now.
+fn ends_line(standing: Option<&Standing>, now: SystemTime) -> Option<String> {
+    let expires_at = match standing {
+        Some(standing) if standing.once => return None,
+        Some(standing) if standing.kept => {
+            return Some("\nIt lasts while your workers run.".to_string());
+        }
+        Some(standing) => standing.expires_at,
+        None => now,
+    };
+    Some(format!(
+        "\nIt ends in {}.",
+        minutes_left(expires_at.duration_since(now).unwrap_or_default())
+    ))
+}
+
+/// The text of one monitor's part of a note. A job forgotten before its note
+/// went has no `standing`.
+fn part_text(part: &Part, standing: Option<&Standing>, now: SystemTime) -> String {
+    let alerts = standing.map(|standing| standing.alerts);
     let header = &part.header;
     let id = header.job_id;
     let command = &header.command;
@@ -408,20 +429,14 @@ fn part_text(part: &Part, expires_at: SystemTime, alerts: Option<u32>, now: Syst
             });
         }
         if part.ended.is_none() && part.ends_soon.is_none() {
-            text.push_str(&format!(
-                "\nIt ends in {}.",
-                minutes_left(expires_at.duration_since(now).unwrap_or_default())
-            ));
+            text.extend(ends_line(standing, now));
         }
         paragraphs.push(text);
     }
     if let Some(check) = &part.check {
         let mut text = check_text(header, check);
         if part.ended.is_none() && part.ends_soon.is_none() {
-            text.push_str(&format!(
-                "\nIt ends in {}.",
-                minutes_left(expires_at.duration_since(now).unwrap_or_default())
-            ));
+            text.extend(ends_line(standing, now));
         }
         paragraphs.push(text);
     }
@@ -534,14 +549,35 @@ fn ended_text(header: &Header, ended: &Ended, alerts: Option<u32>) -> String {
     let id = header.job_id;
     let command = &header.command;
     let at = clock(ended.at);
+    let checks = matches!(header.trigger, MonitorTrigger::Check { .. });
     match &ended.reason {
-        EndReason::Expired if matches!(header.trigger, MonitorTrigger::Check { .. }) => format!(
+        EndReason::Expired if checks => format!(
             "Monitor {id} (`{command}`) ended at {at}, and its checks stopped.{}",
             alerted(alerts)
         ),
         EndReason::Expired => format!(
             "Monitor {id} (`{command}`) ended at {at} and its command was stopped.{}",
             alerted(alerts)
+        ),
+        EndReason::WorkersFinished if checks => format!(
+            "Monitor {id} (`{command}`) ended at {at} because your workers finished, and its checks stopped.{}",
+            alerted(alerts)
+        ),
+        EndReason::WorkersFinished => format!(
+            "Monitor {id} (`{command}`) ended at {at} because your workers finished, and its command was stopped.{}",
+            alerted(alerts)
+        ),
+        EndReason::Alerted if checks => {
+            format!(
+                "Monitor {id} (`{command}`) ended after its first alert, and its checks stopped."
+            )
+        }
+        EndReason::Alerted => format!(
+            "Monitor {id} (`{command}`) ended after its first alert, and its command was stopped."
+        ),
+        EndReason::AtOnce { success } => format!(
+            "Monitor {id} (`{command}`) ended at {at}, because its first check already {}.",
+            if *success { "succeeded" } else { "failed" }
         ),
         EndReason::Exited { code } => {
             let how = match code {
@@ -700,6 +736,8 @@ impl TerminalManager {
         if parts.is_empty() {
             return None;
         }
+        // Asked before any job's lock is taken.
+        let workers = self.workers_running(owner);
         let mut monitors = HashMap::new();
         for part in &parts {
             let id = part.header.job_id;
@@ -713,7 +751,15 @@ impl TerminalManager {
             if part.alerts() {
                 monitor.alerts += 1;
             }
-            monitors.insert(id, (monitor.expires_at, monitor.alerts));
+            monitors.insert(
+                id,
+                Standing {
+                    expires_at: monitor.expires_at,
+                    alerts: monitor.alerts,
+                    once: monitor.once,
+                    kept: workers && monitor.lifetime == MonitorLifetime::WhileWorkersRun,
+                },
+            );
             // An ended job's record is final, and may be forgotten.
             if part.alerts()
                 && data.record.state == JobState::Running
@@ -883,6 +929,16 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
     }
 
+    /// A timed monitor that ends at `expires_at`, with `alerts`.
+    fn standing(expires_at: SystemTime, alerts: u32) -> Standing {
+        Standing {
+            expires_at,
+            alerts,
+            once: false,
+            kept: false,
+        }
+    }
+
     /// News waits briefly for more, then goes. After that, the owner gets
     /// at most one note an interval, whatever number of monitors it has,
     /// counted from when a note went.
@@ -994,7 +1050,7 @@ mod tests {
         );
         let parts = outbox.take(now);
         let ends = at(11 * 3600 + 3 * 60 + 5);
-        let monitors = HashMap::from([(id, (ends, 1))]);
+        let monitors = HashMap::from([(id, standing(ends, 1))]);
         assert_eq!(
             note(&parts, &monitors, at(10 * 3600 + 41 * 60 + 5)),
             format!(
@@ -1055,7 +1111,7 @@ mod tests {
         let limits = MonitorLimits::default();
         let id = Uuid::new_v4();
         let now = Instant::now();
-        let monitors = HashMap::from([(id, (at(10 * 3600 + 70 * 60 + 30), 1))]);
+        let monitors = HashMap::from([(id, standing(at(10 * 3600 + 70 * 60 + 30), 1))]);
         let header = check_header(id, CheckChange::Success);
         let mut outbox = Outbox::default();
         outbox.add(header.clone(), checked(false, "", 10, false), &limits, now);
@@ -1196,7 +1252,7 @@ mod tests {
         let limits = MonitorLimits::default();
         let now = Instant::now();
         let id = Uuid::new_v4();
-        let monitors = HashMap::from([(id, (at(11 * 3600), 1))]);
+        let monitors = HashMap::from([(id, standing(at(11 * 3600), 1))]);
         let text = |news: Vec<(Header, News)>| {
             let mut outbox = Outbox::default();
             for (header, news) in news {
@@ -1324,7 +1380,7 @@ mod tests {
             );
             note(
                 &outbox.take(now),
-                &HashMap::from([(id, (at(0), 4))]),
+                &HashMap::from([(id, standing(at(0), 4))]),
                 at(11 * 3600 + 42 * 60),
             )
         };
@@ -1364,7 +1420,11 @@ mod tests {
             &limits,
             now,
         );
-        let text = note(&outbox.take(now), &HashMap::from([(id, (at(0), 1))]), at(0));
+        let text = note(
+            &outbox.take(now),
+            &HashMap::from([(id, standing(at(0), 1))]),
+            at(0),
+        );
         assert!(
             text.ends_with(&format!(
                 "\n  boom\n\nMonitor {id} (`npm run dev`) ended because its command ended without an exit code at 11:00 UTC. It printed nothing."

@@ -227,3 +227,109 @@ fn job_named(text: &str) -> uuid::Uuid {
         .expect("a moved result");
     rest[..36].parse().unwrap()
 }
+
+/// With subagents, the manager learns whether an agent's workers run. A
+/// monitor of a lead that lasts while they do goes on past its time while
+/// its worker runs, and ends when the worker finishes. `monitor_start`
+/// offers that lifetime.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_leads_monitor_lasts_while_its_worker_runs() {
+    use arko_agents::terminal::{MonitorLifetime, MonitorOptions, MonitorTool};
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        let turn = body.matches("\"function_call_output\"").count();
+        Some(match turn {
+            0 => tool_call_turn("w0", "slow", json!({})),
+            _ => complete_turn("w1", "worker done"),
+        })
+    })
+    .await;
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
+    let offers_lasts = || {
+        MonitorTool::all(jobs.clone())[0]
+            .definition()
+            .parameters
+            .iter()
+            .any(|param| param.name == "lasts")
+    };
+    assert!(!offers_lasts());
+    let slow = Arc::new(Slow::default());
+    let workflow = Workflow::builder()
+        .name("worker-lifetime-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Lead"))
+        .agent("worker", worker())
+        .global_tool(slow.clone())
+        .workflow_services(
+            crate::services::WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .subagents(crate::subagents::SubagentsConfig::default())
+        .background_jobs(jobs.clone())
+        .build()
+        .unwrap();
+    assert!(offers_lasts());
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Run it.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    within(slow.started.notified()).await;
+    let context = TaskContext::new(lead, "lead", "Lead it.", &workspace.0);
+    let monitor = jobs
+        .start_monitor(
+            &context,
+            "sleep 60",
+            MonitorOptions::lines(None)
+                .with_expiry(Duration::from_secs(1))
+                .with_lifetime(MonitorLifetime::WhileWorkersRun),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        jobs.status(lead, monitor.job_id, None).unwrap().state,
+        JobState::Running
+    );
+    slow.release.notify_one();
+    let ended = within(async {
+        loop {
+            let ended = jobs.status(lead, monitor.job_id, None).unwrap();
+            if ended.state.is_terminal() {
+                return ended;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        (ended.state, ended.error.as_deref()),
+        (
+            JobState::TimedOut,
+            Some("ended after its agent's workers finished")
+        )
+    );
+    assert!(
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| !run.state.is_active())
+    );
+}

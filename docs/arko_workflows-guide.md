@@ -848,7 +848,10 @@ moves it to the background, after what it collected.
 background as jobs of an arko_agents terminal manager, which the host moves them with (see
 [Moving calls to the background](arko_agents-guide.md#moving-calls-to-the-background)).
 When a subagent's run ends, its moved calls and monitors stop, since their notes would reach
-no one. Commands it started keep running.
+no one. Commands it started keep running. The manager also learns whether each agent's
+workers run, so an agent's monitor can last while they do (`monitor_start` with
+`lasts: "while_workers_run"`, see [Monitors](interactive-terminals.md#monitors)) and end
+when the last one finishes.
 
 A subagent's `ask_user` goes to its lead as a message, with each question's id, suggested
 answers and default, and the lead's reply is the answer. It always waits for that reply. See [background subagents](../arko_workflows/INDEX.md#background-subagents) for the tools,

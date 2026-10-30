@@ -208,7 +208,8 @@ impl TerminalManager {
 
     /// Keeps `owner`'s monitor `id` for `lasts` from now, at most
     /// [`longest`](MonitorLimits::longest), and arms its warning again.
-    /// Returns its new end. A monitor that ended can't be rearmed
+    /// Returns its new end. One that lasts while workers run still goes on
+    /// past it while they do. A monitor that ended can't be rearmed
     /// ([`TerminalError::Finished`]).
     pub fn rearm(&self, owner: Uuid, id: Uuid, lasts: Duration) -> Result<SystemTime> {
         let limits = self.monitor_limits();
@@ -245,6 +246,7 @@ impl TerminalManager {
                 arming.expires = Instant::now() + lasts;
                 arming.lasts = lasts;
                 arming.warned = false;
+                arming.held = false;
             }
             expires_at
         };

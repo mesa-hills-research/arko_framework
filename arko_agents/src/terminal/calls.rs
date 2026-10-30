@@ -573,6 +573,8 @@ pub(super) fn info(record: &Record, label: String, started: Instant) -> JobInfo 
                 trigger: monitor.trigger.clone(),
                 expires_at: monitor.expires_at,
                 alerts: monitor.alerts,
+                once: monitor.once,
+                lifetime: monitor.lifetime,
             }),
             (None, None) => JobKind::Command,
         },

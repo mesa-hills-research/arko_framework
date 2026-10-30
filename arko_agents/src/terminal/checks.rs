@@ -1,7 +1,7 @@
 //! Monitors that run a check again and again, and alert their owner when
 //! its result changes.
 
-use super::monitor::{CheckChange, MonitorTrigger, Running, clock_seconds};
+use super::monitor::{CheckChange, Done, EndReason, MonitorTrigger, Running, clock_seconds};
 use super::outbox::{CheckResult, News};
 use super::*;
 use futures::future::BoxFuture;
@@ -223,6 +223,17 @@ async fn run_check(
     run
 }
 
+/// Whether a check's result (`success`) is the one a monitor that alerts
+/// `when` it starts succeeding or failing waits for. Other changes have no
+/// result to wait for.
+pub(super) fn awaited(when: CheckChange, success: bool) -> bool {
+    match when {
+        CheckChange::Success => success,
+        CheckChange::Failure => !success,
+        _ => false,
+    }
+}
+
 /// Tells a check's changes from its steady results.
 #[derive(Debug)]
 pub(super) struct CheckState {
@@ -303,14 +314,20 @@ pub(super) async fn run(
     let mut logged = 0;
     let mut next = Instant::now();
     let mut current: Option<(BoxFuture<'static, CheckRun>, Instant)> = None;
-    let mut expired = false;
+    // How the monitor ended by itself.
+    let mut done: Option<Done> = None;
     let mut failure: Option<String> = None;
-    // The start reported a first check that couldn't run, and ends the
-    // monitor.
+    // The start reported how the monitor ended (a first check that
+    // couldn't run, or one that already gave what a monitor that alerts
+    // once waits for).
     let mut told = false;
+    // A monitor that alerts once ended at its first check, which already
+    // gave what it waits for: whether that was a success.
+    let mut there_at_once: Option<bool> = None;
     let mut timing = manager
         .upgrade()
         .map(|manager| manager.watch_monitor_timing());
+    let mut workers = runner::workers_watch(&manager, Some(&running));
     let stop = loop {
         let event = runner::until(running.next_event(&manager, &data));
         let idle = current.is_none();
@@ -348,15 +365,26 @@ pub(super) async fn run(
                 }
                 if let Some(first) = first.take() {
                     let couldnt_run = run.error.is_some();
-                    let _ = first.send(run.clone());
+                    let delivered = first.send(run.clone()).is_ok();
                     if couldnt_run {
                         told = true;
                         failure = run.error.clone();
                         break JobState::Failed;
                     }
+                    if running.once && awaited(when, run.success) {
+                        told = delivered;
+                        there_at_once = Some(run.success);
+                        done = Some(Done::Alerted);
+                        break JobState::Succeeded;
+                    }
                 }
                 if let Some(news) = state.observe(run.result()) {
+                    let alerts = matches!(news, News::Check { alerts: true, .. });
                     running.tell(&manager, news);
+                    if alerts && running.once {
+                        done = Some(Done::Alerted);
+                        break JobState::Succeeded;
+                    }
                 }
             }
             _ = sleep_until(next), if idle => {
@@ -365,11 +393,15 @@ pub(super) async fn run(
                 current = Some((checker(limit), started));
             }
             // Planned again.
-            () = runner::retimed(&mut timing) => {}
+            () = runner::retimed(&mut timing) => {
+                workers = runner::workers_watch(&manager, Some(&running));
+            }
+            // Workers started or ended.
+            () = runner::workers_changed(&mut workers) => {}
             () = event => {
-                if running.timed_event(&manager, &data, &config) {
-                    expired = true;
-                    break JobState::TimedOut;
+                if let Some(ended) = running.timed_event(&manager, &data, &config) {
+                    done = Some(ended);
+                    break ended.state();
                 }
             }
             control = controls.recv() => match control {
@@ -387,12 +419,15 @@ pub(super) async fn run(
     drop(current);
     let (snapshot, ending) = {
         let mut data = data.lock().unwrap();
-        let ending = monitor::end_reason(stop, expired, data.stopped_by, None, failure.as_deref());
+        let ending = match there_at_once {
+            Some(success) => Some(EndReason::AtOnce { success }),
+            None => monitor::end_reason(stop, done, data.stopped_by, None, failure.as_deref()),
+        };
         data.record.state = stop;
-        data.record.error = failure.or(match data.stopped_by {
-            _ if expired => Some("expired".into()),
-            Some(calls::StopCause::User) => Some("stopped by the user".into()),
-            Some(calls::StopCause::OwnerEnded) => {
+        data.record.error = failure.or(match (done, data.stopped_by) {
+            (Some(done), _) => done.error(),
+            (None, Some(calls::StopCause::User)) => Some("stopped by the user".into()),
+            (None, Some(calls::StopCause::OwnerEnded)) => {
                 Some("stopped because its agent's run ended".into())
             }
             _ => None,

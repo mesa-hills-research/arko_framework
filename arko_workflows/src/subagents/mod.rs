@@ -52,6 +52,10 @@
 
 mod board;
 pub(crate) use board::CONTEXT_ARRIVED;
+#[cfg(any(unix, windows))]
+mod liveness;
+#[cfg(any(unix, windows))]
+pub(crate) use liveness::WorkerRuns;
 #[cfg(test)]
 mod delivery_tests;
 #[cfg(test)]

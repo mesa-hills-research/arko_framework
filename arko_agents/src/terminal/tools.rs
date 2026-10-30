@@ -81,7 +81,7 @@ pub(super) fn number(
         })
         .transpose()
 }
-fn boolean(
+pub(super) fn boolean(
     params: &HashMap<String, Value>,
     name: &str,
     default: bool,
