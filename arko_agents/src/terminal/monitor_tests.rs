@@ -1642,9 +1642,11 @@ async fn a_line_monitor_that_alerts_once_ends_after_its_first_alert() {
         notes.push(text);
     }
     let all = notes.join("\n\n");
+    // Lines that came in the same read as the first are in its alert, and
+    // none come after it.
     assert_eq!(all.matches("Monitor alert.").count(), 1, "{all}");
     assert!(
-        all.contains("\n  error 0") && !all.contains("error 1") && !all.contains("It ends in"),
+        all.contains("\n  error 0") && !all.contains("It ends in"),
         "{all}"
     );
     assert!(
@@ -1726,6 +1728,47 @@ async fn a_check_that_alerts_once_ends_after_its_first_alert() {
             None
         );
     }
+}
+
+/// A check that alerts once of a result, whose first result comes after its
+/// start stopped waiting and already is that result, alerts of it with its
+/// end, which wakes its idle owner.
+#[tokio::test(start_paused = true)]
+async fn a_late_first_check_with_the_awaited_result_alerts() {
+    let f = Fixture::new(|_| {});
+    let limits = f.manager.monitor_limits();
+    let mut alerts = f.manager.subscribe_alerts();
+    let slow = limits.first_check_wait + Duration::from_secs(5);
+    let (checker, _) = scripted(vec![(true, "ready", slow)]);
+    let options = MonitorOptions::check(30, CheckChange::Success)
+        .with_label("ready")
+        .once();
+    let watching = monitor::Watching::new(&options, None, &limits);
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "ready".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(first.is_none(), "the start stopped waiting");
+    let alert = timeout(Duration::from_secs(600), alerts.recv())
+        .await
+        .expect("an alert")
+        .unwrap();
+    assert_eq!((alert.job_id, alert.kind), (id, AlertKind::Check));
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let text = next_note(&mut receiver).await;
+    assert_eq!(text.matches("Monitor alert.").count(), 1, "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "Monitor alert. The first check of job {id} (`ready`, every 30 s) succeeded at "
+        )) && text.contains(" UTC. Its output follows.\n  ready\n")
+            && text.ends_with(&format!(
+                "\n\nMonitor {id} (`ready`) ended after its first alert, and its checks stopped."
+            )),
+        "{text}"
+    );
+    assert_eq!(ended_paused(&f, id).await.state, JobState::Succeeded);
 }
 
 /// A [`WorkerLiveness`] a test drives: the owners whose workers run.

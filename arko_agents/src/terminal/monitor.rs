@@ -617,9 +617,6 @@ pub(super) enum EndReason {
     WorkersFinished,
     /// It alerted once, as it was asked to.
     Alerted,
-    /// It was to alert once, and its first check already gave the result it
-    /// waits for (`success` or a failure), which its start didn't report.
-    AtOnce { success: bool },
     /// Its command exited on its own.
     Exited { code: Option<i32> },
     /// Its owner stopped it.
@@ -1188,6 +1185,22 @@ impl TerminalManager {
                 {
                     "It was stopped before its first check ended.".to_string()
                 }
+                // A monitor that alerts once of a result alerts of it even
+                // as the first.
+                None if options.once => match &options.trigger {
+                    MonitorTrigger::Check {
+                        when: CheckChange::Success,
+                        ..
+                    } => "Its first check is still running, and if it succeeds, that is its alert."
+                        .to_string(),
+                    MonitorTrigger::Check {
+                        when: CheckChange::Failure,
+                        ..
+                    } => "Its first check is still running, and if it fails, that is its alert."
+                        .to_string(),
+                    _ => "Its first check is still running, and changes are judged against its result."
+                        .to_string(),
+                },
                 None => {
                     "Its first check is still running, and changes are judged against its result."
                         .to_string()

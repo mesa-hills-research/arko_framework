@@ -46,8 +46,9 @@ pub(super) enum News {
         result: CheckResult,
         /// The change is one the monitor alerts of.
         alerts: bool,
-        /// How long the result before lasted.
-        previous_for: Duration,
+        /// How long the result before lasted, or `None` for the first
+        /// result.
+        previous_for: Option<Duration>,
     },
     /// The monitor ends soon, at `ends_at`, and a rearm keeps it for up
     /// to `longest` from then.
@@ -87,8 +88,9 @@ struct Check {
     shown: Vec<String>,
     /// It has more output than that.
     cut: bool,
-    /// How long the result before the first change lasted.
-    previous_for: Duration,
+    /// How long the result before the first change lasted, or `None` when
+    /// the first is the check's first result.
+    previous_for: Option<Duration>,
 }
 
 /// How a monitor ended.
@@ -496,21 +498,27 @@ fn check_text(header: &Header, check: &Check) -> String {
             ..
         }
     );
-    let before = calls::describe(check.previous_for);
-    let mut text = match (check.changes, output, latest.success) {
-        (1, true, _) => format!(
+    let before = check.previous_for.map(calls::describe);
+    let mut text = match (check.changes, output, latest.success, before) {
+        // The first result, for a monitor that alerts once of the result
+        // it waits for.
+        (1, _, success, None) => format!(
+            "Monitor alert. The first check of job {id} (`{command}`, {every}) {} at {at}.",
+            if success { "succeeded" } else { "failed" }
+        ),
+        (1, true, _, Some(before)) => format!(
             "Monitor alert. The output of the check of job {id} (`{command}`, {every}) changed at {at}, after staying the same for {before}."
         ),
-        (1, false, true) => format!(
+        (1, false, true, Some(before)) => format!(
             "Monitor alert. The check of job {id} (`{command}`, {every}) started succeeding at {at}, after failing for {before}."
         ),
-        (1, false, false) => format!(
+        (1, false, false, Some(before)) => format!(
             "Monitor alert. The check of job {id} (`{command}`, {every}) started failing at {at}, after succeeding for {before}."
         ),
-        (changes, true, _) => format!(
+        (changes, true, _, _) => format!(
             "Monitor alert. The output of the check of job {id} (`{command}`, {every}) changed {changes} times since the last alert, most recently at {at}."
         ),
-        (changes, false, success) => format!(
+        (changes, false, success, _) => format!(
             "Monitor alert. The check of job {id} (`{command}`, {every}) changed {changes} times since the last alert, and now {} (since {at}).",
             if success { "succeeds" } else { "fails" }
         ),
@@ -574,10 +582,6 @@ fn ended_text(header: &Header, ended: &Ended, alerts: Option<u32>) -> String {
         }
         EndReason::Alerted => format!(
             "Monitor {id} (`{command}`) ended after its first alert, and its command was stopped."
-        ),
-        EndReason::AtOnce { success } => format!(
-            "Monitor {id} (`{command}`) ended at {at}, because its first check already {}.",
-            if *success { "succeeded" } else { "failed" }
         ),
         EndReason::Exited { code } => {
             let how = match code {
@@ -1098,7 +1102,7 @@ mod tests {
                 at: at(seconds),
             },
             alerts,
-            previous_for: Duration::from_secs(180),
+            previous_for: Some(Duration::from_secs(180)),
         }
     }
 
@@ -1277,7 +1281,7 @@ mod tests {
                 at: at(0),
             },
             alerts: true,
-            previous_for: Duration::from_secs(60),
+            previous_for: Some(Duration::from_secs(60)),
         };
         let lines_header = header(id, Some("error"));
         let check_header = Header {

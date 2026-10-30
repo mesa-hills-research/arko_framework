@@ -1,7 +1,7 @@
 //! Monitors that run a check again and again, and alert their owner when
 //! its result changes.
 
-use super::monitor::{CheckChange, Done, EndReason, MonitorTrigger, Running, clock_seconds};
+use super::monitor::{CheckChange, Done, MonitorTrigger, Running, clock_seconds};
 use super::outbox::{CheckResult, News};
 use super::*;
 use futures::future::BoxFuture;
@@ -280,7 +280,7 @@ impl CheckState {
         Some(News::Check {
             result,
             alerts,
-            previous_for,
+            previous_for: Some(previous_for),
         })
     }
 }
@@ -321,9 +321,6 @@ pub(super) async fn run(
     // couldn't run, or one that already gave what a monitor that alerts
     // once waits for).
     let mut told = false;
-    // A monitor that alerts once ended at its first check, which already
-    // gave what it waits for: whether that was a success.
-    let mut there_at_once: Option<bool> = None;
     let mut timing = manager
         .upgrade()
         .map(|manager| manager.watch_monitor_timing());
@@ -372,8 +369,19 @@ pub(super) async fn run(
                         break JobState::Failed;
                     }
                     if running.once && awaited(when, run.success) {
+                        // The start says so when it had the result in
+                        // time. Otherwise the result is the alert.
                         told = delivered;
-                        there_at_once = Some(run.success);
+                        if !delivered {
+                            running.tell(
+                                &manager,
+                                News::Check {
+                                    result: run.result(),
+                                    alerts: true,
+                                    previous_for: None,
+                                },
+                            );
+                        }
                         done = Some(Done::Alerted);
                         break JobState::Succeeded;
                     }
@@ -419,10 +427,7 @@ pub(super) async fn run(
     drop(current);
     let (snapshot, ending) = {
         let mut data = data.lock().unwrap();
-        let ending = match there_at_once {
-            Some(success) => Some(EndReason::AtOnce { success }),
-            None => monitor::end_reason(stop, done, data.stopped_by, None, failure.as_deref()),
-        };
+        let ending = monitor::end_reason(stop, done, data.stopped_by, None, failure.as_deref());
         data.record.state = stop;
         data.record.error = failure.or(match (done, data.stopped_by) {
             (Some(done), _) => done.error(),
@@ -596,7 +601,7 @@ mod tests {
                 match state.observe(result(*success, output, 10 * index as u64)) {
                     Some(News::Check {
                         alerts,
-                        previous_for,
+                        previous_for: Some(previous_for),
                         ..
                     }) => Some((alerts, previous_for.as_secs())),
                     Some(other) => panic!("{other:?}"),

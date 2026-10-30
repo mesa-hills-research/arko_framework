@@ -192,7 +192,8 @@ the command. Two options suit watches of other lengths.
   its checks (its job ends `succeeded`). It suits an event that happens once,
   such as a CI run finishing, a file appearing or a server starting to answer. A
   check that alerts on `Success` or `Failure` and whose first result is already
-  that one ends at once, and the start says so.
+  that one ends at once. The start says so, or when the first result comes after
+  the start stopped waiting for it, that result is the alert.
 - `with_lifetime(MonitorLifetime::WhileWorkersRun)` keeps the monitor past its
   time while any of its owner's workers (subagents) run, with no warning, and
   ends it when the last one finishes (`timed_out`, with the error `ended after
