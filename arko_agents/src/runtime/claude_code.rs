@@ -739,6 +739,26 @@ struct Entry {
     messages: usize,
 }
 
+/// Context delivered with a call's result, recorded after the results once
+/// the CLI reports them.
+struct DeliveredContext {
+    /// What went in the call's hook.
+    texts: Vec<String>,
+    /// The note the user typed, sent as their message, by the message's
+    /// UUID, with the text recorded for it. A note the CLI cancels before
+    /// the results is left out.
+    note: Option<(String, String)>,
+}
+
+impl DeliveredContext {
+    /// The record's text, empty when nothing is left.
+    fn text(self) -> String {
+        let mut texts = self.texts;
+        texts.extend(self.note.map(|(_, shown)| shown));
+        texts.join("\n\n")
+    }
+}
+
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
@@ -843,7 +863,7 @@ pub(super) struct ClaudeCodeRun {
     /// Text to add after a call's result: a message given with its approval.
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
-    delivered_context: Vec<String>,
+    delivered_context: Vec<DeliveredContext>,
     /// The marks of the context taken out of the task to be sent
     /// ([`TurnContext::marks`]), kept by the task once it holds that
     /// context: in a message it records, or pending again.
@@ -3168,7 +3188,10 @@ impl ClaudeCodeRun {
         if texts.is_empty() && typed.is_empty() {
             return Ok(cc::Hook::proceed());
         }
-        let mut recorded = texts.clone();
+        let mut delivered = DeliveredContext {
+            texts: texts.clone(),
+            note: None,
+        };
         if !typed.is_empty() {
             // A note alone has the update's heading in the record and the hook.
             let shown = if headed {
@@ -3188,6 +3211,7 @@ impl ClaudeCodeRun {
                     } else {
                         marks.clone()
                     };
+                    delivered.note = Some((uuid.clone(), shown));
                     self.sent_notes.insert(uuid, (typed, marks));
                 }
                 Err(error) => {
@@ -3196,11 +3220,11 @@ impl ClaudeCodeRun {
                         self.task.id
                     );
                     texts.push(shown.clone());
+                    delivered.texts.push(shown);
                 }
             }
-            recorded.push(shown);
         }
-        self.delivered_context.push(recorded.join("\n\n"));
+        self.delivered_context.push(delivered);
         self.emit_context_receipts().await?;
         if texts.is_empty() {
             return Ok(cc::Hook::proceed());
@@ -3211,16 +3235,21 @@ impl ClaudeCodeRun {
     /// The CLI reports each message it is sent by its UUID, from `queued` to
     /// `completed`, or `cancelled` when the turn stopped before the model's
     /// next request. A note it cancelled never reached the model, so it goes
-    /// with the next input.
+    /// with the next input, and the record of the results it went with,
+    /// when they are still to come, leaves it out.
     fn note_settled(&mut self, raw: &Value) {
         let state = raw["state"].as_str();
+        let uuid = raw["command_uuid"].as_str();
         if raw["type"] == "command_lifecycle"
             && matches!(state, Some("completed" | "cancelled"))
-            && let Some((text, marks)) = raw["command_uuid"]
-                .as_str()
-                .and_then(|uuid| self.sent_notes.remove(uuid))
+            && let Some((text, marks)) = uuid.and_then(|uuid| self.sent_notes.remove(uuid))
             && state == Some("cancelled")
         {
+            for delivered in &mut self.delivered_context {
+                if delivered.note.as_ref().map(|(sent, _)| sent.as_str()) == uuid {
+                    delivered.note = None;
+                }
+            }
             self.queue_context(text, false);
             self.task.raise_context_marks(&marks);
         }
@@ -3432,6 +3461,10 @@ impl ClaudeCodeRun {
                     self.observe_last();
                     recorded += 1;
                     for context in std::mem::take(&mut self.delivered_context) {
+                        let context = context.text();
+                        if context.is_empty() {
+                            continue;
+                        }
                         self.task.conversation.add_user_message(&context);
                         self.task.increment_user_message_count();
                         self.observe_last();

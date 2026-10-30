@@ -925,6 +925,77 @@ async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
 }
 
+/// The script of a task whose first call's typed note the CLI reports
+/// cancelled before the call's result, as when the turn stops while the
+/// call's hooks run. The fake goes on with the turn all the same.
+fn note_cancelled_before_its_result() -> Value {
+    json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "cancel_notes": true},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]])
+}
+
+/// Runs the task of `note_cancelled_before_its_result`, its first call
+/// given the typed note with `content`.
+async fn run_with_note_cancelled_before_its_result(content: &'static str) -> (Fake, Task) {
+    let fake = Fake::new(note_cancelled_before_its_result());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content,
+            asked: Default::default(),
+        }),
+    );
+    let (task, _) = start_with(task, runtime).finish().await;
+    (fake, task)
+}
+
+/// The texts of `task`'s record that hold the typed note.
+fn with_typed_note(task: &Task) -> Vec<String> {
+    texts(task)
+        .into_iter()
+        .filter(|text| text.contains("Use tabs."))
+        .collect()
+}
+
+/// A note the CLI reports cancelled before the result it went with never
+/// reached the model. The record of that result leaves it out, and the
+/// note goes with the next call's result, recorded once.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_is_left_out_of_the_record() {
+    let (fake, task) = run_with_note_cancelled_before_its_result("").await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let posts = fake.logged("post");
+    let hooked = posts[1]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(hooked.contains("Use tabs."), "{hooked}");
+    let recorded = with_typed_note(&task);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// The rest of the update went in the call's hook, so the record of the
+/// result keeps it, without the note.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_leaves_the_rest_of_its_update() {
+    let (_, task) = run_with_note_cancelled_before_its_result("A message: skip vendor/.").await;
+    let updates = texts(&task)
+        .into_iter()
+        .filter(|text| text.starts_with("# Workflow context update"))
+        .collect::<Vec<_>>();
+    assert!(updates[0].ends_with("skip vendor/."), "{updates:?}");
+    assert!(!updates[0].contains("Use tabs."), "{updates:?}");
+    assert_eq!(with_typed_note(&task).len(), 1, "{updates:?}");
+}
+
 /// The operator's note of `TYPED_NOTE`, marked as note 3, given at the
 /// second boundary, as a workflow gives the user's answer.
 struct MarkedTypedNote(std::sync::atomic::AtomicUsize);
@@ -1038,6 +1109,28 @@ async fn a_cancelled_note_goes_back_with_its_mark() {
     assert_eq!(fake.logged("midturn").len(), 1);
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
     assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// The same when the CLI reports the note cancelled before the result it
+/// went with: the task holds the note, with its mark, once it goes with the
+/// next call's result.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_keeps_its_mark() {
+    let fake = Fake::new(note_cancelled_before_its_result());
+    let mut task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.context_marks.insert("notes".into(), 2);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+    assert_eq!(with_typed_note(&task).len(), 1);
+    assert!(task.pending_context_injections.is_empty());
 }
 
 /// A completed task continued with a new configuration resumes its session

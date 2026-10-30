@@ -47,6 +47,10 @@ the next turn's index). Steps:
                                          allowed, before it runs; "post":
                                          after its PostToolUse hook, before
                                          its result is reported
+  a tool step with "cancel_notes": true  the messages sent during the turn
+                                         so far are reported cancelled after
+                                         its PostToolUse hook, before its
+                                         result
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"serve": 1}                           answers the host's get_usage
                                          requests, waiting for one if none
@@ -393,6 +397,13 @@ def call_tool(step, index):
     log("post", tool=name, answer=post, output=output, is_error=is_error, input=tool_input)
     if step.get("crash") == "post":
         sys.exit(3)
+    if step.get("cancel_notes"):
+        # The messages sent during the turn so far are reported cancelled
+        # before the call's result, as Claude Code can when the turn stops
+        # while the call's hooks run.
+        for note in state.pop("notes", []):
+            send({"type": "command_lifecycle", "command_uuid": note, "session_id": SESSION,
+                  "state": "cancelled", "uuid": str(uuid.uuid4())})
     send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
           "uuid": record(output),
           "message": {"role": "user", "content": [
