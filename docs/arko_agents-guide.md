@@ -1891,7 +1891,9 @@ conversation, and returns context the agent gets again with its next input. Its
 task's model, such as the one a host now runs the agent with where the task keeps an older
 one it was saved with. Its tools and a system prompt written from it apply from the fresh
 conversation's first request, which writes the prompt cache afresh anyway, and the task
-keeps it. One with another model, or one that isn't valid, is left out with a warning. The
+keeps it. Its skills are loaded and set up again when they differ from the task's, with a new
+`load_skill` and the prompt's skills section, or neither without skills. One with another model,
+one that isn't valid, or one whose skills don't load is left out with a warning. The
 arko_workflows engine does all three for every agent it runs.
 
 `Task::request_report(request)` asks for the report alone, without a handover, such as before
@@ -1901,8 +1903,12 @@ is a reply) and rejects every other call, `complete_task` included, until the re
 task then completes with the report as its summary, and the conversation keeps the request and the
 report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
 in its session, also when it compacts in Claude Code, and neither runtime waits for a plan's usage
-limit to reset during it. It takes a task that is completed, awaiting the user's answer, or
-cancelled, whose open turn is settled first.
+limit to reset during it. An error that ends the request pauses the task for error-recovery
+approval whatever the `LLMErrorPolicy`, so the host hears its cause. It takes a task that is
+completed, awaiting the user's answer, or cancelled, whose open turn is settled first, and calls
+the task was running when it stopped are answered as in doubt, not run again.
+`Task::rewind_claude_code_session` has a Claude Code session resume at the end of the task's
+conversation as it is, such as after a host put back an earlier copy of the task.
 
 `AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
 keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces
