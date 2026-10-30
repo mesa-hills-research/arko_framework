@@ -2481,6 +2481,78 @@ async fn a_handover_s_fresh_session_brings_the_configuration_s_skills() {
     }
 }
 
+/// The handover hook's configuration keeps its own entry for `load_skill`
+/// (approval asked for), with the skills the same or other, in place of the
+/// auto-approval the runtime gave it.
+#[tokio::test]
+async fn a_handover_s_fresh_session_keeps_the_configuration_s_load_skill_entry() {
+    let skills_of = |name: &str| crate::skill::SkillsConfig {
+        embedded: vec![crate::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    };
+    for after in ["alpha", "beta"] {
+        let fake = Fake::new(json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "REPORT: searched a and b."},
+            ],
+            [complete("Done")],
+        ]));
+        let mut saved = config(&fake, &["Grep"]);
+        saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+        saved.skills_config = Some(skills_of("alpha"));
+        let mut task = Task::new(saved, "Search a and b.".into(), fake.workspace(), None);
+        let mut registry = ToolRegistry::new();
+        let skills = task.agent_config.skills_config.clone().unwrap();
+        let prompt = crate::skill::SkillManager::load(&skills, &task.current_working_directory)
+            .unwrap()
+            .setup(&mut registry, &mut task.agent_config);
+        let mut current = task.agent_config.clone();
+        current.skills_config = Some(skills_of(after));
+        current.tool_config.tool_specific_configs.insert(
+            crate::skill::LOAD_SKILL_TOOL_NAME.into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(false),
+                ..Default::default()
+            },
+        );
+        let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(ConfigHook(current)));
+        let (events, commands, handle) = runtime.run_task(
+            task,
+            Arc::new(registry),
+            None,
+            false,
+            Some(prompt),
+            None,
+            None,
+        );
+        let (task, _) = Run {
+            events,
+            commands,
+            handle,
+        }
+        .finish()
+        .await;
+        assert_eq!(task.handovers.len(), 1, "{after}");
+        let tools = &task.agent_config.tool_config;
+        assert_eq!(
+            tools.tool_specific_configs[crate::skill::LOAD_SKILL_TOOL_NAME].auto_approve_tool_use,
+            Some(false),
+            "{after}"
+        );
+        assert!(
+            tools
+                .available_tool_names
+                .contains(&crate::skill::LOAD_SKILL_TOOL_NAME.to_string())
+        );
+    }
+}
+
 /// A report asked for alone goes into a copy of the task's session as its
 /// next input, also for an agent that compacts in Claude Code (no
 /// `/compact` is sent).

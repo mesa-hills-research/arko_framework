@@ -879,6 +879,79 @@ async fn a_handover_s_configuration_brings_its_skills() {
     }
 }
 
+/// `load_skill`'s per-tool entry with auto-approval off.
+fn asked_load_skill() -> crate::agent_config::PerToolConfigOverride {
+    crate::agent_config::PerToolConfigOverride {
+        auto_approve_tool_use: Some(false),
+        ..Default::default()
+    }
+}
+
+/// The hook's configuration keeps its own entry for `load_skill` (here,
+/// approval asked for), with the skills the same or other, in place of the
+/// auto-approval the runtime gave it.
+#[tokio::test]
+async fn a_handover_s_configuration_keeps_its_load_skill_entry() {
+    for after in ["alpha", "beta"] {
+        let (mut agent, mut events, commands) = loop_with_skills(Some(skills_of("alpha")));
+        let tools = &agent.task.agent_config.tool_config;
+        assert_eq!(
+            tools.tool_specific_configs[crate::skill::LOAD_SKILL_TOOL_NAME].auto_approve_tool_use,
+            Some(true)
+        );
+        let mut current = agent.task.agent_config.clone();
+        current.skills_config = Some(skills_of(after));
+        current.tool_config.tool_specific_configs.insert(
+            crate::skill::LOAD_SKILL_TOOL_NAME.into(),
+            asked_load_skill(),
+        );
+        agent.handover_hook = Some(Arc::new(ConfigHook(current)));
+        commands.try_send(UserCommand::RequestHandover).unwrap();
+        push(
+            &mut agent,
+            vec![reply("The report.", 10), native_complete()],
+        );
+        let (task, _) = run(agent, &mut events).await;
+        assert_eq!(task.handovers.len(), 1);
+        let tools = &task.agent_config.tool_config;
+        assert_eq!(
+            tools.tool_specific_configs[crate::skill::LOAD_SKILL_TOOL_NAME].auto_approve_tool_use,
+            Some(false),
+            "{after}"
+        );
+        assert!(
+            tools
+                .available_tool_names
+                .contains(&crate::skill::LOAD_SKILL_TOOL_NAME.to_string())
+        );
+    }
+}
+
+/// For a handover, the runtime's own listing of `load_skill` and the entry
+/// it gives the tool don't count, and an entry of the host's own does.
+#[test]
+fn a_load_skill_entry_of_its_own_counts_for_a_handover() {
+    let (agent, _, _) = loop_with_skills(Some(skills_of("alpha")));
+    let current = agent.task.agent_config.clone();
+    let mut bare = current.clone();
+    bare.tool_config
+        .available_tool_names
+        .retain(|name| name != crate::skill::LOAD_SKILL_TOOL_NAME);
+    bare.tool_config
+        .tool_specific_configs
+        .remove(crate::skill::LOAD_SKILL_TOOL_NAME);
+    assert!(crate::handover::same_for_handover(&current, &bare));
+    let mut own = bare.clone();
+    own.tool_config.tool_specific_configs.insert(
+        crate::skill::LOAD_SKILL_TOOL_NAME.into(),
+        asked_load_skill(),
+    );
+    assert!(!crate::handover::same_for_handover(&current, &own));
+    let mut other = bare;
+    other.skills_config = Some(skills_of("beta"));
+    assert!(!crate::handover::same_for_handover(&current, &other));
+}
+
 /// A pending handover saved before reports could be asked for alone loads
 /// as a handover, and the new fields are saved only when set.
 #[test]

@@ -684,14 +684,45 @@ pub fn same_skills(
     saved(a) == saved(b)
 }
 
+/// Whether a task whose configuration is `current` would run the same with
+/// `next` from a [`HandoverHook::handover_config`]. The runtime lists
+/// `load_skill` by the skills, and gives it the per-tool entry
+/// [`SkillManager::setup`](crate::skill::SkillManager::setup) does where
+/// there is none, so neither counts. An explicit entry for `load_skill`
+/// counts, and so do the skills, embedded ones included ([`same_skills`]).
+pub fn same_for_handover(current: &AgentConfig, next: &AgentConfig) -> bool {
+    let normalized = |config: &AgentConfig| {
+        let mut config = config.clone();
+        let tools = &mut config.tool_config;
+        tools
+            .available_tool_names
+            .retain(|name| name != crate::skill::LOAD_SKILL_TOOL_NAME);
+        let generated = serde_json::to_value(crate::skill::load_skill_default_override()).ok();
+        if tools
+            .tool_specific_configs
+            .get(crate::skill::LOAD_SKILL_TOOL_NAME)
+            .is_some_and(|entry| serde_json::to_value(entry).ok() == generated)
+        {
+            tools
+                .tool_specific_configs
+                .remove(crate::skill::LOAD_SKILL_TOOL_NAME);
+        }
+        serde_json::to_value(config).ok()
+    };
+    normalized(current) == normalized(next)
+        && same_skills(current.skills_config.as_ref(), next.skills_config.as_ref())
+}
+
 /// The tools and skill prompt a runtime goes on with once its task takes
-/// `config` from a [`HandoverHook::handover_config`], in place of the
-/// configuration whose skills were `current`. `None` keeps what the runtime
-/// has, when the skills stay the same: `config` then lists `load_skill` as
-/// `listed` (the current configuration's entries for it) says. Otherwise the
-/// skills load from `config` in `workspace`, its `load_skill` replaces the
-/// runtime's (`config` lists it when it has skills to load), and the prompt
-/// lists its skills. Without skills, there is neither.
+/// `config` from a [`HandoverHook::handover_config`], in place of
+/// `current`. `None` keeps what the runtime has, when the skills stay the
+/// same, and `config` then lists `load_skill` as `current` does. Otherwise
+/// the skills load from `config` in `workspace`, its `load_skill` replaces
+/// the runtime's (`config` lists it when it has skills to load), and the
+/// prompt lists its skills. Without skills, there is neither. An explicit
+/// per-tool entry for `load_skill` in `config` (its approval, time limit or
+/// result cap) stays. Without one, a listed `load_skill` gets the entry
+/// [`SkillManager::setup`](crate::skill::SkillManager::setup) gives.
 pub(crate) fn handover_skills(
     all_tools: &crate::tool::ToolRegistry,
     current: &AgentConfig,
@@ -709,13 +740,12 @@ pub(crate) fn handover_skills(
     tools
         .available_tool_names
         .retain(|name| name != LOAD_SKILL_TOOL_NAME);
-    tools.tool_specific_configs.remove(LOAD_SKILL_TOOL_NAME);
     if same_skills(
         current.skills_config.as_ref(),
         config.skills_config.as_ref(),
     ) {
-        let listed = &current.tool_config;
-        if listed
+        if current
+            .tool_config
             .available_tool_names
             .iter()
             .any(|name| name == LOAD_SKILL_TOOL_NAME)
@@ -723,11 +753,10 @@ pub(crate) fn handover_skills(
             tools
                 .available_tool_names
                 .push(LOAD_SKILL_TOOL_NAME.to_string());
-        }
-        if let Some(entry) = listed.tool_specific_configs.get(LOAD_SKILL_TOOL_NAME) {
             tools
                 .tool_specific_configs
-                .insert(LOAD_SKILL_TOOL_NAME.to_string(), entry.clone());
+                .entry(LOAD_SKILL_TOOL_NAME.to_string())
+                .or_insert_with(crate::skill::load_skill_default_override);
         }
         return Ok(None);
     }
@@ -747,7 +776,7 @@ pub(crate) fn handover_skills(
     Ok(Some((registry, prompt)))
 }
 
-/// The highest question number already taken before `count` questions/// The highest question number already taken before `count` questions
+/// The highest question number already taken before `count` questions
 /// `task`'s agent asks now (see [`HandoverHook::question_numbers`]), with
 /// `taken` numbers the runtime holds for calls not recorded yet.
 pub(crate) fn last_question_number(

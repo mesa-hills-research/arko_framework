@@ -156,12 +156,18 @@ impl SkillManager {
                 .tool_config
                 .tool_specific_configs
                 .entry(tool_name)
-                .or_insert_with(|| PerToolConfigOverride {
-                    auto_approve_tool_use: Some(true),
-                    ..Default::default()
-                });
+                .or_insert_with(load_skill_default_override);
         }
 
         self.prompt_context.clone()
+    }
+}
+
+/// The per-tool entry [`SkillManager::setup`] gives `load_skill` when the
+/// configuration has none: auto-approved.
+pub(crate) fn load_skill_default_override() -> PerToolConfigOverride {
+    PerToolConfigOverride {
+        auto_approve_tool_use: Some(true),
+        ..Default::default()
     }
 }
