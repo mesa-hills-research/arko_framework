@@ -800,8 +800,8 @@ killed outright, or ends with `std::process::exit`, runs no destructor. On Windo
 job object still ends the servers. On Unix they end once they notice their input has
 closed, so a server that ignores that keeps running. A host about to call
 `std::process::exit` calls `kill_mcp_servers()` first, which kills every server's
-process group in the process at once, as `kill_stop_aware_commands()` does for commands,
-and kills any server that starts after it as it starts.
+process group in the process at once, as `kill_stop_aware_commands()` does for commands.
+It also kills a server whose start is under way, and keeps any more from starting.
 Out of the terminal's foreground group, a server doesn't get the terminal's Ctrl-C.
 
 A server's stderr goes to the log (the `log` crate) at info level, a line at a time,

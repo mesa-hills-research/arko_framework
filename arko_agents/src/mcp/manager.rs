@@ -293,8 +293,9 @@ pub(crate) mod tests {
     /// server writes its own and its program's process IDs to.
     const EXIT_PIDS_ENV: &str = "ARKO_TEST_MCP_EXIT_PIDS";
     /// Set there to `after` for the child to call `kill_mcp_servers` after
-    /// it starts its server and before it exits, and to `before` to call it
-    /// before it starts one.
+    /// it starts its server and before it exits, to `before` to call it
+    /// before it starts one, and to `during` to call it while the start is
+    /// paused between the spawn and the listing.
     const EXIT_KILLS_ENV: &str = "ARKO_TEST_MCP_EXIT_KILLS";
 
     /// Runs the child process of
@@ -414,6 +415,9 @@ pub(crate) mod tests {
             ],
         };
         let kills = std::env::var(EXIT_KILLS_ENV).unwrap_or_default();
+        if kills == "during" {
+            exit_during_a_start(config, &paths[0]);
+        }
         if kills == "before" {
             crate::kill_mcp_servers();
         }
@@ -424,6 +428,59 @@ pub(crate) mod tests {
             crate::kill_mcp_servers();
         }
         std::process::exit(7);
+    }
+
+    /// Starts a server on a thread of its own, with the start paused between
+    /// its spawn and its listing, writes the server's process ID to
+    /// `server_pid`, and calls `kill_mcp_servers` meanwhile. If the kill
+    /// returns within 300 ms, the host exits at once, as a host would.
+    /// Otherwise it waits for the start, which goes on, and exits once the
+    /// kill returns. Exits with status 7.
+    fn exit_during_a_start(config: McpConfig, server_pid: &Path) -> ! {
+        let (spawned, spawn) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel();
+        *super::super::connection::PAUSE_AFTER_SPAWN.lock().unwrap() = Some((spawned, wait));
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let manager = runtime.block_on(McpManager::from_config(&config));
+            std::mem::forget(manager);
+            loop {
+                std::thread::park();
+            }
+        });
+        let pid = spawn.recv().unwrap();
+        std::fs::write(server_pid, pid.to_string()).unwrap();
+        let kill = std::thread::spawn(crate::kill_mcp_servers);
+        std::thread::sleep(Duration::from_millis(300));
+        if !kill.is_finished() {
+            let _ = go.send(());
+            kill.join().unwrap();
+        }
+        std::process::exit(7);
+    }
+
+    /// `kill_mcp_servers`, called while a server's start is between its spawn
+    /// and its listing, returns only once the server is listed, and kills
+    /// it, so a host that exits as soon as it returns leaves nothing running.
+    #[test]
+    fn kill_mcp_servers_kills_a_server_whose_start_is_under_way() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (code, server_pid, program_pid) = exit_helper("during");
+        assert_eq!(code, Some(7));
+        let server = Program::read(&server_pid);
+        runtime.block_on(server.ends());
+        // The launcher may have been killed before it wrote it.
+        let program = std::fs::read_to_string(&program_pid).unwrap_or_default();
+        let _ = std::fs::remove_file(&program_pid);
+        if let Ok(pid) = program.trim().parse() {
+            runtime.block_on(Program(pid).ends());
+        }
     }
 
     /// So does a runtime that ends before the manager is dropped, which

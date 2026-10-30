@@ -429,8 +429,7 @@ impl Connection {
 #[cfg(unix)]
 struct ServerGroups {
     listed: std::collections::BTreeSet<i32>,
-    /// `kill_mcp_servers` ran, so a server that starts from now on is
-    /// killed as it is listed.
+    /// `kill_mcp_servers` ran, so no server starts from now on.
     killed: bool,
 }
 
@@ -451,6 +450,14 @@ fn server_groups() -> std::sync::MutexGuard<'static, ServerGroups> {
 /// uncollected then.
 #[cfg(all(test, unix))]
 pub(crate) static UNLISTED: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
+
+/// Pauses a test's server start between the spawn and the listing, while
+/// the list's lock is held: sends the child's process ID, then waits.
+#[cfg(all(test, unix))]
+#[allow(clippy::type_complexity)]
+pub(crate) static PAUSE_AFTER_SPAWN: Mutex<
+    Option<(std::sync::mpsc::Sender<u32>, std::sync::mpsc::Receiver<()>)>,
+> = Mutex::new(None);
 
 /// A server's process group, listed for [`kill_mcp_servers`] while it may
 /// run.
@@ -488,31 +495,28 @@ pub(crate) struct ServerProcess {
 }
 
 impl ServerProcess {
-    /// Starts `command` as a server's process tree and lists its group.
-    /// After `kill_mcp_servers` the group is killed instead, so a server that
-    /// was starting as the host exits doesn't escape it.
+    /// Starts `command` as a server's process tree and lists its group, both
+    /// under the list's lock, so `kill_mcp_servers` never returns while a
+    /// server that started is unlisted. Once it has run, no server starts.
     fn spawn(command: &mut Command) -> std::io::Result<Self> {
-        let (child, tree) = ProcessTree::spawn(command)?;
         #[cfg(unix)]
         {
-            let id = child.id().and_then(|id| i32::try_from(id).ok());
             let mut groups = server_groups();
-            let id = match id {
-                Some(id) if groups.killed => {
-                    // Uncollected, so the ID is still the server's.
-                    let _ = nix::sys::signal::killpg(
-                        nix::unistd::Pid::from_raw(id),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                    None
-                }
-                Some(id) => {
-                    groups.listed.insert(id);
-                    Some(id)
-                }
-                None => None,
-            };
-            drop(groups);
+            if groups.killed {
+                return Err(std::io::Error::other(
+                    "MCP servers no longer start, as the host is exiting",
+                ));
+            }
+            let (child, tree) = ProcessTree::spawn(command)?;
+            #[cfg(test)]
+            if let Some((spawned, go)) = PAUSE_AFTER_SPAWN.lock().unwrap().take() {
+                let _ = spawned.send(child.id().unwrap_or_default());
+                let _ = go.recv();
+            }
+            let id = child.id().and_then(|id| i32::try_from(id).ok());
+            if let Some(id) = id {
+                groups.listed.insert(id);
+            }
             Ok(Self {
                 tree,
                 listed: ListedGroup { id },
@@ -521,6 +525,7 @@ impl ServerProcess {
         }
         #[cfg(not(unix))]
         {
+            let (child, tree) = ProcessTree::spawn(command)?;
             Ok(Self {
                 tree,
                 listed: ListedGroup {},
@@ -545,7 +550,9 @@ impl Drop for ServerProcess {
 
 /// Kills every MCP server running in this process, with the programs each
 /// started, at once (`SIGKILL` to each server's process group on Unix), and
-/// any server that starts after it as it starts. For a host about to exit
+/// keeps any more from starting. A server whose start is under way is
+/// killed as well, since it returns only once that server is listed. For a
+/// host about to exit
 /// without unwinding. `std::process::exit` runs no destructors, so no server
 /// is stopped, and a server that ignores the end of its input keeps running
 /// after the host has gone, as do the programs it started. Call it right
