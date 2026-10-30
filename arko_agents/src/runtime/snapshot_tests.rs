@@ -497,6 +497,64 @@ async fn open_native_calls_are_settled_by_their_tools_recovery_modes() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A report asked for alone of a task cancelled while calls ran (aborted
+/// after the grace period) runs none of them again and resumes no run one
+/// started: each is in doubt, and the report comes after them.
+#[tokio::test]
+async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
+    let workspace = workspace();
+    let reader = Arc::new(Probe::new("reader", ToolRecovery::Rerun));
+    let resumer = Arc::new(Probe::new("resumer", ToolRecovery::Resume));
+    let (mut agent, _, _) = agent(
+        config(ToolCallingMode::Native, &["reader", "resumer"]),
+        registry(vec![reader.clone(), resumer.clone()]),
+        &workspace,
+    );
+    let read = native_call("read", "reader", serde_json::json!({"what": "r"}));
+    let resume = native_call("resume", "resumer", serde_json::json!({"what": "child"}));
+    saved_native_task(&mut agent, vec![read, resume]);
+    let (read_id, resume_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut task = reloaded(&agent.task);
+    task.running_tool_calls = vec![
+        running(read_id, Some("read"), "reader", "r"),
+        running(resume_id, Some("resume"), "resumer", "child"),
+    ];
+    task.set_state(TaskState::Cancelled {
+        reason: "The agent did not stop in time and was aborted.".into(),
+    });
+    task.request_report(None).unwrap();
+    let (mut agent, mut events, _commands) = super::tool_call_tests::agent_for(
+        task,
+        registry(vec![reader.clone(), resumer.clone()]),
+        Arc::new(ai::LLMClient::new()),
+    );
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(super::image_tests::response(ai::Message::new_assistant(
+            "REPORT: read and resumed nothing.",
+        )));
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: read and resumed nothing."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.running_tool_calls.is_empty());
+    assert_calls_paired(&task.conversation);
+    let output = |call: &str| result_for(&task.conversation, call)[0].clone();
+    assert_eq!(output("read").output, RESTARTED_CALL);
+    assert_eq!(output("resume").output, RESTARTED_CALL);
+    assert!(reader.seen.lock().unwrap().is_empty());
+    assert!(resumer.seen.lock().unwrap().is_empty());
+    drop(drain(&mut events));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A tool whose calls differ settles each open call by the call: a read
 /// runs again and a write is in doubt. A read is reported without waiting
 /// for the save, and a write waits.

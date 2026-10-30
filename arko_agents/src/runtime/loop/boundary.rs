@@ -46,7 +46,7 @@ impl AgentLoop {
     }
 
     pub(super) fn refresh_file_tree_context(&mut self) {
-        if self.handover_report_due() {
+        if self.context_held() {
             return;
         }
         let config = &self.task.agent_config.environment_details_config;
@@ -99,7 +99,7 @@ impl AgentLoop {
     /// source's context joins the context taken from the channel, and all of
     /// it goes into the conversation.
     pub(super) fn flush_context_injections(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.handover_report_due() {
+        if self.context_held() {
             return Ok(());
         }
         if let Some(update) = self
@@ -142,7 +142,7 @@ impl AgentLoop {
         // and could be lost from it (a message that needs a reply, say).
         if (self.task.pending_context_injections.is_empty()
             && self.task.pending_context_images.is_empty())
-            || self.handover_report_due()
+            || self.context_held()
         {
             return Ok(());
         }
@@ -301,6 +301,10 @@ impl AgentLoop {
             // First: context that arrives as a handover starts waits for
             // the fresh conversation.
             self.start_handover_if_due().await?;
+            // A report asked for alone ends the task once it is in.
+            if self.task.current_state.is_terminal() {
+                return Ok(Flow::Exit);
+            }
             self.flush_context_injections()?;
             self.emit_context_receipts().await?;
             self.refresh_file_tree_context();

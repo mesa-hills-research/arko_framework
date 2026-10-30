@@ -744,6 +744,26 @@ struct Entry {
     messages: usize,
 }
 
+/// Context delivered with a call's result, recorded after the results once
+/// the CLI reports them.
+struct DeliveredContext {
+    /// What went in the call's hook.
+    texts: Vec<String>,
+    /// The note the user typed, sent as their message, by the message's
+    /// UUID, with the text recorded for it. A note the CLI cancels before
+    /// the results is left out.
+    note: Option<(String, String)>,
+}
+
+impl DeliveredContext {
+    /// The record's text, empty when nothing is left.
+    fn text(self) -> String {
+        let mut texts = self.texts;
+        texts.extend(self.note.map(|(_, shown)| shown));
+        texts.join("\n\n")
+    }
+}
+
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
@@ -765,7 +785,14 @@ enum Stopping {
 
 pub(super) struct ClaudeCodeRun {
     task: Task,
+    /// The tools the task's configuration offers, the only ones served.
     registry: Arc<ToolRegistry>,
+    /// Every tool the runtime was given, offered or not, for a handover that
+    /// changes the configuration ([`HandoverHook::handover_config`]).
+    all_tools: Arc<ToolRegistry>,
+    /// The task's command channel, which the tools are bound to (see
+    /// [`bind_tools`](Self::bind_tools)).
+    command_sender: Option<mpsc::WeakSender<UserCommand>>,
     events: mpsc::Sender<AgentEvent>,
     commands: mpsc::Receiver<UserCommand>,
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
@@ -848,7 +875,7 @@ pub(super) struct ClaudeCodeRun {
     /// Text to add after a call's result: a message given with its approval.
     after_result: HashMap<String, String>,
     /// Context delivered with the latest results, mirrored after them.
-    delivered_context: Vec<String>,
+    delivered_context: Vec<DeliveredContext>,
     /// The marks of the context taken out of the task to be sent
     /// ([`TurnContext::marks`]), kept by the task once it holds that
     /// context: in a message it records, or pending again.
@@ -941,7 +968,8 @@ impl ClaudeCodeRun {
         middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     ) -> Self {
         let offered = task.agent_config.tool_config.offered_tool_names();
-        let registry = Arc::new(registry.restricted_to(offered.iter().map(String::as_str)));
+        let all_tools = registry;
+        let registry = Arc::new(all_tools.restricted_to(offered.iter().map(String::as_str)));
         for name in registry.list_tool_names() {
             if let Some(tool) = registry.get(&name) {
                 tool.reset_context(task.id);
@@ -955,6 +983,8 @@ impl ClaudeCodeRun {
         Self {
             task,
             registry,
+            all_tools,
+            command_sender: None,
             events,
             commands,
             turn_context: None,
@@ -1031,7 +1061,8 @@ impl ClaudeCodeRun {
     }
 
     /// Binds the task's tools to its command channel.
-    pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
+    pub(super) fn bind_tools(&mut self, sender: &mpsc::Sender<UserCommand>) {
+        self.command_sender = Some(sender.downgrade());
         for name in self.registry.list_tool_names() {
             if let Some(tool) = self.registry.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
@@ -1295,6 +1326,10 @@ impl ClaudeCodeRun {
                     .contains(&call.tool_name.as_str())
                 });
             let mode = match (&tool, &call.custom_output) {
+                // A report asked for alone runs no call again, and resumes
+                // no run a call started: the run that goes on with the work
+                // does.
+                _ if self.task.report_only() => ToolRecovery::InDoubt,
                 (Some(_), Some(_)) => ToolRecovery::Rerun,
                 (Some(tool), None) => tool.recovery_mode_for(&call.parameters),
                 (None, _) => ToolRecovery::InDoubt,
@@ -1693,6 +1728,15 @@ impl ClaudeCodeRun {
     }
 
     fn report_request(&self) -> String {
+        // A report asked for alone has a request of its own.
+        if let Some(request) = self
+            .task
+            .handover_requested
+            .as_ref()
+            .filter(|request| request.report_only)
+        {
+            return request.report_only_request(false).to_string();
+        }
         let handover = self.task.agent_config.handover.as_ref();
         if self.is_chat() {
             return handover
@@ -2262,6 +2306,13 @@ impl ClaudeCodeRun {
         let input = if self.compaction == Some(Compaction::Due) {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
+        } else if self.task.report_only() && !self.report_delivered {
+            // A report asked for alone: its request goes with the input the
+            // session doesn't have yet.
+            self.report_delivered = true;
+            let request = self.report_request();
+            self.add_user_message(&request)?;
+            self.unsent_input()?
         } else if chat_reports && self.handover_due() {
             self.report_delivered = true;
             let request = self.report_request();
@@ -2598,7 +2649,7 @@ impl ClaudeCodeRun {
         {
             return self.reject_call(id, &name, TASK_COMPLETE.to_string()).await;
         }
-        if self.handover_due() && name != COMPLETE_TASK_TOOL_NAME {
+        if self.handover_due() && (name != COMPLETE_TASK_TOOL_NAME || self.task.report_only()) {
             self.report_delivered = true;
             let request = self.report_request();
             self.emit(AgentEvent::ToolRejected {
@@ -3174,7 +3225,10 @@ impl ClaudeCodeRun {
         if texts.is_empty() && typed.is_empty() {
             return Ok(cc::Hook::proceed());
         }
-        let mut recorded = texts.clone();
+        let mut delivered = DeliveredContext {
+            texts: texts.clone(),
+            note: None,
+        };
         if !typed.is_empty() {
             // A note alone has the update's heading in the record and the hook.
             let shown = if headed {
@@ -3194,6 +3248,7 @@ impl ClaudeCodeRun {
                     } else {
                         marks.clone()
                     };
+                    delivered.note = Some((uuid.clone(), shown));
                     self.sent_notes.insert(uuid, (typed, marks));
                 }
                 Err(error) => {
@@ -3202,11 +3257,11 @@ impl ClaudeCodeRun {
                         self.task.id
                     );
                     texts.push(shown.clone());
+                    delivered.texts.push(shown);
                 }
             }
-            recorded.push(shown);
         }
-        self.delivered_context.push(recorded.join("\n\n"));
+        self.delivered_context.push(delivered);
         self.emit_context_receipts().await?;
         if texts.is_empty() {
             return Ok(cc::Hook::proceed());
@@ -3217,16 +3272,21 @@ impl ClaudeCodeRun {
     /// The CLI reports each message it is sent by its UUID, from `queued` to
     /// `completed`, or `cancelled` when the turn stopped before the model's
     /// next request. A note it cancelled never reached the model, so it goes
-    /// with the next input.
+    /// with the next input, and the record of the results it went with,
+    /// when they are still to come, leaves it out.
     fn note_settled(&mut self, raw: &Value) {
         let state = raw["state"].as_str();
+        let uuid = raw["command_uuid"].as_str();
         if raw["type"] == "command_lifecycle"
             && matches!(state, Some("completed" | "cancelled"))
-            && let Some((text, marks)) = raw["command_uuid"]
-                .as_str()
-                .and_then(|uuid| self.sent_notes.remove(uuid))
+            && let Some((text, marks)) = uuid.and_then(|uuid| self.sent_notes.remove(uuid))
             && state == Some("cancelled")
         {
+            for delivered in &mut self.delivered_context {
+                if delivered.note.as_ref().map(|(sent, _)| sent.as_str()) == uuid {
+                    delivered.note = None;
+                }
+            }
             self.queue_context(text, false);
             self.task.raise_context_marks(&marks);
         }
@@ -3438,6 +3498,10 @@ impl ClaudeCodeRun {
                     self.observe_last();
                     recorded += 1;
                     for context in std::mem::take(&mut self.delivered_context) {
+                        let context = context.text();
+                        if context.is_empty() {
+                            continue;
+                        }
                         self.task.conversation.add_user_message(&context);
                         self.task.increment_user_message_count();
                         self.observe_last();
@@ -4743,8 +4807,14 @@ impl ClaudeCodeRun {
                 }
                 return Ok(None);
             }
+            // A report asked for alone ends the task, in this session.
+            let report_only = self.task.report_only();
             self.complete_handover(report).await?;
-            return Ok(Some(SessionEnd::Restart));
+            return Ok(Some(if report_only {
+                SessionEnd::Stop
+            } else {
+                SessionEnd::Restart
+            }));
         }
         let ends_with_text = self.task.agent_config.tool_config.ends_task_with_text();
         self.open_turns += 1;
@@ -4850,6 +4920,10 @@ impl ClaudeCodeRun {
     /// the wait for a limit that resets at `resets_at` (Unix seconds): until a
     /// little past the reset, when the whole wait fits `max_wait_ms`.
     fn usage_limit_wait(&self, resets_at: u64) -> Option<Duration> {
+        // A report asked for alone doesn't wait: its host goes on without it.
+        if self.task.report_only() {
+            return None;
+        }
         let retry = &self.task.agent_config.llm_retry_config;
         let crate::agent_config::UsageLimitPolicy::WaitUntilReset { max_wait_ms } =
             retry.usage_limit_policy
@@ -4931,11 +5005,14 @@ impl ClaudeCodeRun {
         cause: ErrorRecoveryCause,
     ) -> Result<(), ArkoAgentsError> {
         log::warn!("Task {}: {message}", self.task.id);
-        let pausing = matches!(
-            self.task.agent_config.llm_error_policy,
-            LLMErrorPolicy::PauseAndAwaitApproval
-                | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
-        );
+        // A report asked for alone pauses whatever the policy, so its host
+        // hears the cause.
+        let pausing = self.task.report_only()
+            || matches!(
+                self.task.agent_config.llm_error_policy,
+                LLMErrorPolicy::PauseAndAwaitApproval
+                    | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
+            );
         if pausing {
             self.pause(message, cause).await
         } else {
@@ -5259,10 +5336,103 @@ impl ClaudeCodeRun {
         Ok(true)
     }
 
+    /// The fresh session of a handover runs with `config`, the
+    /// [`HandoverHook`]'s: it is served `config`'s tools and given a system
+    /// prompt written from it, with `config`'s skills when they differ from
+    /// the task's. One the task can't take is left out, and logged.
+    fn take_handover_config(&mut self, mut config: AgentConfig) -> Result<(), ArkoAgentsError> {
+        let (current, next) = (
+            &self.task.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        // Checked (with the rest) as the task takes it, and first here, so
+        // that a configuration left out loads no skills.
+        let skills = if current.provider == next.provider && current.id == next.id {
+            crate::handover::handover_skills(
+                &self.all_tools,
+                &self.task.agent_config,
+                &mut config,
+                &self.task.current_working_directory,
+            )
+        } else {
+            Ok(None)
+        };
+        let taken = skills
+            .map_err(|error| format!("its skills don't load: {error}"))
+            .and_then(|skills| {
+                self.task.take_handover_config(config)?;
+                Ok(skills)
+            });
+        let skills = match taken {
+            Ok(skills) => skills,
+            Err(reason) => {
+                log::warn!(
+                    "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
+                    self.task.id
+                );
+                return Ok(());
+            }
+        };
+        if let Some((tools, prompt)) = skills {
+            self.all_tools = Arc::new(tools);
+            self.skill_prompt_context = prompt;
+        }
+        self.parsing = self.task.agent_config.get_tool_parsing_config();
+        let offered = self.task.agent_config.tool_config.offered_tool_names();
+        let registry = self
+            .all_tools
+            .restricted_to(offered.iter().map(String::as_str));
+        for name in registry.list_tool_names() {
+            let Some(tool) = registry.get(&name) else {
+                continue;
+            };
+            if self
+                .registry
+                .get(&name)
+                .is_some_and(|served| Arc::ptr_eq(&served, &tool))
+            {
+                continue;
+            }
+            tool.reset_context(self.task.id);
+            if let Some(sender) = &self.command_sender {
+                tool.bind_runtime(self.task.id, sender.clone());
+            }
+        }
+        self.registry = Arc::new(registry);
+        self.served_tools = None;
+        // The fresh session's tools are served by a host set up for them.
+        if let Some(host) = self.host.take() {
+            self.interceptor = host
+                .interceptor
+                .as_ref()
+                .map(|interceptor| InterceptorConfig {
+                    interceptor: interceptor.interceptor.clone(),
+                    failure_policy: interceptor.failure_policy.clone(),
+                });
+        }
+        if let Some(hook) = &self.handover_hook {
+            hook.handover_config_taken(&self.task);
+        }
+        let prompt = self.system_prompt()?;
+        self.task.conversation.system_message = Some(prompt);
+        Ok(())
+    }
+
     /// The report arrived: a fresh session starts from the seed and the
-    /// report, in the same task.
+    /// report, in the same task. The hook's configuration, if it gives one,
+    /// applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
+        if self.task.report_only() {
+            // Asked for alone: the task completes with it, and the
+            // conversation stays.
+            self.task.handover_requested = None;
+            self.report_delivered = false;
+            log::info!("Task {}: Report received.", self.task.id);
+            return self
+                .set_state(TaskState::Completed { summary: report })
+                .await;
+        }
         let chat = self.is_chat();
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
@@ -5271,6 +5441,10 @@ impl ClaudeCodeRun {
         };
         let seed =
             crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
+        let config = self
+            .handover_hook
+            .as_ref()
+            .and_then(|hook| hook.handover_config(&self.task));
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
@@ -5286,6 +5460,9 @@ impl ClaudeCodeRun {
             replaced_messages,
             report: report.clone(),
         });
+        if let Some(config) = config {
+            self.take_handover_config(config)?;
+        }
         let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
         let first = builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
         let mut content = vec![ai::Content::Text(first)];

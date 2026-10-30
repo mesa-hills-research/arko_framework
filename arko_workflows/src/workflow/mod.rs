@@ -105,7 +105,9 @@ impl Workflow {
     }
 
     /// [`run_agent`](Self::run_agent) with `options`, such as a working
-    /// directory of the run's own ([`RunOptions::workspace`]).
+    /// directory of the run's own ([`RunOptions::workspace`]) or a
+    /// configuration other than the agent's registered one
+    /// ([`RunOptions::config`]).
     pub async fn run_agent_with(
         &self,
         agent_name: &str,
@@ -210,6 +212,78 @@ impl Workflow {
             let result = self
                 .engine
                 .continue_agent_with(previous, prompt, options, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
+        })
+        .await
+    }
+
+    /// Asks agent run `previous` for a report of its work, without a
+    /// handover, such as before the work goes on in a new run on another
+    /// model ([`RunOptions::config`]). The run writes it in one more turn of
+    /// its conversation, as it writes a handover report, with the
+    /// `handover_report` tool where it is offered and as a reply otherwise,
+    /// and every other tool call is rejected until it does. `request` is the
+    /// request it gets, in place of
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`](arko_agents::handover::DEFAULT_REPORT_ONLY_REQUEST)
+    /// (or [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`](arko_agents::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST)
+    /// for a reply). It works in both runtimes, and an agent that compacts in
+    /// Claude Code writes the report all the same
+    /// ([`arko_agents::Task::request_report`]).
+    ///
+    /// Returns the run's result once the report is in. The run is
+    /// completed, with the report as its summary, and its conversation keeps
+    /// the request and the report. Context that arrives meanwhile (notes,
+    /// messages, subagent news) waits for the run's next turn. A run that is
+    /// completed, waits for an answer (`WaitingForInput`) or was cancelled
+    /// (`Cancelled`, stopped) can be asked. Others, and a run inside another
+    /// run's tool call, return `BuilderInvalid`.
+    ///
+    /// A report that doesn't come returns the error that says why, and the
+    /// run is put back as it was, without the request, its model calls still
+    /// counted. A plan's usage limit or a credential the provider refuses
+    /// isn't waited out or recovered from automatically. They return
+    /// [`WorkflowError::AgentPaused`] with an error-recovery pause whose
+    /// cause is [`ErrorRecoveryCause::UsageLimit`](arko_agents::ErrorRecoveryCause::UsageLimit)
+    /// (with the limit's reset when known) or whose `error_kind` is
+    /// [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication), and
+    /// so do the other errors a request can end in. The report can be
+    /// cancelled by stopping the run ([`stop_run`](Self::stop_run)), which
+    /// returns [`WorkflowError::AgentStopped`].
+    ///
+    /// A report under way when the workflow stops (its process ends, say) is
+    /// never resumed. Checkpoints keep the run as it was before the request,
+    /// and a resume from one puts it back so, with the model calls and the
+    /// context the report run took, and logs that the report was
+    /// interrupted. The run isn't listed as interrupted, and recovering a
+    /// result read before returns the run as it was. A run a checkpoint saved
+    /// writing a report without the run as it was before (when that couldn't
+    /// be saved) isn't recovered either (`BuilderInvalid`).
+    ///
+    /// A Claude Code agent writes the report in a copy of its session, which
+    /// Claude Code saves as a transcript of its own. The copy a report that
+    /// didn't come leaves behind stays on disk until Claude Code's own
+    /// transcript cleanup removes it, after the `cleanupPeriodDays` of the
+    /// user's Claude Code settings (30 days by default, as Claude Code 2.1
+    /// documents it). Claude Code skips that cleanup in the runtime's own
+    /// sessions, which start with `--setting-sources=`, so it happens in a
+    /// later Claude Code process that reads the user's settings.
+    pub async fn request_report(
+        &self,
+        previous: &AgentResult,
+        request: Option<&str>,
+    ) -> Result<AgentResult, WorkflowError> {
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_admitting().await?;
+            let result = self
+                .engine
+                .request_report(previous, request, &self.context)
                 .await;
             self.finish_call(result, |hook| {
                 hook.agent_name = Some(previous.agent_name.clone());
@@ -452,7 +526,9 @@ impl Workflow {
     }
 
     /// [`spawn_agent`](Self::spawn_agent) with `options`, such as a working
-    /// directory of the run's own ([`RunOptions::workspace`]).
+    /// directory of the run's own ([`RunOptions::workspace`]) or a
+    /// configuration other than the agent's registered one
+    /// ([`RunOptions::config`]).
     pub async fn spawn_agent_with(
         &self,
         agent_name: &str,
@@ -2625,10 +2701,15 @@ impl WorkflowBuilder {
         };
         // The checkpoint's results, their tasks read from the task files it
         // refers to (in the checkpoint's directory).
+        // A run that was writing a report on request resumes as it was
+        // before the report.
+        let mut reports_rolled_back = Vec::new();
         let resumed_results = match (&resume_state, &self.resume_from) {
             (Some(state), Some(path)) => {
                 let run_dir = path.parent().unwrap_or(std::path::Path::new("."));
-                state.agent_results_in(run_dir)?
+                let mut results = state.agent_results_in(run_dir)?;
+                reports_rolled_back = state.roll_back_reports(run_dir, &mut results)?;
+                results
             }
             _ => Vec::new(),
         };
@@ -2727,6 +2808,8 @@ impl WorkflowBuilder {
                         .iter()
                         .map(|run| (run.agent_run_id, run.task_file.clone())),
                 );
+                // Saved by the next checkpoint, as put back.
+                persistence.mark_tasks_unsaved(reports_rolled_back.iter().cloned());
             } else {
                 // The next checkpoint writes every task into this other run
                 // directory, so a task that can't be read fails the resume.
@@ -2859,6 +2942,8 @@ impl WorkflowBuilder {
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
+            run_llm_configs: parking_lot::RwLock::new(HashMap::new()),
+            report_baselines: parking_lot::Mutex::new(HashMap::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             resume_only_tools: self.resume_only_tools,
@@ -3427,6 +3512,10 @@ mod cut_back_tests;
 #[cfg(test)]
 #[path = "keep_warm_tests.rs"]
 mod keep_warm_tests;
+
+#[cfg(test)]
+#[path = "report_tests.rs"]
+mod report_tests;
 
 #[cfg(test)]
 mod event_stream_tests;

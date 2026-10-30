@@ -437,3 +437,582 @@ async fn a_kept_claude_code_configuration_needs_its_host_tools() {
         "{refused}"
     );
 }
+
+/// A new run started on a configuration of its own (`RunOptions::config`),
+/// here on another model, without rebuilding the workflow: its requests go
+/// to that model with that configuration's tools and instructions. The
+/// task keeps it, also across a resume from a checkpoint that doesn't keep
+/// saved configurations, while new runs take the registered one.
+#[tokio::test]
+async fn a_new_run_starts_on_another_model_and_keeps_it_across_a_resume() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let sol = arko_ai::Model::openai_gpt_6_1_sol();
+    let luna = chat().llm_config.model;
+    let mut own = agent();
+    own.llm_config.model = sol.clone();
+    let first = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(own))
+        .await
+        .unwrap();
+    assert!(first.task().unwrap().reconfigured);
+    let bodies = || -> Vec<Value> {
+        server
+            .bodies()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect()
+    };
+    let started = &bodies()[0];
+    assert_eq!(started["model"], sol.id.as_str(), "{started}");
+    assert_eq!(tool_names(started), ["probe"]);
+    assert!(
+        started["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Work on the user's task.")
+    );
+
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = builder(&server, &workspace)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.info().agent_config.llm_config.model.id, sol.id);
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    let continued = bodies().pop().unwrap();
+    assert_eq!(continued["model"], sol.id.as_str(), "{continued}");
+    assert_eq!(tool_names(&continued), ["probe"]);
+    resumed.run_agent("main", "Start over.").await.unwrap();
+    let fresh = bodies().pop().unwrap();
+    assert_eq!(fresh["model"], luna.id.as_str(), "{fresh}");
+    assert!(tool_names(&fresh).is_empty(), "{fresh}");
+}
+
+/// A run started on a Claude Code configuration while its agent is
+/// registered with an API model runs in Claude Code, and the other way
+/// round. Each resumes from a checkpoint on its own configuration.
+#[tokio::test]
+async fn a_new_run_moves_between_an_api_model_and_claude_code() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(serde_json::json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Done in Claude Code."}}],
+    ]));
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let in_claude_code = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(fake.agent()))
+        .await
+        .unwrap();
+    assert_eq!(in_claude_code.status, AgentRunStatus::Completed);
+    assert_eq!(in_claude_code.summary, "Done in Claude Code.");
+    assert_eq!(server.requests(), 0);
+    assert_eq!(fake.logged("user").len(), 1);
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = builder(&server, &workspace)
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(in_claude_code.agent_run_id).unwrap();
+    assert_eq!(
+        restored.info().agent_config.llm_config.model.provider,
+        arko_ai::Provider::ClaudeCode
+    );
+    drop(resumed);
+
+    // Registered in Claude Code, a run starts on an API model.
+    let workspace = Workspace::new();
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", fake.agent())
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let on_the_api = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(chat()))
+        .await
+        .unwrap();
+    assert_eq!(on_the_api.summary, "Sure.");
+    assert_eq!(server.requests(), 1);
+    assert_eq!(fake.logged("user").len(), 1);
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", fake.agent())
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(on_the_api.agent_run_id).unwrap();
+    resumed.continue_agent(&restored, "And now?").await.unwrap();
+    assert_eq!(server.requests(), 2);
+    assert_eq!(fake.logged("user").len(), 1);
+}
+
+/// A handover of a run that keeps the configuration it was saved with
+/// (`keep_saved_configs`) starts the fresh conversation on the agent's
+/// configuration as registered now: a run saved with an old tool set comes
+/// out with the current one, and the current instructions.
+#[tokio::test]
+async fn a_handover_of_a_saved_run_takes_the_registered_configuration() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else if body.contains("Keep going.") {
+            // Over the handover size.
+            tool_call_turn("p1", "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", "\"input_tokens\":20000")
+        } else {
+            text_turn(&format!("t{index}"), "Sure.")
+        })
+    })
+    .await;
+    let mut old = agent();
+    old.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", old)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let mut current = agent();
+    current.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    current.tool_config.available_tool_names = vec!["probe".into(), "fresh".into()];
+    current.instructions = "Work with the fresh tool.".into();
+    let resumed = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", current)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .agent_tool("main", ProbeTool::new("fresh", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    let result = resumed
+        .continue_agent(&restored, "Keep going.")
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "Done.");
+    let task = result.task().unwrap();
+    assert_eq!(task.handovers.len(), 1);
+    assert!(!task.reconfigured);
+    assert!(
+        task.agent_config
+            .tool_config
+            .available_tool_names
+            .contains(&"fresh".to_string())
+    );
+
+    let bodies: Vec<Value> = server
+        .bodies()
+        .iter()
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    // Before the handover, the saved configuration.
+    let continued = &bodies[1];
+    assert!(!tool_names(continued).contains(&"fresh".to_string()));
+    assert!(
+        continued["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Work on the user's task.")
+    );
+    // The fresh conversation, the registered one.
+    let fresh = bodies.last().unwrap();
+    assert!(fresh.to_string().contains("REPORT: probed once."));
+    let tools = tool_names(fresh);
+    assert!(
+        tools.contains(&"fresh".to_string()) && tools.contains(&"probe".to_string()),
+        "{tools:?}"
+    );
+    let instructions = fresh["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Work with the fresh tool."),
+        "{instructions}"
+    );
+}
+
+/// A run the host started on a configuration of its own keeps it across a
+/// handover.
+#[tokio::test]
+async fn a_handover_of_a_run_on_the_host_s_configuration_keeps_it() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else {
+            // Under the handover size, then over it: a conversation that
+            // starts over it doesn't hand over.
+            let size = match body.matches("\"function_call_output\"").count() {
+                0 => "\"input_tokens\":5000",
+                _ => "\"input_tokens\":20000",
+            };
+            tool_call_turn(&format!("p{index}"), "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", size)
+        })
+    })
+    .await;
+    let mut registered = agent();
+    registered.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    registered.instructions = "Work as registered.".into();
+    let mut own = registered.clone();
+    own.instructions = "Work as the host says.".into();
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", registered)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let result = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(own))
+        .await
+        .unwrap();
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
+    let fresh: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
+    assert!(fresh.to_string().contains("REPORT: probed once."));
+    let instructions = fresh["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Work as the host says."),
+        "{instructions}"
+    );
+}
+
+/// A configuration given for a run doesn't make an agent of a name that
+/// isn't registered: the run isn't started, and no model is asked.
+#[tokio::test]
+async fn a_run_on_its_own_configuration_needs_a_registered_agent() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let error = workflow
+        .run_agent_with("ghost", "Hello.", RunOptions::new().config(agent()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, WorkflowError::AgentNotFound(name) if name == "ghost"),
+        "{error}"
+    );
+    let error = match workflow
+        .spawn_agent_with("ghost", "Hello.", RunOptions::new().config(agent()))
+        .await
+    {
+        Ok(_) => panic!("a run of an agent that isn't registered started"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, WorkflowError::AgentNotFound(name) if name == "ghost"),
+        "{error}"
+    );
+    assert_eq!(server.requests(), 0);
+}
+
+/// A handover that changes the run's prompt cache lifetime changes its
+/// automatic `wait_for_message` limit too.
+#[tokio::test]
+async fn a_handover_s_configuration_sets_the_run_s_wait_limit() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else if body.contains("Keep going.") {
+            tool_call_turn("p1", "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", "\"input_tokens\":20000")
+        } else {
+            text_turn(&format!("t{index}"), "Sure.")
+        })
+    })
+    .await;
+    let mut saved = agent();
+    saved.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let build = |config: AgentConfig| {
+        Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", config)
+            .agent_tool("main", ProbeTool::new("probe", false))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+    };
+    let workflow = build(saved.clone()).build().unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // GPT-5.6 Luna's 30-minute cache gives a 27-minute limit, and a
+    // 10-minute lifetime 9.
+    let mut current = saved;
+    current.llm_config.generation_config = current
+        .llm_config
+        .generation_config
+        .with_prompt_cache_lifetime(std::time::Duration::from_secs(600));
+    let resumed = build(current)
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .unwrap();
+    let limit = || {
+        crate::messaging::wait::WaitForMessageTool::new(
+            resumed.context().clone(),
+            "main".to_string(),
+            Arc::new(server.client()),
+        )
+    };
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(
+        limit().wait_limit(first.agent_run_id).await,
+        std::time::Duration::from_secs(27 * 60)
+    );
+    let result = resumed
+        .continue_agent(&restored, "Keep going.")
+        .await
+        .unwrap();
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
+    assert_eq!(
+        limit().wait_limit(first.agent_run_id).await,
+        std::time::Duration::from_secs(9 * 60)
+    );
+}
+
+/// The skills configuration of one embedded skill, `name`.
+fn skills_of(name: &str) -> arko_agents::skill::SkillsConfig {
+    arko_agents::skill::SkillsConfig {
+        embedded: vec![arko_agents::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    }
+}
+
+/// A handover sees a change of the embedded skills alone (a saved
+/// configuration leaves them out), and the run's `load_skill` policy follows
+/// the configuration it gives once the runtime takes it.
+#[tokio::test]
+async fn a_handover_sees_a_change_of_the_embedded_skills() {
+    use arko_agents::HandoverHook;
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let mut registered = agent();
+    registered.skills_config = Some(arko_agents::skill::SkillsConfig {
+        load_skill_interception: Some(arko_agents::InterceptionFailurePolicy::UseRawResult),
+        ..skills_of("beta")
+    });
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", registered.clone())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    let prepared = workflow
+        .engine
+        .prepare_agent_config("main", &registered, context);
+    let hook = crate::workflow::engine::WorkflowHandover {
+        context: context.clone(),
+        agent_name: "main".to_string(),
+        prompt_message_ids: Vec::new(),
+        review: false,
+        depth: 0,
+        load_skill_policy: Default::default(),
+    };
+    let same = arko_agents::Task::new(prepared.clone(), "Go.".into(), workspace.0.clone(), None);
+    assert!(hook.handover_config(&same).is_none());
+    assert!(hook.load_skill_policy.read().is_none());
+    let mut older = prepared;
+    older.skills_config.as_mut().unwrap().embedded = skills_of("alpha").embedded;
+    let saved = arko_agents::Task::new(older, "Go.".into(), workspace.0.clone(), None);
+    let config = hook.handover_config(&saved).unwrap();
+    assert_eq!(
+        config.skills_config.as_ref().unwrap().embedded,
+        skills_of("beta").embedded
+    );
+    // Only once the runtime takes it.
+    assert!(hook.load_skill_policy.read().is_none());
+    let mut taken = saved;
+    taken.agent_config = config;
+    hook.handover_config_taken(&taken);
+    assert_eq!(
+        *hook.load_skill_policy.read(),
+        Some(arko_agents::InterceptionFailurePolicy::UseRawResult)
+    );
+}
+
+/// A handover sees a change of `load_skill`'s per-tool entry alone (here,
+/// approval asked for), where the run went by the auto-approval its runtime
+/// gave the tool, and keeps the entry.
+#[tokio::test]
+async fn a_handover_sees_a_change_of_load_skill_s_entry() {
+    use arko_agents::HandoverHook;
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let mut registered = agent();
+    registered.skills_config = Some(skills_of("alpha"));
+    let saved_config = registered.clone();
+    registered.tool_config.tool_specific_configs.insert(
+        arko_agents::LOAD_SKILL_TOOL_NAME.into(),
+        arko_agents::PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", registered)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    // Saved before the entry: the runtime gave load_skill auto-approval.
+    let mut config = workflow
+        .engine
+        .prepare_agent_config("main", &saved_config, context);
+    let skills = config.skills_config.clone().unwrap();
+    arko_agents::skill::SkillManager::load(&skills, &workspace.0)
+        .unwrap()
+        .setup(&mut arko_agents::ToolRegistry::new(), &mut config);
+    let saved = arko_agents::Task::new(config, "Go.".into(), workspace.0.clone(), None);
+    let hook = crate::workflow::engine::WorkflowHandover {
+        context: context.clone(),
+        agent_name: "main".to_string(),
+        prompt_message_ids: Vec::new(),
+        review: false,
+        depth: 0,
+        load_skill_policy: Default::default(),
+    };
+    let given = hook.handover_config(&saved).unwrap();
+    assert_eq!(
+        given.tool_config.tool_specific_configs[arko_agents::LOAD_SKILL_TOOL_NAME]
+            .auto_approve_tool_use,
+        Some(false)
+    );
+}
+
+/// A configuration the runtime leaves out at a handover (its skills don't
+/// load) changes none of the run's settings: its automatic
+/// `wait_for_message` limit stays by the configuration it keeps.
+#[tokio::test]
+async fn a_handover_configuration_left_out_leaves_the_run_s_settings() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else if body.contains("Keep going.") {
+            tool_call_turn("p1", "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", "\"input_tokens\":20000")
+        } else {
+            text_turn(&format!("t{index}"), "Sure.")
+        })
+    })
+    .await;
+    let mut saved = agent();
+    saved.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let build = |config: AgentConfig| {
+        Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", config)
+            .agent_tool("main", ProbeTool::new("probe", false))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+    };
+    let workflow = build(saved.clone()).build().unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // A 10-minute cache lifetime, and skills from a folder that isn't there.
+    let mut current = saved;
+    current.llm_config.generation_config = current
+        .llm_config
+        .generation_config
+        .with_prompt_cache_lifetime(std::time::Duration::from_secs(600));
+    current.skills_config = Some(arko_agents::skill::SkillsConfig {
+        global_sources: vec![arko_agents::skill::SkillSource {
+            path: workspace.0.join("no-skills-here").display().to_string(),
+            include: None,
+            exclude: None,
+            optional: false,
+        }],
+        on_invalid_skill: arko_agents::skill::InvalidSkillPolicy::Error,
+        ..Default::default()
+    });
+    let resumed = build(current)
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    let result = resumed
+        .continue_agent(&restored, "Keep going.")
+        .await
+        .unwrap();
+    let task = result.task().unwrap();
+    assert_eq!(task.handovers.len(), 1);
+    assert!(task.agent_config.skills_config.is_none());
+    let limit = crate::messaging::wait::WaitForMessageTool::new(
+        resumed.context().clone(),
+        "main".to_string(),
+        Arc::new(server.client()),
+    );
+    assert_eq!(
+        limit.wait_limit(first.agent_run_id).await,
+        std::time::Duration::from_secs(27 * 60)
+    );
+}

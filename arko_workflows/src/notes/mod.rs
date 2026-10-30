@@ -647,17 +647,20 @@ impl NoteBoard {
         drop(state);
         // Read outside the lock: an image may come from its file. The text
         // follows, since it says which images can't be given.
-        let model = ctx
-            .agent_configs
-            .get(agent)
-            .map(|config| &config.llm_config.model);
         taken.map(|(taken, more)| {
             let with_images = taken
                 .iter()
                 .filter(|posted| !posted.images.is_empty())
                 .map(|posted| (posted.seq, posted.images.clone()))
                 .collect::<Vec<_>>();
-            let (images, lost) = self.context_images(&with_images, model);
+            // Fitted to the run's model, which may not be its agent's.
+            let model = if with_images.is_empty() {
+                None
+            } else {
+                ctx.run_llm_config(agent, task_id)
+                    .map(|config| config.model)
+            };
+            let (images, lost) = self.context_images(&with_images, model.as_ref());
             let seqs = taken.iter().map(|posted| posted.seq).collect();
             let (operator, others): (Vec<_>, Vec<_>) = taken
                 .iter()
@@ -864,10 +867,10 @@ impl NoteBoard {
                 "no agent receives this note. Completion verifiers and agents set with notes_by_name_only get a note only when it names them".to_string(),
             ));
         }
-        for agent in &recipients {
-            if let Some(config) = ctx.agent_configs.get(agent) {
-                // Checked for every recipient here, fitted to each when given.
-                crate::workflow::engine::check_sendable_images(agent, config, &note.images)?;
+        // Checked for every recipient here, fitted to each run when given.
+        if !note.images.is_empty() {
+            for agent in &recipients {
+                check_note_images(ctx, agent, &note)?;
             }
         }
         Ok((note, recipients))
@@ -1058,6 +1061,44 @@ fn holds(task: &arko_agents::Task, text: &str) -> bool {
 
 /// Whether `note` may reach run `task_id`: a note for one run reaches
 /// that run only.
+/// Whether `agent` can be sent the images of `note`. A note for one run
+/// goes by the model that run works with, which may not be its agent's.
+/// Another goes to every run of the agent, each sent what its model takes,
+/// so it is refused only when neither the agent's registered model nor that
+/// of a run of its own takes them.
+fn check_note_images(ctx: &SharedContext, agent: &str, note: &Note) -> Result<(), WorkflowError> {
+    let check = |model: arko_ai::Model| {
+        let mut config = ctx.agent_configs.get(agent)?.clone();
+        config.llm_config.model = model;
+        Some(crate::workflow::engine::check_sendable_images(
+            agent,
+            &config,
+            &note.images,
+        ))
+    };
+    if let Some(run) = note.run {
+        let Some(model) = ctx.run_llm_config(agent, run).map(|config| config.model) else {
+            return Ok(());
+        };
+        return check(model).unwrap_or(Ok(()));
+    }
+    let Some(registered) = ctx.agent_configs.get(agent) else {
+        return Ok(());
+    };
+    let refusal = match check(registered.llm_config.model.clone()) {
+        Some(Err(refusal)) => refusal,
+        _ => return Ok(()),
+    };
+    if ctx
+        .run_models_of(agent)
+        .into_iter()
+        .any(|model| matches!(check(model), Some(Ok(()))))
+    {
+        return Ok(());
+    }
+    Err(refusal)
+}
+
 fn for_run(note: &Note, task_id: Uuid) -> bool {
     note.run.is_none_or(|run| run == task_id)
 }

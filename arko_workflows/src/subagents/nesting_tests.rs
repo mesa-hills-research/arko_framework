@@ -1031,6 +1031,8 @@ async fn a_compaction_restates_the_subagents_that_still_work() {
         agent_name: "lead".to_string(),
         prompt_message_ids: Vec::new(),
         review: false,
+        depth: 0,
+        load_skill_policy: Default::default(),
     };
     use arko_agents::HandoverHook;
     assert_eq!(hook.on_compaction(&task), None);

@@ -182,7 +182,7 @@ impl WaitForMessageTool {
     /// last used, so the time the model took to answer is included. At least
     /// a second is left.
     pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
-        let limit = self.limit().await;
+        let limit = self.limit_of(Some(task_id)).await;
         if self.context.wait_timeouts.for_agent(&self.agent_name) != WaitForMessageTimeout::Auto {
             return limit;
         }
@@ -194,16 +194,29 @@ impl WaitForMessageTool {
         limit.saturating_sub(since).max(MIN_AUTO_WAIT)
     }
 
-    /// The agent's time limit.
+    /// The agent's time limit, for a run of its registered configuration.
+    #[cfg(test)]
     pub(crate) async fn limit(&self) -> Duration {
+        self.limit_of(None).await
+    }
+
+    /// The time limit of run `task_id`, by the prompt cache of the model it
+    /// works with, which may not be its agent's (or of the agent's
+    /// registered configuration without one).
+    async fn limit_of(&self, task_id: Option<uuid::Uuid>) -> Duration {
         let timeout = self.context.wait_timeouts.for_agent(&self.agent_name);
-        let lifetime = match (timeout, self.context.agent_configs.get(&self.agent_name)) {
+        let config = match task_id {
+            Some(task_id) => self.context.run_llm_config(&self.agent_name, task_id),
+            None => self
+                .context
+                .agent_configs
+                .get(&self.agent_name)
+                .map(|config| config.llm_config.clone()),
+        };
+        let lifetime = match (timeout, config) {
             (WaitForMessageTimeout::Auto, Some(config)) => {
                 self.llm_client
-                    .prompt_cache_lifetime(
-                        &config.llm_config.model,
-                        &config.llm_config.generation_config,
-                    )
+                    .prompt_cache_lifetime(&config.model, &config.generation_config)
                     .await
             }
             _ => PromptCacheLifetime::Unknown,

@@ -26,6 +26,14 @@ impl AgentLoop {
             .is_some_and(|request| request.report_requested)
     }
 
+    /// Whether context waits for later: while a handover report is due,
+    /// and from the start of a run asked for a report alone, whose context
+    /// waits for the task's next run (also when the run stops before the
+    /// request is in the conversation).
+    pub(super) fn context_held(&self) -> bool {
+        self.handover_report_due() || self.task.report_only()
+    }
+
     /// Whether the agent gives its report with the `handover_report` tool,
     /// which its native requests then offer: native tool calling with
     /// `handover` set, for an agent offered other tools. Otherwise the report
@@ -39,12 +47,14 @@ impl AgentLoop {
     /// is due: every call except `complete_task` (and `handover_report`,
     /// which is answered before this check).
     pub(super) fn handover_blocks(&self, tool_name: &str) -> bool {
-        self.handover_report_due() && tool_name != COMPLETE_TASK_TOOL_NAME
+        self.handover_report_due()
+            && (tool_name != COMPLETE_TASK_TOOL_NAME || self.task.report_only())
     }
 
     /// The result of a call rejected because the handover report is due.
     pub(super) fn handover_report_due_reason(&self) -> &'static str {
-        let completes = !self.task.agent_config.tool_config.ends_task_with_text();
+        let completes =
+            !self.task.agent_config.tool_config.ends_task_with_text() && !self.task.report_only();
         match (self.offers_report_tool(), completes) {
             (true, true) => HANDOVER_REPORT_TOOL_DUE,
             (true, false) => HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION,
@@ -79,7 +89,11 @@ impl AgentLoop {
         if request.report.is_none() {
             request.report = Some(report.to_string());
         }
-        Ok(REPORT_RECEIVED)
+        Ok(if request.report_only {
+            REPORT_ONLY_RECEIVED
+        } else {
+            REPORT_RECEIVED
+        })
     }
 
     /// Before a model request (not a refusal fallback's): replaces the
@@ -145,21 +159,30 @@ impl AgentLoop {
         let input_tokens = request.input_tokens;
         let completes = !self.task.agent_config.tool_config.ends_task_with_text();
         let report_request = match (&config, self.task.agent_config.tool_config.chat) {
+            // A report alone has a request of its own.
+            _ if request.report_only => request.report_only_request(with_tool),
             (Some(config), false) => config.report_request_for(with_tool, completes),
             (None, false) => crate::handover::default_report_request_for(with_tool, completes),
             (Some(config), true) => config.chat_report_request(),
             (None, true) => crate::handover::DEFAULT_CHAT_REPORT_REQUEST,
         };
+        let report_request = report_request.to_string();
+        let report_only = request.report_only;
         if std::mem::take(&mut self.step_left_out) {
             self.task.conversation.add_user_message(&format!(
                 "{}\n\n{report_request}",
                 crate::handover::STEP_LEFT_OUT
             ));
         } else {
-            self.task.conversation.add_user_message(report_request);
+            self.task.conversation.add_user_message(&report_request);
         }
         self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
+        if report_only {
+            // Not a handover: the host asked for the report.
+            log::info!("Task {}: Report requested.", self.task.id);
+            return Ok(());
+        }
         log::info!(
             "Task {}: Handover requested at {} input tokens.",
             self.task.id,
@@ -179,7 +202,9 @@ impl AgentLoop {
         report: String,
     ) -> Result<(), ArkoAgentsError> {
         if self.offers_report_tool() {
-            let note = if self.task.agent_config.tool_config.ends_task_with_text() {
+            let note = if self.task.report_only() {
+                REPORT_ONLY_NO_TOOL_CALL
+            } else if self.task.agent_config.tool_config.ends_task_with_text() {
                 NO_REPORT_TOOL_CALL_NO_COMPLETION
             } else {
                 NO_REPORT_TOOL_CALL
@@ -194,11 +219,100 @@ impl AgentLoop {
         self.complete_handover(report).await
     }
 
+    /// The report asked for alone came ([`Task::request_report`]): the task
+    /// completes with it as its summary, and the conversation stays.
+    async fn complete_report(&mut self, report: String) -> Result<(), ArkoAgentsError> {
+        self.task.handover_requested = None;
+        log::info!("Task {}: Report received.", self.task.id);
+        self.task
+            .set_state(TaskState::Completed { summary: report });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await
+    }
+
+    /// The fresh conversation of a handover runs with `config`, the
+    /// [`HandoverHook`]'s: it offers `config`'s tools under a system prompt
+    /// written from it, with `config`'s skills when they differ from the
+    /// task's. One the task can't take is left out, and logged.
+    fn take_handover_config(
+        &mut self,
+        mut config: crate::agent_config::AgentConfig,
+    ) -> Result<(), ArkoAgentsError> {
+        let (current, next) = (
+            &self.task.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        // Checked (with the rest) as the task takes it, and first here, so
+        // that a configuration left out loads no skills.
+        let skills = if current.provider == next.provider && current.id == next.id {
+            crate::handover::handover_skills(
+                &self.all_tools,
+                &self.task.agent_config,
+                &mut config,
+                &self.task.current_working_directory,
+            )
+        } else {
+            Ok(None)
+        };
+        let taken = skills
+            .map_err(|error| format!("its skills don't load: {error}"))
+            .and_then(|skills| {
+                self.task.take_handover_config(config)?;
+                Ok(skills)
+            });
+        let skills = match taken {
+            Ok(skills) => skills,
+            Err(reason) => {
+                log::warn!(
+                    "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
+                    self.task.id
+                );
+                return Ok(());
+            }
+        };
+        if let Some((tools, prompt)) = skills {
+            self.all_tools = Arc::new(tools);
+            self.skill_prompt_context = prompt;
+        }
+        self.parsing_config = self.task.agent_config.get_tool_parsing_config();
+        let offered = self.task.agent_config.tool_config.offered_tool_names();
+        let registry = self
+            .all_tools
+            .restricted_to(offered.iter().map(String::as_str));
+        for name in registry.list_tool_names() {
+            let Some(tool) = registry.get(&name) else {
+                continue;
+            };
+            if self
+                .tool_registry
+                .get(&name)
+                .is_some_and(|offered| Arc::ptr_eq(&offered, &tool))
+            {
+                continue;
+            }
+            tool.reset_context(self.task.id);
+            if let Some(sender) = &self.command_sender {
+                tool.bind_runtime(self.task.id, sender.clone());
+            }
+        }
+        self.tool_registry = Arc::new(registry);
+        if let Some(hook) = &self.handover_hook {
+            hook.handover_config_taken(&self.task);
+        }
+        self.write_system_prompt()
+    }
+
     /// Replaces the conversation with a fresh one that starts from the
     /// seed (the [`HandoverHook`]'s, or the task's initial prompt) and the
-    /// report, and resets what the loop keeps about the old one.
+    /// report, and resets what the loop keeps about the old one. The
+    /// hook's configuration, if it gives one, applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
+        if self.task.report_only() {
+            return self.complete_report(report).await;
+        }
         let chat = self.task.agent_config.tool_config.chat;
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
@@ -207,6 +321,10 @@ impl AgentLoop {
         };
         let seed =
             crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
+        let config = self
+            .handover_hook
+            .as_ref()
+            .and_then(|hook| hook.handover_config(&self.task));
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
@@ -222,6 +340,9 @@ impl AgentLoop {
             replaced_messages,
             report: report.clone(),
         });
+        if let Some(config) = config {
+            self.take_handover_config(config)?;
+        }
         let prompt_builder = self.prompts();
         let first_message =
             prompt_builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;

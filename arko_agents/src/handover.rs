@@ -40,6 +40,13 @@
 //! host's request, the runtime sends Claude Code's own `/compact` into the
 //! session, and the agent goes on in the same session from Claude Code's
 //! summary of the conversation. See [`crate::claude_code`].
+//!
+//! A host can also ask for the report alone, with [`Task::request_report`],
+//! such as before it goes on with the work in another conversation, on
+//! another model. The agent writes it as it writes a handover report, with
+//! every other tool call rejected until it does, and the task then completes
+//! with the report as its summary. The conversation is not replaced, and an
+//! agent that compacts in Claude Code writes the report all the same.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,6 +105,30 @@ pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
 /// The fresh conversation starts from the user's latest message and this
 /// summary (see [`HandoverSeed::for_chat`]).
 pub const DEFAULT_CHAT_REPORT_REQUEST: &str = "This conversation is getting long, so it will continue in a fresh one that starts from a summary you write now. Reply with that summary as plain text. Cover what the user wants and asked, what you answered, the facts, preferences and decisions to keep, and anything still open. The user's latest message comes before this request, and you haven't answered it yet: don't answer it here. The fresh conversation answers it from your summary, and will have only that message and the summary, so be complete.";
+
+/// What a report asked for alone ([`Task::request_report`]) should cover,
+/// after the request says how to give it.
+macro_rules! report_only_contents {
+    () => {
+        "Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing and what you meant to do next, and what you are unsure of. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet, with who sent it, what it asked, and what you meant to reply. Be complete, since the work may go on from this report alone."
+    };
+}
+
+/// What the runtime asks for, as a user message, for a report alone
+/// ([`Task::request_report`]) from an agent offered the
+/// [`HANDOVER_REPORT_TOOL_NAME`] tool. Every other tool call is rejected
+/// until the agent calls it.
+pub const DEFAULT_REPORT_ONLY_REQUEST: &str = concat!(
+    "Write a report of your work so far now. Call `handover_report` with it. Your other tool calls are not run until you do. ",
+    report_only_contents!()
+);
+
+/// [`DEFAULT_REPORT_ONLY_REQUEST`] for an agent that gives the report as a
+/// reply without a tool call (see the [module docs](self)).
+pub const DEFAULT_TEXT_REPORT_ONLY_REQUEST: &str = concat!(
+    "Write a report of your work so far now. Reply with it as plain text, without calling a tool. ",
+    report_only_contents!()
+);
 
 /// Said before the report request when the step that took a request over
 /// the model's input limit was left out of the conversation (see the
@@ -387,6 +418,15 @@ pub struct HandoverRequest {
     /// between still hands over with it when it runs again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
+    /// The report alone is asked for ([`Task::request_report`]). Once it
+    /// comes, the task completes with it as its summary, and the
+    /// conversation stays as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_only: bool,
+    /// The host's request for a report alone, in place of the default (see
+    /// [`report_only_request`](Self::report_only_request)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 impl HandoverRequest {
@@ -398,7 +438,22 @@ impl HandoverRequest {
             input_tokens,
             report_requested: false,
             report: None,
+            report_only: false,
+            request: None,
         }
+    }
+
+    /// The request an agent receives for a report alone, which is the host's
+    /// [`request`](Self::request), or by default
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`] when the agent gives the report with
+    /// the [`HANDOVER_REPORT_TOOL_NAME`] tool (`with_tool`) and
+    /// [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`] otherwise.
+    pub fn report_only_request(&self, with_tool: bool) -> &str {
+        self.request.as_deref().unwrap_or(if with_tool {
+            DEFAULT_REPORT_ONLY_REQUEST
+        } else {
+            DEFAULT_TEXT_REPORT_ONLY_REQUEST
+        })
     }
 }
 
@@ -553,6 +608,34 @@ pub trait HandoverHook: Send + Sync {
         HandoverSeed::for_task(task)
     }
 
+    /// The configuration `task`'s fresh conversation runs with, in place of
+    /// the task's, or `None` (the default) to keep the task's. `task` still
+    /// holds the conversation being replaced. A host whose agent now runs
+    /// with another configuration than the one a saved task keeps (other
+    /// tools, say) gives that one here, since the fresh conversation writes
+    /// the prompt cache afresh anyway. Its tools and the system prompt
+    /// written from it apply from the fresh conversation's first request,
+    /// and the task keeps it. Its skills are loaded and set up again when
+    /// they differ from the task's (see [`same_skills`]), with a new
+    /// `load_skill`. It must have the task's model (provider and ID), and the
+    /// other tools it offers must be in the runtime's tool registry. One with
+    /// another model, one that isn't valid, or one whose skills don't load
+    /// is left out, and the task keeps its own (logged as a warning).
+    fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
+        let _ = task;
+        None
+    }
+
+    /// The runtime took the configuration
+    /// [`handover_config`](Self::handover_config) gave, which `task` now
+    /// holds, for its fresh conversation. A host that keeps settings of
+    /// its own by the run's configuration (a prompt cache lifetime, say)
+    /// changes them here, so that a configuration the runtime left out
+    /// changes nothing. The default does nothing.
+    fn handover_config_taken(&self, task: &Task) {
+        let _ = task;
+    }
+
     /// Claude Code compacted `task`'s conversation. Its summary replaced the
     /// earlier messages in the session (`task` keeps them all). Returns
     /// context to give the agent again with its next input, such as
@@ -598,6 +681,110 @@ pub trait HandoverHook: Send + Sync {
     fn questions_asked(&self, task: &Task, asked: &[crate::questions::AskedQuestion], wait: bool) {
         let _ = (task, asked, wait);
     }
+}
+
+/// Whether two skills configurations are the same, embedded skills
+/// included (a saved configuration leaves those out).
+pub fn same_skills(
+    a: Option<&crate::skill::SkillsConfig>,
+    b: Option<&crate::skill::SkillsConfig>,
+) -> bool {
+    let saved = |skills: Option<&crate::skill::SkillsConfig>| {
+        skills.map(|skills| (serde_json::to_value(skills).ok(), skills.embedded.clone()))
+    };
+    saved(a) == saved(b)
+}
+
+/// Whether a task whose configuration is `current` would run the same with
+/// `next` from a [`HandoverHook::handover_config`]. The runtime lists
+/// `load_skill` by the skills, and gives it the per-tool entry
+/// [`SkillManager::setup`](crate::skill::SkillManager::setup) does where
+/// there is none, so neither counts. An explicit entry for `load_skill`
+/// counts, and so do the skills, embedded ones included ([`same_skills`]).
+pub fn same_for_handover(current: &AgentConfig, next: &AgentConfig) -> bool {
+    let normalized = |config: &AgentConfig| {
+        let mut config = config.clone();
+        let tools = &mut config.tool_config;
+        tools
+            .available_tool_names
+            .retain(|name| name != crate::skill::LOAD_SKILL_TOOL_NAME);
+        let generated = serde_json::to_value(crate::skill::load_skill_default_override()).ok();
+        if tools
+            .tool_specific_configs
+            .get(crate::skill::LOAD_SKILL_TOOL_NAME)
+            .is_some_and(|entry| serde_json::to_value(entry).ok() == generated)
+        {
+            tools
+                .tool_specific_configs
+                .remove(crate::skill::LOAD_SKILL_TOOL_NAME);
+        }
+        serde_json::to_value(config).ok()
+    };
+    normalized(current) == normalized(next)
+        && same_skills(current.skills_config.as_ref(), next.skills_config.as_ref())
+}
+
+/// The tools and skill prompt a runtime goes on with once its task takes
+/// `config` from a [`HandoverHook::handover_config`], in place of
+/// `current`. `None` keeps what the runtime has, when the skills stay the
+/// same, and `config` then lists `load_skill` as `current` does. Otherwise
+/// the skills load from `config` in `workspace`, its `load_skill` replaces
+/// the runtime's (`config` lists it when it has skills to load), and the
+/// prompt lists its skills. Without skills, there is neither. An explicit
+/// per-tool entry for `load_skill` in `config` (its approval, time limit or
+/// result cap) stays. Without one, a listed `load_skill` gets the entry
+/// [`SkillManager::setup`](crate::skill::SkillManager::setup) gives.
+pub(crate) fn handover_skills(
+    all_tools: &crate::tool::ToolRegistry,
+    current: &AgentConfig,
+    config: &mut AgentConfig,
+    workspace: &std::path::Path,
+) -> Result<
+    Option<(
+        crate::tool::ToolRegistry,
+        Option<crate::skill::SkillPromptContext>,
+    )>,
+    ArkoAgentsError,
+> {
+    use crate::skill::LOAD_SKILL_TOOL_NAME;
+    let tools = &mut config.tool_config;
+    tools
+        .available_tool_names
+        .retain(|name| name != LOAD_SKILL_TOOL_NAME);
+    if same_skills(
+        current.skills_config.as_ref(),
+        config.skills_config.as_ref(),
+    ) {
+        if current
+            .tool_config
+            .available_tool_names
+            .iter()
+            .any(|name| name == LOAD_SKILL_TOOL_NAME)
+        {
+            tools
+                .available_tool_names
+                .push(LOAD_SKILL_TOOL_NAME.to_string());
+            tools
+                .tool_specific_configs
+                .entry(LOAD_SKILL_TOOL_NAME.to_string())
+                .or_insert_with(crate::skill::load_skill_default_override);
+        }
+        return Ok(None);
+    }
+    let names = all_tools
+        .list_tool_names()
+        .into_iter()
+        .filter(|name| name != LOAD_SKILL_TOOL_NAME)
+        .collect::<Vec<_>>();
+    let mut registry = all_tools.restricted_to(names.iter().map(String::as_str));
+    let prompt = match config.skills_config.clone() {
+        Some(skills) => {
+            let manager = crate::skill::SkillManager::load(&skills, workspace)?;
+            Some(manager.setup(&mut registry, config))
+        }
+        None => None,
+    };
+    Ok(Some((registry, prompt)))
 }
 
 /// The highest question number already taken before `count` questions

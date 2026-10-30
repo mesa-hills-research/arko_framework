@@ -1897,8 +1897,32 @@ returns the `HandoverSeed { task_prompt, context }` that starts the fresh one
 (messages delivered into it, files it read) updates its records there, and can restate
 the task without material the report covers and add context after the report. Its
 `on_compaction(task)` is called after Claude Code compacted a Claude Code agent's
-conversation, and returns context the agent gets again with its next input. The
-arko_workflows engine does both for every agent it runs.
+conversation, and returns context the agent gets again with its next input. Its
+`handover_config(task)` can give the fresh conversation another configuration with the
+task's model, such as the one a host now runs the agent with where the task keeps an older
+one it was saved with. Its tools and a system prompt written from it apply from the fresh
+conversation's first request, which writes the prompt cache afresh anyway, and the task
+keeps it. Its skills are loaded and set up again when they differ from the task's, with a new
+`load_skill` and the prompt's skills section, or neither without skills. One with another model,
+one that isn't valid, or one whose skills don't load is left out with a warning. The
+arko_workflows engine does all three for every agent it runs.
+
+`Task::request_report(request)` asks for the report alone, without a handover, such as before
+the work goes on in another conversation on another model. The task's next run sends `request`
+(by default `DEFAULT_REPORT_ONLY_REQUEST`, or `DEFAULT_TEXT_REPORT_ONLY_REQUEST` where the report
+is a reply) and rejects every other call, `complete_task` included, until the report comes. The
+task then completes with the report as its summary, and the conversation keeps the request and the
+report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
+in a copy of its session (a fork) that the task goes on in, so the session is left as it was for a
+host that puts the task back, also when it compacts in Claude Code, and neither runtime waits for a
+plan's usage limit to reset during it. An error that ends the request pauses the task for error-recovery
+approval whatever the `LLMErrorPolicy`, so the host hears its cause. It takes a task that is
+completed, awaiting the user's answer, or cancelled, whose open turn is settled first, and calls
+the task was running when it stopped are answered as in doubt, not run again. The copy of the
+session is a Claude Code transcript like any other, which Claude Code's own cleanup removes after
+`cleanupPeriodDays` of its user settings (30 days by default). Claude Code skips that cleanup in
+the runtime's sessions, which start with `--setting-sources=`, so a later Claude Code process that
+reads the user's settings does it.
 
 `AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
 keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces

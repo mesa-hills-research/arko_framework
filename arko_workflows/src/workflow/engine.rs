@@ -65,15 +65,35 @@ struct ChainedInterceptor {
     /// The policy for the tools the workflow's policy covers.
     policy: InterceptionFailurePolicy,
     /// The policy for `load_skill` results, which the runtime passes to
-    /// the chain only when the agent's skills configuration sets one.
-    load_skill_policy: Option<InterceptionFailurePolicy>,
+    /// the chain only when the run's skills configuration sets one.
+    load_skill_policy: LoadSkillPolicy,
 }
 
+/// The `load_skill` failure policy of a run's chain of interceptors, from
+/// the run's skills configuration. A handover that gives the run another
+/// configuration changes it ([`WorkflowHandover::handover_config`]).
+pub(crate) type LoadSkillPolicy = Arc<parking_lot::RwLock<Option<InterceptionFailurePolicy>>>;
+
 impl ChainedInterceptor {
+    #[cfg(test)]
     fn new(
         interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
         policy: InterceptionFailurePolicy,
         load_skill_policy: Option<InterceptionFailurePolicy>,
+    ) -> Self {
+        Self::sharing(
+            interceptors,
+            policy,
+            Arc::new(parking_lot::RwLock::new(load_skill_policy)),
+        )
+    }
+
+    /// A chain whose `load_skill` policy is `load_skill_policy`'s, as it
+    /// changes.
+    fn sharing(
+        interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
+        policy: InterceptionFailurePolicy,
+        load_skill_policy: LoadSkillPolicy,
     ) -> Self {
         Self {
             interceptors,
@@ -82,10 +102,10 @@ impl ChainedInterceptor {
         }
     }
 
-    fn policy_for(&self, tool_name: &str) -> &InterceptionFailurePolicy {
-        match &self.load_skill_policy {
-            Some(policy) if tool_name == arko_agents::skill::LOAD_SKILL_TOOL_NAME => policy,
-            _ => &self.policy,
+    fn policy_for(&self, tool_name: &str) -> InterceptionFailurePolicy {
+        match &*self.load_skill_policy.read() {
+            Some(policy) if tool_name == arko_agents::skill::LOAD_SKILL_TOOL_NAME => policy.clone(),
+            _ => self.policy.clone(),
         }
     }
 }
@@ -776,6 +796,32 @@ fn count_failed_request(
     }
 }
 
+/// The task of a run that wrote no report on request, put back as it was
+/// `before` the request: still counting the model calls the report run
+/// (`attempt`) made, and holding the context that reached it meanwhile for
+/// its next turn. The report run held that context back (its end recorded
+/// the messages among it as held by the run), so all of it is still to be
+/// given, with the marks of what it took. A Claude Code session is the one
+/// the run had, since the report was written in a copy of it.
+pub(crate) fn report_rollback(before: Task, attempt: &Task) -> Task {
+    let mut task = before;
+    let calls = task.usage_history.len();
+    task.usage_history
+        .extend(attempt.usage_history.iter().skip(calls).cloned());
+    let model_calls = task.model_call_usage_history.len();
+    task.model_call_usage_history.extend(
+        attempt
+            .model_call_usage_history
+            .iter()
+            .skip(model_calls)
+            .cloned(),
+    );
+    task.pending_context_injections = attempt.pending_context_injections.clone();
+    task.pending_context_images = attempt.pending_context_images.clone();
+    task.raise_context_marks(&attempt.context_marks);
+    task
+}
+
 /// Answers `error`, reported at an error-recovery pause, under the
 /// workflow's error recovery policy and the pause's cause: continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
@@ -807,6 +853,20 @@ async fn answer_recovery_pause(
         recovery.failed_requests = recovery.failed_requests.saturating_add(1);
     }
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    // A report asked for alone goes back to its caller at once.
+    if ctx.report_baselines.lock().contains_key(&agent_run_id) {
+        return pause_for_caller(
+            agent_name,
+            agent_run_id,
+            cmd_tx,
+            AgentPause::ErrorRecovery {
+                error,
+                cause,
+                error_kind: recovery.paused_kind,
+            },
+        )
+        .await;
+    }
     let mut action = ctx.error_recovery_policy.action(
         &cause,
         &error,
@@ -1526,8 +1586,12 @@ pub(crate) struct StartOptions {
     /// [`crate::subagents`]).
     pub subagent: bool,
     /// The configuration it starts with, instead of its agent's registered
-    /// one (a subagent's, as the host's hook changed it).
+    /// one (a subagent's, as the host's hook changed it, or the host's own,
+    /// see `host_config`).
     pub config: Option<AgentConfig>,
+    /// `config` is the host's ([`RunOptions::config`](super::RunOptions::config)):
+    /// the task keeps it as one the host gave it ([`Task::reconfigured`]).
+    pub host_config: bool,
     /// Images that go with the prompt (see
     /// [`RunOptions::images`](super::RunOptions::images)).
     pub images: Vec<arko_ai::Image>,
@@ -1742,6 +1806,99 @@ impl From<u32> for RunRole {
     }
 }
 
+/// The configuration a run of `agent_name` in `role` starts with from
+/// `base_config`: the workflow's tools added (see
+/// [`WorkflowEngine::prepare_agent_config_for`]).
+fn prepare_config(
+    agent_name: &str,
+    base_config: &AgentConfig,
+    ctx: &SharedContext,
+    role: RunRole,
+) -> AgentConfig {
+    let mut config = base_config.clone();
+    // The prompt written from this configuration is a new one, so a
+    // subagent's lists and holds no skill kept to the main agent, also
+    // when the host left `subagent` off. (A saved prompt stays, and only
+    // its `load_skill` is narrowed, in `setup_skills`.)
+    if role.subagent
+        && let Some(skills) = config.skills_config.as_mut()
+    {
+        skills.subagent = true;
+    }
+    // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
+    // workflow's tools.
+    if config.tool_config.chat {
+        return config;
+    }
+    // A subagent whose questions go to its lead waits for the answer.
+    if role.subagent
+        && ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.questions_to_lead)
+    {
+        config.tool_config.async_questions = false;
+    }
+
+    let (reads, writes) = ctx.memory.access_of(agent_name);
+    if reads {
+        ensure_tool_name(&mut config, READ_MEMORY_TOOL_NAME);
+    }
+    if writes {
+        ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
+    }
+    if reads || writes {
+        ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
+    }
+    if !ctx.message_recipients(agent_name).is_empty() {
+        ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
+        ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
+    }
+    if !ctx.message_senders(agent_name).is_empty() {
+        ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
+    }
+    if offers_blocking_tool(ctx, agent_name, role) {
+        ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
+    }
+    let (caller, talks) = subagent_tools(ctx, agent_name, role);
+    if caller {
+        ensure_tool_name(&mut config, crate::subagents::START_AGENT_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::LIST_AGENTS_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::STOP_AGENT_TOOL_NAME);
+        if ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.peer_messages)
+        {
+            ensure_tool_name(&mut config, crate::subagents::LINK_AGENTS_TOOL_NAME);
+        }
+    }
+    if talks {
+        ensure_tool_name(&mut config, crate::subagents::MESSAGE_AGENT_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::WAIT_FOR_AGENTS_TOOL_NAME);
+    }
+    if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
+        ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
+    }
+
+    for tool in &ctx.global_tools {
+        ensure_tool_name(&mut config, &tool.name());
+    }
+    if let Some(agent_tools) = ctx.agent_tools.get(agent_name) {
+        for tool in agent_tools {
+            let name = tool.name();
+            if !ctx
+                .resume_only_tools
+                .contains(&(agent_name.to_string(), name.clone()))
+            {
+                ensure_tool_name(&mut config, &name);
+            }
+        }
+    }
+
+    config
+}
+
 impl RunRole {
     /// The role of run `task_id` at `depth`.
     pub(crate) fn of(ctx: &SharedContext, depth: u32, task_id: uuid::Uuid) -> Self {
@@ -1800,6 +1957,7 @@ impl Default for StartOptions {
             workspace: None,
             subagent: false,
             config: None,
+            host_config: false,
             images: Vec::new(),
         }
     }
@@ -1900,6 +2058,11 @@ pub(crate) struct WorkflowHandover {
     /// The run is a completion verifier's review (see
     /// [`StartOptions::review`]).
     pub review: bool,
+    /// See [`StartedRun::depth`].
+    pub depth: u32,
+    /// The `load_skill` policy of the run's chain of interceptors, which
+    /// follows the configuration a handover gives the run.
+    pub load_skill_policy: LoadSkillPolicy,
 }
 
 impl WorkflowHandover {
@@ -1967,6 +2130,50 @@ impl HandoverHook for WorkflowHandover {
             task_prompt,
             context: (!context.is_empty()).then_some(context),
         }
+    }
+
+    /// The configuration the run's agent starts a run with now, prepared as
+    /// for a new run, when the run keeps another one it was saved with
+    /// (other tools or skills, say). A run the host gave a configuration of
+    /// its own (`Task::reconfigured`), one whose agent now has another
+    /// model, and a completion verifier's review keep theirs.
+    fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
+        if self.review || task.reconfigured {
+            return None;
+        }
+        let ctx = &self.context;
+        let base = match ctx.subagents.record(task.id) {
+            Some(record) => ctx.subagents.prepared_config(ctx, &record).ok()?,
+            None => ctx.registered_config(&self.agent_name)?,
+        };
+        let (current, next) = (&task.agent_config.llm_config.model, &base.llm_config.model);
+        if current.provider != next.provider || current.id != next.id {
+            return None;
+        }
+        let config = prepare_config(
+            &self.agent_name,
+            &base,
+            ctx,
+            RunRole::of(ctx, self.depth, task.id),
+        );
+        if arko_agents::handover::same_for_handover(&task.agent_config, &config)
+            || config.validate().is_err()
+        {
+            return None;
+        }
+        Some(config)
+    }
+
+    /// The run's model settings and `load_skill` policy follow the
+    /// configuration the runtime took.
+    fn handover_config_taken(&self, task: &Task) {
+        let config = &task.agent_config;
+        self.context
+            .note_run_llm_config(&self.agent_name, task.id, &config.llm_config);
+        *self.load_skill_policy.write() = config
+            .skills_config
+            .as_ref()
+            .and_then(|skills| skills.load_skill_interception.clone());
     }
 
     /// The questions the user input handler says are still open.
@@ -3035,7 +3242,7 @@ impl WorkflowEngine {
     fn build_interceptor_config(
         &self,
         agent_name: &str,
-        load_skill_policy: Option<InterceptionFailurePolicy>,
+        load_skill_policy: &LoadSkillPolicy,
         ctx: &Arc<SharedContext>,
     ) -> Option<InterceptorConfig> {
         let mut all: Vec<Arc<dyn ToolResultInterceptor>> = Vec::new();
@@ -3062,10 +3269,10 @@ impl WorkflowEngine {
         let interceptor: Arc<dyn ToolResultInterceptor> = if all.len() == 1 {
             all.remove(0)
         } else {
-            Arc::new(ChainedInterceptor::new(
+            Arc::new(ChainedInterceptor::sharing(
                 all,
                 ctx.interception_failure_policy.clone(),
-                load_skill_policy,
+                load_skill_policy.clone(),
             ))
         };
 
@@ -3112,88 +3319,7 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         role: RunRole,
     ) -> AgentConfig {
-        let mut config = base_config.clone();
-        // The prompt written from this configuration is a new one, so a
-        // subagent's lists and holds no skill kept to the main agent, also
-        // when the host left `subagent` off. (A saved prompt stays, and only
-        // its `load_skill` is narrowed, in `setup_skills`.)
-        if role.subagent
-            && let Some(skills) = config.skills_config.as_mut()
-        {
-            skills.subagent = true;
-        }
-        // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
-        // workflow's tools.
-        if config.tool_config.chat {
-            return config;
-        }
-        // A subagent whose questions go to its lead waits for the answer.
-        if role.subagent
-            && ctx
-                .subagents
-                .config()
-                .is_some_and(|config| config.questions_to_lead)
-        {
-            config.tool_config.async_questions = false;
-        }
-
-        let (reads, writes) = ctx.memory.access_of(agent_name);
-        if reads {
-            ensure_tool_name(&mut config, READ_MEMORY_TOOL_NAME);
-        }
-        if writes {
-            ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
-        }
-        if reads || writes {
-            ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
-        }
-        if !ctx.message_recipients(agent_name).is_empty() {
-            ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
-            ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
-        }
-        if !ctx.message_senders(agent_name).is_empty() {
-            ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
-        }
-        if offers_blocking_tool(ctx, agent_name, role) {
-            ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
-        }
-        let (caller, talks) = subagent_tools(ctx, agent_name, role);
-        if caller {
-            ensure_tool_name(&mut config, crate::subagents::START_AGENT_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::LIST_AGENTS_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::STOP_AGENT_TOOL_NAME);
-            if ctx
-                .subagents
-                .config()
-                .is_some_and(|config| config.peer_messages)
-            {
-                ensure_tool_name(&mut config, crate::subagents::LINK_AGENTS_TOOL_NAME);
-            }
-        }
-        if talks {
-            ensure_tool_name(&mut config, crate::subagents::MESSAGE_AGENT_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::WAIT_FOR_AGENTS_TOOL_NAME);
-        }
-        if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
-            ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
-        }
-
-        for tool in &ctx.global_tools {
-            ensure_tool_name(&mut config, &tool.name());
-        }
-        if let Some(agent_tools) = ctx.agent_tools.get(agent_name) {
-            for tool in agent_tools {
-                let name = tool.name();
-                if !ctx
-                    .resume_only_tools
-                    .contains(&(agent_name.to_string(), name.clone()))
-                {
-                    ensure_tool_name(&mut config, &name);
-                }
-            }
-        }
-
-        config
+        prepare_config(agent_name, base_config, ctx, role)
     }
 
     /// The prompt section delivering the messages queued for the agent that
@@ -3274,6 +3400,14 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         mut options: StartOptions,
     ) -> Result<StartedRun, WorkflowError> {
+        // A configuration given for the run doesn't make an agent of a name
+        // that isn't registered.
+        if !ctx.agent_configs.contains_key(agent_name) {
+            if let Some(task_id) = options.reserved {
+                ctx.registry.abandon(task_id);
+            }
+            return Err(WorkflowError::AgentNotFound(agent_name.to_string()));
+        }
         let admission = if options.admitted {
             Ok(())
         } else {
@@ -3336,6 +3470,7 @@ impl WorkflowEngine {
 
         let mut task = Task::new(config, String::new(), workspace, None);
         task.parent = options.parent;
+        task.reconfigured = options.host_config;
         task.initial_task_images = options.images;
         match options.reserved {
             Some(task_id) => task.id = task_id,
@@ -3376,14 +3511,16 @@ impl WorkflowEngine {
         driven: bool,
         review: bool,
     ) -> StartedRun {
-        let load_skill_policy = task
-            .agent_config
-            .skills_config
-            .as_ref()
-            .and_then(|skills| skills.load_skill_interception.clone());
-        let interceptor_config = self.build_interceptor_config(agent_name, load_skill_policy, ctx);
+        let load_skill_policy: LoadSkillPolicy = Arc::new(parking_lot::RwLock::new(
+            task.agent_config
+                .skills_config
+                .as_ref()
+                .and_then(|skills| skills.load_skill_interception.clone()),
+        ));
+        let interceptor_config = self.build_interceptor_config(agent_name, &load_skill_policy, ctx);
         let execution_middleware = self.build_execution_middleware(agent_name, ctx, depth);
         let agent_run_id = task.id;
+        ctx.note_run_llm_config(agent_name, agent_run_id, &task.agent_config.llm_config);
         ctx.registry
             .set_parent(agent_run_id, task.parent.map(|parent| parent.task_id));
         let started_task = task.clone();
@@ -3412,6 +3549,8 @@ impl WorkflowEngine {
                 agent_name: agent_name.to_string(),
                 prompt_message_ids: pending_message_ids.clone(),
                 review,
+                depth,
+                load_skill_policy,
             }));
         if let Some(threshold) = ctx.handover_thresholds.get(agent_name) {
             runtime = runtime.with_handover_threshold(threshold.clone());
@@ -3491,6 +3630,8 @@ impl WorkflowEngine {
         let options = StartOptions {
             workspace: options.workspace,
             images: options.images,
+            host_config: options.config.is_some(),
+            config: options.config,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -3781,6 +3922,8 @@ impl WorkflowEngine {
             driven: false,
             workspace: options.workspace,
             images: options.images,
+            host_config: options.config.is_some(),
+            config: options.config,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -3833,6 +3976,129 @@ impl WorkflowEngine {
             workspace: options.workspace,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
+    }
+
+    /// Asks run `previous` for a report of its work alone, as
+    /// [`Workflow::request_report`](super::Workflow::request_report) says.
+    pub async fn request_report(
+        &self,
+        previous: &AgentResult,
+        request: Option<&str>,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let agent_name = &previous.agent_name;
+        if !matches!(
+            previous.status,
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput | AgentRunStatus::Cancelled
+        ) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "only a completed, waiting or cancelled agent run writes a report on request. Agent run {} is {:?}",
+                previous.agent_run_id, previous.status
+            )));
+        }
+        if previous.info().parent.is_some() {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} runs inside another run's tool call, so it writes no report on request",
+                previous.agent_run_id
+            )));
+        }
+        if is_superseded(previous) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} was superseded by a run that replaced it after a restart, so it writes no report",
+                previous.agent_run_id
+            )));
+        }
+        let mut task = previous.task()?.clone();
+        task.request_report(request.map(str::to_string))
+            .map_err(builder_invalid)?;
+        self.admit(agent_name, Some(previous.agent_run_id), false, ctx)?;
+        let role = RunRole::of(ctx, 0, task.id);
+        let mut registry = self.build_tool_registry(agent_name, ctx, role);
+        Self::restore_embedded_skills(&mut task, ctx, agent_name);
+        let skill_prompt_context = Self::setup_skills(
+            &mut task.agent_config,
+            &mut registry,
+            &task.current_working_directory,
+            role,
+        )?;
+        if !ctx.registry.start_unless_running(task.id, agent_name) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} is running already",
+                task.id
+            )));
+        }
+        // What the task holds, recorded again for a task saved before
+        // messages recorded who holds them.
+        ctx.messages.settle_run(
+            agent_name,
+            task.id,
+            &task.conversation,
+            &[],
+            &task.pending_context_injections,
+            false,
+        );
+        // Its error-recovery pauses come back to the caller at once, and
+        // checkpoints keep the run as it was, which a resume puts back. It is
+        // recorded as it was first, so that the version checkpoints refer to
+        // is that one (a host may pass a result other than the recorded one).
+        if let Some(persistence) = &self.persistence {
+            persistence.record_result(ctx, previous.clone()).await;
+        }
+        ctx.report_baselines
+            .lock()
+            .insert(task.id, previous.clone());
+        let run = self.launch(
+            agent_name,
+            task,
+            registry,
+            skill_prompt_context,
+            Vec::new(),
+            ctx,
+            0,
+            true,
+            false,
+        );
+        let outcome = drive_to_result(run, ctx, self.persistence.as_ref()).await;
+        ctx.report_baselines.lock().remove(&previous.agent_run_id);
+        if outcome.is_err() {
+            self.restore_after_report(previous, ctx).await;
+        }
+        outcome
+    }
+
+    /// Puts run `previous` back as it was before a report was asked of it,
+    /// which didn't come: its task without the request, still counting the
+    /// model calls the request made, and holding the context that reached
+    /// it meanwhile for its next turn. A Claude Code session is the one it
+    /// had, since the report was written in a copy of it. Recorded, saved and
+    /// checkpointed with persistence.
+    async fn restore_after_report(&self, previous: &AgentResult, ctx: &Arc<SharedContext>) {
+        let Ok(previous_task) = previous.task() else {
+            return;
+        };
+        let attempt = recorded_result(ctx, previous.agent_run_id)
+            .and_then(|result| result.task().ok().cloned());
+        let task = match attempt {
+            Some(attempt) => report_rollback(previous_task.clone(), &attempt),
+            None => previous_task.clone(),
+        };
+        let mut restored = AgentResult::of_task(previous.agent_name.clone(), task);
+        restored.stopped_by = previous.stopped_by.clone();
+        ctx.registry
+            .finish(previous.agent_run_id, previous.status.clone());
+        match &self.persistence {
+            Some(persistence) => {
+                persistence.record_result(ctx, restored).await;
+                if let Err(error) = persistence.auto_checkpoint(ctx).await {
+                    log::warn!(
+                        "Workflow '{}': could not save the checkpoint after agent run {} wrote no report: {error}. The next checkpoint tries again.",
+                        ctx.workflow_name,
+                        previous.agent_run_id
+                    );
+                }
+            }
+            None => record_result(ctx, restored),
+        }
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
@@ -4445,6 +4711,18 @@ impl WorkflowEngine {
                 return Err(running());
             }
             let agent_name = &current.agent_name;
+            // A report on request is never resumed. A resume puts a run that
+            // was writing one back as it was before, when that was saved.
+            if current
+                .task()?
+                .handover_requested
+                .as_ref()
+                .is_some_and(|request| request.report_only)
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "agent run {agent_run_id} was writing a report on request when it stopped, and the run as it was before the report wasn't saved, so it isn't recovered (a report is never resumed)"
+                )));
+            }
             self.admit(agent_name, Some(agent_run_id), false, ctx)?;
             let mut task = current.task()?.clone();
             let mut registry = self.build_tool_registry(
@@ -5728,12 +6006,12 @@ mod tests {
         assert!(
             workflow
                 .engine
-                .build_interceptor_config("reviewer", None, workflow.context())
+                .build_interceptor_config("reviewer", &Default::default(), workflow.context())
                 .is_none()
         );
         let interceptor = workflow
             .engine
-            .build_interceptor_config("coder", None, workflow.context())
+            .build_interceptor_config("coder", &Default::default(), workflow.context())
             .unwrap()
             .interceptor;
         let task = TaskContext::new(
@@ -5801,7 +6079,7 @@ mod tests {
                 .unwrap();
             let interceptor = workflow
                 .engine
-                .build_interceptor_config("coder", None, workflow.context())
+                .build_interceptor_config("coder", &Default::default(), workflow.context())
                 .unwrap()
                 .interceptor;
             let task = TaskContext::new(

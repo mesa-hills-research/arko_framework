@@ -38,6 +38,15 @@ pub struct SharedContext {
     /// The skills configurations the host set after the build, by agent.
     /// `None` is no skills.
     pub(crate) agent_skills: RwLock<HashMap<String, Option<SkillsConfig>>>,
+    /// The model settings each run started or went on with, by run, with
+    /// its agent, which may not be the agent's registered ones. Read through
+    /// `run_llm_config`.
+    pub(crate) run_llm_configs: RwLock<HashMap<uuid::Uuid, (String, arko_agents::AgentLLMConfig)>>,
+    /// The runs writing a report asked for alone (`Workflow::request_report`),
+    /// each with its result as it was before, whose error-recovery pauses go
+    /// back to the caller, and which checkpoints keep, for a resume to put
+    /// the run back as it was.
+    pub(crate) report_baselines: parking_lot::Mutex<HashMap<uuid::Uuid, crate::AgentResult>>,
     pub global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     pub agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     /// The (agent, tool name) pairs of `agent_tools` that new and
@@ -126,6 +135,69 @@ impl SharedContext {
         let mut config = self.agent_configs.get(agent)?.clone();
         config.skills_config = self.registered_skills(agent);
         Some(config)
+    }
+
+    /// The model settings run `task_id` of `agent` works with, which may
+    /// not be the agent's registered ones
+    /// ([`RunOptions::config`](crate::RunOptions::config)): as it last
+    /// started, went on or was handed over, else as its recorded result
+    /// saved them (a run restored from a checkpoint), else the registered
+    /// ones.
+    pub(crate) fn run_llm_config(
+        &self,
+        agent: &str,
+        task_id: uuid::Uuid,
+    ) -> Option<arko_agents::AgentLLMConfig> {
+        if let Some((_, config)) = self.run_llm_configs.read().get(&task_id) {
+            return Some(config.clone());
+        }
+        let recorded = self
+            .agent_results
+            .read()
+            .iter()
+            .find(|result| result.agent_run_id == task_id)
+            .map(|result| result.info().agent_config.llm_config.clone());
+        recorded.or_else(|| Some(self.agent_configs.get(agent)?.llm_config.clone()))
+    }
+
+    /// The models `agent`'s runs work with: as they last started, went on
+    /// or were handed over, else as their recorded results saved them (runs
+    /// restored from a checkpoint that haven't run again).
+    pub(crate) fn run_models_of(&self, agent: &str) -> Vec<arko_ai::Model> {
+        let (live, mut models): (std::collections::HashSet<uuid::Uuid>, Vec<arko_ai::Model>) = {
+            let configs = self.run_llm_configs.read();
+            let live = configs
+                .iter()
+                .filter(|(_, (of, _))| of == agent)
+                .map(|(id, (_, config))| (*id, config.model.clone()))
+                .collect::<Vec<_>>();
+            (
+                live.iter().map(|(id, _)| *id).collect(),
+                live.into_iter().map(|(_, model)| model).collect(),
+            )
+        };
+        models.extend(
+            self.agent_results
+                .read()
+                .iter()
+                .filter(|result| result.agent_name == agent && !live.contains(&result.agent_run_id))
+                .map(|result| result.info().agent_config.llm_config.model.clone()),
+        );
+        models
+    }
+
+    /// Records the model settings run `task_id` of `agent` works with, as
+    /// it starts, goes on or is handed over, for
+    /// [`run_llm_config`](Self::run_llm_config).
+    pub(crate) fn note_run_llm_config(
+        &self,
+        agent: &str,
+        task_id: uuid::Uuid,
+        config: &arko_agents::AgentLLMConfig,
+    ) {
+        self.run_llm_configs
+            .write()
+            .insert(task_id, (agent.to_string(), config.clone()));
     }
 
     /// The skills configuration `agent` is registered with now.

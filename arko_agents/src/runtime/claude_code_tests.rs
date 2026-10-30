@@ -958,6 +958,77 @@ async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
 }
 
+/// The script of a task whose first call's typed note the CLI reports
+/// cancelled before the call's result, as when the turn stops while the
+/// call's hooks run. The fake goes on with the turn all the same.
+fn note_cancelled_before_its_result() -> Value {
+    json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "cancel_notes": true},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]])
+}
+
+/// Runs the task of `note_cancelled_before_its_result`, its first call
+/// given the typed note with `content`.
+async fn run_with_note_cancelled_before_its_result(content: &'static str) -> (Fake, Task) {
+    let fake = Fake::new(note_cancelled_before_its_result());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(TypedSecondUpdate {
+            content,
+            asked: Default::default(),
+        }),
+    );
+    let (task, _) = start_with(task, runtime).finish().await;
+    (fake, task)
+}
+
+/// The texts of `task`'s record that hold the typed note.
+fn with_typed_note(task: &Task) -> Vec<String> {
+    texts(task)
+        .into_iter()
+        .filter(|text| text.contains("Use tabs."))
+        .collect()
+}
+
+/// A note the CLI reports cancelled before the result it went with never
+/// reached the model. The record of that result leaves it out, and the
+/// note goes with the next call's result, recorded once.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_is_left_out_of_the_record() {
+    let (fake, task) = run_with_note_cancelled_before_its_result("").await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let posts = fake.logged("post");
+    let hooked = posts[1]["answer"]["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(hooked.contains("Use tabs."), "{hooked}");
+    let recorded = with_typed_note(&task);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// The rest of the update went in the call's hook, so the record of the
+/// result keeps it, without the note.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_leaves_the_rest_of_its_update() {
+    let (_, task) = run_with_note_cancelled_before_its_result("A message: skip vendor/.").await;
+    let updates = texts(&task)
+        .into_iter()
+        .filter(|text| text.starts_with("# Workflow context update"))
+        .collect::<Vec<_>>();
+    assert!(updates[0].ends_with("skip vendor/."), "{updates:?}");
+    assert!(!updates[0].contains("Use tabs."), "{updates:?}");
+    assert_eq!(with_typed_note(&task).len(), 1, "{updates:?}");
+}
+
 /// The operator's note of `TYPED_NOTE`, marked as note 3, given at the
 /// second boundary, as a workflow gives the user's answer.
 struct MarkedTypedNote(std::sync::atomic::AtomicUsize);
@@ -1071,6 +1142,28 @@ async fn a_cancelled_note_goes_back_with_its_mark() {
     assert_eq!(fake.logged("midturn").len(), 1);
     assert_eq!(task.pending_context_injections, [TYPED_NOTE]);
     assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// The same when the CLI reports the note cancelled before the result it
+/// went with: the task holds the note, with its mark, once it goes with the
+/// next call's result.
+#[tokio::test]
+async fn a_note_cancelled_before_its_result_keeps_its_mark() {
+    let fake = Fake::new(note_cancelled_before_its_result());
+    let mut task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.context_marks.insert("notes".into(), 2);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert_eq!(fake.logged("midturn").len(), 1);
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+    assert_eq!(with_typed_note(&task).len(), 1);
+    assert!(task.pending_context_injections.is_empty());
 }
 
 /// A completed task continued with a new configuration resumes its session
@@ -2289,6 +2382,327 @@ async fn a_handover_continues_in_a_fresh_session() {
     assert!(!first_argv.contains(&format!("--session-id={first_session}")));
     let users = fake.logged("user");
     assert!(users[1]["text"].as_str().unwrap().contains(REPORT_HEADING));
+}
+
+/// Gives the fresh conversation its configuration.
+struct ConfigHook(AgentConfig);
+
+impl crate::handover::HandoverHook for ConfigHook {
+    fn handover_config(&self, _task: &Task) -> Option<AgentConfig> {
+        Some(self.0.clone())
+    }
+}
+
+/// The handover hook's configuration runs the fresh session: its tools and
+/// a system prompt written from it, and the task keeps it.
+#[tokio::test]
+async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "REPORT: searched a and b."},
+        ],
+        [complete("Searched c")],
+    ]));
+    let mut saved = config(&fake, &["Grep"]);
+    saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let mut current = saved.clone();
+    current.instructions = "Search with Grep and Read.".into();
+    current.tool_config.available_tool_names = vec!["Grep".into(), "Read".into()];
+    let task = Task::new(saved, "Search a, b and c.".into(), fake.workspace(), None);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_handover_hook(Arc::new(ConfigHook(current)));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Searched c"),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.agent_config.instructions, "Search with Grep and Read.");
+    let argv = |index: usize| -> String {
+        serde_json::from_value::<Vec<String>>(fake.logged("argv")[index]["argv"].clone())
+            .unwrap()
+            .join(" ")
+    };
+    let (first, fresh) = (argv(0), argv(1));
+    assert!(first.contains("--tools Grep "), "{first}");
+    assert!(!first.contains("Search with Grep and Read."), "{first}");
+    assert!(fresh.contains("--tools Grep,Read"), "{fresh}");
+    assert!(fresh.contains("Search with Grep and Read."), "{fresh}");
+}
+
+/// The handover hook's configuration brings its skills to the fresh
+/// session: its system prompt lists them and `load_skill` is served for
+/// them, from one skill to another, from none to some, and from some to
+/// none (`load_skill` is no longer served).
+#[tokio::test]
+async fn a_handover_s_fresh_session_brings_the_configuration_s_skills() {
+    let skills_of = |name: &str| crate::skill::SkillsConfig {
+        embedded: vec![crate::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    };
+    for (before, after) in [
+        (Some("alpha"), Some("beta")),
+        (None, Some("beta")),
+        (Some("alpha"), None),
+    ] {
+        let wanted = after.or(before).unwrap();
+        let fake = Fake::new(json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "REPORT: searched a and b."},
+            ],
+            [
+                {"tool": "mcp__arko__load_skill", "input": {"name": wanted}},
+                complete("Done"),
+            ],
+        ]));
+        let mut saved = config(&fake, &["Grep"]);
+        saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+        // As a host gives it, before the runtime sets its skills up.
+        let mut current = saved.clone();
+        current.skills_config = after.map(skills_of);
+        saved.skills_config = before.map(skills_of);
+        let mut task = Task::new(saved, "Search a and b.".into(), fake.workspace(), None);
+        let mut registry = ToolRegistry::new();
+        let prompt = task.agent_config.skills_config.clone().map(|skills| {
+            crate::skill::SkillManager::load(&skills, &task.current_working_directory)
+                .unwrap()
+                .setup(&mut registry, &mut task.agent_config)
+        });
+        let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(ConfigHook(current)));
+        let (events, commands, handle) =
+            runtime.run_task(task, Arc::new(registry), None, false, prompt, None, None);
+        let (task, _) = Run {
+            events,
+            commands,
+            handle,
+        }
+        .finish()
+        .await;
+        assert_eq!(task.handovers.len(), 1, "{before:?} to {after:?}");
+        let fresh = fake.logged("argv")[1]["argv"].to_string();
+        let served = fake.logged("tools")[1]["tools"].to_string();
+        let posts = fake.logged("post");
+        let loaded = posts
+            .iter()
+            .find(|post| post["tool"] == "mcp__arko__load_skill")
+            .map(|post| post["output"].to_string())
+            .unwrap_or_default();
+        match after {
+            Some(name) => {
+                assert!(fresh.contains(&format!("The {name} skill.")), "{fresh}");
+                assert!(served.contains("load_skill"), "{served}");
+                assert!(loaded.contains(&format!("The {name} body.")), "{loaded}");
+            }
+            None => {
+                assert!(!fresh.contains("Available Skills"), "{fresh}");
+                assert!(!served.contains("load_skill"), "{served}");
+                assert!(!loaded.contains("body."), "{loaded}");
+            }
+        }
+        if let Some(name) = before.filter(|_| before != after) {
+            assert!(!fresh.contains(&format!("The {name} skill.")), "{fresh}");
+        }
+    }
+}
+
+/// The handover hook's configuration keeps its own entry for `load_skill`
+/// (approval asked for), with the skills the same or other, in place of the
+/// auto-approval the runtime gave it.
+#[tokio::test]
+async fn a_handover_s_fresh_session_keeps_the_configuration_s_load_skill_entry() {
+    let skills_of = |name: &str| crate::skill::SkillsConfig {
+        embedded: vec![crate::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    };
+    for after in ["alpha", "beta"] {
+        let fake = Fake::new(json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "REPORT: searched a and b."},
+            ],
+            [complete("Done")],
+        ]));
+        let mut saved = config(&fake, &["Grep"]);
+        saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+        saved.skills_config = Some(skills_of("alpha"));
+        let mut task = Task::new(saved, "Search a and b.".into(), fake.workspace(), None);
+        let mut registry = ToolRegistry::new();
+        let skills = task.agent_config.skills_config.clone().unwrap();
+        let prompt = crate::skill::SkillManager::load(&skills, &task.current_working_directory)
+            .unwrap()
+            .setup(&mut registry, &mut task.agent_config);
+        let mut current = task.agent_config.clone();
+        current.skills_config = Some(skills_of(after));
+        current.tool_config.tool_specific_configs.insert(
+            crate::skill::LOAD_SKILL_TOOL_NAME.into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(false),
+                ..Default::default()
+            },
+        );
+        let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(ConfigHook(current)));
+        let (events, commands, handle) = runtime.run_task(
+            task,
+            Arc::new(registry),
+            None,
+            false,
+            Some(prompt),
+            None,
+            None,
+        );
+        let (task, _) = Run {
+            events,
+            commands,
+            handle,
+        }
+        .finish()
+        .await;
+        assert_eq!(task.handovers.len(), 1, "{after}");
+        let tools = &task.agent_config.tool_config;
+        assert_eq!(
+            tools.tool_specific_configs[crate::skill::LOAD_SKILL_TOOL_NAME].auto_approve_tool_use,
+            Some(false),
+            "{after}"
+        );
+        assert!(
+            tools
+                .available_tool_names
+                .contains(&crate::skill::LOAD_SKILL_TOOL_NAME.to_string())
+        );
+    }
+}
+
+/// A report asked for alone goes into a copy of the task's session as its
+/// next input, also for an agent that compacts in Claude Code (no
+/// `/compact` is sent).
+/// Calls are held for it, `complete_task` too, and the task completes with
+/// the reply as its summary, without a handover.
+#[tokio::test]
+async fn a_report_asked_for_alone_is_written_in_the_session() {
+    let fake = Fake::new(json!([
+        [complete("First")],
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            complete("Not yet"),
+            {"text": "REPORT: did the first part."},
+        ],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig {
+        compact_in_claude_code: true,
+        ..HandoverConfig::at_input_tokens(1)
+    });
+    let task = Task::new(config, "Start.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    task.request_report(None).unwrap();
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: did the first part."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.handovers.is_empty());
+    assert!(task.handover_requested.is_none());
+    // Written in a copy of the session, which the task goes on in.
+    let fork = task.claude_code_session.clone().unwrap();
+    assert_ne!(fork, session);
+    assert!(task.claude_code_fork_of.is_none());
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 2, "{users:?}");
+    assert!(
+        fake.logged("user")[1]["history"]
+            .to_string()
+            .contains("Start."),
+        "the copy holds the conversation"
+    );
+    assert!(
+        users[1].contains(crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST),
+        "{}",
+        users[1]
+    );
+    // The first run's `complete_task`, then the two calls held.
+    let posts = fake.logged("post");
+    assert_eq!(posts.len(), 3, "{posts:?}");
+    assert!(
+        posts[1..].iter().all(|post| post["is_error"] == true
+            && post["output"]
+                .as_str()
+                .unwrap()
+                .contains("Reply with it as plain text")),
+        "{posts:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ConversationCompacted { .. }))
+    );
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    assert!(argv.contains(&format!("--resume={session}")), "{argv:?}");
+    assert!(argv.contains(&"--fork-session".to_string()), "{argv:?}");
+    assert!(argv.contains(&format!("--session-id={fork}")), "{argv:?}");
+}
+
+/// A report asked of a branch whose session isn't copied yet (it hasn't
+/// run) is written in a copy of the session the branch comes from, at the
+/// branch's point, and the branch goes on in it.
+#[tokio::test]
+async fn a_report_asked_of_a_branch_that_hasn_t_run_copies_the_original_session() {
+    let fake = Fake::new(json!([
+        [complete("First")],
+        [{"text": "REPORT: the branch did the first part."}],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Start.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    let mut branch = task.branch(task.conversation.messages.len()).unwrap();
+    assert_eq!(
+        branch.claude_code_fork_of.as_deref(),
+        Some(session.as_str())
+    );
+    branch.request_report(None).unwrap();
+    assert_eq!(
+        branch.claude_code_fork_of.as_deref(),
+        Some(session.as_str())
+    );
+    let (branch, _) = start(branch).finish().await;
+    assert!(
+        matches!(&branch.current_state, TaskState::Completed { summary } if summary == "REPORT: the branch did the first part."),
+        "{:?}",
+        branch.current_state
+    );
+    let copy = branch.claude_code_session.clone().unwrap();
+    assert_ne!(copy, session);
+    assert!(branch.claude_code_fork_of.is_none());
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    assert!(argv.contains(&format!("--resume={session}")), "{argv:?}");
+    assert!(argv.contains(&"--fork-session".to_string()), "{argv:?}");
+    assert!(argv.contains(&format!("--session-id={copy}")), "{argv:?}");
+    assert!(
+        fake.logged("user")[1]["history"]
+            .to_string()
+            .contains("Start."),
+        "the copy holds the conversation"
+    );
 }
 
 /// The host's threshold replaces the configured one, larger or smaller.
@@ -3997,6 +4411,58 @@ async fn a_rerun_tool_open_at_the_stop_runs_again_for_the_resumed_session() {
         "{resumed}"
     );
     assert!(resumed.contains("CONTENTS-OF-A"), "{resumed}");
+}
+
+/// A report asked for alone of a task cancelled while a call ran doesn't
+/// run the call again: the session hears its outcome is unknown, then the
+/// report's request.
+#[tokio::test]
+async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__read_file",
+            "input": {"path": "a.txt"},
+            "id": "toolu_read",
+            "crash": "pre",
+        }],
+        [{"text": "REPORT: read nothing yet."}],
+    ]));
+    std::fs::write(fake.workspace().join("a.txt"), "CONTENTS-OF-A").unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file"]),
+        "Read a.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    let mut saved = recorder.latest(|task| {
+        !task.running_tool_calls.is_empty() && task.current_state == TaskState::InProgress
+    });
+    saved.set_state(TaskState::Cancelled {
+        reason: "The agent did not stop in time and was aborted.".into(),
+    });
+    saved.request_report(None).unwrap();
+    let (task, resumed) = run_saved(&fake, &saved).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: read nothing yet."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(resumed.contains("its outcome is unknown"), "{resumed}");
+    assert!(!resumed.contains("CONTENTS-OF-A"), "{resumed}");
+    assert!(
+        resumed.contains(crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST),
+        "{resumed}"
+    );
 }
 
 #[tokio::test]

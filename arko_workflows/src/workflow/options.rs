@@ -11,7 +11,7 @@ use crate::error::WorkflowError;
 /// [`Workflow::run_agent_with`]: crate::Workflow::run_agent_with
 /// [`Workflow::spawn_agent_with`]: crate::Workflow::spawn_agent_with
 /// [`Workflow::run_agent`]: crate::Workflow::run_agent
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RunOptions {
     /// The run's working directory, instead of the workflow's workspace. The
@@ -30,12 +30,50 @@ pub struct RunOptions {
     /// with [`arko_ai::Model::image_refusal`]'s reason), before the run
     /// starts.
     pub images: Vec<arko_ai::Image>,
+    /// The configuration the run starts with, in place of its agent's
+    /// registered one (see [`RunOptions::config`]).
+    pub config: Option<arko_agents::AgentConfig>,
 }
+
+// By hand, since a configuration has no `PartialEq` of its own: two are equal
+// when they save the same.
+impl PartialEq for RunOptions {
+    fn eq(&self, other: &Self) -> bool {
+        let saved = |config: &Option<arko_agents::AgentConfig>| {
+            config
+                .as_ref()
+                .map(|config| serde_json::to_value(config).ok())
+        };
+        self.workspace == other.workspace
+            && self.images == other.images
+            && saved(&self.config) == saved(&other.config)
+    }
+}
+
+impl Eq for RunOptions {}
 
 impl RunOptions {
     /// Options that change nothing.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Starts the run with `config` in place of its agent's registered
+    /// configuration, without rebuilding the workflow, such as another
+    /// model, provider or runtime (an API model, a ChatGPT sign-in, Claude
+    /// Code), or other instructions or tools. The workflow adds its tools to `config`
+    /// as it does to the registered one, and the agent's name, its notes,
+    /// messages, subagents and budget stay the agent's. Images go by
+    /// `config`'s model. The task keeps the configuration, so the run is
+    /// continued, handed over and resumed from a checkpoint with it. A resume
+    /// doesn't compare it with the agent's registered one, as for
+    /// [`ContinueOptions::reconfigure`] (the task is marked
+    /// [`reconfigured`](arko_agents::Task::reconfigured)). The tools it
+    /// lists must be registered for the agent (`resume_only_agent_tool`
+    /// counts), or they aren't offered.
+    pub fn config(mut self, config: arko_agents::AgentConfig) -> Self {
+        self.config = Some(config);
+        self
     }
 
     /// Runs the agent in `workspace`. See [`RunOptions::workspace`].

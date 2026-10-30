@@ -444,6 +444,170 @@ async fn notes_with_images_are_one_time_and_for_models_that_take_them() {
     assert!(plain.get("images").is_none(), "{plain}");
 }
 
+/// A run started on a model of its own (`RunOptions::config`) gets a note's
+/// images by that model, not by its agent's: a model that takes no images
+/// gets the line saying the image can't be shown.
+#[tokio::test]
+async fn a_note_s_images_go_by_the_run_s_own_model() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = builder(&server, &workspace, &["worker"]).build().unwrap();
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let first = workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(blind),
+        )
+        .await
+        .unwrap();
+    workflow
+        .post_note(
+            Note::new("See this.")
+                .once()
+                .to(["worker"])
+                .images([png("eA==")]),
+        )
+        .unwrap();
+    workflow.continue_agent(&first, "Go on.").await.unwrap();
+    let body = server.bodies().pop().unwrap();
+    let text = user_text(&body);
+    assert!(text.contains("See this."), "{text}");
+    assert!(text.contains("(Its image can't be shown.)"), "{text}");
+    assert!(!body.contains("input_image"), "{body}");
+}
+
+/// A note for one run is checked against that run's model, not its
+/// agent's: a run on a model that takes images is sent the image though its
+/// agent's model takes none, and a run on a model that takes none is refused
+/// a note with one. A note for the agent is refused only when neither its
+/// model nor that of one of its runs takes the image.
+#[tokio::test]
+async fn a_note_s_images_are_checked_against_the_runs_that_get_it() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let seeing = agent_config("Friendly worker");
+    let image = || png("eA==");
+
+    // Registered blind, with a run that sees.
+    let workflow = Workflow::builder()
+        .name("notes-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("worker", blind.clone())
+        .build()
+        .unwrap();
+    let refused = workflow
+        .post_note(
+            Note::new("See this.")
+                .once()
+                .to(["worker"])
+                .images([image()]),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("doesn't take images"), "{refused}");
+    let first = workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(seeing.clone()),
+        )
+        .await
+        .unwrap();
+    workflow
+        .post_note(
+            Note::new("See this.")
+                .for_run(first.agent_run_id)
+                .to(["worker"])
+                .images([image()]),
+        )
+        .unwrap();
+    workflow.continue_agent(&first, "Go on.").await.unwrap();
+    let body = server.bodies().pop().unwrap();
+    assert!(body.contains("input_image"), "{body}");
+    workflow
+        .post_note(
+            Note::new("And this.")
+                .once()
+                .to(["worker"])
+                .images([image()]),
+        )
+        .unwrap();
+
+    // Registered seeing, with a blind run.
+    let workflow = Workflow::builder()
+        .name("notes-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("worker", seeing)
+        .build()
+        .unwrap();
+    let blind_run = workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(blind),
+        )
+        .await
+        .unwrap();
+    let refused = workflow
+        .post_note(
+            Note::new("See this.")
+                .for_run(blind_run.agent_run_id)
+                .to(["worker"])
+                .images([image()]),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("doesn't take images"), "{refused}");
+}
+
+/// After a resume from a checkpoint, a run of the agent that hasn't run again
+/// still counts for a note for the agent: its saved model takes the image,
+/// though the agent's registered model takes none.
+#[tokio::test]
+async fn a_saved_run_s_model_counts_for_a_note_after_a_resume() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let build = || {
+        Workflow::builder()
+            .name("notes-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("worker", blind.clone())
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let workflow = build().build().unwrap();
+    workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(agent_config("Friendly worker")),
+        )
+        .await
+        .unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = build()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    resumed
+        .post_note(
+            Note::new("See this.")
+                .once()
+                .to(["worker"])
+                .images([png("eA==")]),
+        )
+        .unwrap();
+}
+
 /// A standing note is in the initial prompt of every later run, newest
 /// first; a one-time note isn't, and reaches a run that had started when it
 /// was posted once, when that run is continued.

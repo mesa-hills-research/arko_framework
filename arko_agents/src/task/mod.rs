@@ -529,7 +529,8 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_fork_of: Option<String>,
     /// The task runs with a configuration its host gave it after it started
-    /// ([`Task::reconfigure`]), not the one it was started with. A workflow
+    /// ([`Task::reconfigure`]), or at its start in place of its agent's
+    /// registered one (an arko_workflows `RunOptions::config`). A workflow
     /// resumed from a checkpoint keeps it, without comparing it with the
     /// agent's registered configuration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -922,6 +923,96 @@ impl Task {
         if self.claude_code_session.is_some() {
             self.claude_code_prompt_changed = true;
         }
+        Ok(())
+    }
+
+    /// Asks the agent for a report of its work, without a handover (see
+    /// [`crate::handover`]). Its next run asks for the report with `request`,
+    /// or by default with
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`](crate::handover::DEFAULT_REPORT_ONLY_REQUEST)
+    /// (or [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`](crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST)
+    /// where the agent gives the report as a reply), and rejects every other
+    /// tool call, `complete_task` included, until the report comes. The task
+    /// then completes with the report as its summary, and the conversation
+    /// keeps the request and the report. Context that arrives meanwhile waits
+    /// for the task's next run. An agent that compacts in Claude Code
+    /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+    /// writes the report all the same, in a copy of the task's session (a
+    /// fork) that the task goes on in, and the run doesn't wait for a plan's
+    /// usage limit to reset
+    /// ([`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)).
+    /// It takes a task between turns, one completed, awaiting the user's
+    /// answer, or cancelled (a turn the cancellation left open is settled
+    /// first, as when the task runs again). Returns `InvalidTaskState`
+    /// otherwise, and for an empty `request`.
+    pub fn request_report(&mut self, request: Option<String>) -> Result<(), ArkoAgentsError> {
+        if !matches!(
+            self.current_state,
+            TaskState::Completed { .. }
+                | TaskState::AwaitingUserResponse { .. }
+                | TaskState::Cancelled { .. }
+        ) {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a report is asked for only between turns (completed, awaiting the user's answer, or cancelled), not {:?}",
+                self.current_state
+            )));
+        }
+        if request
+            .as_deref()
+            .is_some_and(|request| request.trim().is_empty())
+        {
+            return Err(ArkoAgentsError::InvalidTaskState(
+                "a report's request must not be empty".to_string(),
+            ));
+        }
+        self.set_state(TaskState::InProgress);
+        // Claude Code writes it in a copy of the session, which the task
+        // goes on in. The session stays as it was, so a host that puts the
+        // task back as it was before the request has it as it was too.
+        if let Some(own) = self.claude_code_session.take() {
+            let parent = self.claude_code_fork_of.take().unwrap_or(own);
+            self.claude_code_fork_of = Some(parent);
+            self.claude_code_session = Some(Uuid::new_v4().to_string());
+        }
+        self.handover_requested = Some(crate::handover::HandoverRequest {
+            report_only: true,
+            request,
+            ..crate::handover::HandoverRequest::new(
+                self.current_conversation_context_size().unwrap_or(0),
+            )
+        });
+        Ok(())
+    }
+
+    /// A report alone is asked for ([`request_report`](Self::request_report))
+    /// and hasn't come yet.
+    pub(crate) fn report_only(&self) -> bool {
+        self.handover_requested
+            .as_ref()
+            .is_some_and(|request| request.report_only)
+    }
+
+    /// Takes `config` for the fresh conversation of a handover, in place of
+    /// the task's configuration, with the same model
+    /// ([`HandoverHook::handover_config`](crate::handover::HandoverHook::handover_config)).
+    /// The system message is written again from it. The task isn't marked
+    /// [`reconfigured`](Self::reconfigured) for it. Returns why `config`
+    /// can't be taken otherwise.
+    pub(crate) fn take_handover_config(&mut self, config: AgentConfig) -> Result<(), String> {
+        let (current, next) = (
+            &self.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        if current.provider != next.provider || current.id != next.id {
+            return Err(format!(
+                "it has another model ('{}' of {:?}) than the task ('{}' of {:?})",
+                next.id, next.provider, current.id, current.provider
+            ));
+        }
+        config.validate().map_err(|error| error.to_string())?;
+        self.agent_config_id = config.id.clone();
+        self.agent_config = config;
+        self.conversation.system_message = None;
         Ok(())
     }
 
