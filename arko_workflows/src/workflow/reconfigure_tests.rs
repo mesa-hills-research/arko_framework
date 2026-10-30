@@ -560,3 +560,157 @@ async fn a_new_run_moves_between_an_api_model_and_claude_code() {
     assert_eq!(server.requests(), 2);
     assert_eq!(fake.logged("user").len(), 1);
 }
+
+/// A handover of a run that keeps the configuration it was saved with
+/// (`keep_saved_configs`) starts the fresh conversation on the agent's
+/// configuration as registered now: a run saved with an old tool set comes
+/// out with the current one, and the current instructions.
+#[tokio::test]
+async fn a_handover_of_a_saved_run_takes_the_registered_configuration() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else if body.contains("Keep going.") {
+            // Over the handover size.
+            tool_call_turn("p1", "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", "\"input_tokens\":20000")
+        } else {
+            text_turn(&format!("t{index}"), "Sure.")
+        })
+    })
+    .await;
+    let mut old = agent();
+    old.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", old)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let mut current = agent();
+    current.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    current.tool_config.available_tool_names = vec!["probe".into(), "fresh".into()];
+    current.instructions = "Work with the fresh tool.".into();
+    let resumed = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", current)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .agent_tool("main", ProbeTool::new("fresh", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .unwrap();
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    let result = resumed
+        .continue_agent(&restored, "Keep going.")
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "Done.");
+    let task = result.task().unwrap();
+    assert_eq!(task.handovers.len(), 1);
+    assert!(!task.reconfigured);
+    assert!(
+        task.agent_config
+            .tool_config
+            .available_tool_names
+            .contains(&"fresh".to_string())
+    );
+
+    let bodies: Vec<Value> = server
+        .bodies()
+        .iter()
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    // Before the handover, the saved configuration.
+    let continued = &bodies[1];
+    assert!(!tool_names(continued).contains(&"fresh".to_string()));
+    assert!(
+        continued["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Work on the user's task.")
+    );
+    // The fresh conversation, the registered one.
+    let fresh = bodies.last().unwrap();
+    assert!(fresh.to_string().contains("REPORT: probed once."));
+    let tools = tool_names(fresh);
+    assert!(
+        tools.contains(&"fresh".to_string()) && tools.contains(&"probe".to_string()),
+        "{tools:?}"
+    );
+    let instructions = fresh["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Work with the fresh tool."),
+        "{instructions}"
+    );
+}
+
+/// A run the host started on a configuration of its own keeps it across a
+/// handover.
+#[tokio::test]
+async fn a_handover_of_a_run_on_the_host_s_configuration_keeps_it() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else {
+            // Under the handover size, then over it: a conversation that
+            // starts over it doesn't hand over.
+            let size = match body.matches("\"function_call_output\"").count() {
+                0 => "\"input_tokens\":5000",
+                _ => "\"input_tokens\":20000",
+            };
+            tool_call_turn(&format!("p{index}"), "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", size)
+        })
+    })
+    .await;
+    let mut registered = agent();
+    registered.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    registered.instructions = "Work as registered.".into();
+    let mut own = registered.clone();
+    own.instructions = "Work as the host says.".into();
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", registered)
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let result = workflow
+        .run_agent_with("main", "Hello.", RunOptions::new().config(own))
+        .await
+        .unwrap();
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
+    let fresh: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
+    assert!(fresh.to_string().contains("REPORT: probed once."));
+    let instructions = fresh["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Work as the host says."),
+        "{instructions}"
+    );
+}

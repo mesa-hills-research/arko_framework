@@ -1746,6 +1746,99 @@ impl From<u32> for RunRole {
     }
 }
 
+/// The configuration a run of `agent_name` in `role` starts with from
+/// `base_config`: the workflow's tools added (see
+/// [`WorkflowEngine::prepare_agent_config_for`]).
+fn prepare_config(
+    agent_name: &str,
+    base_config: &AgentConfig,
+    ctx: &SharedContext,
+    role: RunRole,
+) -> AgentConfig {
+    let mut config = base_config.clone();
+    // The prompt written from this configuration is a new one, so a
+    // subagent's lists and holds no skill kept to the main agent, also
+    // when the host left `subagent` off. (A saved prompt stays, and only
+    // its `load_skill` is narrowed, in `setup_skills`.)
+    if role.subagent
+        && let Some(skills) = config.skills_config.as_mut()
+    {
+        skills.subagent = true;
+    }
+    // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
+    // workflow's tools.
+    if config.tool_config.chat {
+        return config;
+    }
+    // A subagent whose questions go to its lead waits for the answer.
+    if role.subagent
+        && ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.questions_to_lead)
+    {
+        config.tool_config.async_questions = false;
+    }
+
+    let (reads, writes) = ctx.memory.access_of(agent_name);
+    if reads {
+        ensure_tool_name(&mut config, READ_MEMORY_TOOL_NAME);
+    }
+    if writes {
+        ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
+    }
+    if reads || writes {
+        ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
+    }
+    if !ctx.message_recipients(agent_name).is_empty() {
+        ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
+        ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
+    }
+    if !ctx.message_senders(agent_name).is_empty() {
+        ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
+    }
+    if offers_blocking_tool(ctx, agent_name, role) {
+        ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
+    }
+    let (caller, talks) = subagent_tools(ctx, agent_name, role);
+    if caller {
+        ensure_tool_name(&mut config, crate::subagents::START_AGENT_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::LIST_AGENTS_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::STOP_AGENT_TOOL_NAME);
+        if ctx
+            .subagents
+            .config()
+            .is_some_and(|config| config.peer_messages)
+        {
+            ensure_tool_name(&mut config, crate::subagents::LINK_AGENTS_TOOL_NAME);
+        }
+    }
+    if talks {
+        ensure_tool_name(&mut config, crate::subagents::MESSAGE_AGENT_TOOL_NAME);
+        ensure_tool_name(&mut config, crate::subagents::WAIT_FOR_AGENTS_TOOL_NAME);
+    }
+    if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
+        ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
+    }
+
+    for tool in &ctx.global_tools {
+        ensure_tool_name(&mut config, &tool.name());
+    }
+    if let Some(agent_tools) = ctx.agent_tools.get(agent_name) {
+        for tool in agent_tools {
+            let name = tool.name();
+            if !ctx
+                .resume_only_tools
+                .contains(&(agent_name.to_string(), name.clone()))
+            {
+                ensure_tool_name(&mut config, &name);
+            }
+        }
+    }
+
+    config
+}
+
 impl RunRole {
     /// The role of run `task_id` at `depth`.
     pub(crate) fn of(ctx: &SharedContext, depth: u32, task_id: uuid::Uuid) -> Self {
@@ -1905,6 +1998,8 @@ pub(crate) struct WorkflowHandover {
     /// The run is a completion verifier's review (see
     /// [`StartOptions::review`]).
     pub review: bool,
+    /// See [`StartedRun::depth`].
+    pub depth: u32,
 }
 
 impl WorkflowHandover {
@@ -1972,6 +2067,55 @@ impl HandoverHook for WorkflowHandover {
             task_prompt,
             context: (!context.is_empty()).then_some(context),
         }
+    }
+
+    /// The configuration the run's agent starts a run with now, prepared as
+    /// for a new run, when the run keeps another one it was saved with
+    /// (other tools, say). A run the host gave a configuration of its own
+    /// (`Task::reconfigured`), one whose agent now has another model, and a
+    /// completion verifier's review keep theirs.
+    fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
+        if self.review || task.reconfigured {
+            return None;
+        }
+        let ctx = &self.context;
+        let base = match ctx.subagents.record(task.id) {
+            Some(record) => ctx.subagents.prepared_config(ctx, &record).ok()?,
+            None => ctx.registered_config(&self.agent_name)?,
+        };
+        let (current, next) = (&task.agent_config.llm_config.model, &base.llm_config.model);
+        if current.provider != next.provider || current.id != next.id {
+            return None;
+        }
+        let mut config = prepare_config(
+            &self.agent_name,
+            &base,
+            ctx,
+            RunRole::of(ctx, self.depth, task.id),
+        );
+        // The runtime's `load_skill` was set up for the run as it started:
+        // the configuration lists it as the task's does, when it has skills.
+        let current_tools = &task.agent_config.tool_config;
+        if config.skills_config.is_some()
+            && current_tools
+                .available_tool_names
+                .iter()
+                .any(|name| name == LOAD_SKILL_TOOL_NAME)
+        {
+            ensure_tool_name(&mut config, LOAD_SKILL_TOOL_NAME);
+            if let Some(load_skill) = current_tools
+                .tool_specific_configs
+                .get(LOAD_SKILL_TOOL_NAME)
+            {
+                config
+                    .tool_config
+                    .tool_specific_configs
+                    .entry(LOAD_SKILL_TOOL_NAME.to_string())
+                    .or_insert_with(|| load_skill.clone());
+            }
+        }
+        let saved = |config: &AgentConfig| serde_json::to_value(config).ok();
+        (saved(&config) != saved(&task.agent_config)).then_some(config)
     }
 
     /// The questions the user input handler says are still open.
@@ -3117,88 +3261,7 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         role: RunRole,
     ) -> AgentConfig {
-        let mut config = base_config.clone();
-        // The prompt written from this configuration is a new one, so a
-        // subagent's lists and holds no skill kept to the main agent, also
-        // when the host left `subagent` off. (A saved prompt stays, and only
-        // its `load_skill` is narrowed, in `setup_skills`.)
-        if role.subagent
-            && let Some(skills) = config.skills_config.as_mut()
-        {
-            skills.subagent = true;
-        }
-        // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
-        // workflow's tools.
-        if config.tool_config.chat {
-            return config;
-        }
-        // A subagent whose questions go to its lead waits for the answer.
-        if role.subagent
-            && ctx
-                .subagents
-                .config()
-                .is_some_and(|config| config.questions_to_lead)
-        {
-            config.tool_config.async_questions = false;
-        }
-
-        let (reads, writes) = ctx.memory.access_of(agent_name);
-        if reads {
-            ensure_tool_name(&mut config, READ_MEMORY_TOOL_NAME);
-        }
-        if writes {
-            ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
-        }
-        if reads || writes {
-            ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
-        }
-        if !ctx.message_recipients(agent_name).is_empty() {
-            ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
-            ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
-        }
-        if !ctx.message_senders(agent_name).is_empty() {
-            ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
-        }
-        if offers_blocking_tool(ctx, agent_name, role) {
-            ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
-        }
-        let (caller, talks) = subagent_tools(ctx, agent_name, role);
-        if caller {
-            ensure_tool_name(&mut config, crate::subagents::START_AGENT_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::LIST_AGENTS_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::STOP_AGENT_TOOL_NAME);
-            if ctx
-                .subagents
-                .config()
-                .is_some_and(|config| config.peer_messages)
-            {
-                ensure_tool_name(&mut config, crate::subagents::LINK_AGENTS_TOOL_NAME);
-            }
-        }
-        if talks {
-            ensure_tool_name(&mut config, crate::subagents::MESSAGE_AGENT_TOOL_NAME);
-            ensure_tool_name(&mut config, crate::subagents::WAIT_FOR_AGENTS_TOOL_NAME);
-        }
-        if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
-            ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
-        }
-
-        for tool in &ctx.global_tools {
-            ensure_tool_name(&mut config, &tool.name());
-        }
-        if let Some(agent_tools) = ctx.agent_tools.get(agent_name) {
-            for tool in agent_tools {
-                let name = tool.name();
-                if !ctx
-                    .resume_only_tools
-                    .contains(&(agent_name.to_string(), name.clone()))
-                {
-                    ensure_tool_name(&mut config, &name);
-                }
-            }
-        }
-
-        config
+        prepare_config(agent_name, base_config, ctx, role)
     }
 
     /// The prompt section delivering the messages queued for the agent that
@@ -3419,6 +3482,7 @@ impl WorkflowEngine {
                 agent_name: agent_name.to_string(),
                 prompt_message_ids: pending_message_ids.clone(),
                 review,
+                depth,
             }));
         if let Some(threshold) = ctx.handover_thresholds.get(agent_name) {
             runtime = runtime.with_handover_threshold(threshold.clone());

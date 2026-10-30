@@ -161,6 +161,7 @@ async fn a_handover_restates_the_questions_the_handler_has_open() {
             agent_name: "lead".to_string(),
             prompt_message_ids: Vec::new(),
             review: false,
+            depth: 0,
         };
         let mut task = arko_agents::Task::new(
             asking_agent(),
