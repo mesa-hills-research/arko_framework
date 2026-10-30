@@ -138,6 +138,11 @@ impl AgentLoop {
         let Some(tool) = self.tool_registry.get(&call.tool_name) else {
             return (None, ToolRecovery::InDoubt);
         };
+        // A report asked for alone runs no call again, and resumes no run a
+        // call started: the run that goes on with the work does.
+        if self.task.report_only() {
+            return (Some(tool), ToolRecovery::InDoubt);
+        }
         let mode = if call.custom_output.is_some() {
             ToolRecovery::Rerun
         } else {

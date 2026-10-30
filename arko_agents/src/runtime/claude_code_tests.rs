@@ -4167,6 +4167,58 @@ async fn a_rerun_tool_open_at_the_stop_runs_again_for_the_resumed_session() {
     assert!(resumed.contains("CONTENTS-OF-A"), "{resumed}");
 }
 
+/// A report asked for alone of a task cancelled while a call ran doesn't
+/// run the call again: the session hears its outcome is unknown, then the
+/// report's request.
+#[tokio::test]
+async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__read_file",
+            "input": {"path": "a.txt"},
+            "id": "toolu_read",
+            "crash": "pre",
+        }],
+        [{"text": "REPORT: read nothing yet."}],
+    ]));
+    std::fs::write(fake.workspace().join("a.txt"), "CONTENTS-OF-A").unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file"]),
+        "Read a.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    let mut saved = recorder.latest(|task| {
+        !task.running_tool_calls.is_empty() && task.current_state == TaskState::InProgress
+    });
+    saved.set_state(TaskState::Cancelled {
+        reason: "The agent did not stop in time and was aborted.".into(),
+    });
+    saved.request_report(None).unwrap();
+    let (task, resumed) = run_saved(&fake, &saved).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: read nothing yet."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(resumed.contains("its outcome is unknown"), "{resumed}");
+    assert!(!resumed.contains("CONTENTS-OF-A"), "{resumed}");
+    assert!(
+        resumed.contains(crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST),
+        "{resumed}"
+    );
+}
+
 #[tokio::test]
 async fn recovered_tool_images_are_sent_and_survive_saving_before_delivery() {
     let fake = Fake::new(json!([

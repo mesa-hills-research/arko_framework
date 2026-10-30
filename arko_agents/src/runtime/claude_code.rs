@@ -1321,6 +1321,10 @@ impl ClaudeCodeRun {
                     .contains(&call.tool_name.as_str())
                 });
             let mode = match (&tool, &call.custom_output) {
+                // A report asked for alone runs no call again, and resumes
+                // no run a call started: the run that goes on with the work
+                // does.
+                _ if self.task.report_only() => ToolRecovery::InDoubt,
                 (Some(_), Some(_)) => ToolRecovery::Rerun,
                 (Some(tool), None) => tool.recovery_mode_for(&call.parameters),
                 (None, _) => ToolRecovery::InDoubt,
@@ -4995,11 +4999,14 @@ impl ClaudeCodeRun {
         cause: ErrorRecoveryCause,
     ) -> Result<(), ArkoAgentsError> {
         log::warn!("Task {}: {message}", self.task.id);
-        let pausing = matches!(
-            self.task.agent_config.llm_error_policy,
-            LLMErrorPolicy::PauseAndAwaitApproval
-                | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
-        );
+        // A report asked for alone pauses whatever the policy, so its host
+        // hears the cause.
+        let pausing = self.task.report_only()
+            || matches!(
+                self.task.agent_config.llm_error_policy,
+                LLMErrorPolicy::PauseAndAwaitApproval
+                    | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
+            );
         if pausing {
             self.pause(message, cause).await
         } else {

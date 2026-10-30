@@ -249,7 +249,8 @@ impl AgentLoop {
     }
 
     /// Ends recovery: the task pauses for error-recovery approval, with
-    /// `cause`, under the pausing error policies, or is interrupted.
+    /// `cause`, under the pausing error policies and while a report asked
+    /// for alone is due, or is interrupted.
     pub(super) async fn finish_llm_recovery(
         &mut self,
         message: String,
@@ -260,11 +261,14 @@ impl AgentLoop {
         // A pending fallback stays pending: continuing sends its request
         // again, and resolving the refusal drops it.
         self.task.monitor_pause = false;
-        let pause = matches!(
-            self.task.agent_config.llm_error_policy,
-            LLMErrorPolicy::PauseAndAwaitApproval
-                | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
-        );
+        // A report asked for alone pauses whatever the policy, so its host
+        // hears the cause.
+        let pause = self.task.report_only()
+            || matches!(
+                self.task.agent_config.llm_error_policy,
+                LLMErrorPolicy::PauseAndAwaitApproval
+                    | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
+            );
         if pause {
             self.task
                 .set_state(TaskState::AwaitingErrorRecoveryApproval {
