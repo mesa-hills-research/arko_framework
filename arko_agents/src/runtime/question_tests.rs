@@ -274,6 +274,66 @@ async fn wait_holds_the_task_until_the_answer() {
     }
 }
 
+/// A report asked for alone of a task waiting for its answer: the asking
+/// call keeps its one result, ahead of the request, and the task completes
+/// with the report, its question still waiting in its log.
+#[tokio::test]
+async fn a_report_from_a_task_waiting_for_its_answer_keeps_each_result_once() {
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = false;
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    let which = serde_json::json!({"questions": [{"question": "Which file?"}]});
+    push(
+        &mut agent,
+        vec![turn(vec![native_call("ask", "ask_user", which)])],
+    );
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    super::tool_call_tests::wait_for(&mut events, &mut seen, |event| match event {
+        AgentEvent::UserQuestionsAsked { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let (mut task, _) = finish(run, &mut events).await;
+    assert!(matches!(
+        task.current_state,
+        TaskState::AwaitingUserResponse { .. }
+    ));
+
+    task.request_report(None).unwrap();
+    let (mut agent, mut events, _commands) = super::tool_call_tests::agent_for(
+        task,
+        ToolRegistry::new(),
+        Arc::new(ai::LLMClient::new()),
+    );
+    push(
+        &mut agent,
+        vec![super::image_tests::response(ai::Message::new_assistant(
+            "REPORT: asked which file.",
+        ))],
+    );
+    let run = tokio::spawn(agent.run());
+    let (task, _) = finish(run, &mut events).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: asked which file."),
+        "{:?}",
+        task.current_state
+    );
+    let results = task
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(ai::Content::as_tool_result)
+        .filter(|result| result.call_id.as_deref() == Some("ask"))
+        .count();
+    assert_eq!(results, 1, "{}", conversation_text(&task));
+    assert!(!task.questions.waiting.is_empty());
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// `close_questions` closes the questions the task asked and reports them,
 /// and says which ids it never asked.
 #[tokio::test]
