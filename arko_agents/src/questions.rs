@@ -392,15 +392,22 @@ impl Answer {
                 .is_none_or(|text| text.trim().is_empty())
     }
 
-    /// The answer as the agent's note gives it.
+    /// The answer as the agent's note gives it. The user's own words follow
+    /// whatever they picked, "You decide" included.
     pub fn words(&self, question: Option<&Question>) -> String {
+        let text = self.text.as_deref().map(str::trim).unwrap_or_default();
         if self.you_decide {
-            return match question.and_then(|question| question.default.as_deref()) {
+            let decide = match question.and_then(|question| question.default.as_deref()) {
                 Some(default) => format!(
                     "You decide (you said you'd assume: {})",
                     excerpt(default, EXCERPT_CHARS)
                 ),
                 None => "You decide".to_string(),
+            };
+            return if text.is_empty() {
+                decide
+            } else {
+                format!("{decide}, plus “{text}”")
             };
         }
         let choices = self
@@ -410,11 +417,10 @@ impl Answer {
             .filter(|choice| !choice.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
-        let text = self.text.as_deref().map(str::trim).unwrap_or_default();
         match (choices.is_empty(), text.is_empty()) {
             (_, true) => choices,
             (true, false) => text.to_string(),
-            (false, false) => format!("{choices}. {text}"),
+            (false, false) => format!("{choices}, plus “{text}”"),
         }
     }
 }
@@ -796,7 +802,7 @@ mod tests {
         };
         assert_eq!(
             answer_note::<&str>(&asked, &other, &[]),
-            "The user answered q3.\nq3 Tabs or spaces? Tabs. but 2 wide"
+            "The user answered q3.\nq3 Tabs or spaces? Tabs, plus “but 2 wide”"
         );
         // A long question, and its default, are named by an excerpt, and
         // the answer is given whole.
@@ -846,5 +852,47 @@ mod tests {
         assert!(section.starts_with(OPEN_QUESTIONS_HEADING), "{section}");
         assert!(section.contains("q3 Tabs or spaces?"), "{section}");
         assert_eq!(open_section(&[]), None);
+    }
+
+    /// The user's own words go with any pick, "You decide" included.
+    #[test]
+    fn words_typed_with_a_pick_are_kept() {
+        let question = Question {
+            question: "Tabs or spaces?".to_string(),
+            default: Some("Spaces".to_string()),
+            ..Question::default()
+        };
+        let decide = Answer {
+            you_decide: true,
+            text: Some("  but keep the old files as they are ".to_string()),
+            ..Answer::default()
+        };
+        assert_eq!(
+            decide.words(Some(&question)),
+            "You decide (you said you'd assume: Spaces), plus “but keep the old files as they are”"
+        );
+        let decide_alone = Answer {
+            you_decide: true,
+            ..Answer::default()
+        };
+        assert_eq!(
+            decide_alone.words(Some(&question)),
+            "You decide (you said you'd assume: Spaces)"
+        );
+        assert_eq!(decide_alone.words(None), "You decide");
+        let picked = Answer {
+            choices: vec!["Spaces".to_string()],
+            text: Some("Two of them".to_string()),
+            ..Answer::default()
+        };
+        assert_eq!(picked.words(Some(&question)), "Spaces, plus “Two of them”");
+        let typed = Answer {
+            text: Some("Neither, use the editor's setting".to_string()),
+            ..Answer::default()
+        };
+        assert_eq!(
+            typed.words(Some(&question)),
+            "Neither, use the editor's setting"
+        );
     }
 }

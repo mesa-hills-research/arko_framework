@@ -133,7 +133,7 @@ and the host delivers the answers as context, such as a note, worded with the he
 ```text
 The user answered q3 and q4.
 q3 Tabs or spaces? Spaces
-q4 Push now? You decide (you said you'd assume: not yet)
+q4 Push now? You decide (you said you'd assume: not yet), plus “after the review”
 Still open: q5.
 ```
 
