@@ -110,7 +110,7 @@ pub const DEFAULT_CHAT_REPORT_REQUEST: &str = "This conversation is getting long
 /// after the request says how to give it.
 macro_rules! report_only_contents {
     () => {
-        "Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing and what you meant to do next, and what you are unsure of. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet: who sent it, what it asked, and what you meant to reply. Be complete: the work may go on from this report alone."
+        "Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing and what you meant to do next, and what you are unsure of. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet, with who sent it, what it asked, and what you meant to reply. Be complete, since the work may go on from this report alone."
     };
 }
 
