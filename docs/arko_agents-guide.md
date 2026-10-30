@@ -798,8 +798,10 @@ or dropping it ends the programs it started too. A server behind a launcher such
 in the background. The same happens when the server exits by itself. A host that is
 killed outright, or ends with `std::process::exit`, runs no destructor. On Windows the
 job object still ends the servers. On Unix they end once they notice their input has
-closed, so a server that ignores that keeps running. Out of the terminal's foreground
-group, a server doesn't get the terminal's Ctrl-C.
+closed, so a server that ignores that keeps running. A host about to call
+`std::process::exit` calls `kill_mcp_servers()` first, which kills every server's
+process group in the process at once, as `kill_stop_aware_commands()` does for commands.
+Out of the terminal's foreground group, a server doesn't get the terminal's Ctrl-C.
 
 A server's stderr goes to the log (the `log` crate) at info level, a line at a time,
 tagged with the server's name (`MCP server 'filesystem' stderr: ...`). It is not printed

@@ -329,6 +329,7 @@ impl Connection {
         }
 
         let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(OpenError::Spawn)?;
+        let listed = ListedGroup::of(&child);
         let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
             return Err(OpenError::Spawn(std::io::Error::other(
                 "the server's standard input or output is not available",
@@ -340,7 +341,7 @@ impl Connection {
         let watcher = watch_server(
             config.name.clone(),
             child,
-            tree,
+            (tree, listed),
             stderr,
             redactions.clone(),
             stopped,
@@ -424,6 +425,75 @@ impl Connection {
     }
 }
 
+/// The process groups of the MCP servers running in this process (Unix), for
+/// [`kill_mcp_servers`].
+#[cfg(unix)]
+static SERVER_GROUPS: Mutex<std::collections::BTreeSet<i32>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(unix)]
+fn server_groups() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<i32>> {
+    SERVER_GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A server's process group, listed for [`kill_mcp_servers`] from its start
+/// until its tree is killed (or dropped) and this is dropped.
+pub(crate) struct ListedGroup {
+    #[cfg(unix)]
+    id: Option<i32>,
+}
+
+impl ListedGroup {
+    /// The group `child` leads, as [`ProcessTree::spawn`] starts it.
+    fn of(child: &Child) -> Self {
+        #[cfg(unix)]
+        {
+            let id = child.id().and_then(|id| i32::try_from(id).ok());
+            if let Some(id) = id {
+                server_groups().insert(id);
+            }
+            Self { id }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            Self {}
+        }
+    }
+}
+
+impl Drop for ListedGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(id) = self.id.take() {
+            server_groups().remove(&id);
+        }
+    }
+}
+
+/// Kills every MCP server running in this process, with the programs each
+/// started, at once (`SIGKILL` to each server's process group on Unix). For
+/// a host about to exit without unwinding. `std::process::exit` runs no
+/// destructors, so no server is stopped, and a server that ignores the end
+/// of its input keeps running after the host has gone, as do the programs
+/// it started. Call it right before the exit, as
+/// [`kill_stop_aware_commands`](crate::kill_stop_aware_commands) is called.
+/// A host killed outright (`SIGKILL`) can't call it. On Windows it does
+/// nothing, since each server's job object ends its processes when the
+/// host's handles close. A manager or hub that goes on finds its servers
+/// exited, as if they had exited by themselves.
+pub fn kill_mcp_servers() {
+    #[cfg(unix)]
+    for id in server_groups().iter() {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(*id),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
 /// A server process that exited on its own (not stopped by the manager):
 /// its exit status and last stderr lines, reported in a warning.
 #[derive(Debug)]
@@ -475,7 +545,7 @@ fn describe_exit(status: &std::io::Result<ExitStatus>) -> String {
 fn watch_server(
     name: String,
     mut child: Child,
-    mut tree: ProcessTree,
+    (mut tree, listed): (ProcessTree, ListedGroup),
     stderr: Option<ChildStderr>,
     redactions: Arc<Redactions>,
     mut stop: oneshot::Receiver<()>,
@@ -542,6 +612,7 @@ fn watch_server(
         // What the server started must not outlive it, and one that keeps
         // the stderr pipe open would delay the report below.
         tree.kill();
+        drop(listed);
         let status = exited?;
         if let Some(reader) = reader {
             let _ = tokio::time::timeout(STDERR_DRAIN, reader).await;
@@ -599,11 +670,12 @@ mod tests {
         stopped: oneshot::Receiver<()>,
     ) -> (JoinHandle<Option<ServerExit>>, Arc<Mutex<Option<String>>>) {
         let (child, tree, stderr) = server(script);
+        let listed = ListedGroup::of(&child);
         let exit = Arc::new(Mutex::new(None));
         let watcher = watch_server(
             "files".into(),
             child,
-            tree,
+            (tree, listed),
             stderr,
             Arc::new(redactions),
             stopped,
