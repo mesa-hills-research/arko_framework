@@ -2400,6 +2400,87 @@ async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
     assert!(fresh.contains("Search with Grep and Read."), "{fresh}");
 }
 
+/// The handover hook's configuration brings its skills to the fresh
+/// session: its system prompt lists them and `load_skill` is served for
+/// them, from one skill to another, from none to some, and from some to
+/// none (`load_skill` is no longer served).
+#[tokio::test]
+async fn a_handover_s_fresh_session_brings_the_configuration_s_skills() {
+    let skills_of = |name: &str| crate::skill::SkillsConfig {
+        embedded: vec![crate::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    };
+    for (before, after) in [
+        (Some("alpha"), Some("beta")),
+        (None, Some("beta")),
+        (Some("alpha"), None),
+    ] {
+        let wanted = after.or(before).unwrap();
+        let fake = Fake::new(json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "REPORT: searched a and b."},
+            ],
+            [
+                {"tool": "mcp__arko__load_skill", "input": {"name": wanted}},
+                complete("Done"),
+            ],
+        ]));
+        let mut saved = config(&fake, &["Grep"]);
+        saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+        // As a host gives it, before the runtime sets its skills up.
+        let mut current = saved.clone();
+        current.skills_config = after.map(skills_of);
+        saved.skills_config = before.map(skills_of);
+        let mut task = Task::new(saved, "Search a and b.".into(), fake.workspace(), None);
+        let mut registry = ToolRegistry::new();
+        let prompt = task.agent_config.skills_config.clone().map(|skills| {
+            crate::skill::SkillManager::load(&skills, &task.current_working_directory)
+                .unwrap()
+                .setup(&mut registry, &mut task.agent_config)
+        });
+        let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .with_handover_hook(Arc::new(ConfigHook(current)));
+        let (events, commands, handle) =
+            runtime.run_task(task, Arc::new(registry), None, false, prompt, None, None);
+        let (task, _) = Run {
+            events,
+            commands,
+            handle,
+        }
+        .finish()
+        .await;
+        assert_eq!(task.handovers.len(), 1, "{before:?} to {after:?}");
+        let fresh = fake.logged("argv")[1]["argv"].to_string();
+        let served = fake.logged("tools")[1]["tools"].to_string();
+        let posts = fake.logged("post");
+        let loaded = posts
+            .iter()
+            .find(|post| post["tool"] == "mcp__arko__load_skill")
+            .map(|post| post["output"].to_string())
+            .unwrap_or_default();
+        match after {
+            Some(name) => {
+                assert!(fresh.contains(&format!("The {name} skill.")), "{fresh}");
+                assert!(served.contains("load_skill"), "{served}");
+                assert!(loaded.contains(&format!("The {name} body.")), "{loaded}");
+            }
+            None => {
+                assert!(!fresh.contains("Available Skills"), "{fresh}");
+                assert!(!served.contains("load_skill"), "{served}");
+                assert!(!loaded.contains("body."), "{loaded}");
+            }
+        }
+        if let Some(name) = before.filter(|_| before != after) {
+            assert!(!fresh.contains(&format!("The {name} skill.")), "{fresh}");
+        }
+    }
+}
+
 /// A report asked for alone goes into the task's session as its next input,
 /// also for an agent that compacts in Claude Code (no `/compact` is sent).
 /// Calls are held for it, `complete_task` too, and the task completes with

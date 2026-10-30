@@ -614,10 +614,12 @@ pub trait HandoverHook: Send + Sync {
     /// tools, say) gives that one here, since the fresh conversation writes
     /// the prompt cache afresh anyway. Its tools and the system prompt
     /// written from it apply from the fresh conversation's first request,
-    /// and the task keeps it. It must have the task's model (provider and
-    /// ID), and the tools it offers must be in the runtime's tool registry.
-    /// One with another model, or one that isn't valid, is left out, and the
-    /// task keeps its own (logged as a warning).
+    /// and the task keeps it. Its skills are loaded and set up again when
+    /// they differ from the task's (see [`same_skills`]), with a new
+    /// `load_skill`. It must have the task's model (provider and ID), and the
+    /// other tools it offers must be in the runtime's tool registry. One with
+    /// another model, one that isn't valid, or one whose skills don't load
+    /// is left out, and the task keeps its own (logged as a warning).
     fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
         let _ = task;
         None
@@ -670,7 +672,82 @@ pub trait HandoverHook: Send + Sync {
     }
 }
 
-/// The highest question number already taken before `count` questions
+/// Whether two skills configurations are the same, embedded skills
+/// included (a saved configuration leaves those out).
+pub fn same_skills(
+    a: Option<&crate::skill::SkillsConfig>,
+    b: Option<&crate::skill::SkillsConfig>,
+) -> bool {
+    let saved = |skills: Option<&crate::skill::SkillsConfig>| {
+        skills.map(|skills| (serde_json::to_value(skills).ok(), skills.embedded.clone()))
+    };
+    saved(a) == saved(b)
+}
+
+/// The tools and skill prompt a runtime goes on with once its task takes
+/// `config` from a [`HandoverHook::handover_config`], in place of the
+/// configuration whose skills were `current`. `None` keeps what the runtime
+/// has, when the skills stay the same: `config` then lists `load_skill` as
+/// `listed` (the current configuration's entries for it) says. Otherwise the
+/// skills load from `config` in `workspace`, its `load_skill` replaces the
+/// runtime's (`config` lists it when it has skills to load), and the prompt
+/// lists its skills. Without skills, there is neither.
+pub(crate) fn handover_skills(
+    all_tools: &crate::tool::ToolRegistry,
+    current: &AgentConfig,
+    config: &mut AgentConfig,
+    workspace: &std::path::Path,
+) -> Result<
+    Option<(
+        crate::tool::ToolRegistry,
+        Option<crate::skill::SkillPromptContext>,
+    )>,
+    ArkoAgentsError,
+> {
+    use crate::skill::LOAD_SKILL_TOOL_NAME;
+    let tools = &mut config.tool_config;
+    tools
+        .available_tool_names
+        .retain(|name| name != LOAD_SKILL_TOOL_NAME);
+    tools.tool_specific_configs.remove(LOAD_SKILL_TOOL_NAME);
+    if same_skills(
+        current.skills_config.as_ref(),
+        config.skills_config.as_ref(),
+    ) {
+        let listed = &current.tool_config;
+        if listed
+            .available_tool_names
+            .iter()
+            .any(|name| name == LOAD_SKILL_TOOL_NAME)
+        {
+            tools
+                .available_tool_names
+                .push(LOAD_SKILL_TOOL_NAME.to_string());
+        }
+        if let Some(entry) = listed.tool_specific_configs.get(LOAD_SKILL_TOOL_NAME) {
+            tools
+                .tool_specific_configs
+                .insert(LOAD_SKILL_TOOL_NAME.to_string(), entry.clone());
+        }
+        return Ok(None);
+    }
+    let names = all_tools
+        .list_tool_names()
+        .into_iter()
+        .filter(|name| name != LOAD_SKILL_TOOL_NAME)
+        .collect::<Vec<_>>();
+    let mut registry = all_tools.restricted_to(names.iter().map(String::as_str));
+    let prompt = match config.skills_config.clone() {
+        Some(skills) => {
+            let manager = crate::skill::SkillManager::load(&skills, workspace)?;
+            Some(manager.setup(&mut registry, config))
+        }
+        None => None,
+    };
+    Ok(Some((registry, prompt)))
+}
+
+/// The highest question number already taken before `count` questions/// The highest question number already taken before `count` questions
 /// `task`'s agent asks now (see [`HandoverHook::question_numbers`]), with
 /// `taken` numbers the runtime holds for calls not recorded yet.
 pub(crate) fn last_question_number(

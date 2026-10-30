@@ -732,6 +732,120 @@ fn a_report_is_asked_for_between_turns_only() {
     assert_eq!(task.current_state, TaskState::InProgress);
 }
 
+/// The skills configuration of one embedded skill, `name`.
+fn skills_of(name: &str) -> crate::skill::SkillsConfig {
+    crate::skill::SkillsConfig {
+        embedded: vec![crate::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    }
+}
+
+/// A `load_skill` call for skill `name`.
+fn load_skill_call(name: &str) -> ScriptedStreamResult {
+    let mut message = ai::Message::new_assistant("");
+    let mut load = call("load", crate::skill::LOAD_SKILL_TOOL_NAME);
+    load.arguments = serde_json::json!({ "name": name });
+    message.tool_calls.push(load);
+    scripted(message, 10)
+}
+
+/// A loop like the harness's whose task has `skills`, set up as a host sets
+/// them up.
+fn loop_with_skills(
+    skills: Option<crate::skill::SkillsConfig>,
+) -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+) {
+    let (agent, _, _) = harness(ToolCallingMode::Native);
+    let mut task = agent.task.clone();
+    let names = agent.all_tools.list_tool_names();
+    let mut registry = agent
+        .all_tools
+        .restricted_to(names.iter().map(String::as_str));
+    task.agent_config.skills_config = skills.clone();
+    let prompt = skills.map(|skills| {
+        crate::skill::SkillManager::load(&skills, &task.current_working_directory)
+            .unwrap()
+            .setup(&mut registry, &mut task.agent_config)
+    });
+    let (events, receiver) = mpsc::channel(200);
+    let (sender, commands) = mpsc::channel(10);
+    let agent = AgentLoop::new(
+        task,
+        Arc::new(ai::LLMClient::new()),
+        Arc::new(registry),
+        events,
+        commands,
+        None,
+        false,
+        prompt,
+        None,
+        None,
+    );
+    (agent, receiver, sender)
+}
+
+/// The hook's configuration brings its skills to the fresh conversation:
+/// its system prompt lists them and `load_skill` loads them, from one skill
+/// to another, from none to some, and from some to none (`load_skill` is no
+/// longer offered).
+#[tokio::test]
+async fn a_handover_s_configuration_brings_its_skills() {
+    for (before, after) in [
+        (Some("alpha"), Some("beta")),
+        (None, Some("beta")),
+        (Some("alpha"), None),
+    ] {
+        let (mut agent, mut events, commands) = loop_with_skills(before.map(skills_of));
+        // As a host gives it, before the runtime sets its skills up.
+        let mut current = agent.task.agent_config.clone();
+        current.skills_config = after.map(skills_of);
+        current
+            .tool_config
+            .available_tool_names
+            .retain(|name| name != crate::skill::LOAD_SKILL_TOOL_NAME);
+        agent.handover_hook = Some(Arc::new(ConfigHook(current)));
+        commands.try_send(UserCommand::RequestHandover).unwrap();
+        push(
+            &mut agent,
+            vec![
+                reply("The report.", 10),
+                load_skill_call(after.or(before).unwrap()),
+                native_complete(),
+            ],
+        );
+        let (task, events) = run(agent, &mut events).await;
+        assert_eq!(task.handovers.len(), 1);
+        let prompt = task.conversation.system_message.clone().unwrap();
+        let loaded = results(&events, crate::skill::LOAD_SKILL_TOOL_NAME);
+        match after {
+            Some(name) => {
+                assert!(prompt.contains(&format!("The {name} skill.")), "{prompt}");
+                assert_eq!(loaded.len(), 1, "{before:?} to {after:?}: {loaded:?}");
+                assert!(
+                    loaded[0].contains(&format!("The {name} body.")),
+                    "{loaded:?}"
+                );
+            }
+            None => {
+                assert!(!prompt.contains("Available Skills"), "{prompt}");
+                assert!(
+                    loaded.iter().all(|output| !output.contains("body.")),
+                    "{loaded:?}"
+                );
+            }
+        }
+        if let Some(name) = before.filter(|_| before != after) {
+            assert!(!prompt.contains(&format!("The {name} skill.")), "{prompt}");
+        }
+    }
+}
+
 #[test]
 fn tasks_saved_before_handovers_load() {
     let (agent, _events, _commands) = harness(ToolCallingMode::Native);

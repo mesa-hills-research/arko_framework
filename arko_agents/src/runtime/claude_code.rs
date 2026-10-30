@@ -5332,15 +5332,44 @@ impl ClaudeCodeRun {
 
     /// The fresh session of a handover runs with `config`, the
     /// [`HandoverHook`]'s: it is served `config`'s tools and given a system
-    /// prompt written from it. One the task can't take is left out, and
-    /// logged.
-    fn take_handover_config(&mut self, config: AgentConfig) -> Result<(), ArkoAgentsError> {
-        if let Err(reason) = self.task.take_handover_config(config) {
-            log::warn!(
-                "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
-                self.task.id
-            );
-            return Ok(());
+    /// prompt written from it, with `config`'s skills when they differ from
+    /// the task's. One the task can't take is left out, and logged.
+    fn take_handover_config(&mut self, mut config: AgentConfig) -> Result<(), ArkoAgentsError> {
+        let (current, next) = (
+            &self.task.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        // Checked (with the rest) as the task takes it, and first here, so
+        // that a configuration left out loads no skills.
+        let skills = if current.provider == next.provider && current.id == next.id {
+            crate::handover::handover_skills(
+                &self.all_tools,
+                &self.task.agent_config,
+                &mut config,
+                &self.task.current_working_directory,
+            )
+        } else {
+            Ok(None)
+        };
+        let taken = skills
+            .map_err(|error| format!("its skills don't load: {error}"))
+            .and_then(|skills| {
+                self.task.take_handover_config(config)?;
+                Ok(skills)
+            });
+        let skills = match taken {
+            Ok(skills) => skills,
+            Err(reason) => {
+                log::warn!(
+                    "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
+                    self.task.id
+                );
+                return Ok(());
+            }
+        };
+        if let Some((tools, prompt)) = skills {
+            self.all_tools = Arc::new(tools);
+            self.skill_prompt_context = prompt;
         }
         self.parsing = self.task.agent_config.get_tool_parsing_config();
         let offered = self.task.agent_config.tool_config.offered_tool_names();
@@ -5348,18 +5377,33 @@ impl ClaudeCodeRun {
             .all_tools
             .restricted_to(offered.iter().map(String::as_str));
         for name in registry.list_tool_names() {
-            if self.registry.get(&name).is_some() {
+            let Some(tool) = registry.get(&name) else {
+                continue;
+            };
+            if self
+                .registry
+                .get(&name)
+                .is_some_and(|served| Arc::ptr_eq(&served, &tool))
+            {
                 continue;
             }
-            if let Some(tool) = registry.get(&name) {
-                tool.reset_context(self.task.id);
-                if let Some(sender) = &self.command_sender {
-                    tool.bind_runtime(self.task.id, sender.clone());
-                }
+            tool.reset_context(self.task.id);
+            if let Some(sender) = &self.command_sender {
+                tool.bind_runtime(self.task.id, sender.clone());
             }
         }
         self.registry = Arc::new(registry);
         self.served_tools = None;
+        // The fresh session's tools are served by a host set up for them.
+        if let Some(host) = self.host.take() {
+            self.interceptor = host
+                .interceptor
+                .as_ref()
+                .map(|interceptor| InterceptorConfig {
+                    interceptor: interceptor.interceptor.clone(),
+                    failure_policy: interceptor.failure_policy.clone(),
+                });
+        }
         let prompt = self.system_prompt()?;
         self.task.conversation.system_message = Some(prompt);
         Ok(())
