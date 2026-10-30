@@ -1397,7 +1397,10 @@ The CLI runs in a process group of its own (on Windows, a job object that kills 
 processes when closed), with the programs it starts. `close`, or dropping the session,
 kills a command a Bash call left running as well as the CLI. `process_tree::ProcessTree`
 does the same for any command. `ProcessTree::spawn(&mut command)` returns the child and a
-tree, and `kill` or dropping the tree ends both.
+tree, and `kill` or dropping the tree ends both. Kill the tree before collecting the child's
+exit status, as `ProcessTree::wait(&mut child)` does. On Unix the group's ID is the child's
+process ID, which another program can take once the child is collected.
+`process_tree::exited(&mut child)` waits for a child to exit without collecting it.
 
 ## Examples and tests
 

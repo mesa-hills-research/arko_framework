@@ -369,14 +369,18 @@ impl ClaudeSession {
     /// transcript.
     pub async fn close(mut self) -> Result<ExitStatus, ClaudeError> {
         self.stdin.lock().await.take();
-        let status = match tokio::time::timeout(EXIT_GRACE, self.child.wait()).await {
+        // The tree is killed before the CLI is collected, while its group's
+        // ID can't have passed to another program.
+        let status = match tokio::time::timeout(EXIT_GRACE, self.tree.wait(&mut self.child)).await {
             Ok(status) => status,
-            Err(_) => match self.child.kill().await {
-                Ok(()) => self.child.wait().await,
-                Err(error) => Err(error),
-            },
+            Err(_) => {
+                self.tree.kill();
+                match self.child.kill().await {
+                    Ok(()) => self.child.wait().await,
+                    Err(error) => Err(error),
+                }
+            }
         };
-        self.tree.kill();
         self.reader.abort();
         Ok(status?)
     }
