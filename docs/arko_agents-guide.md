@@ -1902,13 +1902,12 @@ the work goes on in another conversation on another model. The task's next run s
 is a reply) and rejects every other call, `complete_task` included, until the report comes. The
 task then completes with the report as its summary, and the conversation keeps the request and the
 report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
-in its session, also when it compacts in Claude Code, and neither runtime waits for a plan's usage
-limit to reset during it. An error that ends the request pauses the task for error-recovery
+in a copy of its session (a fork) that the task goes on in, so the session is left as it was for a
+host that puts the task back, also when it compacts in Claude Code, and neither runtime waits for a
+plan's usage limit to reset during it. An error that ends the request pauses the task for error-recovery
 approval whatever the `LLMErrorPolicy`, so the host hears its cause. It takes a task that is
 completed, awaiting the user's answer, or cancelled, whose open turn is settled first, and calls
 the task was running when it stopped are answered as in doubt, not run again.
-`Task::rewind_claude_code_session` has a Claude Code session resume at the end of the task's
-conversation as it is, such as after a host put back an earlier copy of the task.
 
 `AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
 keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces
