@@ -614,7 +614,8 @@ async fn a_claude_code_report_that_doesn_t_come_leaves_the_session_as_it_was() {
     }
 }
 
-/// The agent of `agent()`, with the probe.
+/// The agent of `agent()`, with the probe, in a workflow that keeps every
+/// checkpoint it writes.
 fn report_builder(server: &ResponsesServer, run_dir: &std::path::Path) -> WorkflowBuilder {
     Workflow::builder()
         .name("report-test")
@@ -622,7 +623,7 @@ fn report_builder(server: &ResponsesServer, run_dir: &std::path::Path) -> Workfl
         .llm_client(Arc::new(server.client()))
         .agent("main", agent())
         .agent_tool("main", ProbeTool::new("probe", false))
-        .persistence(PersistenceConfig::new(run_dir))
+        .persistence(PersistenceConfig::new(run_dir).keep_last_checkpoints(100))
 }
 
 /// A server that answers every request with a plan's usage limit.
@@ -639,163 +640,236 @@ async fn limited_server() -> ResponsesServer {
     .await
 }
 
-/// Runs the agent once in `workspace` (run directory `.run`), then asks it
-/// for a report, with a note waiting for its next turn, which makes one call
-/// (rejected) and then waits for the model until the process ends, after a
-/// checkpoint. Returns the run as it was before the report, and the
-/// checkpoint.
-async fn a_report_under_way(workspace: &Workspace) -> (AgentResult, std::path::PathBuf) {
-    let server = ResponsesServer::start(|index, body| {
-        if !body.contains(REQUESTED) {
-            return Some(text_turn(&format!("t{index}"), "Sure."));
-        }
-        (!body.contains("function_call_output")).then(|| tool_call_turn("p1", "probe", json!({})))
-    })
-    .await;
+/// A refused credential, as the OpenAI API answers it.
+fn refused() -> Reply {
+    Reply::Status {
+        status: 401,
+        retry_after: None,
+        body: json!({"error": {"message": "Incorrect API key provided.", "type": "invalid_request_error", "code": "invalid_api_key"}}).to_string(),
+    }
+}
+
+/// Every checkpoint file of `run_dir`, the live one included.
+fn checkpoint_files(run_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(run_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                (name.starts_with("checkpoint-") && name.ends_with(".json"))
+                    || name == crate::persistence::LIVE_CHECKPOINT_FILE
+            })
+        })
+        .collect()
+}
+
+/// A report run is never saved. Checkpoints taken during the report, and
+/// the one its end writes, record the run as it was last saved, without
+/// the report's request. A resume from one has nothing to resume or wait
+/// for: no model is asked, though the resumed server answers every request
+/// with a plan limit.
+#[tokio::test]
+async fn a_report_run_is_never_saved_in_a_checkpoint() {
+    let workspace = Workspace::new();
     let run_dir = workspace.0.join(".run");
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server = {
+        let release = release.clone();
+        ResponsesServer::start_async(move |index, body| {
+            let release = release.clone();
+            Box::pin(async move {
+                if !body.contains(REQUESTED) {
+                    return Some(Reply::Stream(text_turn(&format!("t{index}"), "Sure.")));
+                }
+                if !body.contains("function_call_output") {
+                    return Some(Reply::Stream(tool_call_turn("p1", "probe", json!({}))));
+                }
+                // Held while the checkpoint is taken, then refused.
+                release.notified().await;
+                Some(refused())
+            })
+        })
+        .await
+    };
     let workflow = Arc::new(report_builder(&server, &run_dir).build().unwrap());
     let first = workflow.run_agent("main", "Hello.").await.unwrap();
-    let mut waiting = first.task().unwrap().clone();
-    waiting.pending_context_injections = vec!["A held note: use tabs.".into()];
-    let before = AgentResult::of_task(first.agent_name.clone(), waiting);
     let report = tokio::spawn({
-        let (workflow, before) = (workflow.clone(), before.clone());
-        async move { workflow.request_report(&before, None).await }
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
     });
     server.wait_for_requests(3).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     workflow.checkpoint().await.unwrap();
-    let checkpoint = latest_checkpoint(workspace);
-    // The process ends with the report under way.
+    let during = latest_checkpoint(&workspace);
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), report)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    drop(workflow);
+
+    let files = checkpoint_files(&run_dir);
+    assert!(files.len() >= 3, "{files:?}");
+    for file in &files {
+        let state = crate::persistence::PersistenceManager::load_checkpoint(file)
+            .await
+            .unwrap();
+        let saved = state
+            .agent_results_in(&run_dir)
+            .unwrap()
+            .into_iter()
+            .find(|result| result.agent_run_id == first.agent_run_id)
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            AgentRunStatus::Completed,
+            "{}",
+            file.display()
+        );
+        let task = saved.task().unwrap();
+        assert!(task.handover_requested.is_none(), "{}", file.display());
+        assert!(
+            !serde_json::to_string(&task.conversation)
+                .unwrap()
+                .contains(REQUESTED),
+            "{}",
+            file.display()
+        );
+    }
+
+    let limited = limited_server().await;
+    for checkpoint in [during, latest_checkpoint(&workspace)] {
+        let resumed = report_builder(&limited, &run_dir)
+            .resume_from(&checkpoint)
+            .build()
+            .unwrap();
+        assert!(resumed.interrupted_runs().is_empty());
+        assert!(resumed.stopped_runs().is_empty());
+        let restored = resumed.agent_result(first.agent_run_id).unwrap();
+        assert_eq!(restored.status, AgentRunStatus::Completed);
+        assert_eq!(restored.summary, first.summary);
+    }
+    assert_eq!(limited.requests(), 0);
+}
+
+/// A report call dropped while its run waits for the model (the workflow
+/// kept) puts the run back as it was. The run goes on as usual, its
+/// continuation is saved and resumes, and the error recovery policy applies
+/// to it again.
+#[tokio::test]
+async fn a_dropped_report_call_leaves_the_run_to_go_on() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let server = ResponsesServer::start_async(|index, body| {
+        Box::pin(async move {
+            if body.contains("Fail now.") {
+                return Some(refused());
+            }
+            if body.contains(REQUESTED) && !body.contains("Go on.") {
+                // The report waits for the model until the call is dropped.
+                return None;
+            }
+            Some(Reply::Stream(text_turn(&format!("t{index}"), "Sure.")))
+        })
+    })
+    .await;
+    let workflow = Arc::new(report_builder(&server, &run_dir).build().unwrap());
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    server.wait_for_requests(2).await;
     report.abort();
     let _ = report.await;
-    drop(workflow);
-    (before, checkpoint)
-}
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(restored.status, AgentRunStatus::Completed);
+    assert_eq!(
+        restored.task().unwrap().conversation.messages.len(),
+        first.task().unwrap().conversation.messages.len()
+    );
+    let went_on = workflow.continue_agent(&restored, "Go on.").await.unwrap();
+    let length = went_on.task().unwrap().conversation.messages.len();
+    let input = bodies(&server).pop().unwrap()["input"].to_string();
+    assert!(!input.contains(REQUESTED), "{input}");
+    workflow.checkpoint().await.unwrap();
 
-/// A report under way when the workflow stops is never resumed. The
-/// checkpoint keeps the run as it was before the request, and a resume puts
-/// it back so, with the model calls and the context the report run took.
-/// Nothing waits, and no model is asked: the resumed server answers every
-/// request with a plan limit, which a recovery or a new report gets at once.
-#[tokio::test]
-async fn a_report_under_way_at_a_checkpoint_is_put_back_on_resume() {
-    let workspace = Workspace::new();
-    let run_dir = workspace.0.join(".run");
-    let (before, checkpoint) = a_report_under_way(&workspace).await;
-    let saved = crate::persistence::PersistenceManager::load_checkpoint(&checkpoint)
-        .await
-        .unwrap();
-    assert_eq!(saved.report_baselines.len(), 1);
-    let interrupted = saved
-        .agent_results_in(&run_dir)
-        .unwrap()
-        .into_iter()
-        .find(|result| result.agent_run_id == before.agent_run_id)
-        .unwrap();
-    assert_eq!(interrupted.status, AgentRunStatus::Interrupted);
-
-    let limited = limited_server().await;
-    let resumed = report_builder(&limited, &run_dir)
-        .resume_from(&checkpoint)
+    let resumed = report_builder(&server, &run_dir)
+        .resume_from(latest_checkpoint(&workspace))
         .build()
         .unwrap();
-    assert!(resumed.interrupted_runs().is_empty());
-    let restored = resumed.agent_result(before.agent_run_id).unwrap();
-    assert_eq!(restored.status, AgentRunStatus::Completed);
-    assert_eq!(restored.summary, before.summary);
-    let (was, now) = (before.task().unwrap(), restored.task().unwrap());
-    assert_eq!(
-        now.conversation.messages.len(),
-        was.conversation.messages.len()
-    );
-    assert!(now.handover_requested.is_none());
-    assert_eq!(now.pending_context_injections, ["A held note: use tabs."]);
-    assert_eq!(now.usage_history.len(), was.usage_history.len() + 1);
+    let saved = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(saved.status, AgentRunStatus::Completed);
+    assert_eq!(saved.task().unwrap().conversation.messages.len(), length);
+    drop(resumed);
 
-    // Recovering the result read before the resume returns the run as it
-    // was, at once.
-    let recovered =
-        tokio::time::timeout(Duration::from_secs(5), resumed.recover_agent(&interrupted))
-            .await
-            .expect("nothing waits")
-            .unwrap();
-    assert_eq!(recovered.status, AgentRunStatus::Completed);
-    assert_eq!(limited.requests(), 0);
-    // A new report gets the plan limit at once.
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        resumed.request_report(&restored, None),
-    )
-    .await
-    .expect("nothing waits")
-    .unwrap_err();
+    // The automatic policy decides its pauses again: a refused credential
+    // fails the run rather than coming back as a pause for the caller.
+    let error = workflow
+        .continue_agent(&went_on, "Fail now.")
+        .await
+        .unwrap_err();
     assert!(
-        matches!(
-            &error,
-            WorkflowError::AgentPaused {
-                pause: AgentPause::ErrorRecovery {
-                    cause: arko_agents::ErrorRecoveryCause::UsageLimit { .. },
-                    ..
-                },
-                ..
-            }
-        ),
+        !matches!(error, WorkflowError::AgentPaused { .. }),
         "{error}"
     );
-    // The checkpoint after it saves the run as it was put back.
-    resumed.checkpoint().await.unwrap();
-    let latest =
-        crate::persistence::PersistenceManager::load_checkpoint(&latest_checkpoint(&workspace))
-            .await
-            .unwrap();
-    assert!(latest.report_baselines.is_empty());
-    let saved_run = latest
-        .agent_results_in(&run_dir)
+}
+
+/// A report asked of a result other than the recorded one (here, with a
+/// note waiting), whose save then fails: the run put back as it was asked
+/// of can't be saved, so checkpoints keep the state saved before, and a
+/// resume has that state.
+#[tokio::test]
+async fn a_failed_save_after_a_report_keeps_the_state_saved_before() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let server = ResponsesServer::start_async(|index, body| {
+        Box::pin(async move {
+            Some(if body.contains(REQUESTED) {
+                refused()
+            } else {
+                Reply::Stream(text_turn(&format!("t{index}"), "Sure."))
+            })
+        })
+    })
+    .await;
+    let workflow = report_builder(&server, &run_dir).build().unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let mut waiting = first.task().unwrap().clone();
+    waiting.pending_context_injections = vec!["A held note: use tabs.".into()];
+    let asked = AgentResult::of_task(first.agent_name.clone(), waiting);
+    workflow
+        .engine
+        .persistence()
         .unwrap()
-        .into_iter()
-        .find(|result| result.agent_run_id == before.agent_run_id)
-        .unwrap();
-    assert_eq!(saved_run.status, AgentRunStatus::Completed);
+        .fail_task_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    workflow.request_report(&asked, None).await.unwrap_err();
+    // Put back as it was asked of, in memory.
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
     assert_eq!(
-        saved_run.task().unwrap().pending_context_injections,
+        restored.task().unwrap().pending_context_injections,
         ["A held note: use tabs."]
     );
-}
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
 
-/// A run saved writing a report without the run as it was before (a
-/// checkpoint that doesn't keep it) is refused by a recovery, which never
-/// resumes a report, and no model is asked.
-#[tokio::test]
-async fn a_report_saved_without_the_run_before_it_isnt_recovered() {
-    let workspace = Workspace::new();
-    let run_dir = workspace.0.join(".run");
-    let (before, checkpoint) = a_report_under_way(&workspace).await;
-    let mut state: Value =
-        serde_json::from_str(&std::fs::read_to_string(&checkpoint).unwrap()).unwrap();
-    state.as_object_mut().unwrap().remove("report_baselines");
-    let without = run_dir.join("without-baseline.json");
-    std::fs::write(&without, state.to_string()).unwrap();
-    let limited = limited_server().await;
-    let resumed = report_builder(&limited, &run_dir)
-        .resume_from(&without)
+    let resumed = report_builder(&server, &run_dir)
+        .resume_from(latest_checkpoint(&workspace))
         .build()
         .unwrap();
-    let interrupted = resumed.interrupted_runs();
-    assert_eq!(interrupted.len(), 1);
-    assert_eq!(interrupted[0].agent_run_id, before.agent_run_id);
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        resumed.recover_agent(&interrupted[0]),
-    )
-    .await
-    .expect("nothing waits")
-    .unwrap_err();
-    assert!(
-        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("writing a report")),
-        "{error}"
+    let saved = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(saved.status, AgentRunStatus::Completed);
+    let task = saved.task().unwrap();
+    assert!(task.pending_context_injections.is_empty());
+    assert!(task.handover_requested.is_none());
+    assert_eq!(
+        task.conversation.messages.len(),
+        first.task().unwrap().conversation.messages.len()
     );
-    assert_eq!(limited.requests(), 0);
 }
 
 /// After a Claude Code report that came, the run goes on in the copy of its

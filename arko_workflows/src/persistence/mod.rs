@@ -561,25 +561,18 @@ impl PersistenceManager {
         }
     }
 
-    /// Records that the recorded results of these tasks (task ID, the file
-    /// relative to the run directory last saved for it) changed since they
-    /// were saved, such as a run put back as it was before a report on
-    /// request, so the next checkpoint saves them as new versions. Until one
-    /// does, checkpoints refer to that file.
-    pub(crate) fn mark_tasks_unsaved(&self, tasks: impl IntoIterator<Item = (uuid::Uuid, String)>) {
+    /// Records that the recorded result of task `id` changed since it was
+    /// saved, such as a run put back as it was before a report on request
+    /// (with the model calls and the context the report run took), so the
+    /// next checkpoint saves it as a new version. Until one does,
+    /// checkpoints refer to the version last saved.
+    pub(crate) fn mark_task_changed(&self, id: uuid::Uuid) {
         let mut saved = self.saved_tasks.lock();
-        for (id, file) in tasks {
-            saved.insert(
-                id,
-                SavedTask {
-                    file: Some(file),
-                    unsaved: Some(
-                        "it was put back as it was before a report that was interrupted, and isn't saved as a version yet"
-                            .to_string(),
-                    ),
-                },
-            );
-        }
+        let entry = saved.entry(id).or_default();
+        entry.unsaved = Some(
+            "it was put back as it was before a report that didn't come, and isn't saved as a version yet"
+                .to_string(),
+        );
     }
 
     /// Records a finalized agent result in `ctx`, replacing an earlier one
@@ -592,6 +585,15 @@ impl PersistenceManager {
         ctx: &SharedContext,
         result: crate::workflow::result::AgentResult,
     ) {
+        // A report on request is never saved: the run stays as it was until
+        // the report comes, and is recorded then.
+        if ctx
+            .reports_in_flight
+            .lock()
+            .contains_key(&result.agent_run_id)
+        {
+            return;
+        }
         let _guard = self.write_lock.lock().await;
         let saved = match result.task() {
             Ok(task) => self.write_task(task).await,
@@ -775,9 +777,6 @@ impl PersistenceManager {
 
         let mut agent_runs = Vec::new();
         let mut missing_task_states = Vec::new();
-        let mut report_baselines = Vec::new();
-        // The runs writing a report on request, as they were before it.
-        let baselines = ctx.report_baselines.lock().clone();
         let mut running_ids = HashSet::new();
         let mut live_files = HashSet::new();
         let completed_agents: Vec<state::SerializableAgentResult>;
@@ -819,17 +818,6 @@ impl PersistenceManager {
                     continue;
                 };
                 running_ids.insert(*id);
-                // A run writing a report on request is kept as it was
-                // before, for a resume to put it back: a report is never
-                // resumed. Its task is the version its result was saved in.
-                if let Some(baseline) = baselines.get(id)
-                    && let Some(saved) = tasks
-                        .get(id)
-                        .and_then(|saved| saved.file.clone())
-                        .filter(|saved| live_file_task(saved).is_none())
-                {
-                    report_baselines.push(state::AgentRunRecord::of(baseline, saved));
-                }
                 running_records.push(state::AgentRunRecord {
                     agent_run_id: *id,
                     agent_name: run.agent_name.clone(),
@@ -901,17 +889,12 @@ impl PersistenceManager {
                     )
                 })
                 .collect::<Vec<_>>();
-            let baseline_records = report_baselines
-                .iter()
-                .map(|record: &state::AgentRunRecord| (record.agent_run_id, &record.task_file))
-                .collect::<Vec<_>>();
             fingerprint = self::fingerprint(&(
                 shared,
                 &records,
                 &missing_task_states,
                 &completed_agents,
                 uncounted,
-                &baseline_records,
             ));
             if live {
                 let latest = self.latest.lock();
@@ -938,7 +921,6 @@ impl PersistenceManager {
             agent_results: Vec::new(),
             agent_runs,
             missing_task_states,
-            report_baselines,
             verification_records,
             distillation_records,
             completed_agents,
@@ -1712,8 +1694,6 @@ fn checkpoint_references(path: &Path) -> std::io::Result<Vec<String>> {
     struct References {
         #[serde(default)]
         agent_runs: Vec<Reference>,
-        #[serde(default)]
-        report_baselines: Vec<Reference>,
     }
     #[derive(serde::Deserialize)]
     struct Reference {
@@ -1724,7 +1704,6 @@ fn checkpoint_references(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(references
         .agent_runs
         .into_iter()
-        .chain(references.report_baselines)
         .map(|reference| reference.task_file)
         .collect())
 }
