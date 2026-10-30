@@ -217,6 +217,60 @@ impl Workflow {
         .await
     }
 
+    /// Asks agent run `previous` for a report of its work, without a
+    /// handover, such as before the work goes on in a new run on another
+    /// model ([`RunOptions::config`]). The run writes it in one more turn of
+    /// its conversation, as it writes a handover report, with the
+    /// `handover_report` tool where it is offered and as a reply otherwise,
+    /// and every other tool call is rejected until it does. `request` is the
+    /// request it gets, in place of
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`](arko_agents::handover::DEFAULT_REPORT_ONLY_REQUEST)
+    /// (or [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`](arko_agents::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST)
+    /// for a reply). It works in both runtimes, and an agent that compacts in
+    /// Claude Code writes the report all the same
+    /// ([`arko_agents::Task::request_report`]).
+    ///
+    /// Returns the run's result once the report is in. The run is
+    /// completed, with the report as its summary, and its conversation keeps
+    /// the request and the report. Context that arrives meanwhile (notes,
+    /// messages, subagent news) waits for the run's next turn. A run that is
+    /// completed, waits for an answer (`WaitingForInput`) or was cancelled
+    /// (`Cancelled`, stopped) can be asked. Others, and a run inside another
+    /// run's tool call, return `BuilderInvalid`.
+    ///
+    /// A report that doesn't come returns the error that says why, and the
+    /// run is put back as it was, without the request, its model calls still
+    /// counted. A plan's usage limit or a credential the provider refuses
+    /// isn't waited out or recovered from automatically. They return
+    /// [`WorkflowError::AgentPaused`] with an error-recovery pause whose
+    /// cause is [`ErrorRecoveryCause::UsageLimit`](arko_agents::ErrorRecoveryCause::UsageLimit)
+    /// (with the limit's reset when known) or whose `error_kind` is
+    /// [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication), and
+    /// so do the other errors a request can end in. The report can be
+    /// cancelled by stopping the run ([`stop_run`](Self::stop_run)), which
+    /// returns [`WorkflowError::AgentStopped`].
+    pub async fn request_report(
+        &self,
+        previous: &AgentResult,
+        request: Option<&str>,
+    ) -> Result<AgentResult, WorkflowError> {
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_admitting().await?;
+            let result = self
+                .engine
+                .request_report(previous, request, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
+        })
+        .await
+    }
+
     /// Continue an agent paused for a decision (`AgentRunStatus::Paused`,
     /// returned as [`WorkflowError::AgentPaused`]). Decide the tool calls it
     /// awaits approval for, or continue or fail it after an error-recovery
@@ -2855,6 +2909,7 @@ impl WorkflowBuilder {
             agent_configs: self.agents.iter().cloned().collect(),
             agent_skills: parking_lot::RwLock::new(HashMap::new()),
             run_llm_configs: parking_lot::RwLock::new(HashMap::new()),
+            report_runs: parking_lot::Mutex::new(HashSet::new()),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
             resume_only_tools: self.resume_only_tools,
@@ -3410,6 +3465,10 @@ mod cut_back_tests;
 #[cfg(test)]
 #[path = "keep_warm_tests.rs"]
 mod keep_warm_tests;
+
+#[cfg(test)]
+#[path = "report_tests.rs"]
+mod report_tests;
 
 #[cfg(test)]
 mod event_stream_tests;

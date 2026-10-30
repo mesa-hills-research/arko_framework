@@ -807,6 +807,20 @@ async fn answer_recovery_pause(
         recovery.failed_requests = recovery.failed_requests.saturating_add(1);
     }
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    // A report asked for alone goes back to its caller at once.
+    if ctx.report_runs.lock().contains(&agent_run_id) {
+        return pause_for_caller(
+            agent_name,
+            agent_run_id,
+            cmd_tx,
+            AgentPause::ErrorRecovery {
+                error,
+                cause,
+                error_kind: recovery.paused_kind,
+            },
+        )
+        .await;
+    }
     let mut action = ctx.error_recovery_policy.action(
         &cause,
         &error,
@@ -3908,6 +3922,128 @@ impl WorkflowEngine {
             workspace: options.workspace,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
+    }
+
+    /// Asks run `previous` for a report of its work alone, as
+    /// [`Workflow::request_report`](super::Workflow::request_report) says.
+    pub async fn request_report(
+        &self,
+        previous: &AgentResult,
+        request: Option<&str>,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let agent_name = &previous.agent_name;
+        if !matches!(
+            previous.status,
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput | AgentRunStatus::Cancelled
+        ) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "only a completed, waiting or cancelled agent run writes a report on request. Agent run {} is {:?}",
+                previous.agent_run_id, previous.status
+            )));
+        }
+        if previous.info().parent.is_some() {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} runs inside another run's tool call, so it writes no report on request",
+                previous.agent_run_id
+            )));
+        }
+        if is_superseded(previous) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} was superseded by a run that replaced it after a restart, so it writes no report",
+                previous.agent_run_id
+            )));
+        }
+        let mut task = previous.task()?.clone();
+        task.request_report(request.map(str::to_string))
+            .map_err(builder_invalid)?;
+        self.admit(agent_name, Some(previous.agent_run_id), false, ctx)?;
+        let role = RunRole::of(ctx, 0, task.id);
+        let mut registry = self.build_tool_registry(agent_name, ctx, role);
+        Self::restore_embedded_skills(&mut task, ctx, agent_name);
+        let skill_prompt_context = Self::setup_skills(
+            &mut task.agent_config,
+            &mut registry,
+            &task.current_working_directory,
+            role,
+        )?;
+        if !ctx.registry.start_unless_running(task.id, agent_name) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} is running already",
+                task.id
+            )));
+        }
+        // What the task holds, recorded again for a task saved before
+        // messages recorded who holds them.
+        ctx.messages.settle_run(
+            agent_name,
+            task.id,
+            &task.conversation,
+            &[],
+            &task.pending_context_injections,
+            false,
+        );
+        // Its error-recovery pauses come back to the caller at once.
+        ctx.report_runs.lock().insert(task.id);
+        let run = self.launch(
+            agent_name,
+            task,
+            registry,
+            skill_prompt_context,
+            Vec::new(),
+            ctx,
+            0,
+            true,
+            false,
+        );
+        let outcome = drive_to_result(run, ctx, self.persistence.as_ref()).await;
+        ctx.report_runs.lock().remove(&previous.agent_run_id);
+        if outcome.is_err() {
+            self.restore_after_report(previous, ctx).await;
+        }
+        outcome
+    }
+
+    /// Puts run `previous` back as it was before a report was asked of it,
+    /// which didn't come: its task without the request, still counting the
+    /// model calls the request made. Recorded, saved and checkpointed with
+    /// persistence.
+    async fn restore_after_report(&self, previous: &AgentResult, ctx: &Arc<SharedContext>) {
+        let Ok(previous_task) = previous.task() else {
+            return;
+        };
+        let mut task = previous_task.clone();
+        let attempt = recorded_result(ctx, previous.agent_run_id)
+            .and_then(|result| result.task().ok().cloned());
+        if let Some(attempt) = attempt {
+            let calls = task.usage_history.len();
+            task.usage_history
+                .extend(attempt.usage_history.into_iter().skip(calls));
+            let model_calls = task.model_call_usage_history.len();
+            task.model_call_usage_history.extend(
+                attempt
+                    .model_call_usage_history
+                    .into_iter()
+                    .skip(model_calls),
+            );
+        }
+        let mut restored = AgentResult::of_task(previous.agent_name.clone(), task);
+        restored.stopped_by = previous.stopped_by.clone();
+        ctx.registry
+            .finish(previous.agent_run_id, previous.status.clone());
+        match &self.persistence {
+            Some(persistence) => {
+                persistence.record_result(ctx, restored).await;
+                if let Err(error) = persistence.auto_checkpoint(ctx).await {
+                    log::warn!(
+                        "Workflow '{}': could not save the checkpoint after agent run {} wrote no report: {error}. The next checkpoint tries again.",
+                        ctx.workflow_name,
+                        previous.agent_run_id
+                    );
+                }
+            }
+            None => record_result(ctx, restored),
+        }
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
