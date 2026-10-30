@@ -796,6 +796,116 @@ fn count_failed_request(
     }
 }
 
+/// A report on request under way (see
+/// [`Workflow::request_report`](super::Workflow::request_report)), from the
+/// report run's launch until the report comes or the run is put back as it
+/// was. While it lasts, the run is in `SharedContext::reports_in_flight`:
+/// its error-recovery pauses go back to the caller, its report run is never
+/// saved (no task journal, and its end isn't recorded), and checkpoints keep
+/// recording the run as it was last saved. Dropped before the report came
+/// (the call ended in an error, or was dropped itself), it puts the run back
+/// as it was.
+pub(crate) struct ReportInFlight {
+    context: Arc<SharedContext>,
+    persistence: Option<Arc<PersistenceManager>>,
+    previous: AgentResult,
+    open: bool,
+}
+
+impl ReportInFlight {
+    /// A report of run `previous` begins.
+    fn begin(
+        ctx: &Arc<SharedContext>,
+        persistence: Option<Arc<PersistenceManager>>,
+        previous: &AgentResult,
+    ) -> Self {
+        ctx.reports_in_flight
+            .lock()
+            .insert(previous.agent_run_id, None);
+        Self {
+            context: ctx.clone(),
+            persistence,
+            previous: previous.clone(),
+            open: true,
+        }
+    }
+
+    /// The report came, in run result `result`: the run is recorded with
+    /// it as any run is at its end, saved and checkpointed with persistence.
+    async fn came(&mut self, result: &AgentResult) {
+        self.open = false;
+        let ctx = &self.context;
+        ctx.reports_in_flight
+            .lock()
+            .remove(&self.previous.agent_run_id);
+        if let Ok(task) = result.task() {
+            ctx.messages.settle_run(
+                &result.agent_name,
+                result.agent_run_id,
+                &task.conversation,
+                &[],
+                &task.pending_context_injections,
+                true,
+            );
+            ctx.subagents.settle_run(ctx, task);
+        }
+        match &self.persistence {
+            Some(persistence) => {
+                persistence.record_result(ctx, result.clone()).await;
+                if let Err(error) = persistence.auto_checkpoint(ctx).await {
+                    log::warn!(
+                        "Workflow '{}': could not save the checkpoint after agent run {} wrote its report: {error}. The next checkpoint tries again.",
+                        ctx.workflow_name,
+                        result.agent_run_id
+                    );
+                }
+            }
+            None => record_result(ctx, result.clone()),
+        }
+    }
+
+    /// Puts the run back as it was before the report, in memory, keeping
+    /// the model calls and the context its report run took when it ended
+    /// (see [`report_rollback`]). With persistence, the next checkpoint
+    /// saves it.
+    fn restore(&mut self) {
+        if !std::mem::take(&mut self.open) {
+            return;
+        }
+        let ctx = &self.context;
+        let id = self.previous.agent_run_id;
+        let attempt = ctx.reports_in_flight.lock().remove(&id).flatten();
+        let Ok(previous) = self.previous.task() else {
+            return;
+        };
+        let task = match attempt.as_ref().and_then(|attempt| attempt.task().ok()) {
+            Some(attempt) => report_rollback(previous.clone(), attempt),
+            None => previous.clone(),
+        };
+        ctx.messages.settle_run(
+            &self.previous.agent_name,
+            id,
+            &task.conversation,
+            &[],
+            &task.pending_context_injections,
+            false,
+        );
+        let mut restored = AgentResult::of_task(self.previous.agent_name.clone(), task);
+        restored.stopped_by = self.previous.stopped_by.clone();
+        ctx.registry.finish(id, self.previous.status.clone());
+        record_result(ctx, restored);
+        if let Some(persistence) = &self.persistence {
+            persistence.mark_task_changed(id);
+        }
+    }
+}
+
+impl Drop for ReportInFlight {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 /// The task of a run that wrote no report on request, put back as it was
 /// `before` the request: still counting the model calls the report run
 /// (`attempt`) made, and holding the context that reached it meanwhile for
@@ -854,7 +964,7 @@ async fn answer_recovery_pause(
     }
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
     // A report asked for alone goes back to its caller at once.
-    if ctx.report_baselines.lock().contains_key(&agent_run_id) {
+    if ctx.reports_in_flight.lock().contains_key(&agent_run_id) {
         return pause_for_caller(
             agent_name,
             agent_run_id,
@@ -2874,6 +2984,15 @@ pub(crate) async fn save_stop_checkpoint(
 /// Records `result` in the run's results, replacing an earlier result of
 /// its task (without persistence, see [`PersistenceManager::record_result`]).
 pub(crate) fn record_result(ctx: &SharedContext, result: AgentResult) {
+    // A report on request is never recorded as the run's result (see
+    // `ReportInFlight`).
+    if ctx
+        .reports_in_flight
+        .lock()
+        .contains_key(&result.agent_run_id)
+    {
+        return;
+    }
     crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
 }
 
@@ -2907,20 +3026,27 @@ pub(crate) async fn finalize_agent_task(
         );
         tracker.finish_actor(&ActorId::new(agent_run_id, &agent_name), continued);
     }
-    // Channel acceptance is not consumption: complete_task may finish with
-    // unread InjectContext commands. Only context in the conversation counts
-    // as read; context taken but not added stays with the task.
-    ctx.messages.settle_run(
-        &agent_name,
-        agent_run_id,
-        &task.conversation,
-        prompt_ids,
-        &task.pending_context_injections,
-        matches!(task.current_state, TaskState::Completed { .. }),
-    );
-    // Its subagent mail too: what it holds leaves the mailbox, the rest is
-    // given again.
-    ctx.subagents.settle_run(ctx, &task);
+    // A report run on request (see `ReportInFlight`) is neither settled nor
+    // recorded here: the report call records the run once the report came,
+    // or puts it back as it was.
+    let report_run = ctx.reports_in_flight.lock().contains_key(&agent_run_id);
+    if !report_run {
+        // Channel acceptance is not consumption: complete_task may finish
+        // with unread InjectContext commands. Only context in the
+        // conversation counts as read; context taken but not added stays
+        // with the task.
+        ctx.messages.settle_run(
+            &agent_name,
+            agent_run_id,
+            &task.conversation,
+            prompt_ids,
+            &task.pending_context_injections,
+            matches!(task.current_state, TaskState::Completed { .. }),
+        );
+        // Its subagent mail too: what it holds leaves the mailbox, the rest
+        // is given again.
+        ctx.subagents.settle_run(ctx, &task);
+    }
     let pause = AgentPause::of(&task.current_state);
     let mut result = AgentResult::of_task(agent_name.clone(), task);
     // Ended by a stop the host asked for: not the agent's failure.
@@ -2942,6 +3068,11 @@ pub(crate) async fn finalize_agent_task(
     // the result is recorded even if this call is dropped while it waits
     // for another save.
     match persistence {
+        _ if report_run => {
+            if let Some(ended) = ctx.reports_in_flight.lock().get_mut(&agent_run_id) {
+                *ended = Some(result.clone());
+            }
+        }
         Some(persistence) => {
             let recording = {
                 let (persistence, ctx, result) = (persistence.clone(), ctx.clone(), result.clone());
@@ -3563,10 +3694,11 @@ impl WorkflowEngine {
             runtime = runtime.with_background_jobs(jobs.clone());
         }
         // Saved as it runs, with the usage it has been charged for so far.
-        let journal = self
-            .persistence
-            .clone()
-            .filter(|persistence| persistence.journals_tasks());
+        // A report on request is never saved as it runs.
+        let journal = self.persistence.clone().filter(|persistence| {
+            persistence.journals_tasks()
+                && !ctx.reports_in_flight.lock().contains_key(&agent_run_id)
+        });
         if let Some(journal) = &journal {
             journal.begin_live_run(agent_run_id, agent_name, task.usage_history.len());
             runtime = runtime.with_task_snapshots(Arc::new(crate::persistence::TaskJournal::new(
@@ -4037,16 +4169,11 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
-        // Its error-recovery pauses come back to the caller at once, and
-        // checkpoints keep the run as it was, which a resume puts back. It is
-        // recorded as it was first, so that the version checkpoints refer to
-        // is that one (a host may pass a result other than the recorded one).
-        if let Some(persistence) = &self.persistence {
-            persistence.record_result(ctx, previous.clone()).await;
-        }
-        ctx.report_baselines
-            .lock()
-            .insert(task.id, previous.clone());
+        // From here until the report comes, the run's error-recovery pauses
+        // come back to the caller at once, and the report run is never
+        // saved. Whatever ends the call first (an error, or the call
+        // dropped), the run is put back as it was.
+        let mut in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
         let run = self.launch(
             agent_name,
             task,
@@ -4059,45 +4186,24 @@ impl WorkflowEngine {
             false,
         );
         let outcome = drive_to_result(run, ctx, self.persistence.as_ref()).await;
-        ctx.report_baselines.lock().remove(&previous.agent_run_id);
-        if outcome.is_err() {
-            self.restore_after_report(previous, ctx).await;
-        }
-        outcome
-    }
-
-    /// Puts run `previous` back as it was before a report was asked of it,
-    /// which didn't come: its task without the request, still counting the
-    /// model calls the request made, and holding the context that reached
-    /// it meanwhile for its next turn. A Claude Code session is the one it
-    /// had, since the report was written in a copy of it. Recorded, saved and
-    /// checkpointed with persistence.
-    async fn restore_after_report(&self, previous: &AgentResult, ctx: &Arc<SharedContext>) {
-        let Ok(previous_task) = previous.task() else {
-            return;
-        };
-        let attempt = recorded_result(ctx, previous.agent_run_id)
-            .and_then(|result| result.task().ok().cloned());
-        let task = match attempt {
-            Some(attempt) => report_rollback(previous_task.clone(), &attempt),
-            None => previous_task.clone(),
-        };
-        let mut restored = AgentResult::of_task(previous.agent_name.clone(), task);
-        restored.stopped_by = previous.stopped_by.clone();
-        ctx.registry
-            .finish(previous.agent_run_id, previous.status.clone());
-        match &self.persistence {
-            Some(persistence) => {
-                persistence.record_result(ctx, restored).await;
-                if let Err(error) = persistence.auto_checkpoint(ctx).await {
+        match outcome {
+            Ok(result) => {
+                in_flight.came(&result).await;
+                Ok(result)
+            }
+            Err(error) => {
+                in_flight.restore();
+                if let Some(persistence) = &self.persistence
+                    && let Err(error) = persistence.auto_checkpoint(ctx).await
+                {
                     log::warn!(
                         "Workflow '{}': could not save the checkpoint after agent run {} wrote no report: {error}. The next checkpoint tries again.",
                         ctx.workflow_name,
                         previous.agent_run_id
                     );
                 }
+                Err(error)
             }
-            None => record_result(ctx, restored),
         }
     }
 
