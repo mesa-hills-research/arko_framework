@@ -258,6 +258,15 @@ impl Workflow {
     /// result read before returns the run as it was. A run a checkpoint saved
     /// writing a report without the run as it was before (when that couldn't
     /// be saved) isn't recovered either (`BuilderInvalid`).
+    ///
+    /// A Claude Code agent writes the report in a copy of its session, which
+    /// Claude Code saves as a transcript of its own. The copy a report that
+    /// didn't come leaves behind stays on disk until Claude Code's own
+    /// transcript cleanup removes it, after the `cleanupPeriodDays` of the
+    /// user's Claude Code settings (30 days by default, as Claude Code 2.1
+    /// documents it). Claude Code skips that cleanup in the runtime's own
+    /// sessions, which start with `--setting-sources=`, so it happens in a
+    /// later Claude Code process that reads the user's settings.
     pub async fn request_report(
         &self,
         previous: &AgentResult,

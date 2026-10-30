@@ -1907,7 +1907,11 @@ host that puts the task back, also when it compacts in Claude Code, and neither 
 plan's usage limit to reset during it. An error that ends the request pauses the task for error-recovery
 approval whatever the `LLMErrorPolicy`, so the host hears its cause. It takes a task that is
 completed, awaiting the user's answer, or cancelled, whose open turn is settled first, and calls
-the task was running when it stopped are answered as in doubt, not run again.
+the task was running when it stopped are answered as in doubt, not run again. The copy of the
+session is a Claude Code transcript like any other, which Claude Code's own cleanup removes after
+`cleanupPeriodDays` of its user settings (30 days by default). Claude Code skips that cleanup in
+the runtime's sessions, which start with `--setting-sources=`, so a later Claude Code process that
+reads the user's settings does it.
 
 `AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
 keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces
