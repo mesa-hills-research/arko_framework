@@ -338,6 +338,43 @@ pub(crate) fn is_context_notice(content: &str) -> bool {
 
 /// Whether `content`, an injected context payload, is message `id`'s
 /// [`injection`].
+/// Takes back the marks of the runs holding a message (see
+/// [`AgentMessage::held_by`]) whose tasks in `results` don't hold it, so it
+/// is presented to them again. A checkpoint can record a run's end in its
+/// messages with an older task of the run (one whose save failed, or one
+/// put back as it was while the checkpoint was written), so on resume the
+/// run gets what its end held again. A run `results` lacks, or whose task
+/// can't be read, keeps its marks.
+pub(crate) fn release_unheld(
+    queues: &mut HashMap<String, Vec<AgentMessage>>,
+    results: &[crate::workflow::result::AgentResult],
+) {
+    for message in queues.values_mut().flatten() {
+        let released = message
+            .held_by
+            .iter()
+            .copied()
+            .filter(|run| {
+                let task = results
+                    .iter()
+                    .find(|result| result.agent_run_id == *run)
+                    .and_then(|result| result.task().ok());
+                task.is_some_and(|task| {
+                    !message.read_by.contains(run)
+                        && !conversation_holds(&task.conversation, message)
+                        && !task
+                            .pending_context_injections
+                            .iter()
+                            .any(|content| is_injection_of(content, message.id))
+                })
+            })
+            .collect::<Vec<_>>();
+        if !released.is_empty() {
+            message.held_by.retain(|run| !released.contains(run));
+        }
+    }
+}
+
 pub(crate) fn is_injection_of(content: &str, id: Uuid) -> bool {
     content.starts_with(&format!("Message {id} from agent '"))
 }

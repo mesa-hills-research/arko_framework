@@ -261,8 +261,11 @@ impl Workflow {
     /// Dropping the call puts the run back as it was, as an error does, with
     /// the model calls and context its report run took by its latest turn,
     /// and a report that came is recorded even when the call is dropped
-    /// while its result is saved. The run never shows as running for its
-    /// report ([`agent_status`](Self::agent_status)), and a report that
+    /// while its result is saved. Should the task recording it end early
+    /// (its runtime shut down, say), the run is recorded with the report in
+    /// memory, the next checkpoint saves it, and the call returns
+    /// [`WorkflowError::Channel`] saying so. The run never shows as running
+    /// for its report ([`agent_status`](Self::agent_status)), and a report that
     /// doesn't come leaves its status and what it read (context freshness)
     /// as they were. The report run's model calls stay in the cost ledger and
     /// the budgets, which checkpoints save, and the run put back counts them
@@ -2902,7 +2905,9 @@ impl WorkflowBuilder {
             None => self.memory_config.unwrap_or_default().build(),
         };
         let messages = if let Some(state) = &resume_state {
-            MessageBus::from_snapshot(agent_names.iter().cloned(), state.message_queues.clone())
+            let mut queues = state.message_queues.clone();
+            crate::messaging::release_unheld(&mut queues, &resumed_results);
+            MessageBus::from_snapshot(agent_names.iter().cloned(), queues)
         } else {
             MessageBus::new(agent_names.iter().cloned())
         };

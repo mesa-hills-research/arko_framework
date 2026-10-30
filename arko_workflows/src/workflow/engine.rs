@@ -876,46 +876,23 @@ impl ReportInFlight {
     /// The report came, in run result `result`: the run is recorded with
     /// it as any run is at its end, saved and checkpointed with persistence,
     /// by a task of its own, which runs to its end whatever becomes of the
-    /// caller. Returns that task, which unmarks the run in the registry at
-    /// its end.
+    /// caller (see [`ReportCommit`]). Returns that task.
     fn came(&mut self, result: AgentResult) -> tokio::task::JoinHandle<()> {
         self.open = false;
-        let reserved = self.reserved.take();
-        let ctx = self.context.clone();
-        let persistence = self.persistence.clone();
-        tokio::spawn(async move {
-            let id = result.agent_run_id;
-            let agent_name = result.agent_name.clone();
-            ctx.reports_in_flight.lock().remove(&id);
-            // Recorded before its messages are settled. A checkpoint reads
-            // the messages before the results, so one that sees them settled
-            // sees the result that holds them too.
-            match &persistence {
-                Some(persistence) => persistence.record_result(&ctx, result.clone()).await,
-                None => record_result(&ctx, result.clone()),
-            }
-            if let Ok(task) = result.task() {
-                ctx.messages.settle_run(
-                    &agent_name,
-                    id,
-                    &task.conversation,
-                    &[],
-                    &task.pending_context_injections,
-                    true,
-                );
-                ctx.subagents.settle_run(&ctx, task);
-            }
-            ctx.registry.report_came(&agent_name);
-            if let Some(persistence) = &persistence
-                && let Err(error) = persistence.auto_checkpoint(&ctx).await
-            {
-                log::warn!(
-                    "Workflow '{}': could not save the checkpoint after agent run {id} wrote its report: {error}. The next checkpoint tries again.",
-                    ctx.workflow_name
-                );
-            }
-            drop(reserved);
-        })
+        let commit = ReportCommit {
+            context: self.context.clone(),
+            persistence: self.persistence.clone(),
+            result,
+            recorded: false,
+            settled: false,
+            _reserved: self.reserved.take(),
+        };
+        let task = tokio::spawn(commit.run());
+        #[cfg(test)]
+        if let Some(persistence) = &self.persistence {
+            persistence.spawned_report_commit(&task);
+        }
+        task
     }
 
     /// Puts the run back as it was before the report, in memory, keeping
@@ -947,7 +924,10 @@ impl ReportInFlight {
         // shares the task).
         record_result(ctx, restored.clone());
         if let Some(persistence) = &self.persistence {
-            persistence.mark_task_changed(id);
+            persistence.mark_task_changed(
+                id,
+                "it was put back as it was before a report that didn't come",
+            );
         }
         if let Ok(task) = restored.task() {
             ctx.messages.settle_run(
@@ -971,6 +951,87 @@ impl Drop for ReportInFlight {
     /// Puts the run back, then unmarks it (as its fields drop).
     fn drop(&mut self) {
         self.restore();
+    }
+}
+
+/// The record of a report that came (see [`ReportInFlight::came`]), owned
+/// by the task that makes it. Should that task end before it has made the
+/// record (dropped with its runtime, or panicking), dropping the commit
+/// makes it in memory, and the next checkpoint saves it. Either way the run
+/// leaves `SharedContext::reports_in_flight`, and then the registry's mark
+/// (as its fields drop).
+struct ReportCommit {
+    context: Arc<SharedContext>,
+    persistence: Option<Arc<PersistenceManager>>,
+    result: AgentResult,
+    /// Whether the result is recorded.
+    recorded: bool,
+    /// Whether the run's messages and mail are settled.
+    settled: bool,
+    /// Unmarks the run as it drops, after the commit's own drop.
+    _reserved: Option<ReportReservation>,
+}
+
+impl ReportCommit {
+    async fn run(mut self) {
+        let ctx = self.context.clone();
+        let id = self.result.agent_run_id;
+        ctx.reports_in_flight.lock().remove(&id);
+        // Recorded before its messages are settled. A checkpoint reads the
+        // messages before the results, so one that sees them settled sees
+        // the result that holds them too.
+        match &self.persistence {
+            Some(persistence) => persistence.record_result(&ctx, self.result.clone()).await,
+            None => record_result(&ctx, self.result.clone()),
+        }
+        self.recorded = true;
+        self.settle();
+        if let Some(persistence) = &self.persistence
+            && let Err(error) = persistence.auto_checkpoint(&ctx).await
+        {
+            log::warn!(
+                "Workflow '{}': could not save the checkpoint after agent run {id} wrote its report: {error}. The next checkpoint tries again.",
+                ctx.workflow_name
+            );
+        }
+    }
+
+    /// Settles the run's messages and mail by its result, once.
+    fn settle(&mut self) {
+        if std::mem::replace(&mut self.settled, true) {
+            return;
+        }
+        let ctx = &self.context;
+        let result = &self.result;
+        if let Ok(task) = result.task() {
+            ctx.messages.settle_run(
+                &result.agent_name,
+                result.agent_run_id,
+                &task.conversation,
+                &[],
+                &task.pending_context_injections,
+                true,
+            );
+            ctx.subagents.settle_run(ctx, task);
+        }
+        ctx.registry.report_came(&result.agent_name);
+    }
+}
+
+impl Drop for ReportCommit {
+    fn drop(&mut self) {
+        let id = self.result.agent_run_id;
+        self.context.reports_in_flight.lock().remove(&id);
+        if !std::mem::replace(&mut self.recorded, true) {
+            record_result(&self.context, self.result.clone());
+            if let Some(persistence) = &self.persistence {
+                persistence.mark_task_changed(
+                    id,
+                    "its report came, but the task saving it ended before it did",
+                );
+            }
+        }
+        self.settle();
     }
 }
 
@@ -4289,7 +4350,12 @@ impl WorkflowEngine {
                 // Recorded by a task of its own, so that this call's caller
                 // dropping it meanwhile leaves the run recorded with its
                 // report all the same.
-                let _ = in_flight.came(result.clone()).await;
+                in_flight.came(result.clone()).await.map_err(|error| {
+                    WorkflowError::Channel(format!(
+                        "agent run {} wrote its report, but the task recording it ended early ({error}). The run is recorded with the report, and the next checkpoint saves it",
+                        result.agent_run_id
+                    ))
+                })?;
                 Ok(result)
             }
             Err(error) => {

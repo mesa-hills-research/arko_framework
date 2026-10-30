@@ -152,6 +152,7 @@ impl Board {
             |persistence| persistence.config().checkpoint_dir.join("subagents"),
         );
         let mut state = restored.unwrap_or_default();
+        give_unsaved_mail_again(&mut state, results);
         settle_restored(&mut state, results, config.as_ref());
         Self {
             max_failed_requests: Mutex::new(
@@ -186,6 +187,30 @@ impl Board {
 
     pub(crate) fn set_max_failed_requests(&self, max: Option<u32>) {
         *self.max_failed_requests.lock() = max;
+    }
+
+    /// Forgets the settled mail (see [`SubagentsSnapshot::settled`]) whose
+    /// recipient's task, as `saved` gives it (the run's recorded result,
+    /// when its task is the version saved), holds it. Checkpoints then
+    /// needn't keep it.
+    pub(crate) fn prune_settled(&self, saved: impl Fn(Uuid) -> Option<AgentResult>) {
+        let settled = self.state.lock().settled.clone();
+        if settled.is_empty() {
+            return;
+        }
+        // Searched outside the lock: a conversation can be long.
+        let kept = settled
+            .iter()
+            .filter(|item| {
+                !saved(item.to)
+                    .is_some_and(|result| result.task().is_ok_and(|task| task_holds(task, item)))
+            })
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        self.state
+            .lock()
+            .settled
+            .retain(|item| kept.contains(&item.id));
     }
 
     /// The state a checkpoint saves. `None` while there is nothing.
@@ -639,18 +664,22 @@ impl Board {
             .map(|item| item.id)
             .collect::<Vec<_>>();
         {
-            let mut state = self.state.lock();
+            let mut guard = self.state.lock();
+            let state = &mut *guard;
+            let mut settled = Vec::new();
             state.mail.retain_mut(|item| {
                 if item.to != task.id || item.delivered_at.is_none() || item.withheld {
                     return true;
                 }
                 if held.contains(&item.id) {
+                    settled.push(item.clone());
                     return false;
                 }
                 item.delivered_at = None;
                 item.resent = true;
                 true
             });
+            state.settled.extend(settled);
         }
         self.bump();
         // A subagent's driver continues it.
@@ -2987,6 +3016,28 @@ fn stopped_with_workflow(ctx: &SharedContext, run_id: Uuid) -> bool {
 
 /// Settles the records a checkpoint saved running: by the outcome their
 /// runs recorded.
+/// Settled mail (see [`SubagentsSnapshot::settled`]) whose recipient's
+/// restored task doesn't hold it, since the checkpoint has an older task of
+/// the run, goes back in the mailbox to be given again. The rest is
+/// forgotten.
+fn give_unsaved_mail_again(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
+    let settled = std::mem::take(&mut state.settled);
+    if settled.is_empty() {
+        return;
+    }
+    for mut item in settled {
+        let Some(result) = results.iter().find(|result| result.agent_run_id == item.to) else {
+            continue;
+        };
+        if result.task().is_ok_and(|task| !task_holds(task, &item)) {
+            item.delivered_at = None;
+            item.resent = true;
+            state.mail.push(item);
+        }
+    }
+    state.mail.sort_by_key(|item| item.id);
+}
+
 fn settle_restored(
     state: &mut SubagentsSnapshot,
     results: &[AgentResult],
@@ -3716,6 +3767,64 @@ mod restore_tests {
             mail[0].body,
             "message_agent restarts it where it stopped.\n\nr1 used 12 tokens (Stopped, no result)."
         );
+    }
+
+    /// Settled mail its recipient's restored task lacks (the checkpoint has
+    /// an older task of the run) is given again on resume, and settled mail
+    /// it holds is forgotten. A checkpoint forgets settled mail once the
+    /// recipient's task as saved holds it.
+    #[test]
+    fn settled_mail_a_restored_task_lacks_is_given_again() {
+        let config = crate::test_support::agent_config("Lead");
+        let task = Task::new(config, "Lead.".into(), std::env::temp_dir(), None);
+        let item = |id: u64| MailItem {
+            id,
+            to: task.id,
+            from: MailSender::Host,
+            kind: MailKind::Message,
+            heading: "A message from the host:".into(),
+            body: format!("Note {id}."),
+            at: Utc::now(),
+            delivered_at: Some(Utc::now()),
+            file: None,
+            withheld: false,
+            resent: false,
+        };
+        let mut holding = task.clone();
+        holding.pending_context_injections = vec![item(1).text()];
+        let result = |task: &Task| AgentResult::of_task("lead".into(), task.clone());
+        let restored = |task: &Task| {
+            let snapshot = SubagentsSnapshot {
+                settled: vec![item(1)],
+                last_mail: 1,
+                ..SubagentsSnapshot::default()
+            };
+            Board::new(None, Some(snapshot), &[result(task)], Uuid::new_v4(), None)
+        };
+
+        let board = restored(&task);
+        let state = board.state.lock().clone();
+        assert!(state.settled.is_empty());
+        assert_eq!(state.mail.len(), 1);
+        assert!(state.mail[0].delivered_at.is_none() && state.mail[0].resent);
+        assert_eq!(board.pending(task.id).len(), 1);
+
+        let board = restored(&holding);
+        assert_eq!(
+            board.state.lock().clone(),
+            SubagentsSnapshot {
+                last_mail: 1,
+                ..SubagentsSnapshot::default()
+            }
+        );
+
+        let board = Board::new(None, None, &[], Uuid::new_v4(), None);
+        board.state.lock().settled = vec![item(1)];
+        board.prune_settled(|_| None);
+        board.prune_settled(|_| Some(result(&task)));
+        assert_eq!(board.state.lock().settled.len(), 1);
+        board.prune_settled(|_| Some(result(&holding)));
+        assert!(board.state.lock().settled.is_empty());
     }
 }
 
