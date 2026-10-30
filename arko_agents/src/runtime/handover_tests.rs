@@ -846,6 +846,40 @@ async fn a_handover_s_configuration_brings_its_skills() {
     }
 }
 
+/// A pending handover saved before reports could be asked for alone loads
+/// as a handover, and the new fields are saved only when set.
+#[test]
+fn a_pending_handover_saved_before_reports_alone_loads() {
+    let (agent, _, _) = harness(ToolCallingMode::Native);
+    let mut saved = serde_json::to_value(&agent.task).unwrap();
+    saved["handover_requested"] = serde_json::json!({
+        "requested_at": "2026-10-01T12:00:00Z",
+        "input_tokens": 1200,
+        "report_requested": true,
+        "report": "REPORT: half done."
+    });
+    let task: Task = serde_json::from_value(saved).unwrap();
+    let request = task.handover_requested.clone().unwrap();
+    assert!(!request.report_only);
+    assert_eq!(request.request, None);
+    assert_eq!(request.report.as_deref(), Some("REPORT: half done."));
+    assert!(!task.report_only());
+    let written = serde_json::to_value(&request).unwrap();
+    assert!(written.get("report_only").is_none(), "{written}");
+    assert!(written.get("request").is_none(), "{written}");
+
+    let mut task = task;
+    task.set_state(TaskState::Completed {
+        summary: "Done.".into(),
+    });
+    task.request_report(Some("Report now.".into())).unwrap();
+    let written = serde_json::to_value(&task).unwrap();
+    assert_eq!(written["handover_requested"]["report_only"], true);
+    assert_eq!(written["handover_requested"]["request"], "Report now.");
+    let reloaded: Task = serde_json::from_value(written).unwrap();
+    assert!(reloaded.report_only());
+}
+
 #[test]
 fn tasks_saved_before_handovers_load() {
     let (agent, _events, _commands) = harness(ToolCallingMode::Native);
