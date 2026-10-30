@@ -298,7 +298,7 @@ impl Board {
         }
     }
 
-    fn bump(&self) {
+    pub(crate) fn bump(&self) {
         self.version
             .send_modify(|version| *version = version.wrapping_add(1));
     }

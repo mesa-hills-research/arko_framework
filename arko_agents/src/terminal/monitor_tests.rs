@@ -1755,6 +1755,14 @@ impl Workers {
     }
 }
 
+impl Workers {
+    /// What the manager holds of it.
+    fn weak(self: &Arc<Self>) -> Weak<dyn WorkerLiveness> {
+        let weak: Weak<Self> = Arc::downgrade(self);
+        weak
+    }
+}
+
 impl WorkerLiveness for Workers {
     fn has_running_workers(&self, owner: Uuid) -> bool {
         self.running.lock().unwrap().contains(&owner)
@@ -1809,7 +1817,7 @@ async fn listed(f: &Fixture, id: Uuid) -> serde_json::Value {
 async fn a_monitor_lasts_while_its_owners_workers_run() {
     let f = Fixture::new(|_| {});
     let workers = Workers::new();
-    f.manager.set_worker_liveness(Some(workers.clone()));
+    f.manager.add_worker_liveness(workers.weak());
     let (sender, mut receiver) = mpsc::channel(8);
     f.manager.bind_runtime(f.owner, sender.downgrade());
     let minutes = |count: u64| Duration::from_secs(60 * count);
@@ -1862,16 +1870,19 @@ async fn a_monitor_lasts_while_its_owners_workers_run() {
         )
     );
 
-    // A host whose workflow ended leaves no workers: a monitor its workers
-    // kept ends.
-    workers.set(f.owner, true);
+    // Several hosts share the manager. A monitor is kept while any of them
+    // says its owner has workers running, and one whose host dropped it no
+    // longer counts.
+    let other = Workers::new();
+    f.manager.add_worker_liveness(other.weak());
+    other.set(f.owner, true);
     let id = kept_check(&f, minutes(10), Vec::new()).await;
     tokio::time::sleep(minutes(20)).await;
     assert_eq!(
         f.manager.status(f.owner, id, None).unwrap().state,
         JobState::Running
     );
-    f.manager.set_worker_liveness(None);
+    drop(other);
     let end = next_note(&mut receiver).await;
     assert!(
         end.contains(" UTC because your workers finished, and its checks stopped."),
@@ -1886,7 +1897,7 @@ async fn a_monitor_lasts_while_its_owners_workers_run() {
 async fn without_running_workers_a_monitor_ends_at_its_time() {
     let f = Fixture::new(|_| {});
     let workers = Workers::new();
-    f.manager.set_worker_liveness(Some(workers.clone()));
+    f.manager.add_worker_liveness(workers.weak());
     let (sender, mut receiver) = mpsc::channel(8);
     f.manager.bind_runtime(f.owner, sender.downgrade());
     let minutes = |count: u64| Duration::from_secs(60 * count);
@@ -1974,7 +1985,7 @@ async fn the_monitor_tools_take_once_and_lasts() {
     );
 
     let workers = Workers::new();
-    f.manager.set_worker_liveness(Some(workers.clone()));
+    f.manager.add_worker_liveness(workers.weak());
     assert_eq!(
         parameter(start, "lasts").map(|param| (param.required, param.param_type)),
         Some((false, ToolParameterType::String))

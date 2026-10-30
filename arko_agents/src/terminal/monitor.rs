@@ -114,7 +114,7 @@ pub enum MonitorLifetime {
     /// host's [`WorkerLiveness`] says. Once its time has passed it ends when
     /// the last worker finishes. While workers run it gives no warning
     /// before its end. With no worker running it ends at its time, as a
-    /// timed monitor does. A host that sets no `WorkerLiveness` has no
+    /// timed monitor does. A host that adds no `WorkerLiveness` has no
     /// workers, so the monitor ends at its time.
     WhileWorkersRun,
 }
@@ -127,8 +127,9 @@ impl MonitorLifetime {
 
 /// Says whether an agent's workers (subagents) run, for the monitors that
 /// last while they do ([`MonitorLifetime::WhileWorkersRun`]). A host that
-/// runs workers sets one with [`TerminalManager::set_worker_liveness`].
-/// arko_workflows sets one on the manager given to its `background_jobs`.
+/// runs workers adds one with [`TerminalManager::add_worker_liveness`] and
+/// keeps it while its workers can run. Each arko_workflows workflow with
+/// subagents adds its own to the manager given to its `background_jobs`.
 pub trait WorkerLiveness: Send + Sync {
     /// Whether any worker that `owner` (a task) started runs now, or waits
     /// to start. It is asked often, so it should answer quickly, and never
@@ -136,9 +137,9 @@ pub trait WorkerLiveness: Send + Sync {
     fn has_running_workers(&self, owner: Uuid) -> bool;
 
     /// What changes whenever a worker starts or ends, so monitors don't
-    /// wait to notice. A channel that closes says no worker will run again
-    /// (the workflow ended). Monitors also ask again each
-    /// [`WORKERS_RECHECK`] while workers keep them.
+    /// wait to notice. A host that drops its `WorkerLiveness` changes it or
+    /// closes it, so its monitors notice it no longer counts. Monitors also
+    /// ask again each [`WORKERS_RECHECK`] while workers keep them.
     fn changes(&self) -> watch::Receiver<u64>;
 }
 
@@ -1051,35 +1052,52 @@ impl TerminalManager {
         self.monitor_limits.lock().unwrap().clone()
     }
 
-    /// Sets what says whether an agent's workers run, for the monitors that
-    /// last while they do ([`MonitorLifetime::WhileWorkersRun`]), or `None`
-    /// for a host without workers. `monitor_start` offers its `lasts`
-    /// parameter only while one is set. Monitors already running ask the new
-    /// one from now on.
-    pub fn set_worker_liveness(&self, liveness: Option<Arc<dyn WorkerLiveness>>) {
-        *self.worker_liveness.lock().unwrap() = liveness;
+    /// Adds what says whether some agents' workers run, for the monitors
+    /// that last while they do ([`MonitorLifetime::WhileWorkersRun`]). The
+    /// manager holds it weakly, so it counts until its host drops it. Each
+    /// workflow that shares the manager adds its own, and a monitor is kept
+    /// while any of them says its owner has a worker running.
+    /// `monitor_start` offers its `lasts` parameter while one counts. Running
+    /// monitors plan their timed events again.
+    pub fn add_worker_liveness(&self, liveness: Weak<dyn WorkerLiveness>) {
+        {
+            let mut all = self.worker_liveness.lock().unwrap();
+            all.retain(|liveness| liveness.strong_count() > 0);
+            all.push(liveness);
+        }
         self.monitor_timing_changed();
     }
 
-    /// Whether a [`WorkerLiveness`] is set, so monitors can last while
+    /// The [`WorkerLiveness`]es that count, those whose hosts still hold
+    /// them.
+    fn live_worker_liveness(&self) -> Vec<Arc<dyn WorkerLiveness>> {
+        let mut all = self.worker_liveness.lock().unwrap();
+        all.retain(|liveness| liveness.strong_count() > 0);
+        all.iter().filter_map(Weak::upgrade).collect()
+    }
+
+    /// Whether a [`WorkerLiveness`] counts, so monitors can last while
     /// workers run.
     pub(super) fn has_worker_liveness(&self) -> bool {
-        self.worker_liveness.lock().unwrap().is_some()
+        !self.live_worker_liveness().is_empty()
     }
 
-    /// Whether `owner` has workers running, as the [`WorkerLiveness`]
-    /// says. Never asked with a job's lock held, as it may take the
-    /// host's own locks.
+    /// Whether `owner` has workers running, as any [`WorkerLiveness`] says.
+    /// Never asked with a job's lock held, as it may take the hosts' own
+    /// locks.
     pub(super) fn workers_running(&self, owner: Uuid) -> bool {
-        let liveness = self.worker_liveness.lock().unwrap().clone();
-        liveness.is_some_and(|liveness| liveness.has_running_workers(owner))
+        self.live_worker_liveness()
+            .iter()
+            .any(|liveness| liveness.has_running_workers(owner))
     }
 
-    /// What changes as workers start and end, if a [`WorkerLiveness`] is
-    /// set.
-    pub(super) fn worker_changes(&self) -> Option<watch::Receiver<u64>> {
-        let liveness = self.worker_liveness.lock().unwrap().clone();
-        liveness.map(|liveness| liveness.changes())
+    /// What changes as workers start and end, one for each
+    /// [`WorkerLiveness`] that counts.
+    pub(super) fn worker_changes(&self) -> Vec<watch::Receiver<u64>> {
+        self.live_worker_liveness()
+            .iter()
+            .map(|liveness| liveness.changes())
+            .collect()
     }
 
     /// The news of monitors that went to no runtime from now on, because

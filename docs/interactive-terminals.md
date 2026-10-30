@@ -199,12 +199,16 @@ the command. Two options suit watches of other lengths.
   its agent's workers finished`). It suits a watch that matters while workers
   work, such as disk space or memory during their builds, or a dev server's
   errors. With no worker running it ends at its time, as other monitors do, and a
-  worker that starts before then keeps it. The host says whether workers run
-  with `set_worker_liveness(Some(liveness))`, a `WorkerLiveness` that answers
+  worker that starts before then keeps it. A host says whether workers run
+  with `add_worker_liveness(weak)`, a `WorkerLiveness` that answers
   `has_running_workers(owner)` and gives a `watch` channel that changes as
-  workers start and end (closed once none will run again). Monitors ask it again
-  each minute (`WORKERS_RECHECK`) while workers keep them.
-  `WorkflowBuilder::background_jobs` sets it from the workflow's subagents.
+  workers start and end. The manager holds it weakly, so it counts while its
+  host holds it, and a host that drops it changes or closes its channel so the
+  monitors look again. Several hosts can share a manager, and a monitor is kept
+  while any of them says its owner has workers running. Monitors also ask
+  again each minute (`WORKERS_RECHECK`) while workers keep them. Each workflow
+  with subagents and `WorkflowBuilder::background_jobs` adds its own, which
+  counts while the workflow lives.
 
 It returns `MonitorStarted { job_id, expires_at, summary }`, where
 `summary` is what the `monitor_start` tool returns. A monitor of lines waits a
@@ -321,7 +325,7 @@ allowlist names them.
 
 | Tool | Behavior |
 | --- | --- |
-| `monitor_start` | Watch `command`'s lines that match `pattern`, or with `every_seconds` run it as a check and alert as `alert_when` says (`success`, `failure`, `change` or `output`), for `expires_minutes` (1 to 30). `once: true` ends it after its first alert. `lasts: "while_workers_run"` keeps it while the agent's workers run, and is offered only when the host set a `WorkerLiveness`. Returns what the monitor watches until when, with its output so far or its first check's result. |
+| `monitor_start` | Watch `command`'s lines that match `pattern`, or with `every_seconds` run it as a check and alert as `alert_when` says (`success`, `failure`, `change` or `output`), for `expires_minutes` (1 to 30). `once: true` ends it after its first alert. `lasts: "while_workers_run"` keeps it while the agent's workers run, and is offered only while a `WorkerLiveness` counts. Returns what the monitor watches until when, with its output so far or its first check's result. |
 | `monitor_control` | `list` the agent's monitors (with `job_id`, `command`, `watching`, `alerts` and `ends_in_minutes`, plus `once` and `lasts` when set, and `ends` in place of `ends_in_minutes` once only its workers keep it), `rearm` one for `minutes` from now (30 by default), or `stop` one. |
 
 A Claude Code agent's monitors run in the runtime's manager like the native

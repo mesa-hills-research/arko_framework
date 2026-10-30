@@ -487,9 +487,9 @@ pub struct TerminalManager {
     wake_rules: Mutex<warnings::WakeRules>,
     /// Changes when monitors should plan their timed events again.
     monitor_timing: watch::Sender<u64>,
-    /// Says whether an owner's workers run, for the monitors that last
-    /// while they do.
-    worker_liveness: Mutex<Option<Arc<dyn WorkerLiveness>>>,
+    /// What says whether owners' workers run, for the monitors that last
+    /// while they do, held weakly.
+    worker_liveness: Mutex<Vec<Weak<dyn WorkerLiveness>>>,
     _directory_lock: Arc<std::fs::File>,
     /// Which open of the directory this manager is (see `OPENS`).
     generation: u64,

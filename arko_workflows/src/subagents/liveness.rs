@@ -9,9 +9,11 @@ use uuid::Uuid;
 use crate::context::SharedContext;
 
 /// Says from the workflow's board whether the runs an agent started are
-/// queued or running. `WorkflowBuilder::build` sets it on the manager given
-/// to `background_jobs` when the workflow has subagents. It holds the
-/// workflow weakly, so once the workflow is dropped no worker runs.
+/// queued or running. `WorkflowBuilder::build` adds it to the manager given
+/// to `background_jobs` when the workflow has subagents, and the workflow
+/// holds it, so it counts for as long as the workflow lives, even when its
+/// host keeps the workflow's context longer. Dropped with the workflow, it
+/// tells the monitors to look again.
 pub(crate) struct WorkerRuns(Weak<SharedContext>);
 
 impl WorkerRuns {
@@ -32,6 +34,16 @@ impl arko_agents::terminal::WorkerLiveness for WorkerRuns {
             Some(context) => context.subagents.changes(),
             // Closed, as no worker runs again.
             None => watch::channel(0).1,
+        }
+    }
+}
+
+impl Drop for WorkerRuns {
+    /// The monitors it kept look again, and find it gone. Without the
+    /// context, its channel has closed, which tells them as well.
+    fn drop(&mut self) {
+        if let Some(context) = self.0.upgrade() {
+            context.subagents.bump();
         }
     }
 }

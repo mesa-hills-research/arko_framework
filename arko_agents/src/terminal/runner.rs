@@ -488,28 +488,34 @@ pub(super) async fn retimed(timing: &mut Option<watch::Receiver<u64>>) {
 }
 
 /// What tells a monitor that lasts while its owner's workers run that they
-/// started or ended, or `None` for another monitor or with no
-/// [`WorkerLiveness`](monitor::WorkerLiveness).
+/// started or ended, one for each [`WorkerLiveness`](monitor::WorkerLiveness),
+/// or none for another monitor.
 pub(super) fn workers_watch(
     manager: &Weak<TerminalManager>,
     running: Option<&monitor::Running>,
-) -> Option<watch::Receiver<u64>> {
+) -> Vec<watch::Receiver<u64>> {
     running
         .filter(|running| running.lifetime == monitor::MonitorLifetime::WhileWorkersRun)
         .and(manager.upgrade())
-        .and_then(|manager| manager.worker_changes())
+        .map(|manager| manager.worker_changes())
+        .unwrap_or_default()
 }
 
-/// Resolves when `workers` changes, and once more when it closes (no worker
-/// runs again), after which it is `None`. Never without it.
-pub(super) async fn workers_changed(workers: &mut Option<watch::Receiver<u64>>) {
-    match workers {
-        Some(receiver) => {
-            if receiver.changed().await.is_err() {
-                *workers = None;
-            }
-        }
-        None => std::future::pending().await,
+/// Resolves when one of `workers` changes, and once more when one closes,
+/// which is then left out. Never without any.
+pub(super) async fn workers_changed(workers: &mut Vec<watch::Receiver<u64>>) {
+    if workers.is_empty() {
+        return std::future::pending().await;
+    }
+    let (closed, index) = {
+        let changes = workers
+            .iter_mut()
+            .map(|receiver| Box::pin(receiver.changed()));
+        let (result, index, _) = futures::future::select_all(changes).await;
+        (result.is_err(), index)
+    };
+    if closed {
+        workers.swap_remove(index);
     }
 }
 
