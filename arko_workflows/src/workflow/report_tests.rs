@@ -333,3 +333,267 @@ async fn a_claude_code_agent_writes_a_report_on_request_in_its_session() {
     assert!(input.contains("Reply with it as plain text"), "{input}");
     assert!(!input.starts_with("/compact"), "{input}");
 }
+
+/// How a report ends that doesn't come.
+#[derive(Clone, Copy, Debug)]
+enum NoReport {
+    /// Its request fails.
+    Failed,
+    /// The host stops the run.
+    Stopped,
+}
+
+/// A peer's message that reaches the run while it writes a report that
+/// doesn't come is held back, as during any report, and is given once when
+/// the run goes on: in the same workflow, or after a resume from a
+/// checkpoint.
+#[tokio::test]
+async fn a_message_during_a_report_that_doesn_t_come_is_given_once() {
+    for (end, reload) in [
+        (NoReport::Failed, false),
+        (NoReport::Failed, true),
+        (NoReport::Stopped, false),
+        (NoReport::Stopped, true),
+    ] {
+        let workspace = Workspace::new();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server = {
+            let release = release.clone();
+            ResponsesServer::start_async(move |index, body| {
+                let release = release.clone();
+                Box::pin(async move {
+                    if body.contains(REQUESTED) && !body.contains("Go on.") {
+                        // Held until the message is in, then failed (or
+                        // held for good, for a stop).
+                        release.notified().await;
+                        return matches!(end, NoReport::Failed).then(|| Reply::Status {
+                            status: 401,
+                            retry_after: None,
+                            body: json!({"error": {"message": "Incorrect API key provided.", "type": "invalid_request_error", "code": "invalid_api_key"}}).to_string(),
+                        });
+                    }
+                    Some(Reply::Stream(text_turn(&format!("t{index}"), "Sure.")))
+                })
+            })
+            .await
+        };
+        let build = || {
+            builder(&server, &workspace, agent())
+                .agent("peer", agent_config("Peer"))
+                .agent_tool("main", ProbeTool::new("probe", false))
+        };
+        let workflow = Arc::new(build().build().unwrap());
+        let first = workflow.run_agent("main", "Hello.").await.unwrap();
+        let report = tokio::spawn({
+            let (workflow, first) = (workflow.clone(), first.clone());
+            async move { workflow.request_report(&first, None).await }
+        });
+        server.wait_for_requests(2).await;
+        workflow
+            .context()
+            .messages
+            .send("peer", None, "main", "Use British spelling.".into(), vec![])
+            .await
+            .unwrap();
+        // Taken by the run, which holds it back while the report is due.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        match end {
+            NoReport::Failed => release.notify_one(),
+            NoReport::Stopped => {
+                assert!(workflow.stop_run(
+                    first.agent_run_id,
+                    StopRequest::new(crate::workflow::stop::StopKind::Operator, "Ctrl-C"),
+                    RunStopIntent::Relaunch,
+                ));
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(20), report)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let workflow = if reload {
+            workflow.checkpoint().await.unwrap();
+            drop(workflow);
+            Arc::new(
+                build()
+                    .resume_from(latest_checkpoint(&workspace))
+                    .build()
+                    .unwrap(),
+            )
+        } else {
+            workflow
+        };
+        let restored = workflow.agent_result(first.agent_run_id).unwrap();
+        workflow.continue_agent(&restored, "Go on.").await.unwrap();
+        let input = bodies(&server).pop().unwrap()["input"].to_string();
+        assert_eq!(
+            input.matches("Use British spelling.").count(),
+            1,
+            "{end:?}, reload {reload}: {input}"
+        );
+    }
+}
+
+/// The latest checkpoint of the run directory.
+fn latest_checkpoint(workspace: &Workspace) -> std::path::PathBuf {
+    let run = workspace.0.join(".run");
+    let name = std::fs::read_to_string(run.join("latest-checkpoint")).unwrap();
+    run.join(name.trim())
+}
+
+/// Under the error policies that inform the agent too, a report's plan
+/// limit and refused credential come back as the pause that says why, with
+/// the agent set to wait for a plan's reset.
+#[tokio::test]
+async fn a_report_s_failure_says_why_under_every_error_policy() {
+    for policy in [
+        arko_agents::LLMErrorPolicy::InformAgentAndContinue,
+        arko_agents::LLMErrorPolicy::RetryThenInformAgent { max_attempts: 2 },
+    ] {
+        let mut config = agent();
+        config.llm_error_policy = policy.clone();
+        config.llm_retry_config.usage_limit_policy =
+            arko_agents::UsageLimitPolicy::WaitUntilReset {
+                max_wait_ms: 3_600_000,
+            };
+        let (error, ..) = a_failed_report(
+            Reply::Status {
+                status: 401,
+                retry_after: None,
+                body: json!({"error": {"message": "Incorrect API key provided.", "type": "invalid_request_error", "code": "invalid_api_key"}}).to_string(),
+            },
+            config.clone(),
+        )
+        .await;
+        assert!(
+            matches!(
+                &error,
+                WorkflowError::AgentPaused {
+                    pause: AgentPause::ErrorRecovery {
+                        error_kind: Some(arko_ai::ErrorKind::Authentication),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "{policy:?}: {error}"
+        );
+        let resets_at = chrono::Utc::now().timestamp() + 60;
+        let (error, ..) = a_failed_report(
+            Reply::Status {
+                status: 429,
+                retry_after: Some(60),
+                body: json!({"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached", "plan_type": "pro", "resets_at": resets_at}}).to_string(),
+            },
+            config,
+        )
+        .await;
+        assert!(
+            matches!(
+                &error,
+                WorkflowError::AgentPaused {
+                    pause: AgentPause::ErrorRecovery {
+                        cause: arko_agents::ErrorRecoveryCause::UsageLimit { .. },
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "{policy:?}: {error}"
+        );
+    }
+}
+
+/// The same for a Claude Code agent: a login Claude Code lacks, and a plan
+/// limit it reports reached, under each error policy.
+#[tokio::test]
+async fn a_claude_code_report_s_failure_says_why_under_every_error_policy() {
+    use super::recovery_tests::FakeClaude;
+    let resets_at = chrono::Utc::now().timestamp() as u64 + 60;
+    let failures = [
+        json!([{"api_error": "authentication_failed", "text": "Not logged in · Please run /login", "status": null}]),
+        json!([
+            {"rate_limit": {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets_at}},
+            {"fail": "Claude usage limit reached."},
+        ]),
+    ];
+    for policy in [
+        arko_agents::LLMErrorPolicy::InformAgentAndContinue,
+        arko_agents::LLMErrorPolicy::RetryThenInformAgent { max_attempts: 2 },
+    ] {
+        for (index, failure) in failures.iter().enumerate() {
+            let fake = FakeClaude::new(json!([
+                [{"tool": "mcp__arko__complete_task", "input": {"summary": "Started."}}],
+                failure,
+            ]));
+            let workspace = Workspace::new();
+            let server =
+                ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure.")))
+                    .await;
+            let mut claude = fake.agent();
+            claude.llm_error_policy = policy.clone();
+            claude.llm_retry_config.usage_limit_policy =
+                arko_agents::UsageLimitPolicy::WaitUntilReset {
+                    max_wait_ms: 3_600_000,
+                };
+            let workflow = builder(&server, &workspace, claude).build().unwrap();
+            let first = workflow.run_agent("main", "Start.").await.unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(20),
+                workflow.request_report(&first, None),
+            )
+            .await
+            .expect("the report doesn't wait")
+            .unwrap_err();
+            let WorkflowError::AgentPaused {
+                pause:
+                    AgentPause::ErrorRecovery {
+                        cause, error_kind, ..
+                    },
+                ..
+            } = &error
+            else {
+                panic!("{policy:?}: {error}");
+            };
+            if index == 0 {
+                assert_eq!(*error_kind, Some(arko_ai::ErrorKind::Authentication));
+            } else {
+                assert!(
+                    matches!(cause, arko_agents::ErrorRecoveryCause::UsageLimit { .. }),
+                    "{cause:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A Claude Code report that doesn't come leaves the session as it was:
+/// the run's next input resumes it before the report's request, so the
+/// session holds neither the request nor what the model wrote of it.
+#[tokio::test]
+async fn a_claude_code_report_that_doesn_t_come_leaves_the_session_as_it_was() {
+    use super::recovery_tests::FakeClaude;
+    let fake = FakeClaude::new(json!([
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Started."}}],
+        [{"api_error": "authentication_failed", "text": "Not logged in · Please run /login", "status": null}],
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "Went on."}}],
+    ]));
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace, fake.agent()).build().unwrap();
+    let first = workflow.run_agent("main", "Start.").await.unwrap();
+    workflow.request_report(&first, None).await.unwrap_err();
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
+    let result = workflow.continue_agent(&restored, "Go on.").await.unwrap();
+    assert_eq!(result.summary, "Went on.");
+    let users = fake.logged("user");
+    assert_eq!(users.len(), 3, "{users:?}");
+    let history = users[2]["history"].to_string();
+    assert!(!history.contains("Write a report"), "{history}");
+    assert!(!history.contains("Not logged in"), "{history}");
+    assert!(history.contains("Start."), "{history}");
+    let argv = fake.logged("argv")[2]["argv"].to_string();
+    assert!(argv.contains("--resume-session-at="), "{argv}");
+}
