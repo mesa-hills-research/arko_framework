@@ -113,26 +113,7 @@ impl AgentLoop {
     /// conversation has them already.
     pub(super) fn write_prompts(&mut self) -> Result<(), ArkoAgentsError> {
         if self.task.conversation.system_message.is_none() {
-            let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();
-            for name in &self.task.agent_config.tool_config.available_tool_names {
-                if let Some(tool) = self.tool_registry.get(name) {
-                    tool_defs_for_prompt.push(tool.definition());
-                } else {
-                    log::warn!(
-                        "Agent {} configured with tool '{}' but it was not found in the registry.",
-                        self.task.agent_config.name,
-                        name
-                    );
-                }
-            }
-            if !tool_defs_for_prompt
-                .iter()
-                .any(|def| def.name == COMPLETE_TASK_TOOL_NAME)
-                && let Some(ct_tool) = self.tool_registry.get(COMPLETE_TASK_TOOL_NAME)
-            {
-                tool_defs_for_prompt.push(ct_tool.definition());
-            }
-
+            let tool_defs_for_prompt = self.prompt_tool_definitions();
             let prompt_builder = PromptBuilder::new(
                 &self.task.agent_config,
                 tool_defs_for_prompt.iter().collect(),
@@ -161,5 +142,47 @@ impl AgentLoop {
             }
         }
         Ok(())
+    }
+
+    /// Writes the system prompt alone, from the task's configuration and
+    /// the tools it offers (a handover's fresh conversation that changed
+    /// the configuration adds its first message itself).
+    pub(super) fn write_system_prompt(&mut self) -> Result<(), ArkoAgentsError> {
+        let tool_defs_for_prompt = self.prompt_tool_definitions();
+        let system_prompt = PromptBuilder::new(
+            &self.task.agent_config,
+            tool_defs_for_prompt.iter().collect(),
+            &self.parsing_config,
+            self.skill_prompt_context.as_ref(),
+        )
+        .tools_offered(self.offers_tools())
+        .build_system_prompt(&self.task)?;
+        self.task.conversation.system_message = Some(system_prompt);
+        Ok(())
+    }
+
+    /// The definitions of the tools the system prompt lists: those the
+    /// configuration lists that the registry has, and `complete_task`.
+    fn prompt_tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();
+        for name in &self.task.agent_config.tool_config.available_tool_names {
+            if let Some(tool) = self.tool_registry.get(name) {
+                tool_defs_for_prompt.push(tool.definition());
+            } else {
+                log::warn!(
+                    "Agent {} configured with tool '{}' but it was not found in the registry.",
+                    self.task.agent_config.name,
+                    name
+                );
+            }
+        }
+        if !tool_defs_for_prompt
+            .iter()
+            .any(|def| def.name == COMPLETE_TASK_TOOL_NAME)
+            && let Some(ct_tool) = self.tool_registry.get(COMPLETE_TASK_TOOL_NAME)
+        {
+            tool_defs_for_prompt.push(ct_tool.definition());
+        }
+        tool_defs_for_prompt
     }
 }

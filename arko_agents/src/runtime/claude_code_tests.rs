@@ -2351,6 +2351,55 @@ async fn a_handover_continues_in_a_fresh_session() {
     assert!(users[1]["text"].as_str().unwrap().contains(REPORT_HEADING));
 }
 
+/// Gives the fresh conversation its configuration.
+struct ConfigHook(AgentConfig);
+
+impl crate::handover::HandoverHook for ConfigHook {
+    fn handover_config(&self, _task: &Task) -> Option<AgentConfig> {
+        Some(self.0.clone())
+    }
+}
+
+/// The handover hook's configuration runs the fresh session: its tools and
+/// a system prompt written from it, and the task keeps it.
+#[tokio::test]
+async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "REPORT: searched a and b."},
+        ],
+        [complete("Searched c")],
+    ]));
+    let mut saved = config(&fake, &["Grep"]);
+    saved.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let mut current = saved.clone();
+    current.instructions = "Search with Grep and Read.".into();
+    current.tool_config.available_tool_names = vec!["Grep".into(), "Read".into()];
+    let task = Task::new(saved, "Search a, b and c.".into(), fake.workspace(), None);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_handover_hook(Arc::new(ConfigHook(current)));
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Searched c"),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.agent_config.instructions, "Search with Grep and Read.");
+    let argv = |index: usize| -> String {
+        serde_json::from_value::<Vec<String>>(fake.logged("argv")[index]["argv"].clone())
+            .unwrap()
+            .join(" ")
+    };
+    let (first, fresh) = (argv(0), argv(1));
+    assert!(first.contains("--tools Grep "), "{first}");
+    assert!(!first.contains("Search with Grep and Read."), "{first}");
+    assert!(fresh.contains("--tools Grep,Read"), "{fresh}");
+    assert!(fresh.contains("Search with Grep and Read."), "{fresh}");
+}
+
 /// The host's threshold replaces the configured one, larger or smaller.
 #[tokio::test]
 async fn the_hosts_threshold_moves_the_handover_both_ways() {

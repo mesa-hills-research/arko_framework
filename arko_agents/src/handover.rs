@@ -552,6 +552,22 @@ pub trait HandoverHook: Send + Sync {
         HandoverSeed::for_task(task)
     }
 
+    /// The configuration `task`'s fresh conversation runs with, in place of
+    /// the task's, or `None` (the default) to keep the task's. `task` still
+    /// holds the conversation being replaced. A host whose agent now runs
+    /// with another configuration than the one a saved task keeps (other
+    /// tools, say) gives that one here, since the fresh conversation writes
+    /// the prompt cache afresh anyway. Its tools and the system prompt
+    /// written from it apply from the fresh conversation's first request,
+    /// and the task keeps it. It must have the task's model (provider and
+    /// ID), and the tools it offers must be in the runtime's tool registry.
+    /// One with another model, or one that isn't valid, is left out, and the
+    /// task keeps its own (logged as a warning).
+    fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
+        let _ = task;
+        None
+    }
+
     /// Claude Code compacted `task`'s conversation. Its summary replaced the
     /// earlier messages in the session (`task` keeps them all). Returns
     /// context to give the agent again with its next input, such as

@@ -103,7 +103,14 @@ macro_rules! step {
 pub struct AgentLoop {
     task: Task,
     llm_client: Arc<ai::LLMClient>,
+    /// The tools the task's configuration offers, the only ones that run.
     tool_registry: Arc<ToolRegistry>,
+    /// Every tool the runtime was given, offered or not, for a handover that
+    /// changes the configuration ([`HandoverHook::handover_config`]).
+    all_tools: Arc<ToolRegistry>,
+    /// The task's command channel, which the tools are bound to (see
+    /// [`bind_tools`](Self::bind_tools)).
+    command_sender: Option<mpsc::WeakSender<UserCommand>>,
     event_sender: mpsc::Sender<AgentEvent>,
     command_receiver: mpsc::Receiver<UserCommand>,
     parsing_config: ToolParsingConfig,
@@ -245,8 +252,8 @@ impl AgentLoop {
         // The tools offered are the only tools that run: a call to any other
         // one is answered as unavailable, in either tool calling mode.
         let offered = task.agent_config.tool_config.offered_tool_names();
-        let tool_registry =
-            Arc::new(tool_registry.restricted_to(offered.iter().map(String::as_str)));
+        let all_tools = tool_registry;
+        let tool_registry = Arc::new(all_tools.restricted_to(offered.iter().map(String::as_str)));
 
         for name in tool_registry.list_tool_names() {
             if let Some(tool) = tool_registry.get(&name) {
@@ -258,6 +265,8 @@ impl AgentLoop {
             task,
             llm_client,
             tool_registry,
+            all_tools,
+            command_sender: None,
             event_sender,
             command_receiver,
             parsing_config,
@@ -315,7 +324,8 @@ impl AgentLoop {
     /// Binds the task's tools to its command channel
     /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)), and its
     /// background jobs, whose notes go there.
-    pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
+    pub(super) fn bind_tools(&mut self, sender: &mpsc::Sender<UserCommand>) {
+        self.command_sender = Some(sender.downgrade());
         for name in self.tool_registry.list_tool_names() {
             if let Some(tool) = self.tool_registry.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());

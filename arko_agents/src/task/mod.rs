@@ -926,6 +926,30 @@ impl Task {
         Ok(())
     }
 
+    /// Takes `config` for the fresh conversation of a handover, in place of
+    /// the task's configuration, with the same model
+    /// ([`HandoverHook::handover_config`](crate::handover::HandoverHook::handover_config)).
+    /// The system message is written again from it. The task isn't marked
+    /// [`reconfigured`](Self::reconfigured) for it. Returns why `config`
+    /// can't be taken otherwise.
+    pub(crate) fn take_handover_config(&mut self, config: AgentConfig) -> Result<(), String> {
+        let (current, next) = (
+            &self.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        if current.provider != next.provider || current.id != next.id {
+            return Err(format!(
+                "it has another model ('{}' of {:?}) than the task ('{}' of {:?})",
+                next.id, next.provider, current.id, current.provider
+            ));
+        }
+        config.validate().map_err(|error| error.to_string())?;
+        self.agent_config_id = config.id.clone();
+        self.agent_config = config;
+        self.conversation.system_message = None;
+        Ok(())
+    }
+
     /// Replaces the placeholders of images that are gone
     /// ([`arko_ai::Image::unavailable`], read back from a store that no
     /// longer had them) with text saying so. In a message, the image becomes

@@ -194,9 +194,44 @@ impl AgentLoop {
         self.complete_handover(report).await
     }
 
+    /// The fresh conversation of a handover runs with `config`, the
+    /// [`HandoverHook`]'s: it offers `config`'s tools under a system prompt
+    /// written from it. One the task can't take is left out, and logged.
+    fn take_handover_config(
+        &mut self,
+        config: crate::agent_config::AgentConfig,
+    ) -> Result<(), ArkoAgentsError> {
+        if let Err(reason) = self.task.take_handover_config(config) {
+            log::warn!(
+                "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
+                self.task.id
+            );
+            return Ok(());
+        }
+        self.parsing_config = self.task.agent_config.get_tool_parsing_config();
+        let offered = self.task.agent_config.tool_config.offered_tool_names();
+        let registry = self
+            .all_tools
+            .restricted_to(offered.iter().map(String::as_str));
+        for name in registry.list_tool_names() {
+            if self.tool_registry.get(&name).is_some() {
+                continue;
+            }
+            if let Some(tool) = registry.get(&name) {
+                tool.reset_context(self.task.id);
+                if let Some(sender) = &self.command_sender {
+                    tool.bind_runtime(self.task.id, sender.clone());
+                }
+            }
+        }
+        self.tool_registry = Arc::new(registry);
+        self.write_system_prompt()
+    }
+
     /// Replaces the conversation with a fresh one that starts from the
     /// seed (the [`HandoverHook`]'s, or the task's initial prompt) and the
-    /// report, and resets what the loop keeps about the old one.
+    /// report, and resets what the loop keeps about the old one. The
+    /// hook's configuration, if it gives one, applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
         let chat = self.task.agent_config.tool_config.chat;
@@ -207,6 +242,10 @@ impl AgentLoop {
         };
         let seed =
             crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
+        let config = self
+            .handover_hook
+            .as_ref()
+            .and_then(|hook| hook.handover_config(&self.task));
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
@@ -222,6 +261,9 @@ impl AgentLoop {
             replaced_messages,
             report: report.clone(),
         });
+        if let Some(config) = config {
+            self.take_handover_config(config)?;
+        }
         let prompt_builder = self.prompts();
         let first_message =
             prompt_builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;

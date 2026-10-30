@@ -780,7 +780,14 @@ enum Stopping {
 
 pub(super) struct ClaudeCodeRun {
     task: Task,
+    /// The tools the task's configuration offers, the only ones served.
     registry: Arc<ToolRegistry>,
+    /// Every tool the runtime was given, offered or not, for a handover that
+    /// changes the configuration ([`HandoverHook::handover_config`]).
+    all_tools: Arc<ToolRegistry>,
+    /// The task's command channel, which the tools are bound to (see
+    /// [`bind_tools`](Self::bind_tools)).
+    command_sender: Option<mpsc::WeakSender<UserCommand>>,
     events: mpsc::Sender<AgentEvent>,
     commands: mpsc::Receiver<UserCommand>,
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
@@ -956,7 +963,8 @@ impl ClaudeCodeRun {
         middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     ) -> Self {
         let offered = task.agent_config.tool_config.offered_tool_names();
-        let registry = Arc::new(registry.restricted_to(offered.iter().map(String::as_str)));
+        let all_tools = registry;
+        let registry = Arc::new(all_tools.restricted_to(offered.iter().map(String::as_str)));
         for name in registry.list_tool_names() {
             if let Some(tool) = registry.get(&name) {
                 tool.reset_context(task.id);
@@ -970,6 +978,8 @@ impl ClaudeCodeRun {
         Self {
             task,
             registry,
+            all_tools,
+            command_sender: None,
             events,
             commands,
             turn_context: None,
@@ -1046,7 +1056,8 @@ impl ClaudeCodeRun {
     }
 
     /// Binds the task's tools to its command channel.
-    pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
+    pub(super) fn bind_tools(&mut self, sender: &mpsc::Sender<UserCommand>) {
+        self.command_sender = Some(sender.downgrade());
         for name in self.registry.list_tool_names() {
             if let Some(tool) = self.registry.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
@@ -5286,8 +5297,44 @@ impl ClaudeCodeRun {
         Ok(true)
     }
 
+    /// The fresh session of a handover runs with `config`, the
+    /// [`HandoverHook`]'s: it is served `config`'s tools and given a system
+    /// prompt written from it. One the task can't take is left out, and
+    /// logged.
+    fn take_handover_config(&mut self, config: AgentConfig) -> Result<(), ArkoAgentsError> {
+        if let Err(reason) = self.task.take_handover_config(config) {
+            log::warn!(
+                "Task {}: The handover keeps the task's configuration, since the one its host gave can't be taken ({reason}).",
+                self.task.id
+            );
+            return Ok(());
+        }
+        self.parsing = self.task.agent_config.get_tool_parsing_config();
+        let offered = self.task.agent_config.tool_config.offered_tool_names();
+        let registry = self
+            .all_tools
+            .restricted_to(offered.iter().map(String::as_str));
+        for name in registry.list_tool_names() {
+            if self.registry.get(&name).is_some() {
+                continue;
+            }
+            if let Some(tool) = registry.get(&name) {
+                tool.reset_context(self.task.id);
+                if let Some(sender) = &self.command_sender {
+                    tool.bind_runtime(self.task.id, sender.clone());
+                }
+            }
+        }
+        self.registry = Arc::new(registry);
+        self.served_tools = None;
+        let prompt = self.system_prompt()?;
+        self.task.conversation.system_message = Some(prompt);
+        Ok(())
+    }
+
     /// The report arrived: a fresh session starts from the seed and the
-    /// report, in the same task.
+    /// report, in the same task. The hook's configuration, if it gives one,
+    /// applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
         let chat = self.is_chat();
@@ -5298,6 +5345,10 @@ impl ClaudeCodeRun {
         };
         let seed =
             crate::handover::with_open_questions(seed, self.handover_hook.as_deref(), &self.task);
+        let config = self
+            .handover_hook
+            .as_ref()
+            .and_then(|hook| hook.handover_config(&self.task));
         // A chat's fresh conversation answers the user's latest input, with
         // the images it held, and a task's restates the task, with its images.
         let images = crate::handover::seed_images(&self.task, chat);
@@ -5313,6 +5364,9 @@ impl ClaudeCodeRun {
             replaced_messages,
             report: report.clone(),
         });
+        if let Some(config) = config {
+            self.take_handover_config(config)?;
+        }
         let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
         let first = builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
         let mut content = vec![ai::Content::Text(first)];

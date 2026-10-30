@@ -526,6 +526,87 @@ async fn the_hook_sees_the_old_conversation_and_sets_the_seed() {
     assert_eq!(task.initial_task_prompt, "Inspect fixture image");
 }
 
+/// Gives the fresh conversation its configuration.
+struct ConfigHook(crate::agent_config::AgentConfig);
+
+impl HandoverHook for ConfigHook {
+    fn handover_config(&self, _task: &Task) -> Option<crate::agent_config::AgentConfig> {
+        Some(self.0.clone())
+    }
+}
+
+/// The ToolResult events of `tool`'s calls.
+fn results(events: &[AgentEvent], tool: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolResult {
+                tool_name, output, ..
+            } if tool_name == tool => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The hook's configuration runs the fresh conversation: its system prompt
+/// is written from it, and a tool it offers that the task didn't offer
+/// runs. The task keeps it, without being marked reconfigured.
+#[tokio::test]
+async fn the_hook_s_configuration_runs_the_fresh_conversation() {
+    let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
+    let mut current = agent.task.agent_config.clone();
+    current.instructions = "Answer in plain text.".into();
+    // The task offers the image tool alone of the two, as saved.
+    agent.task.agent_config.tool_config.available_tool_names =
+        vec!["view_image".into(), "complete_task".into()];
+    agent.tool_registry = Arc::new(agent.all_tools.restricted_to(["view_image"]));
+    agent.handover_hook = Some(Arc::new(ConfigHook(current)));
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![
+            reply("The report.", 10),
+            native_call("plain_text", 10),
+            native_complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    assert!(
+        task.agent_config
+            .tool_config
+            .available_tool_names
+            .contains(&"plain_text".to_string())
+    );
+    assert!(!task.reconfigured);
+    let prompt = task.conversation.system_message.as_deref().unwrap();
+    assert!(prompt.contains("Answer in plain text."), "{prompt}");
+    assert_eq!(results(&events, "plain_text"), ["Legacy text output"]);
+}
+
+/// A configuration with another model than the task's is left out: the
+/// fresh conversation keeps the task's.
+#[tokio::test]
+async fn a_hook_s_configuration_with_another_model_is_left_out() {
+    let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
+    let mut other = agent.task.agent_config.clone();
+    other.instructions = "Answer in plain text.".into();
+    other.llm_config.model = ai::Model::openai_gpt_6_1_sol();
+    agent.handover_hook = Some(Arc::new(ConfigHook(other)));
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![reply("The report.", 10), native_complete()],
+    );
+    let (task, _) = run(agent, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.agent_config.instructions, "test");
+    assert_eq!(
+        task.agent_config.llm_config.model.id,
+        ai::Model::openai_gpt_5_6_luna().id
+    );
+}
+
 #[test]
 fn tasks_saved_before_handovers_load() {
     let (agent, _events, _commands) = harness(ToolCallingMode::Native);
