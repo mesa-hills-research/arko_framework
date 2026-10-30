@@ -40,6 +40,13 @@
 //! host's request, the runtime sends Claude Code's own `/compact` into the
 //! session, and the agent goes on in the same session from Claude Code's
 //! summary of the conversation. See [`crate::claude_code`].
+//!
+//! A host can also ask for the report alone, with [`Task::request_report`],
+//! such as before it goes on with the work in another conversation, on
+//! another model. The agent writes it as it writes a handover report, with
+//! every other tool call rejected until it does, and the task then completes
+//! with the report as its summary. The conversation is not replaced, and an
+//! agent that compacts in Claude Code writes the report all the same.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,6 +105,30 @@ pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
 /// The fresh conversation starts from the user's latest message and this
 /// summary (see [`HandoverSeed::for_chat`]).
 pub const DEFAULT_CHAT_REPORT_REQUEST: &str = "This conversation is getting long, so it will continue in a fresh one that starts from a summary you write now. Reply with that summary as plain text. Cover what the user wants and asked, what you answered, the facts, preferences and decisions to keep, and anything still open. The user's latest message comes before this request, and you haven't answered it yet: don't answer it here. The fresh conversation answers it from your summary, and will have only that message and the summary, so be complete.";
+
+/// What a report asked for alone ([`Task::request_report`]) should cover,
+/// after the request says how to give it.
+macro_rules! report_only_contents {
+    () => {
+        "Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing and what you meant to do next, and what you are unsure of. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet: who sent it, what it asked, and what you meant to reply. Be complete: the work may go on from this report alone."
+    };
+}
+
+/// What the runtime asks for, as a user message, for a report alone
+/// ([`Task::request_report`]) from an agent offered the
+/// [`HANDOVER_REPORT_TOOL_NAME`] tool. Every other tool call is rejected
+/// until the agent calls it.
+pub const DEFAULT_REPORT_ONLY_REQUEST: &str = concat!(
+    "Write a report of your work so far now. Call `handover_report` with it. Your other tool calls are not run until you do. ",
+    report_only_contents!()
+);
+
+/// [`DEFAULT_REPORT_ONLY_REQUEST`] for an agent that gives the report as a
+/// reply without a tool call (see the [module docs](self)).
+pub const DEFAULT_TEXT_REPORT_ONLY_REQUEST: &str = concat!(
+    "Write a report of your work so far now. Reply with it as plain text, without calling a tool. ",
+    report_only_contents!()
+);
 
 /// Said before the report request when the step that took a request over
 /// the model's input limit was left out of the conversation (see the
@@ -386,6 +417,15 @@ pub struct HandoverRequest {
     /// between still hands over with it when it runs again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
+    /// The report alone is asked for ([`Task::request_report`]): once it
+    /// comes, the task completes with it as its summary, and the
+    /// conversation stays as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_only: bool,
+    /// The host's request for a report alone, in place of the default (see
+    /// [`report_only_request`](Self::report_only_request)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 impl HandoverRequest {
@@ -397,7 +437,22 @@ impl HandoverRequest {
             input_tokens,
             report_requested: false,
             report: None,
+            report_only: false,
+            request: None,
         }
+    }
+
+    /// The request an agent receives for a report alone: the host's
+    /// [`request`](Self::request), or by default
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`] when the agent gives the report with
+    /// the [`HANDOVER_REPORT_TOOL_NAME`] tool (`with_tool`) and
+    /// [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`] otherwise.
+    pub fn report_only_request(&self, with_tool: bool) -> &str {
+        self.request.as_deref().unwrap_or(if with_tool {
+            DEFAULT_REPORT_ONLY_REQUEST
+        } else {
+            DEFAULT_TEXT_REPORT_ONLY_REQUEST
+        })
     }
 }
 

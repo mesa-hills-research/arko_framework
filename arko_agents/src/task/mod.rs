@@ -926,6 +926,63 @@ impl Task {
         Ok(())
     }
 
+    /// Asks the agent for a report of its work, without a handover (see
+    /// [`crate::handover`]). Its next run asks for the report with `request`,
+    /// or by default with
+    /// [`DEFAULT_REPORT_ONLY_REQUEST`](crate::handover::DEFAULT_REPORT_ONLY_REQUEST)
+    /// (or [`DEFAULT_TEXT_REPORT_ONLY_REQUEST`](crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST)
+    /// where the agent gives the report as a reply), and rejects every other
+    /// tool call, `complete_task` included, until the report comes. The task
+    /// then completes with the report as its summary, and the conversation
+    /// keeps the request and the report. Context that arrives meanwhile waits
+    /// for the task's next run. An agent that compacts in Claude Code
+    /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+    /// writes the report all the same, and the run doesn't wait for a plan's
+    /// usage limit to reset
+    /// ([`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)).
+    /// Between turns only: a task completed, awaiting the user's answer, or
+    /// cancelled (a turn the cancellation left open is settled first, as
+    /// when the task runs again). Returns `InvalidTaskState` otherwise, and
+    /// for an empty `request`.
+    pub fn request_report(&mut self, request: Option<String>) -> Result<(), ArkoAgentsError> {
+        if !matches!(
+            self.current_state,
+            TaskState::Completed { .. }
+                | TaskState::AwaitingUserResponse { .. }
+                | TaskState::Cancelled { .. }
+        ) {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a report is asked for only between turns (completed, awaiting the user's answer, or cancelled), not {:?}",
+                self.current_state
+            )));
+        }
+        if request
+            .as_deref()
+            .is_some_and(|request| request.trim().is_empty())
+        {
+            return Err(ArkoAgentsError::InvalidTaskState(
+                "a report's request must not be empty".to_string(),
+            ));
+        }
+        self.set_state(TaskState::InProgress);
+        self.handover_requested = Some(crate::handover::HandoverRequest {
+            report_only: true,
+            request,
+            ..crate::handover::HandoverRequest::new(
+                self.current_conversation_context_size().unwrap_or(0),
+            )
+        });
+        Ok(())
+    }
+
+    /// A report alone is asked for ([`request_report`](Self::request_report))
+    /// and hasn't come yet.
+    pub(crate) fn report_only(&self) -> bool {
+        self.handover_requested
+            .as_ref()
+            .is_some_and(|request| request.report_only)
+    }
+
     /// Takes `config` for the fresh conversation of a handover, in place of
     /// the task's configuration, with the same model
     /// ([`HandoverHook::handover_config`](crate::handover::HandoverHook::handover_config)).

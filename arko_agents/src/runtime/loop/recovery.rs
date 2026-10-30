@@ -336,6 +336,10 @@ impl AgentLoop {
     /// When a usage limit is waited out under
     /// [`UsageLimitPolicy::WaitUntilReset`], the delay before the retry.
     fn usage_limit_wait(&self, error: &ai::Error) -> Option<Duration> {
+        // A report asked for alone doesn't wait: its host goes on without it.
+        if self.task.report_only() {
+            return None;
+        }
         let UsageLimitPolicy::WaitUntilReset { max_wait_ms } =
             self.task.agent_config.llm_retry_config.usage_limit_policy
         else {

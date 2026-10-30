@@ -607,6 +607,131 @@ async fn a_hook_s_configuration_with_another_model_is_left_out() {
     );
 }
 
+/// A loop for `task`, with the harness's tools.
+fn loop_for(
+    task: Task,
+) -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+) {
+    let (agent, _, _) = harness(ToolCallingMode::Native);
+    let (events, receiver) = mpsc::channel(200);
+    let (sender, commands) = mpsc::channel(10);
+    let agent = AgentLoop::new(
+        task,
+        Arc::new(ai::LLMClient::new()),
+        agent.all_tools.clone(),
+        events,
+        commands,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    (agent, receiver, sender)
+}
+
+/// The harness's task, completed with `complete_task`.
+async fn completed(mut agent: AgentLoop, events: &mut mpsc::Receiver<AgentEvent>) -> Task {
+    push(&mut agent, vec![native_complete()]);
+    let (task, _) = run(agent, events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    task
+}
+
+/// A report asked for alone: one more turn of the same conversation, whose
+/// `handover_report` call gives the report. The task completes with it as
+/// its summary, without a handover, and the conversation keeps the request
+/// and the report.
+#[tokio::test]
+async fn a_report_asked_for_alone_completes_the_task_in_the_same_conversation() {
+    let (agent, mut events, _commands) = tool_harness();
+    let mut task = completed(agent, &mut events).await;
+    let before = task.conversation.messages.len();
+    task.request_report(None).unwrap();
+    let (mut agent, mut events, _commands) = loop_for(task);
+    push(&mut agent, vec![native_report(&[], "REPORT: done.", 10)]);
+    let (task, events) = run(agent, &mut events).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: done."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.handovers.is_empty());
+    assert!(task.handover_requested.is_none());
+    let texts = texts(&task);
+    assert_eq!(texts.len(), before + 3, "{texts:#?}");
+    assert_eq!(texts[before], crate::handover::DEFAULT_REPORT_ONLY_REQUEST);
+    assert_eq!(
+        results(&events, HANDOVER_REPORT_TOOL_NAME),
+        ["Report received."]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+    );
+}
+
+/// Until the report comes, every other call is rejected, `complete_task`
+/// too, and the host's request replaces the default.
+#[tokio::test]
+async fn a_report_asked_for_alone_holds_back_complete_task_too() {
+    let (agent, mut events, _commands) = tool_harness();
+    let mut task = completed(agent, &mut events).await;
+    task.request_report(Some("Report for the next model.".into()))
+        .unwrap();
+    let (mut agent, mut events, _commands) = loop_for(task);
+    push(
+        &mut agent,
+        vec![
+            native_call(COMPLETE_TASK_TOOL_NAME, 10),
+            native_report(&[], "REPORT: done.", 10),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: done.")
+    );
+    assert_eq!(
+        rejections(&events, COMPLETE_TASK_TOOL_NAME),
+        [HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION]
+    );
+    assert!(texts(&task).contains(&"Report for the next model.".to_string()));
+}
+
+/// An agent not offered `handover_report` gives the report as a reply.
+#[tokio::test]
+async fn a_report_asked_for_alone_comes_as_a_reply_without_the_report_tool() {
+    let (agent, mut events, _commands) = harness(ToolCallingMode::Native);
+    let mut task = completed(agent, &mut events).await;
+    task.request_report(None).unwrap();
+    let (mut agent, mut events, _commands) = loop_for(task);
+    push(&mut agent, vec![reply("REPORT: done.", 10)]);
+    let (task, _) = run(agent, &mut events).await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: done.")
+    );
+    assert!(texts(&task).contains(&crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST.to_string()));
+}
+
+/// A report is asked for between turns only, with a request that says
+/// something.
+#[test]
+fn a_report_is_asked_for_between_turns_only() {
+    let (agent, _, _) = harness(ToolCallingMode::Native);
+    let mut task = agent.task;
+    assert!(task.request_report(None).is_err());
+    task.set_state(TaskState::Completed {
+        summary: "Done.".into(),
+    });
+    assert!(task.request_report(Some(" ".into())).is_err());
+    task.request_report(None).unwrap();
+    assert_eq!(task.current_state, TaskState::InProgress);
+}
+
 #[test]
 fn tasks_saved_before_handovers_load() {
     let (agent, _events, _commands) = harness(ToolCallingMode::Native);

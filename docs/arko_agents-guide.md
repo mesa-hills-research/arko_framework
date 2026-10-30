@@ -1894,6 +1894,16 @@ conversation's first request, which writes the prompt cache afresh anyway, and t
 keeps it. One with another model, or one that isn't valid, is left out with a warning. The
 arko_workflows engine does all three for every agent it runs.
 
+`Task::request_report(request)` asks for the report alone, without a handover, such as before
+the work goes on in another conversation on another model. The task's next run sends `request`
+(by default `DEFAULT_REPORT_ONLY_REQUEST`, or `DEFAULT_TEXT_REPORT_ONLY_REQUEST` where the report
+is a reply) and rejects every other call, `complete_task` included, until the report comes. The
+task then completes with the report as its summary, and the conversation keeps the request and the
+report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
+in its session, also when it compacts in Claude Code, and neither runtime waits for a plan's usage
+limit to reset during it. It takes a task that is completed, awaiting the user's answer, or
+cancelled, whose open turn is settled first.
+
 `AgentRuntime::with_handover_threshold` takes a `HandoverThreshold`, a threshold the host
 keeps a clone of and may change while the task runs, larger or smaller. Set, it replaces
 the configured threshold from the next check on, and `set(None)` goes back to it. The

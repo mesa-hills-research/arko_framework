@@ -301,6 +301,10 @@ impl AgentLoop {
             // First: context that arrives as a handover starts waits for
             // the fresh conversation.
             self.start_handover_if_due().await?;
+            // A report asked for alone ends the task once it is in.
+            if self.task.current_state.is_terminal() {
+                return Ok(Flow::Exit);
+            }
             self.flush_context_injections()?;
             self.emit_context_receipts().await?;
             self.refresh_file_tree_context();

@@ -30,6 +30,11 @@ pub(super) const NO_REPORT_TOOL_CALL_NO_COMPLETION: &str = "Your response did no
 /// asked for, and a call without a report.
 pub(super) const REPORT_RECEIVED: &str =
     "Handover report received. Your conversation continues from it in a fresh one.";
+/// The result of the `handover_report` call that gives a report asked for
+/// alone ([`Task::request_report`]).
+pub(super) const REPORT_ONLY_RECEIVED: &str = "Report received.";
+/// [`NO_REPORT_TOOL_CALL`] for a report asked for alone.
+pub(super) const REPORT_ONLY_NO_TOOL_CALL: &str = "Your response did not call a tool, so no report was received. Call handover_report with the report.";
 pub(super) const REPORT_NOT_REQUESTED: &str = "This call was not run: no handover report was asked for. Continue with your task: you will be asked for a report if your conversation needs to be handed over.";
 pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the call had no report. Call handover_report again with the full report in its `report` parameter.";
 

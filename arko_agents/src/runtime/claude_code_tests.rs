@@ -2400,6 +2400,65 @@ async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
     assert!(fresh.contains("Search with Grep and Read."), "{fresh}");
 }
 
+/// A report asked for alone goes into the task's session as its next input,
+/// also for an agent that compacts in Claude Code (no `/compact` is sent).
+/// Calls are held for it, `complete_task` too, and the task completes with
+/// the reply as its summary, without a handover.
+#[tokio::test]
+async fn a_report_asked_for_alone_is_written_in_the_session() {
+    let fake = Fake::new(json!([
+        [complete("First")],
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            complete("Not yet"),
+            {"text": "REPORT: did the first part."},
+        ],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig {
+        compact_in_claude_code: true,
+        ..HandoverConfig::at_input_tokens(1)
+    });
+    let task = Task::new(config, "Start.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    task.request_report(None).unwrap();
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "REPORT: did the first part."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.handovers.is_empty());
+    assert!(task.handover_requested.is_none());
+    assert_eq!(task.claude_code_session.as_deref(), Some(session.as_str()));
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 2, "{users:?}");
+    assert!(
+        users[1].contains(crate::handover::DEFAULT_TEXT_REPORT_ONLY_REQUEST),
+        "{}",
+        users[1]
+    );
+    // The first run's `complete_task`, then the two calls held.
+    let posts = fake.logged("post");
+    assert_eq!(posts.len(), 3, "{posts:?}");
+    assert!(
+        posts[1..].iter().all(|post| post["is_error"] == true
+            && post["output"]
+                .as_str()
+                .unwrap()
+                .contains("Reply with it as plain text")),
+        "{posts:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ConversationCompacted { .. }))
+    );
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    assert!(argv.contains(&format!("--resume={session}")), "{argv:?}");
+}
+
 /// The host's threshold replaces the configured one, larger or smaller.
 #[tokio::test]
 async fn the_hosts_threshold_moves_the_handover_both_ways() {

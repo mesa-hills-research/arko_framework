@@ -39,12 +39,14 @@ impl AgentLoop {
     /// is due: every call except `complete_task` (and `handover_report`,
     /// which is answered before this check).
     pub(super) fn handover_blocks(&self, tool_name: &str) -> bool {
-        self.handover_report_due() && tool_name != COMPLETE_TASK_TOOL_NAME
+        self.handover_report_due()
+            && (tool_name != COMPLETE_TASK_TOOL_NAME || self.task.report_only())
     }
 
     /// The result of a call rejected because the handover report is due.
     pub(super) fn handover_report_due_reason(&self) -> &'static str {
-        let completes = !self.task.agent_config.tool_config.ends_task_with_text();
+        let completes =
+            !self.task.agent_config.tool_config.ends_task_with_text() && !self.task.report_only();
         match (self.offers_report_tool(), completes) {
             (true, true) => HANDOVER_REPORT_TOOL_DUE,
             (true, false) => HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION,
@@ -79,7 +81,11 @@ impl AgentLoop {
         if request.report.is_none() {
             request.report = Some(report.to_string());
         }
-        Ok(REPORT_RECEIVED)
+        Ok(if request.report_only {
+            REPORT_ONLY_RECEIVED
+        } else {
+            REPORT_RECEIVED
+        })
     }
 
     /// Before a model request (not a refusal fallback's): replaces the
@@ -145,21 +151,30 @@ impl AgentLoop {
         let input_tokens = request.input_tokens;
         let completes = !self.task.agent_config.tool_config.ends_task_with_text();
         let report_request = match (&config, self.task.agent_config.tool_config.chat) {
+            // A report alone has a request of its own.
+            _ if request.report_only => request.report_only_request(with_tool),
             (Some(config), false) => config.report_request_for(with_tool, completes),
             (None, false) => crate::handover::default_report_request_for(with_tool, completes),
             (Some(config), true) => config.chat_report_request(),
             (None, true) => crate::handover::DEFAULT_CHAT_REPORT_REQUEST,
         };
+        let report_request = report_request.to_string();
+        let report_only = request.report_only;
         if std::mem::take(&mut self.step_left_out) {
             self.task.conversation.add_user_message(&format!(
                 "{}\n\n{report_request}",
                 crate::handover::STEP_LEFT_OUT
             ));
         } else {
-            self.task.conversation.add_user_message(report_request);
+            self.task.conversation.add_user_message(&report_request);
         }
         self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
+        if report_only {
+            // Not a handover: the host asked for the report.
+            log::info!("Task {}: Report requested.", self.task.id);
+            return Ok(());
+        }
         log::info!(
             "Task {}: Handover requested at {} input tokens.",
             self.task.id,
@@ -179,7 +194,9 @@ impl AgentLoop {
         report: String,
     ) -> Result<(), ArkoAgentsError> {
         if self.offers_report_tool() {
-            let note = if self.task.agent_config.tool_config.ends_task_with_text() {
+            let note = if self.task.report_only() {
+                REPORT_ONLY_NO_TOOL_CALL
+            } else if self.task.agent_config.tool_config.ends_task_with_text() {
                 NO_REPORT_TOOL_CALL_NO_COMPLETION
             } else {
                 NO_REPORT_TOOL_CALL
@@ -192,6 +209,19 @@ impl AgentLoop {
                 .await;
         }
         self.complete_handover(report).await
+    }
+
+    /// The report asked for alone came ([`Task::request_report`]): the task
+    /// completes with it as its summary, and the conversation stays.
+    async fn complete_report(&mut self, report: String) -> Result<(), ArkoAgentsError> {
+        self.task.handover_requested = None;
+        log::info!("Task {}: Report received.", self.task.id);
+        self.task
+            .set_state(TaskState::Completed { summary: report });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await
     }
 
     /// The fresh conversation of a handover runs with `config`, the
@@ -234,6 +264,9 @@ impl AgentLoop {
     /// hook's configuration, if it gives one, applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
+        if self.task.report_only() {
+            return self.complete_report(report).await;
+        }
         let chat = self.task.agent_config.tool_config.chat;
         let seed = match &self.handover_hook {
             Some(hook) => hook.on_handover(&self.task, &report),
