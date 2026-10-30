@@ -455,7 +455,7 @@ async fn an_automatic_limit_follows_the_run_s_own_model() {
     // GPT-5.6 Luna gives 27 minutes.
     let mut own = agent("lead").llm_config;
     own.model = arko_ai::Model::anthropic_claude_opus_5_5();
-    context.note_run_llm_config(lead.id, &own);
+    context.note_run_llm_config("lead", lead.id, &own);
     let tool = WaitForMessageTool::new(
         context.clone(),
         "lead".to_string(),

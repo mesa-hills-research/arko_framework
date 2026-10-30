@@ -65,15 +65,35 @@ struct ChainedInterceptor {
     /// The policy for the tools the workflow's policy covers.
     policy: InterceptionFailurePolicy,
     /// The policy for `load_skill` results, which the runtime passes to
-    /// the chain only when the agent's skills configuration sets one.
-    load_skill_policy: Option<InterceptionFailurePolicy>,
+    /// the chain only when the run's skills configuration sets one.
+    load_skill_policy: LoadSkillPolicy,
 }
 
+/// The `load_skill` failure policy of a run's chain of interceptors, from
+/// the run's skills configuration. A handover that gives the run another
+/// configuration changes it ([`WorkflowHandover::handover_config`]).
+pub(crate) type LoadSkillPolicy = Arc<parking_lot::RwLock<Option<InterceptionFailurePolicy>>>;
+
 impl ChainedInterceptor {
+    #[cfg(test)]
     fn new(
         interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
         policy: InterceptionFailurePolicy,
         load_skill_policy: Option<InterceptionFailurePolicy>,
+    ) -> Self {
+        Self::sharing(
+            interceptors,
+            policy,
+            Arc::new(parking_lot::RwLock::new(load_skill_policy)),
+        )
+    }
+
+    /// A chain whose `load_skill` policy is `load_skill_policy`'s, as it
+    /// changes.
+    fn sharing(
+        interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
+        policy: InterceptionFailurePolicy,
+        load_skill_policy: LoadSkillPolicy,
     ) -> Self {
         Self {
             interceptors,
@@ -82,10 +102,10 @@ impl ChainedInterceptor {
         }
     }
 
-    fn policy_for(&self, tool_name: &str) -> &InterceptionFailurePolicy {
-        match &self.load_skill_policy {
-            Some(policy) if tool_name == arko_agents::skill::LOAD_SKILL_TOOL_NAME => policy,
-            _ => &self.policy,
+    fn policy_for(&self, tool_name: &str) -> InterceptionFailurePolicy {
+        match &*self.load_skill_policy.read() {
+            Some(policy) if tool_name == arko_agents::skill::LOAD_SKILL_TOOL_NAME => policy.clone(),
+            _ => self.policy.clone(),
         }
     }
 }
@@ -2014,6 +2034,9 @@ pub(crate) struct WorkflowHandover {
     pub review: bool,
     /// See [`StartedRun::depth`].
     pub depth: u32,
+    /// The `load_skill` policy of the run's chain of interceptors, which
+    /// follows the configuration a handover gives the run.
+    pub load_skill_policy: LoadSkillPolicy,
 }
 
 impl WorkflowHandover {
@@ -2085,9 +2108,10 @@ impl HandoverHook for WorkflowHandover {
 
     /// The configuration the run's agent starts a run with now, prepared as
     /// for a new run, when the run keeps another one it was saved with
-    /// (other tools, say). A run the host gave a configuration of its own
-    /// (`Task::reconfigured`), one whose agent now has another model, and a
-    /// completion verifier's review keep theirs.
+    /// (other tools or skills, say). A run the host gave a configuration of
+    /// its own (`Task::reconfigured`), one whose agent now has another
+    /// model, and a completion verifier's review keep theirs. The run's
+    /// model settings and `load_skill` policy follow the one it gives.
     fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
         if self.review || task.reconfigured {
             return None;
@@ -2101,35 +2125,37 @@ impl HandoverHook for WorkflowHandover {
         if current.provider != next.provider || current.id != next.id {
             return None;
         }
-        let mut config = prepare_config(
+        let config = prepare_config(
             &self.agent_name,
             &base,
             ctx,
             RunRole::of(ctx, self.depth, task.id),
         );
-        // The runtime's `load_skill` was set up for the run as it started:
-        // the configuration lists it as the task's does, when it has skills.
-        let current_tools = &task.agent_config.tool_config;
-        if config.skills_config.is_some()
-            && current_tools
+        // The runtime lists `load_skill` by the skills, which the
+        // configurations compare by, embedded ones included.
+        let without_load_skill = |config: &AgentConfig| {
+            let mut config = config.clone();
+            let tools = &mut config.tool_config;
+            tools
                 .available_tool_names
-                .iter()
-                .any(|name| name == LOAD_SKILL_TOOL_NAME)
-        {
-            ensure_tool_name(&mut config, LOAD_SKILL_TOOL_NAME);
-            if let Some(load_skill) = current_tools
-                .tool_specific_configs
-                .get(LOAD_SKILL_TOOL_NAME)
-            {
-                config
-                    .tool_config
-                    .tool_specific_configs
-                    .entry(LOAD_SKILL_TOOL_NAME.to_string())
-                    .or_insert_with(|| load_skill.clone());
-            }
+                .retain(|name| name != LOAD_SKILL_TOOL_NAME);
+            tools.tool_specific_configs.remove(LOAD_SKILL_TOOL_NAME);
+            serde_json::to_value(config).ok()
+        };
+        let same = without_load_skill(&config) == without_load_skill(&task.agent_config)
+            && arko_agents::handover::same_skills(
+                config.skills_config.as_ref(),
+                task.agent_config.skills_config.as_ref(),
+            );
+        if same || config.validate().is_err() {
+            return None;
         }
-        let saved = |config: &AgentConfig| serde_json::to_value(config).ok();
-        (saved(&config) != saved(&task.agent_config)).then_some(config)
+        ctx.note_run_llm_config(&self.agent_name, task.id, &config.llm_config);
+        *self.load_skill_policy.write() = config
+            .skills_config
+            .as_ref()
+            .and_then(|skills| skills.load_skill_interception.clone());
+        Some(config)
     }
 
     /// The questions the user input handler says are still open.
@@ -3198,7 +3224,7 @@ impl WorkflowEngine {
     fn build_interceptor_config(
         &self,
         agent_name: &str,
-        load_skill_policy: Option<InterceptionFailurePolicy>,
+        load_skill_policy: &LoadSkillPolicy,
         ctx: &Arc<SharedContext>,
     ) -> Option<InterceptorConfig> {
         let mut all: Vec<Arc<dyn ToolResultInterceptor>> = Vec::new();
@@ -3225,10 +3251,10 @@ impl WorkflowEngine {
         let interceptor: Arc<dyn ToolResultInterceptor> = if all.len() == 1 {
             all.remove(0)
         } else {
-            Arc::new(ChainedInterceptor::new(
+            Arc::new(ChainedInterceptor::sharing(
                 all,
                 ctx.interception_failure_policy.clone(),
-                load_skill_policy,
+                load_skill_policy.clone(),
             ))
         };
 
@@ -3467,15 +3493,16 @@ impl WorkflowEngine {
         driven: bool,
         review: bool,
     ) -> StartedRun {
-        let load_skill_policy = task
-            .agent_config
-            .skills_config
-            .as_ref()
-            .and_then(|skills| skills.load_skill_interception.clone());
-        let interceptor_config = self.build_interceptor_config(agent_name, load_skill_policy, ctx);
+        let load_skill_policy: LoadSkillPolicy = Arc::new(parking_lot::RwLock::new(
+            task.agent_config
+                .skills_config
+                .as_ref()
+                .and_then(|skills| skills.load_skill_interception.clone()),
+        ));
+        let interceptor_config = self.build_interceptor_config(agent_name, &load_skill_policy, ctx);
         let execution_middleware = self.build_execution_middleware(agent_name, ctx, depth);
         let agent_run_id = task.id;
-        ctx.note_run_llm_config(agent_run_id, &task.agent_config.llm_config);
+        ctx.note_run_llm_config(agent_name, agent_run_id, &task.agent_config.llm_config);
         ctx.registry
             .set_parent(agent_run_id, task.parent.map(|parent| parent.task_id));
         let started_task = task.clone();
@@ -3505,6 +3532,7 @@ impl WorkflowEngine {
                 prompt_message_ids: pending_message_ids.clone(),
                 review,
                 depth,
+                load_skill_policy,
             }));
         if let Some(threshold) = ctx.handover_thresholds.get(agent_name) {
             runtime = runtime.with_handover_threshold(threshold.clone());
@@ -5965,12 +5993,12 @@ mod tests {
         assert!(
             workflow
                 .engine
-                .build_interceptor_config("reviewer", None, workflow.context())
+                .build_interceptor_config("reviewer", &Default::default(), workflow.context())
                 .is_none()
         );
         let interceptor = workflow
             .engine
-            .build_interceptor_config("coder", None, workflow.context())
+            .build_interceptor_config("coder", &Default::default(), workflow.context())
             .unwrap()
             .interceptor;
         let task = TaskContext::new(
@@ -6038,7 +6066,7 @@ mod tests {
                 .unwrap();
             let interceptor = workflow
                 .engine
-                .build_interceptor_config("coder", None, workflow.context())
+                .build_interceptor_config("coder", &Default::default(), workflow.context())
                 .unwrap()
                 .interceptor;
             let task = TaskContext::new(

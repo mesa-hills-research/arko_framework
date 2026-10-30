@@ -38,9 +38,10 @@ pub struct SharedContext {
     /// The skills configurations the host set after the build, by agent.
     /// `None` is no skills.
     pub(crate) agent_skills: RwLock<HashMap<String, Option<SkillsConfig>>>,
-    /// The model settings each run started or went on with, by run, which
-    /// may not be its agent's registered ones. Read through `run_llm_config`.
-    pub(crate) run_llm_configs: RwLock<HashMap<uuid::Uuid, arko_agents::AgentLLMConfig>>,
+    /// The model settings each run started or went on with, by run, with
+    /// its agent, which may not be the agent's registered ones. Read through
+    /// `run_llm_config`.
+    pub(crate) run_llm_configs: RwLock<HashMap<uuid::Uuid, (String, arko_agents::AgentLLMConfig)>>,
     /// The runs writing a report asked for alone (`Workflow::request_report`),
     /// whose error-recovery pauses go back to the caller.
     pub(crate) report_runs: parking_lot::Mutex<std::collections::HashSet<uuid::Uuid>>,
@@ -136,27 +137,39 @@ impl SharedContext {
 
     /// The model settings run `task_id` of `agent` works with, which may
     /// not be the agent's registered ones
-    /// ([`RunOptions::config`](crate::RunOptions::config)). The registered
-    /// ones for a run that hasn't started.
+    /// ([`RunOptions::config`](crate::RunOptions::config)): as it last
+    /// started, went on or was handed over, else as its recorded result
+    /// saved them (a run restored from a checkpoint), else the registered
+    /// ones.
     pub(crate) fn run_llm_config(
         &self,
         agent: &str,
         task_id: uuid::Uuid,
     ) -> Option<arko_agents::AgentLLMConfig> {
-        if let Some(config) = self.run_llm_configs.read().get(&task_id) {
+        if let Some((_, config)) = self.run_llm_configs.read().get(&task_id) {
             return Some(config.clone());
         }
-        Some(self.agent_configs.get(agent)?.llm_config.clone())
+        let recorded = self
+            .agent_results
+            .read()
+            .iter()
+            .find(|result| result.agent_run_id == task_id)
+            .map(|result| result.info().agent_config.llm_config.clone());
+        recorded.or_else(|| Some(self.agent_configs.get(agent)?.llm_config.clone()))
     }
 
-    /// Records the model settings run `task_id` works with, as it starts or
-    /// goes on, for [`run_llm_config`](Self::run_llm_config).
+    /// Records the model settings run `task_id` of `agent` works with, as
+    /// it starts, goes on or is handed over, for
+    /// [`run_llm_config`](Self::run_llm_config).
     pub(crate) fn note_run_llm_config(
         &self,
+        agent: &str,
         task_id: uuid::Uuid,
         config: &arko_agents::AgentLLMConfig,
     ) {
-        self.run_llm_configs.write().insert(task_id, config.clone());
+        self.run_llm_configs
+            .write()
+            .insert(task_id, (agent.to_string(), config.clone()));
     }
 
     /// The skills configuration `agent` is registered with now.

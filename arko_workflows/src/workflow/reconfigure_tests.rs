@@ -744,3 +744,138 @@ async fn a_run_on_its_own_configuration_needs_a_registered_agent() {
     );
     assert_eq!(server.requests(), 0);
 }
+
+/// A handover that changes the run's prompt cache lifetime changes its
+/// automatic `wait_for_message` limit too.
+#[tokio::test]
+async fn a_handover_s_configuration_sets_the_run_s_wait_limit() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains("# Handover report") {
+            text_turn(&format!("t{index}"), "Done.")
+        } else if body.contains("Your conversation is getting long") {
+            tool_call_turn(
+                "report",
+                "handover_report",
+                serde_json::json!({"report": "REPORT: probed once."}),
+            )
+        } else if body.contains("Keep going.") {
+            tool_call_turn("p1", "probe", serde_json::json!({}))
+                .replace("\"input_tokens\":10", "\"input_tokens\":20000")
+        } else {
+            text_turn(&format!("t{index}"), "Sure.")
+        })
+    })
+    .await;
+    let mut saved = agent();
+    saved.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let build = |config: AgentConfig| {
+        Workflow::builder()
+            .name("reconfigure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("main", config)
+            .agent_tool("main", ProbeTool::new("probe", false))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+    };
+    let workflow = build(saved.clone()).build().unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    // GPT-5.6 Luna's 30-minute cache gives a 27-minute limit, and a
+    // 10-minute lifetime 9.
+    let mut current = saved;
+    current.llm_config.generation_config = current
+        .llm_config
+        .generation_config
+        .with_prompt_cache_lifetime(std::time::Duration::from_secs(600));
+    let resumed = build(current)
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .unwrap();
+    let limit = || {
+        crate::messaging::wait::WaitForMessageTool::new(
+            resumed.context().clone(),
+            "main".to_string(),
+            Arc::new(server.client()),
+        )
+    };
+    let restored = resumed.agent_result(first.agent_run_id).unwrap();
+    assert_eq!(
+        limit().wait_limit(first.agent_run_id).await,
+        std::time::Duration::from_secs(27 * 60)
+    );
+    let result = resumed
+        .continue_agent(&restored, "Keep going.")
+        .await
+        .unwrap();
+    assert_eq!(result.task().unwrap().handovers.len(), 1);
+    assert_eq!(
+        limit().wait_limit(first.agent_run_id).await,
+        std::time::Duration::from_secs(9 * 60)
+    );
+}
+
+/// The skills configuration of one embedded skill, `name`.
+fn skills_of(name: &str) -> arko_agents::skill::SkillsConfig {
+    arko_agents::skill::SkillsConfig {
+        embedded: vec![arko_agents::skill::EmbeddedSkill::new(
+            name,
+            format!("---\nname: {name}\ndescription: The {name} skill.\n---\nThe {name} body.\n"),
+        )],
+        ..Default::default()
+    }
+}
+
+/// A handover sees a change of the embedded skills alone (a saved
+/// configuration leaves them out), and the run's `load_skill` policy follows
+/// the configuration it gives.
+#[tokio::test]
+async fn a_handover_sees_a_change_of_the_embedded_skills() {
+    use arko_agents::HandoverHook;
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let mut registered = agent();
+    registered.skills_config = Some(arko_agents::skill::SkillsConfig {
+        load_skill_interception: Some(arko_agents::InterceptionFailurePolicy::UseRawResult),
+        ..skills_of("beta")
+    });
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", registered.clone())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    let prepared = workflow
+        .engine
+        .prepare_agent_config("main", &registered, context);
+    let hook = crate::workflow::engine::WorkflowHandover {
+        context: context.clone(),
+        agent_name: "main".to_string(),
+        prompt_message_ids: Vec::new(),
+        review: false,
+        depth: 0,
+        load_skill_policy: Default::default(),
+    };
+    let same = arko_agents::Task::new(prepared.clone(), "Go.".into(), workspace.0.clone(), None);
+    assert!(hook.handover_config(&same).is_none());
+    assert!(hook.load_skill_policy.read().is_none());
+    let mut older = prepared;
+    older.skills_config.as_mut().unwrap().embedded = skills_of("alpha").embedded;
+    let saved = arko_agents::Task::new(older, "Go.".into(), workspace.0.clone(), None);
+    let config = hook.handover_config(&saved).unwrap();
+    assert_eq!(
+        config.skills_config.unwrap().embedded,
+        skills_of("beta").embedded
+    );
+    assert_eq!(
+        *hook.load_skill_policy.read(),
+        Some(arko_agents::InterceptionFailurePolicy::UseRawResult)
+    );
+}
