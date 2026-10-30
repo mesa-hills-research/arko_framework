@@ -46,6 +46,18 @@ pub(crate) enum OpenError {
     Handshake { error: String, exit: Option<String> },
 }
 
+/// Whether a spawn's `error` may come after its process started: any error
+/// but the program missing or not allowed to run, and a start refused as the
+/// host exits.
+fn is_lost_start(error: &std::io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
 impl OpenError {
     /// The reason in a few fixed words, for an agent or a user: the
     /// server's exit when it exited. It never holds the server's command or
@@ -58,7 +70,11 @@ impl OpenError {
                 std::io::ErrorKind::PermissionDenied => {
                     "its program couldn't be started (permission denied)".into()
                 }
-                _ => "its program couldn't be started".into(),
+                std::io::ErrorKind::Interrupted => {
+                    "it wasn't started, as the host is exiting".into()
+                }
+                _ => "its program couldn't be started, or it started and was lost, so it may still be running"
+                    .into(),
             },
             Self::Handshake {
                 exit: Some(exit), ..
@@ -72,6 +88,9 @@ impl OpenError {
     fn diagnostic(&self, config: &McpServerConfig, redactions: &Redactions) -> String {
         let program = program(config);
         redactions.apply(&match self {
+            Self::Spawn(error) if is_lost_start(error) => format!(
+                "{program} couldn't be started, or it started and was lost, so it may still be running: {error}"
+            ),
             Self::Spawn(error) => format!("{program} couldn't be started: {error}"),
             Self::Handshake { error, .. } => format!("the MCP handshake failed: {error}"),
         })
@@ -503,10 +522,19 @@ impl ServerProcess {
         {
             let mut groups = server_groups();
             if groups.killed {
-                return Err(std::io::Error::other(
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
                     "MCP servers no longer start, as the host is exiting",
                 ));
             }
+            // shortcut: Tokio's `Command::spawn` starts the process, then sets
+            // up its pipes and its reaper, and if that fails it returns the
+            // error and drops the started child without killing it. Tokio
+            // offers no way to get that child back, so such a server goes on
+            // running, unlisted and out of `kill_mcp_servers`' reach, and the
+            // error says it may have started. This can be lifted if Tokio
+            // gains a way to adopt a std child, or by spawning with std and
+            // driving the pipes ourselves.
             let (child, tree) = ProcessTree::spawn(command)?;
             #[cfg(test)]
             if let Some((spawned, go)) = PAUSE_AFTER_SPAWN.lock().unwrap().take() {
@@ -562,6 +590,9 @@ impl Drop for ServerProcess {
 /// nothing, since each server's job object ends its processes when the
 /// host's handles close. A manager or hub that goes on finds its servers
 /// exited, as if they had exited by themselves, and can't start new ones.
+/// It can't reach a server whose start failed after its process started (as
+/// Tokio may fail to set up its pipes), since Tokio gives that process back
+/// to no one. That start's error says the server may have started.
 pub fn kill_mcp_servers() {
     #[cfg(unix)]
     {
@@ -863,6 +894,24 @@ mod tests {
                 .block_on(program.ends());
             drop(stop);
         }
+    }
+
+    /// A start that failed for a reason other than a missing program, one
+    /// not allowed to run, or the host's exit may have left its process
+    /// running, and its reason says so.
+    #[test]
+    fn a_start_that_may_have_left_its_process_running_says_so() {
+        use std::io::ErrorKind;
+        let reason = |kind| OpenError::Spawn(std::io::Error::new(kind, "failed")).reason();
+        assert_eq!(reason(ErrorKind::NotFound), "its program wasn't found");
+        assert_eq!(
+            reason(ErrorKind::Interrupted),
+            "it wasn't started, as the host is exiting"
+        );
+        assert_eq!(
+            reason(ErrorKind::Other),
+            "its program couldn't be started, or it started and was lost, so it may still be running"
+        );
     }
 
     /// A server that exits on its own is reported with its exit status and
