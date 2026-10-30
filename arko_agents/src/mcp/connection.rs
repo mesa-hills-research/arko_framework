@@ -328,20 +328,19 @@ impl Connection {
             }
         }
 
-        let (mut child, tree) = ProcessTree::spawn(&mut cmd).map_err(OpenError::Spawn)?;
-        let listed = ListedGroup::of(&child);
-        let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
+        let mut server = ServerProcess::spawn(&mut cmd).map_err(OpenError::Spawn)?;
+        let (Some(stdout), Some(stdin)) = (server.child.stdout.take(), server.child.stdin.take())
+        else {
             return Err(OpenError::Spawn(std::io::Error::other(
                 "the server's standard input or output is not available",
             )));
         };
-        let stderr = child.stderr.take();
+        let stderr = server.child.stderr.take();
         let (stop, stopped) = oneshot::channel();
         let exit = Arc::new(Mutex::new(None));
         let watcher = watch_server(
             config.name.clone(),
-            child,
-            (tree, listed),
+            server,
             stderr,
             redactions.clone(),
             stopped,
@@ -453,48 +452,16 @@ fn server_groups() -> std::sync::MutexGuard<'static, ServerGroups> {
 #[cfg(all(test, unix))]
 pub(crate) static UNLISTED: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
 
-/// A server's process group, listed for [`kill_mcp_servers`] from right
-/// after its start. The watcher unlists it after killing the group and
-/// before collecting the server, so the list never holds the ID of a
-/// collected server, which another program's group may have taken.
-pub(crate) struct ListedGroup {
+/// A server's process group, listed for [`kill_mcp_servers`] while it may
+/// run.
+struct ListedGroup {
     #[cfg(unix)]
     id: Option<i32>,
 }
 
 impl ListedGroup {
-    /// The group `child` leads, as [`ProcessTree::spawn`] starts it. After
-    /// `kill_mcp_servers` the group is killed instead, so a server that was
-    /// starting as the host exits doesn't escape it.
-    fn of(child: &Child) -> Self {
-        #[cfg(unix)]
-        {
-            let Some(id) = child.id().and_then(|id| i32::try_from(id).ok()) else {
-                return Self { id: None };
-            };
-            let mut groups = server_groups();
-            if groups.killed {
-                drop(groups);
-                // Uncollected, so the ID is still the server's.
-                let _ = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(id),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-                return Self { id: None };
-            }
-            groups.listed.insert(id);
-            Self { id: Some(id) }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = child;
-            Self {}
-        }
-    }
-}
-
-impl Drop for ListedGroup {
-    fn drop(&mut self) {
+    /// Takes the group off the list.
+    fn unlist(&mut self) {
         #[cfg(unix)]
         if let Some(id) = self.id.take() {
             server_groups().listed.remove(&id);
@@ -504,6 +471,75 @@ impl Drop for ListedGroup {
                 nix::sys::signal::kill(nix::unistd::Pid::from_raw(id), None).is_ok(),
             ));
         }
+    }
+}
+
+/// A server's process, the tree of what it starts, and its group's place
+/// on the list for [`kill_mcp_servers`], owned together. However it ends
+/// (collected by its watcher, or dropped with the watcher's task when its
+/// runtime ends or the task is aborted), the tree is killed and the group
+/// unlisted before the child can be collected, while the group's ID is
+/// still the server's.
+pub(crate) struct ServerProcess {
+    tree: ProcessTree,
+    listed: ListedGroup,
+    /// Dropped last. Tokio's reaper may collect it as it drops.
+    child: Child,
+}
+
+impl ServerProcess {
+    /// Starts `command` as a server's process tree and lists its group.
+    /// After `kill_mcp_servers` the group is killed instead, so a server that
+    /// was starting as the host exits doesn't escape it.
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        let (child, tree) = ProcessTree::spawn(command)?;
+        #[cfg(unix)]
+        {
+            let id = child.id().and_then(|id| i32::try_from(id).ok());
+            let mut groups = server_groups();
+            let id = match id {
+                Some(id) if groups.killed => {
+                    // Uncollected, so the ID is still the server's.
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(id),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                    None
+                }
+                Some(id) => {
+                    groups.listed.insert(id);
+                    Some(id)
+                }
+                None => None,
+            };
+            drop(groups);
+            Ok(Self {
+                tree,
+                listed: ListedGroup { id },
+                child,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                tree,
+                listed: ListedGroup {},
+                child,
+            })
+        }
+    }
+
+    /// Kills the tree and unlists its group. The child stays uncollected.
+    fn end(&mut self) {
+        self.tree.kill();
+        self.listed.unlist();
+    }
+}
+
+impl Drop for ServerProcess {
+    /// Ends the tree before the child drops.
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -583,8 +619,7 @@ fn describe_exit(status: &std::io::Result<ExitStatus>) -> String {
 /// is dropped, as when its runtime ends.
 fn watch_server(
     name: String,
-    mut child: Child,
-    (mut tree, listed): (ProcessTree, ListedGroup),
+    mut server: ServerProcess,
     stderr: Option<ChildStderr>,
     redactions: Arc<Redactions>,
     mut stop: oneshot::Receiver<()>,
@@ -629,26 +664,25 @@ fn watch_server(
             biased;
             graceful = &mut stop => {
                 if graceful.is_ok() {
-                    let _ = tokio::time::timeout(SHUTDOWN_GRACE, exited(&mut child)).await;
+                    let _ = tokio::time::timeout(SHUTDOWN_GRACE, exited(&mut server.child)).await;
                 }
                 true
             }
-            () = exited(&mut child) => false,
+            () = exited(&mut server.child) => false,
         };
         // What the server started must not outlive it, and one that keeps
         // the stderr pipe open would delay the report below.
-        tree.kill();
-        drop(listed);
+        server.end();
         if stopped {
             // The tree's kill reached it, unless it had none.
-            let _ = child.start_kill();
-            match child.wait().await {
+            let _ = server.child.start_kill();
+            match server.child.wait().await {
                 Ok(status) => log::info!("MCP server '{name}' stopped ({status})."),
                 Err(error) => log::info!("MCP server '{name}' stopped: {error}"),
             }
             return None;
         }
-        let status = child.wait().await;
+        let status = server.child.wait().await;
         if let Some(reader) = reader {
             let _ = tokio::time::timeout(STDERR_DRAIN, reader).await;
         }
@@ -679,7 +713,7 @@ mod tests {
 
     use super::*;
 
-    fn server(script: &str) -> (Child, ProcessTree, Option<ChildStderr>) {
+    fn server(script: &str) -> (ServerProcess, Option<ChildStderr>) {
         let mut command = Command::new("sh");
         command
             .args(["-c", script])
@@ -687,9 +721,21 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let (mut child, tree) = ProcessTree::spawn(&mut command).unwrap();
-        let stderr = child.stderr.take();
-        (child, tree, stderr)
+        let mut process = ServerProcess::spawn(&mut command).unwrap();
+        let stderr = process.child.stderr.take();
+        (process, stderr)
+    }
+
+    /// Whether `pid`'s group was unlisted with its leader uncollected, as
+    /// last recorded.
+    fn unlisted_uncollected(pid: i32) -> Option<bool> {
+        UNLISTED
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == pid)
+            .map(|(_, uncollected)| *uncollected)
     }
 
     fn watch(
@@ -704,13 +750,11 @@ mod tests {
         redactions: Redactions,
         stopped: oneshot::Receiver<()>,
     ) -> (JoinHandle<Option<ServerExit>>, Arc<Mutex<Option<String>>>) {
-        let (child, tree, stderr) = server(script);
-        let listed = ListedGroup::of(&child);
+        let (process, stderr) = server(script);
         let exit = Arc::new(Mutex::new(None));
         let watcher = watch_server(
             "files".into(),
-            child,
-            (tree, listed),
+            process,
             stderr,
             Arc::new(redactions),
             stopped,
@@ -725,15 +769,13 @@ mod tests {
     #[tokio::test]
     async fn a_servers_group_is_unlisted_before_the_server_is_collected() {
         for (script, stops) in [("exit 0", false), ("sleep 30", true)] {
-            let (child, tree, stderr) = server(script);
-            let pid = child.id().unwrap() as i32;
-            let listed = ListedGroup::of(&child);
+            let (process, stderr) = server(script);
+            let pid = process.child.id().unwrap() as i32;
             assert!(server_groups().listed.contains(&pid));
             let (stop, stopped) = oneshot::channel();
             let watcher = watch_server(
                 "files".into(),
-                child,
-                (tree, listed),
+                process,
                 stderr,
                 Arc::new(Redactions::default()),
                 stopped,
@@ -748,14 +790,71 @@ mod tests {
                 drop(stop);
             }
             assert!(!server_groups().listed.contains(&pid));
-            let uncollected = UNLISTED
-                .lock()
+            assert_eq!(unlisted_uncollected(pid), Some(true), "{script}");
+        }
+    }
+
+    /// A watcher dropped with its runtime, while it waited or before it ran
+    /// at all, still kills the server's tree and unlists its group before the
+    /// server can be collected, whether the server runs or has exited.
+    #[test]
+    fn a_dropped_watcher_ends_the_tree_before_the_server_is_collected() {
+        use crate::mcp::manager::tests::Program;
+        for exited in [false, true] {
+            let program_pid =
+                std::env::temp_dir().join(format!("arko-mcp-dropped-{}.pid", uuid::Uuid::new_v4()));
+            let script = format!(
+                "sleep 300 & echo $! > '{}'; {}",
+                program_pid.display(),
+                if exited { "exit 0" } else { "sleep 300" }
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (stop, stopped) = oneshot::channel();
+            let pid = {
+                let _context = runtime.enter();
+                let (process, stderr) = server(&script);
+                let pid = process.child.id().unwrap() as i32;
+                watch_server(
+                    "files".into(),
+                    process,
+                    stderr,
+                    Arc::new(Redactions::default()),
+                    stopped,
+                    Arc::new(Mutex::new(None)),
+                );
+                pid
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::fs::read_to_string(&program_pid).map_or(true, |pid| pid.trim().is_empty()) {
+                assert!(std::time::Instant::now() < deadline, "no program started");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if exited {
+                // The server has exited, and its watcher never ran.
+                while !crate::mcp::manager::tests::has_ended(pid) {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the server didn't exit"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            } else {
+                // The watcher waits for the server.
+                runtime.block_on(async { tokio::time::sleep(Duration::from_millis(200)).await });
+            }
+            let program = Program::read(&program_pid);
+            drop(runtime);
+            assert_eq!(unlisted_uncollected(pid), Some(true), "exited: {exited}");
+            assert!(!server_groups().listed.contains(&pid));
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
                 .unwrap()
-                .iter()
-                .rev()
-                .find(|(id, _)| *id == pid)
-                .map(|(_, uncollected)| *uncollected);
-            assert_eq!(uncollected, Some(true), "{script}");
+                .block_on(program.ends());
+            drop(stop);
         }
     }
 
