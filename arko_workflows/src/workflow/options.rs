@@ -59,9 +59,9 @@ impl RunOptions {
     }
 
     /// Starts the run with `config` in place of its agent's registered
-    /// configuration, without rebuilding the workflow: another model,
-    /// provider or runtime (an API model, a ChatGPT sign-in, Claude Code),
-    /// other instructions or tools. The workflow adds its tools to `config`
+    /// configuration, without rebuilding the workflow, such as another
+    /// model, provider or runtime (an API model, a ChatGPT sign-in, Claude
+    /// Code), or other instructions or tools. The workflow adds its tools to `config`
     /// as it does to the registered one, and the agent's name, its notes,
     /// messages, subagents and budget stay the agent's. Images go by
     /// `config`'s model. The task keeps the configuration, so the run is

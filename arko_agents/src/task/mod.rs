@@ -940,10 +940,10 @@ impl Task {
     /// writes the report all the same, and the run doesn't wait for a plan's
     /// usage limit to reset
     /// ([`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)).
-    /// Between turns only: a task completed, awaiting the user's answer, or
-    /// cancelled (a turn the cancellation left open is settled first, as
-    /// when the task runs again). Returns `InvalidTaskState` otherwise, and
-    /// for an empty `request`.
+    /// It takes a task between turns, one completed, awaiting the user's
+    /// answer, or cancelled (a turn the cancellation left open is settled
+    /// first, as when the task runs again). Returns `InvalidTaskState`
+    /// otherwise, and for an empty `request`.
     pub fn request_report(&mut self, request: Option<String>) -> Result<(), ArkoAgentsError> {
         if !matches!(
             self.current_state,

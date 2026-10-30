@@ -417,7 +417,7 @@ pub struct HandoverRequest {
     /// between still hands over with it when it runs again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
-    /// The report alone is asked for ([`Task::request_report`]): once it
+    /// The report alone is asked for ([`Task::request_report`]). Once it
     /// comes, the task completes with it as its summary, and the
     /// conversation stays as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -442,7 +442,7 @@ impl HandoverRequest {
         }
     }
 
-    /// The request an agent receives for a report alone: the host's
+    /// The request an agent receives for a report alone, which is the host's
     /// [`request`](Self::request), or by default
     /// [`DEFAULT_REPORT_ONLY_REQUEST`] when the agent gives the report with
     /// the [`HANDOVER_REPORT_TOOL_NAME`] tool (`with_tool`) and
