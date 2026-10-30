@@ -3356,6 +3356,14 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         mut options: StartOptions,
     ) -> Result<StartedRun, WorkflowError> {
+        // A configuration given for the run doesn't make an agent of a name
+        // that isn't registered.
+        if !ctx.agent_configs.contains_key(agent_name) {
+            if let Some(task_id) = options.reserved {
+                ctx.registry.abandon(task_id);
+            }
+            return Err(WorkflowError::AgentNotFound(agent_name.to_string()));
+        }
         let admission = if options.admitted {
             Ok(())
         } else {

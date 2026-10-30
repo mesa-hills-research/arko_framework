@@ -714,3 +714,33 @@ async fn a_handover_of_a_run_on_the_host_s_configuration_keeps_it() {
         "{instructions}"
     );
 }
+
+/// A configuration given for a run doesn't make an agent of a name that
+/// isn't registered: the run isn't started, and no model is asked.
+#[tokio::test]
+async fn a_run_on_its_own_configuration_needs_a_registered_agent() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let error = workflow
+        .run_agent_with("ghost", "Hello.", RunOptions::new().config(agent()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, WorkflowError::AgentNotFound(name) if name == "ghost"),
+        "{error}"
+    );
+    let error = match workflow
+        .spawn_agent_with("ghost", "Hello.", RunOptions::new().config(agent()))
+        .await
+    {
+        Ok(_) => panic!("a run of an agent that isn't registered started"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, WorkflowError::AgentNotFound(name) if name == "ghost"),
+        "{error}"
+    );
+    assert_eq!(server.requests(), 0);
+}
