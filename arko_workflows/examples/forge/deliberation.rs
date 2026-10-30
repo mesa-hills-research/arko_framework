@@ -1368,6 +1368,7 @@ fn tool_definition(name: &str, description: &str, schema: Value) -> ToolDefiniti
         parallel_safe: false,
         tool_type_details: ToolTypeDetails::DeveloperDefined,
         // Arrays and objects, which `parameters` can't describe.
+        read_only: false,
         raw_json_schema_override: Some(schema),
     }
 }

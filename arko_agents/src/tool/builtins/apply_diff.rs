@@ -646,6 +646,7 @@ Best Practices:
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

@@ -184,6 +184,7 @@ impl Tool for Step {
             parameters: vec![parameter("what", false), parameter("path", true)],
             parallel_safe: self.parallel_safe,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

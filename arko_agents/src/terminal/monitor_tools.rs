@@ -146,6 +146,7 @@ impl Tool for MonitorTool {
             output_based_example: None,
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

@@ -17,6 +17,7 @@ impl Tool for ImageTool {
             output_based_example: None,
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }

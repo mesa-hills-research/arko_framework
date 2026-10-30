@@ -426,6 +426,7 @@ async fn tools_observe_the_changed_history_from_the_start() {
                 output_based_example: None,
                 parallel_safe: false,
                 tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
+                read_only: false,
                 raw_json_schema_override: None,
             }
         }

@@ -78,6 +78,7 @@ impl Tool for ReadMemoryTool {
             ],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: true,
             raw_json_schema_override: None,
         }
     }
@@ -194,6 +195,7 @@ impl Tool for WriteMemoryTool {
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -300,6 +302,7 @@ impl Tool for ListMemoriesTool {
             parameters: vec![],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: true,
             raw_json_schema_override: None,
         }
     }

@@ -220,6 +220,69 @@ async fn memory_tools_follow_each_agents_access() {
     assert_eq!(offered(&workflow, "reader", &tools), [true, false, true]);
 }
 
+/// Of the workflow's tools, only those whose calls change nothing are
+/// read-only: `read_memory`, `list_memories`, `list_recipients` and
+/// `list_agents`, besides the built-in reads. The tools that write, send,
+/// start or stop runs, or take messages and reports aren't.
+#[test]
+fn only_the_workflow_tools_that_read_are_read_only() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace.0, &["lead", "worker"])
+        .memory(crate::memory::MemoryConfig::new().tier(tier(
+            "notes",
+            AccessScope::All,
+            AccessScope::All,
+        )))
+        .workflow_services(
+            crate::services::WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .subagents(crate::subagents::SubagentsConfig::default().peer_messages(true))
+        .build()
+        .unwrap();
+    let registry = workflow
+        .engine
+        .build_tool_registry("lead", workflow.context(), 0);
+    let mut flags: Vec<(String, bool)> = registry
+        .list_tool_definitions()
+        .into_iter()
+        .map(|definition| (definition.name, definition.read_only))
+        .collect();
+    flags.sort();
+    let read_only: Vec<&str> = flags
+        .iter()
+        .filter(|(_, read_only)| *read_only)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        read_only,
+        [
+            "list_agents",
+            "list_files",
+            "list_memories",
+            "list_recipients",
+            "read_file",
+            "read_memory"
+        ]
+    );
+    for name in [
+        "write_memory",
+        "send_message",
+        "wait_for_message",
+        "start_agent",
+        "message_agent",
+        "wait_for_agents",
+        "stop_agent",
+        "link_agents",
+    ] {
+        assert!(
+            flags.contains(&(name.to_string(), false)),
+            "{name} isn't offered as a tool that changes something: {flags:?}"
+        );
+    }
+}
+
 /// Every agent-name list is checked at build: memory access sets, workflow
 /// services callers and targets, and voters. Tier names must be unique.
 #[test]

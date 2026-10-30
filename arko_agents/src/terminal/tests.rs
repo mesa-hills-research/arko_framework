@@ -414,6 +414,36 @@ async fn terminal_tools_are_exempt_from_the_host_tool_time_limit() {
     }
 }
 
+/// Of the terminal and monitor tools, only `terminal_status` is read-only.
+/// The others start, type into, stop or rearm jobs, and a tool with any
+/// such action isn't read-only (`terminal_control` cancels and
+/// `monitor_control` rearms and stops, besides listing).
+#[tokio::test]
+async fn only_terminal_status_is_read_only() {
+    let f = Fixture::new(|_| {});
+    let mut registry = crate::tool::ToolRegistry::new();
+    f.manager.register_tools(&mut registry);
+    let flags: Vec<(String, bool)> = TerminalTool::NAMES
+        .iter()
+        .chain(&MonitorTool::NAMES)
+        .map(|name| {
+            let definition = registry.get(name).unwrap().definition();
+            (definition.name, definition.read_only)
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            ("terminal_start".to_string(), false),
+            ("terminal_status".to_string(), true),
+            ("terminal_input".to_string(), false),
+            ("terminal_control".to_string(), false),
+            ("monitor_start".to_string(), false),
+            ("monitor_control".to_string(), false),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
     let root = std::env::temp_dir().join(format!("arko-terminal-restart-{}", Uuid::new_v4()));

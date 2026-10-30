@@ -140,3 +140,43 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the built-in tools whose calls change nothing are read-only.
+    /// The tools that write files, ask or message the user, or end the task
+    /// aren't.
+    #[test]
+    fn only_the_built_in_tools_that_read_are_read_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::skill::LoadSkillTool::new(
+            Default::default(),
+            ".",
+        )));
+        let mut flags: Vec<(String, bool)> = registry
+            .list_tool_definitions()
+            .into_iter()
+            .map(|definition| (definition.name, definition.read_only))
+            .collect();
+        flags.sort();
+        let read_only = |name: &str| (name.to_string(), true);
+        let writes = |name: &str| (name.to_string(), false);
+        assert_eq!(
+            flags,
+            [
+                writes("apply_diff"),
+                writes("ask_user"),
+                writes("close_questions"),
+                writes("complete_task"),
+                writes("edit_file"),
+                read_only("list_files"),
+                read_only("load_skill"),
+                writes("message_user"),
+                read_only("read_file"),
+                writes("write_file"),
+            ]
+        );
+    }
+}

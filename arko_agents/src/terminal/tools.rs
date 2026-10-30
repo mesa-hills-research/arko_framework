@@ -196,6 +196,8 @@ impl Tool for TerminalTool {
             output_based_example: None,
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            // The others start, type into or stop jobs.
+            read_only: matches!(self.operation, Operation::Status),
             raw_json_schema_override: None,
         }
     }

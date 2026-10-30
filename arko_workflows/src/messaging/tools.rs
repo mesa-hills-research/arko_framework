@@ -85,6 +85,7 @@ impl Tool for SendMessageTool {
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         }
     }
@@ -220,6 +221,7 @@ impl Tool for ListRecipientsTool {
             parameters: vec![],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: true,
             raw_json_schema_override: None,
         }
     }

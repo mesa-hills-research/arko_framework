@@ -89,6 +89,16 @@ pub struct ToolDefinition {
     /// parallel-safe.
     #[serde(default)]
     pub parallel_safe: bool,
+    /// The tool only reads. Its calls change nothing outside the agent's
+    /// conversation (no files, no messages, no processes, no shared state),
+    /// whatever their arguments. Claude Code gets it as the MCP `readOnlyHint` of the tools
+    /// served to it, and runs the read-only calls of a response at the same
+    /// time instead of one after another. It differs from `parallel_safe`,
+    /// which says only that calls don't affect each other. A tool that sends
+    /// a message can be parallel-safe, but it isn't read-only. False by
+    /// default, and in saved definitions without it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
     pub tool_type_details: ToolTypeDetails,
     /// When set, `to_json_schema()` and `to_arko_ai_tool_definition()` use
     /// this value verbatim instead of generating a schema from `parameters`.
@@ -275,6 +285,7 @@ mod tests {
             ],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         };
         let params = HashMap::from([("path".into(), serde_json::json!("design.md"))]);
@@ -312,6 +323,7 @@ mod tests {
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         };
         let mut params = HashMap::from([
@@ -350,6 +362,7 @@ mod tests {
             }],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
             raw_json_schema_override: None,
         };
         let schema = definition.to_json_schema();
