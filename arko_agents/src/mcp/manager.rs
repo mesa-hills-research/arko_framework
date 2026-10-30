@@ -292,9 +292,41 @@ pub(crate) mod tests {
     /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: the files its
     /// server writes its own and its program's process IDs to.
     const EXIT_PIDS_ENV: &str = "ARKO_TEST_MCP_EXIT_PIDS";
-    /// Set to `1` there for the child to call `kill_mcp_servers` before it
-    /// exits.
+    /// Set there to `after` for the child to call `kill_mcp_servers` after
+    /// it starts its server and before it exits, and to `before` to call it
+    /// before it starts one.
     const EXIT_KILLS_ENV: &str = "ARKO_TEST_MCP_EXIT_KILLS";
+
+    /// Runs the child process of
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`] with `kills`,
+    /// returns its exit code and the files its server writes its own and its
+    /// program's process IDs to.
+    fn exit_helper(kills: &str) -> (Option<i32>, PathBuf, PathBuf) {
+        let id = uuid::Uuid::new_v4();
+        let server_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.server"));
+        let program_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.program"));
+        let helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "mcp::manager::tests::exits_with_mcp_servers_running",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(
+                EXIT_PIDS_ENV,
+                std::env::join_paths([&server_pid, &program_pid]).unwrap(),
+            )
+            .env(EXIT_KILLS_ENV, kills)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            matches!(helper.status.code(), Some(7 | 8)),
+            "the helper exited: {}{}",
+            String::from_utf8_lossy(&helper.stdout),
+            String::from_utf8_lossy(&helper.stderr)
+        );
+        (helper.status.code(), server_pid, program_pid)
+    }
 
     /// `kill_mcp_servers` ends each server's whole process group, the server
     /// behind its launcher and the program it started, before an exit that
@@ -307,34 +339,12 @@ pub(crate) mod tests {
             .enable_time()
             .build()
             .unwrap();
-        for kills in [false, true] {
-            let id = uuid::Uuid::new_v4();
-            let server_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.server"));
-            let program_pid = std::env::temp_dir().join(format!("arko-mcp-exit-{id}.program"));
-            let helper = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "mcp::manager::tests::exits_with_mcp_servers_running",
-                    "--exact",
-                    "--test-threads=1",
-                ])
-                .env(
-                    EXIT_PIDS_ENV,
-                    std::env::join_paths([&server_pid, &program_pid]).unwrap(),
-                )
-                .env(EXIT_KILLS_ENV, if kills { "1" } else { "0" })
-                .stdin(std::process::Stdio::null())
-                .output()
-                .unwrap();
-            assert_eq!(
-                helper.status.code(),
-                Some(7),
-                "the helper exited: {}{}",
-                String::from_utf8_lossy(&helper.stdout),
-                String::from_utf8_lossy(&helper.stderr)
-            );
+        for kills in ["no", "after"] {
+            let (code, server_pid, program_pid) = exit_helper(kills);
+            assert_eq!(code, Some(7));
             let server = Program::read(&server_pid);
             let program = Program::read(&program_pid);
-            if kills {
+            if kills == "after" {
                 runtime.block_on(async {
                     server.ends().await;
                     program.ends().await;
@@ -350,12 +360,33 @@ pub(crate) mod tests {
         }
     }
 
+    /// A server that starts after `kill_mcp_servers` (one starting as the
+    /// host exits) is killed as it starts, so its start fails and nothing
+    /// it started goes on.
+    #[test]
+    fn a_server_started_after_kill_mcp_servers_is_killed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (code, server_pid, program_pid) = exit_helper("before");
+        assert_eq!(code, Some(8), "the start failed");
+        // The launcher may have been killed before it wrote them.
+        for pid_file in [server_pid, program_pid] {
+            let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            let _ = std::fs::remove_file(&pid_file);
+            if let Ok(pid) = pid.trim().parse() {
+                runtime.block_on(Program(pid).ends());
+            }
+        }
+    }
+
     /// The child process of
     /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: starts a server
     /// behind a `sh -c` launcher, which ignores the end of its input and
     /// leaves a program running, writes their process IDs, kills the servers
-    /// if asked, and exits at once with status 7. Does nothing in a normal
-    /// test run.
+    /// when asked, and exits at once, with status 7 when the server started
+    /// and 8 when it didn't. Does nothing in a normal test run.
     #[tokio::test]
     async fn exits_with_mcp_servers_running() {
         let Some(paths) = std::env::var_os(EXIT_PIDS_ENV) else {
@@ -382,8 +413,14 @@ pub(crate) mod tests {
                     )])),
             ],
         };
-        let _manager = McpManager::from_config(&config).await.unwrap();
-        if std::env::var(EXIT_KILLS_ENV).as_deref() == Ok("1") {
+        let kills = std::env::var(EXIT_KILLS_ENV).unwrap_or_default();
+        if kills == "before" {
+            crate::kill_mcp_servers();
+        }
+        let Ok(_manager) = McpManager::from_config(&config).await else {
+            std::process::exit(8);
+        };
+        if kills == "after" {
             crate::kill_mcp_servers();
         }
         std::process::exit(7);

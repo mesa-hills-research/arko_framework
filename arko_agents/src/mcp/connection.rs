@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arko_ai::process::NoConsoleWindow;
-use arko_ai::process_tree::ProcessTree;
+use arko_ai::process_tree::{ProcessTree, exited};
 use rmcp::ServiceExt;
 use rmcp::service::{Peer, RoleClient, RunningService};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -426,35 +426,64 @@ impl Connection {
 }
 
 /// The process groups of the MCP servers running in this process (Unix), for
-/// [`kill_mcp_servers`].
+/// [`kill_mcp_servers`], and whether it ran.
 #[cfg(unix)]
-static SERVER_GROUPS: Mutex<std::collections::BTreeSet<i32>> =
-    Mutex::new(std::collections::BTreeSet::new());
+struct ServerGroups {
+    listed: std::collections::BTreeSet<i32>,
+    /// `kill_mcp_servers` ran, so a server that starts from now on is
+    /// killed as it is listed.
+    killed: bool,
+}
 
 #[cfg(unix)]
-fn server_groups() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<i32>> {
+static SERVER_GROUPS: Mutex<ServerGroups> = Mutex::new(ServerGroups {
+    listed: std::collections::BTreeSet::new(),
+    killed: false,
+});
+
+#[cfg(unix)]
+fn server_groups() -> std::sync::MutexGuard<'static, ServerGroups> {
     SERVER_GROUPS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A server's process group, listed for [`kill_mcp_servers`] from its start
-/// until its tree is killed (or dropped) and this is dropped.
+/// The groups unlisted in tests, each with whether its leader was still
+/// uncollected then.
+#[cfg(all(test, unix))]
+pub(crate) static UNLISTED: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
+
+/// A server's process group, listed for [`kill_mcp_servers`] from right
+/// after its start. The watcher unlists it after killing the group and
+/// before collecting the server, so the list never holds the ID of a
+/// collected server, which another program's group may have taken.
 pub(crate) struct ListedGroup {
     #[cfg(unix)]
     id: Option<i32>,
 }
 
 impl ListedGroup {
-    /// The group `child` leads, as [`ProcessTree::spawn`] starts it.
+    /// The group `child` leads, as [`ProcessTree::spawn`] starts it. After
+    /// `kill_mcp_servers` the group is killed instead, so a server that was
+    /// starting as the host exits doesn't escape it.
     fn of(child: &Child) -> Self {
         #[cfg(unix)]
         {
-            let id = child.id().and_then(|id| i32::try_from(id).ok());
-            if let Some(id) = id {
-                server_groups().insert(id);
+            let Some(id) = child.id().and_then(|id| i32::try_from(id).ok()) else {
+                return Self { id: None };
+            };
+            let mut groups = server_groups();
+            if groups.killed {
+                drop(groups);
+                // Uncollected, so the ID is still the server's.
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(id),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+                return Self { id: None };
             }
-            Self { id }
+            groups.listed.insert(id);
+            Self { id: Some(id) }
         }
         #[cfg(not(unix))]
         {
@@ -468,29 +497,39 @@ impl Drop for ListedGroup {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(id) = self.id.take() {
-            server_groups().remove(&id);
+            server_groups().listed.remove(&id);
+            #[cfg(test)]
+            UNLISTED.lock().unwrap().push((
+                id,
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(id), None).is_ok(),
+            ));
         }
     }
 }
 
 /// Kills every MCP server running in this process, with the programs each
-/// started, at once (`SIGKILL` to each server's process group on Unix). For
-/// a host about to exit without unwinding. `std::process::exit` runs no
-/// destructors, so no server is stopped, and a server that ignores the end
-/// of its input keeps running after the host has gone, as do the programs
-/// it started. Call it right before the exit, as
+/// started, at once (`SIGKILL` to each server's process group on Unix), and
+/// any server that starts after it as it starts. For a host about to exit
+/// without unwinding. `std::process::exit` runs no destructors, so no server
+/// is stopped, and a server that ignores the end of its input keeps running
+/// after the host has gone, as do the programs it started. Call it right
+/// before the exit, as
 /// [`kill_stop_aware_commands`](crate::kill_stop_aware_commands) is called.
 /// A host killed outright (`SIGKILL`) can't call it. On Windows it does
 /// nothing, since each server's job object ends its processes when the
 /// host's handles close. A manager or hub that goes on finds its servers
-/// exited, as if they had exited by themselves.
+/// exited, as if they had exited by themselves, and can't start new ones.
 pub fn kill_mcp_servers() {
     #[cfg(unix)]
-    for id in server_groups().iter() {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(*id),
-            nix::sys::signal::Signal::SIGKILL,
-        );
+    {
+        let mut groups = server_groups();
+        groups.killed = true;
+        for id in &groups.listed {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(*id),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
     }
 }
 
@@ -583,37 +622,33 @@ fn watch_server(
         })
     });
     tokio::spawn(async move {
-        let exited = tokio::select! {
+        // The server is collected only after its group has been killed and
+        // unlisted, while the group's ID can't have passed to another
+        // program.
+        let stopped = tokio::select! {
             biased;
             graceful = &mut stop => {
-                let status = if graceful.is_ok() {
-                    tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await.ok()
-                } else {
-                    None
-                };
-                let status = match status {
-                    Some(status) => status,
-                    None => {
-                        tree.kill();
-                        match child.kill().await {
-                            Ok(()) => child.wait().await,
-                            Err(error) => Err(error),
-                        }
-                    }
-                };
-                match status {
-                    Ok(status) => log::info!("MCP server '{name}' stopped ({status})."),
-                    Err(error) => log::info!("MCP server '{name}' stopped: {error}"),
+                if graceful.is_ok() {
+                    let _ = tokio::time::timeout(SHUTDOWN_GRACE, exited(&mut child)).await;
                 }
-                None
+                true
             }
-            status = child.wait() => Some(status),
+            () = exited(&mut child) => false,
         };
         // What the server started must not outlive it, and one that keeps
         // the stderr pipe open would delay the report below.
         tree.kill();
         drop(listed);
-        let status = exited?;
+        if stopped {
+            // The tree's kill reached it, unless it had none.
+            let _ = child.start_kill();
+            match child.wait().await {
+                Ok(status) => log::info!("MCP server '{name}' stopped ({status})."),
+                Err(error) => log::info!("MCP server '{name}' stopped: {error}"),
+            }
+            return None;
+        }
+        let status = child.wait().await;
         if let Some(reader) = reader {
             let _ = tokio::time::timeout(STDERR_DRAIN, reader).await;
         }
@@ -682,6 +717,46 @@ mod tests {
             exit.clone(),
         );
         (watcher, exit)
+    }
+
+    /// A server's group is unlisted for `kill_mcp_servers` before the server
+    /// is collected, whether it exits by itself or is stopped, so the list
+    /// never holds an ID that another program's group may have taken.
+    #[tokio::test]
+    async fn a_servers_group_is_unlisted_before_the_server_is_collected() {
+        for (script, stops) in [("exit 0", false), ("sleep 30", true)] {
+            let (child, tree, stderr) = server(script);
+            let pid = child.id().unwrap() as i32;
+            let listed = ListedGroup::of(&child);
+            assert!(server_groups().listed.contains(&pid));
+            let (stop, stopped) = oneshot::channel();
+            let watcher = watch_server(
+                "files".into(),
+                child,
+                (tree, listed),
+                stderr,
+                Arc::new(Redactions::default()),
+                stopped,
+                Arc::new(Mutex::new(None)),
+            );
+            if stops {
+                // Dropped, it stops the server at once.
+                drop(stop);
+                watcher.await.unwrap();
+            } else {
+                watcher.await.unwrap();
+                drop(stop);
+            }
+            assert!(!server_groups().listed.contains(&pid));
+            let uncollected = UNLISTED
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(id, _)| *id == pid)
+                .map(|(_, uncollected)| *uncollected);
+            assert_eq!(uncollected, Some(true), "{script}");
+        }
     }
 
     /// A server that exits on its own is reported with its exit status and
