@@ -566,6 +566,48 @@ async fn a_note_s_images_are_checked_against_the_runs_that_get_it() {
     assert!(refused.contains("doesn't take images"), "{refused}");
 }
 
+/// After a resume from a checkpoint, a run of the agent that hasn't run again
+/// still counts for a note for the agent: its saved model takes the image,
+/// though the agent's registered model takes none.
+#[tokio::test]
+async fn a_saved_run_s_model_counts_for_a_note_after_a_resume() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let mut blind = agent_config("Friendly blind");
+    blind.llm_config.model.supports_image_input = false;
+    let build = || {
+        Workflow::builder()
+            .name("notes-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("worker", blind.clone())
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let workflow = build().build().unwrap();
+    workflow
+        .run_agent_with(
+            "worker",
+            "Write it.",
+            crate::RunOptions::new().config(agent_config("Friendly worker")),
+        )
+        .await
+        .unwrap();
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let resumed = build()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    resumed
+        .post_note(
+            Note::new("See this.")
+                .once()
+                .to(["worker"])
+                .images([png("eA==")]),
+        )
+        .unwrap();
+}
+
 /// A standing note is in the initial prompt of every later run, newest
 /// first; a one-time note isn't, and reaches a run that had started when it
 /// was posted once, when that run is continued.

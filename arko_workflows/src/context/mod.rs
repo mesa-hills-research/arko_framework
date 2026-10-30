@@ -158,15 +158,30 @@ impl SharedContext {
         recorded.or_else(|| Some(self.agent_configs.get(agent)?.llm_config.clone()))
     }
 
-    /// The models `agent`'s runs that started, went on or were handed over
-    /// work with.
+    /// The models `agent`'s runs work with: as they last started, went on
+    /// or were handed over, else as their recorded results saved them (runs
+    /// restored from a checkpoint that haven't run again).
     pub(crate) fn run_models_of(&self, agent: &str) -> Vec<arko_ai::Model> {
-        self.run_llm_configs
-            .read()
-            .values()
-            .filter(|(of, _)| of == agent)
-            .map(|(_, config)| config.model.clone())
-            .collect()
+        let (live, mut models): (std::collections::HashSet<uuid::Uuid>, Vec<arko_ai::Model>) = {
+            let configs = self.run_llm_configs.read();
+            let live = configs
+                .iter()
+                .filter(|(_, (of, _))| of == agent)
+                .map(|(id, (_, config))| (*id, config.model.clone()))
+                .collect::<Vec<_>>();
+            (
+                live.iter().map(|(id, _)| *id).collect(),
+                live.into_iter().map(|(_, model)| model).collect(),
+            )
+        };
+        models.extend(
+            self.agent_results
+                .read()
+                .iter()
+                .filter(|result| result.agent_name == agent && !live.contains(&result.agent_run_id))
+                .map(|result| result.info().agent_config.llm_config.model.clone()),
+        );
+        models
     }
 
     /// Records the model settings run `task_id` of `agent` works with, as
