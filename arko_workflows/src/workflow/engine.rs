@@ -2110,8 +2110,7 @@ impl HandoverHook for WorkflowHandover {
     /// for a new run, when the run keeps another one it was saved with
     /// (other tools or skills, say). A run the host gave a configuration of
     /// its own (`Task::reconfigured`), one whose agent now has another
-    /// model, and a completion verifier's review keep theirs. The run's
-    /// model settings and `load_skill` policy follow the one it gives.
+    /// model, and a completion verifier's review keep theirs.
     fn handover_config(&self, task: &Task) -> Option<AgentConfig> {
         if self.review || task.reconfigured {
             return None;
@@ -2131,31 +2130,24 @@ impl HandoverHook for WorkflowHandover {
             ctx,
             RunRole::of(ctx, self.depth, task.id),
         );
-        // The runtime lists `load_skill` by the skills, which the
-        // configurations compare by, embedded ones included.
-        let without_load_skill = |config: &AgentConfig| {
-            let mut config = config.clone();
-            let tools = &mut config.tool_config;
-            tools
-                .available_tool_names
-                .retain(|name| name != LOAD_SKILL_TOOL_NAME);
-            tools.tool_specific_configs.remove(LOAD_SKILL_TOOL_NAME);
-            serde_json::to_value(config).ok()
-        };
-        let same = without_load_skill(&config) == without_load_skill(&task.agent_config)
-            && arko_agents::handover::same_skills(
-                config.skills_config.as_ref(),
-                task.agent_config.skills_config.as_ref(),
-            );
-        if same || config.validate().is_err() {
+        if arko_agents::handover::same_for_handover(&task.agent_config, &config)
+            || config.validate().is_err()
+        {
             return None;
         }
-        ctx.note_run_llm_config(&self.agent_name, task.id, &config.llm_config);
+        Some(config)
+    }
+
+    /// The run's model settings and `load_skill` policy follow the
+    /// configuration the runtime took.
+    fn handover_config_taken(&self, task: &Task) {
+        let config = &task.agent_config;
+        self.context
+            .note_run_llm_config(&self.agent_name, task.id, &config.llm_config);
         *self.load_skill_policy.write() = config
             .skills_config
             .as_ref()
             .and_then(|skills| skills.load_skill_interception.clone());
-        Some(config)
     }
 
     /// The questions the user input handler says are still open.
