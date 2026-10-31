@@ -398,7 +398,7 @@ pub trait SubagentHook: Send + Sync {
     }
 
     /// Whether the run `record` describes is offered the tools that start
-    /// agent runs: `start_agent`, `list_agents`, `stop_agent`, `link_agents`
+    /// agent runs, namely `start_agent`, `list_agents`, `stop_agent`, `link_agents`
     /// and `run_workflow_agent`. The default is `true`, so every subagent at
     /// a depth under [`SubagentsConfig::max_depth`], of an agent that is a
     /// caller, gets them. With `false` the run is not a caller. It keeps
@@ -642,7 +642,7 @@ impl MailItem {
         format!("[end of mail {}]", self.id)
     }
 
-    /// Whether `text` holds the item: its marker and its end marker, so an
+    /// Whether `text` holds the item, meaning its marker and its end marker, so an
     /// item cut short doesn't count.
     pub(crate) fn held_in(&self, text: &str) -> bool {
         text.contains(&self.marker()) && text.contains(&self.end_marker())
@@ -697,7 +697,7 @@ impl MailItem {
         )
     }
 
-    /// The item as a context update shows it: whole, or for a long body an
+    /// The item as a context update shows it, whole, or for a long body an
     /// excerpt with the file holding all of it, then its end marker. Every
     /// line after the first indented.
     pub(crate) fn excerpt(&self) -> String {

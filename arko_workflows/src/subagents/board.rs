@@ -79,7 +79,7 @@ struct HandleClaim<'a> {
 }
 
 impl HandleClaim<'_> {
-    /// The start went through: the handle stays taken.
+    /// The start went through, so the handle stays taken.
     fn keep(self) {
         std::mem::forget(self);
     }
@@ -110,8 +110,8 @@ pub(crate) struct Board {
     workflow_run_id: Uuid,
     /// Where long mailbox items are saved whole.
     mail_dir: PathBuf,
-    /// The configurations the host's hook prepared for runs that start:
-    /// the hook runs once per start.
+    /// The configurations the host's hook prepared for runs that start.
+    /// The hook runs once per start.
     prepared: Mutex<HashMap<Uuid, AgentConfig>>,
     /// Stops received after launch selection and before run registration.
     starting: Mutex<HashMap<Uuid, Option<(StopRequest, std::time::Instant)>>>,
@@ -134,7 +134,7 @@ pub(crate) struct Board {
 
 impl Board {
     /// The board of a workflow run. `restored` from its checkpoint, with
-    /// the results it recorded (`results`): records that were running are
+    /// the results it recorded (`results`). Records that were running are
     /// settled by the outcome their runs recorded.
     pub(crate) fn new(
         config: Option<SubagentsConfig>,
@@ -231,7 +231,7 @@ impl Board {
     }
 
     /// Takes the mailbox items for run `to` it hasn't received out of the
-    /// mailbox: the host delivers them its own way.
+    /// mailbox. The host delivers them its own way.
     pub(crate) fn take(&self, ctx: &Arc<SharedContext>, to: Uuid) -> Vec<MailItem> {
         let taken = {
             let mut state = self.state.lock();
@@ -358,7 +358,7 @@ impl Board {
         self.bump();
     }
 
-    /// Saves the change soon: with the live checkpoint while runs are live,
+    /// Saves the change soon, with the live checkpoint while runs are live,
     /// else with a checkpoint.
     fn save_soon(&self, ctx: &Arc<SharedContext>) {
         let Some(persistence) = ctx.persistence.clone() else {
@@ -469,7 +469,7 @@ impl Board {
         }
     }
 
-    /// After `item` was added: the waits are woken, and a recipient that
+    /// After `item` was added, the waits are woken, and a recipient that
     /// isn't running gets it as its kind says (see [`Self::wake`]).
     fn posted(&self, ctx: &Arc<SharedContext>, item: &MailItem) {
         self.bump();
@@ -479,7 +479,7 @@ impl Board {
         self.save_soon(ctx);
     }
 
-    /// Run `to` has mail that wakes it: unless it runs (it gets the mail at
+    /// Run `to` has mail that wakes it, unless it runs (it gets the mail at
     /// its next turn boundary, or its wait returns it), a subagent that
     /// finished, or that its lead's message restarts, goes on, and a run
     /// the host drives gets `NewsWaiting`.
@@ -538,8 +538,8 @@ impl Board {
                 if let Some(record) = about {
                     self.emit(&record, kind);
                 } else if let Some(agent) = self.host_runs.lock().get(&to).cloned() {
-                    // The host's own mail to a run no subagent concerns:
-                    // the news is about the run itself.
+                    // The host's own mail to a run no subagent concerns.
+                    // The news is about the run itself.
                     self.send_event(SubagentEvent {
                         timestamp: Utc::now(),
                         workflow_run_id: self.workflow_run_id,
@@ -557,7 +557,7 @@ impl Board {
 
     /// The mail for run `task_id`'s next turn boundary, oldest first, as
     /// much as fits ([`UPDATE_MAX_MAIL_BYTES`]), with the items' ids
-    /// (`mail:<id>`): it counts as delivered.
+    /// (`mail:<id>`). It counts as delivered.
     pub(crate) fn update(&self, task_id: Uuid) -> Option<(String, Vec<String>)> {
         let (text, taken) = {
             let mut state = self.state.lock();
@@ -612,7 +612,7 @@ impl Board {
         Some((text, ids))
     }
 
-    /// Run `task.id` ended as `task`: the mail it was given that its task
+    /// Run `task.id` ended as `task`. The mail it was given that its task
     /// holds leaves the mailbox, and the mail its task doesn't hold (given
     /// as it ended, or after its last save) is given again, except mail
     /// withheld from it. A run the host drives with mail waiting gets
@@ -630,7 +630,7 @@ impl Board {
         if delivered.is_empty() && self.pending(task.id).is_empty() {
             return;
         }
-        // Searched outside the lock: a conversation can be long.
+        // Searched outside the lock because a conversation can be long.
         let held = delivered
             .iter()
             .filter(|item| task_holds(task, item))
@@ -659,7 +659,7 @@ impl Board {
 
     /// Run `task.id` was cut back (`ContinueOptions::cut_back_to`). The
     /// subagents it started in the `removed` messages belong to a timeline
-    /// the conversation abandoned: they are detached, and their mail (given
+    /// the conversation abandoned. They are detached, and their mail (given
     /// or not, and any still to come) is withheld, kept in the records for
     /// the host to show. Those it started in the messages it keeps, or in a
     /// conversation a handover replaced, stay. The mail of the subagents it
@@ -708,7 +708,7 @@ impl Board {
     }
 
     /// Run `task.id` is recovered from its task as last saved, which may
-    /// lack mail it was given after that save: that mail is given again.
+    /// lack mail it was given after that save, and that mail is given again.
     pub(crate) fn recovered(&self, task: &Task) {
         let delivered = {
             let state = self.state.lock();
@@ -738,7 +738,7 @@ impl Board {
     // ----- starting and running -----
 
     /// Starts a subagent for caller run `caller` (of `caller_agent`, at
-    /// `caller_depth`, working in `caller_dir`): the tool's result, or why
+    /// `caller_depth`, working in `caller_dir`), returning the tool's result, or why
     /// it can't.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start(
@@ -987,7 +987,7 @@ impl Board {
         ))
     }
 
-    /// The configuration `record`'s run starts with: its agent's, as the
+    /// The configuration `record`'s run starts with, its agent's, as the
     /// host's hook changes it.
     pub(crate) fn prepared_config(
         &self,
@@ -1004,7 +1004,7 @@ impl Board {
     }
 
     /// How many subagents hold a place under
-    /// [`SubagentsConfig::max_running`]: those running, except the ones that
+    /// [`SubagentsConfig::max_running`], those running, except the ones that
     /// wait for subagents of their own.
     fn places_taken(&self, state: &SubagentsSnapshot) -> usize {
         let waiting = self.waiting.lock();
@@ -1109,7 +1109,7 @@ impl Board {
         }
     }
 
-    /// Run `run_id` ended with `outcome`: its record says how, its lead gets
+    /// Run `run_id` ended with `outcome`. Its record says how, its lead gets
     /// the news, and a queued run takes its place.
     async fn ended(
         &self,
@@ -1146,7 +1146,7 @@ impl Board {
                     && result.stopped_by.is_none()
                     && record.stop_requested.is_none() =>
             {
-                // Mail that came as it finished: it goes on, and reports again.
+                // Mail that came as it finished, so it goes on, and reports again.
                 if !workflow_stopped && self.pending(run_id).iter().any(|item| item.kind.wakes()) {
                     let launch = PendingLaunch::Resume {
                         message: String::new(),
@@ -1351,8 +1351,8 @@ impl Board {
     }
 
     /// Relaunches the subagents a stop of the workflow ended, or that were
-    /// running when it ended: their handles. The news that one stopped,
-    /// which its lead hasn't received, is withdrawn: it goes on. A subagent
+    /// running when it ended, and returns their handles. The news that one stopped,
+    /// which its lead hasn't received, is withdrawn, and it goes on. A subagent
     /// whose own lead (a subagent too) isn't running or relaunched is not
     /// relaunched, since it would report to a run that is gone. It is
     /// stopped instead, and its lead is told.
@@ -1500,7 +1500,7 @@ impl Board {
 
     // ----- messages, waits and stops -----
 
-    /// Sends `text` from run `from` to `to` (a run id, or `lead`): the
+    /// Sends `text` from run `from` to `to` (a run id, or `lead`), returning the
     /// tool's result.
     pub(crate) fn message(
         &self,
@@ -1623,7 +1623,7 @@ impl Board {
         let (item, copy) = {
             let mut state = self.state.lock();
             match &recipient {
-                // The lead steps in: its runs may exchange messages again.
+                // The lead steps in, so its runs may exchange messages again.
                 Recipient::Subagent(run) => state
                     .peer_counts
                     .retain(|(a, b, _)| *a != run.run_id && *b != run.run_id),
@@ -1836,7 +1836,7 @@ impl Board {
         ))
     }
 
-    /// Waits for mail for run `me`, as `wait_for_agents` does: returns the
+    /// Waits for mail for run `me`, as `wait_for_agents` does, returning the
     /// tool's result. The call's `signals` end it early when it is stopped,
     /// moved to the background, or context arrives for it.
     #[allow(clippy::too_many_arguments)]
@@ -2560,7 +2560,7 @@ impl Board {
         handles.into_iter().map(|(_, handle)| handle).collect()
     }
 
-    /// Stops run `id` of caller `caller`, as `stop_agent` does: the tool's
+    /// Stops run `id` of caller `caller`, as `stop_agent` does, returning the tool's
     /// result.
     pub(crate) async fn stop(
         &self,
@@ -2986,7 +2986,7 @@ fn stopped_with_workflow(ctx: &SharedContext, run_id: Uuid) -> bool {
     })
 }
 
-/// Settles the records a checkpoint saved running: by the outcome their
+/// Settles the records a checkpoint saved running, by the outcome their
 /// runs recorded.
 fn settle_restored(
     state: &mut SubagentsSnapshot,
@@ -3045,7 +3045,7 @@ fn settle_restored(
             _ => record.state = SubagentState::Interrupted,
         }
     }
-    // News the lead never got: it gets it now.
+    // News the lead never got, so it gets it now.
     for (record, kind, heading, body) in news {
         let delivered = state
             .mail
@@ -3124,7 +3124,7 @@ fn hook_text(
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// The record a mailbox item to `to` from `from` concerns: the sending
+/// The record a mailbox item to `to` from `from` concerns, the sending
 /// subagent's, else the recipient's.
 fn about_record(state: &SubagentsSnapshot, from: MailSender, to: Uuid) -> Option<SubagentRecord> {
     let by_id = |id: Uuid| state.runs.iter().find(|run| run.run_id == id).cloned();
@@ -3134,7 +3134,7 @@ fn about_record(state: &SubagentsSnapshot, from: MailSender, to: Uuid) -> Option
     }
 }
 
-/// The run `id` names: a short id (`r1`) or a run id.
+/// The run `id` names, a short id (`r1`) or a run id.
 fn find<'a>(state: &'a SubagentsSnapshot, id: &str) -> Option<&'a SubagentRecord> {
     let id = id.trim().trim_matches('`').trim_matches('"');
     state
@@ -3199,7 +3199,7 @@ fn holds_start(messages: &[arko_ai::Message], handle: &str) -> bool {
     })
 }
 
-/// Whether `task` holds `item`: in its conversation (a context update, a
+/// Whether `task` holds `item`, in its conversation (a context update, a
 /// prompt or a tool result), in context it took and hasn't added, or given
 /// before its latest handover (its report covers it). The task's records say
 /// by the item's id. For context it saved without ids, its text says, as it
@@ -3252,7 +3252,7 @@ fn start_request(workflow_run_id: Uuid, record: &SubagentRecord) -> StartRequest
     }
 }
 
-/// A subagent's initial prompt: its task, then who it works for and where,
+/// A subagent's initial prompt, with its task, then who it works for and where,
 /// after the host's context when it gives one
 /// ([`SubagentsConfig::start_context`]). A lead that is a subagent itself is
 /// named by its handle.
@@ -3324,7 +3324,7 @@ fn subagent_prompt(
 }
 
 /// What ends `wait_for_agents` early, from its call's
-/// [`TaskContext`](arko_agents::TaskContext): a stop, a move to the
+/// [`TaskContext`](arko_agents::TaskContext), namely a stop, a move to the
 /// background, and context arriving. Also whether the caller runs in Claude
 /// Code, whose result then has a size limit ([`WAIT_MAIL_BYTES`]).
 pub(crate) struct WaitSignals<'a> {
@@ -3351,7 +3351,7 @@ const WAIT_MAIL_BYTES: usize = 39_000;
 /// Between a wait's status and its items.
 const MAIL_SEPARATOR: &str = "\n\n---\n\n";
 
-/// A wait's result: the status first (`lead`, if any, and the runs still
+/// A wait's result, with the status first (`lead`, if any, and the runs still
 /// active), then the items that came, whole, in the order they came. An item
 /// that alone is over the `budget` is cut. It ends with who else has
 /// mail (`left`) that didn't fit, which stays in the mailbox.
@@ -3379,7 +3379,7 @@ fn wait_result(
     text
 }
 
-/// Who sent `senders`, once each, in order: a run by its id, `your lead` if
+/// Who sent `senders`, once each, in order, a run by its id, `your lead` if
 /// it isn't one of the subagents, or `the host`.
 fn sender_names(state: &SubagentsSnapshot, senders: &[MailSender]) -> Vec<String> {
     let mut names = Vec::new();
@@ -3416,7 +3416,7 @@ fn handles_in_words(handles: &[String]) -> String {
     }
 }
 
-/// `for 3m`: how long a state has lasted.
+/// `for 3m` shows how long a state has lasted.
 fn ago(since: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     let seconds = (now - since).num_seconds().max(0);
     let span = if seconds < 60 {
@@ -3790,7 +3790,7 @@ mod update_tests {
         assert!(board.update(run).is_none());
     }
 
-    /// The task's records say whether it holds an item, by its id: one whose
+    /// The task's records say whether it holds an item, by its id, one whose
     /// rest is pending, or recorded too. A task saved before tasks kept ids
     /// holds what its text holds whole, and a tool result holds an item only
     /// with both its markers.
@@ -3833,7 +3833,7 @@ mod update_tests {
             .add_user_message("# Workflow context update\n\nThe rest.");
         task.record_held_ids(1, vec![id.clone()]);
         assert!(task_holds(&task, &item));
-        // Saved before ids: its text, whole.
+        // Saved before ids, with its text whole.
         let mut old = task.clone();
         old.context_records.clear();
         old.context_records_from = None;
@@ -3843,7 +3843,7 @@ mod update_tests {
             item.excerpt()
         ));
         assert!(task_holds(&old, &item));
-        // Saved before ids, then numbered and recorded since: no hook
+        // Saved before ids, then numbered and recorded since. No hook
         // splits it, so its 12 KB are whole in one message.
         let mut json = serde_json::to_value(&old).unwrap();
         json["conversation"]["messages"] = serde_json::to_value(vec![arko_ai::Message::new_user(
