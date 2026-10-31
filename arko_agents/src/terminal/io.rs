@@ -38,7 +38,7 @@ pub(super) struct Process {
 }
 
 // Both participants append complete JSON lines and flush. EOF means "no new
-// bytes yet"; a local timer tails the file without waking an agent. A file
+// bytes yet", and a local timer tails the file without waking an agent. A file
 // transport avoids OS-specific inherited descriptors and socket dependencies.
 const CONTROL_LIMIT: u64 = 8 * 1024 * 1024;
 struct Requests {

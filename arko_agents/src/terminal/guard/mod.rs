@@ -152,7 +152,7 @@ impl CommandGuard {
 
 // ------------------------------------------------------------------ host
 
-/// What the guard knows about the machine: path rules, the working
+/// What the guard knows about the machine, namely path rules, the working
 /// directory, the home and temporary directories, and the environment.
 struct Host {
     style: PathStyle,
@@ -481,7 +481,7 @@ impl Host {
 
 #[derive(Debug, Clone)]
 struct Located {
-    /// `None`: the path is only known when the command runs.
+    /// `None` means the path is only known when the command runs.
     path: Option<AbsPath>,
     span: Span,
     /// The path assumes an unknown value is empty.
@@ -636,7 +636,7 @@ impl Scope {
         }
     }
 
-    /// A nested shell: same directory, none of the parent's shell variables.
+    /// A nested shell, same directory, none of the parent's shell variables.
     fn child(&self) -> Self {
         Self {
             opaque: self.opaque,
@@ -644,7 +644,7 @@ impl Scope {
         }
     }
 
-    /// A subshell (`$(…)`, a command `find` runs): the same directory and
+    /// A subshell (`$(…)`, a command `find` runs), with the same directory and
     /// variables.
     fn subshell(&self, cwd: Option<AbsPath>) -> Self {
         Self {
@@ -655,7 +655,7 @@ impl Scope {
     }
 
     /// What a subshell in the line (`( … )`, a background list, a pipeline's
-    /// member) can change and loses when it ends: the directory and the
+    /// member) can change and loses when it ends, namely the directory and the
     /// variables.
     fn save(&self) -> Saved {
         (self.cwd.clone(), self.vars.clone())
@@ -668,7 +668,7 @@ impl Scope {
     }
 
     /// The shell after commands that may have run in a subshell or in this
-    /// shell: what they changed is only known when they run.
+    /// shell. What they changed is only known when they run.
     fn merge(&mut self, (cwd, vars): Saved) {
         if self.cwd != cwd {
             self.cwd = None;
@@ -739,7 +739,7 @@ impl Analysis<'_> {
                 }
             }
         }
-        // What a POSIX subshell changes ends with it; what a pipeline's last
+        // What a POSIX subshell changes ends with it, and what a pipeline's last
         // member changes is only known when it runs.
         let mut subshells = Vec::new();
         for command in &commands {
@@ -788,8 +788,8 @@ impl Analysis<'_> {
             ShellDialect::PowerShell if self.assign_powershell(scope, words) => return,
             _ => {}
         }
-        // PowerShell runs a quoted or computed first word only after `&`;
-        // otherwise the statement is an expression.
+        // PowerShell runs a quoted or computed first word only after `&`.
+        // Otherwise the statement is an expression.
         let expression = dialect == ShellDialect::PowerShell
             && !command.call
             && words
@@ -825,7 +825,7 @@ impl Analysis<'_> {
         };
         let program = words[0].literal().unwrap_or_else(|| name.clone());
         let rest = &words[1..];
-        // The command runs there; the shell stays where it is.
+        // The command runs there, and the shell stays where it is.
         let shell_directory = directory.map(|cwd| std::mem::replace(&mut scope.cwd, cwd));
         if !command.piped
             && let Some(listing) = self.listing(dialect, &name, rest, scope)
@@ -926,7 +926,7 @@ impl Analysis<'_> {
         }
     }
 
-    /// `words` as the rules see them: resolved, with an unquoted variable
+    /// `words` as the rules see them, resolved, with an unquoted variable
     /// split into words as the shell splits it (PowerShell doesn't), and
     /// `None` for a word only known when the command runs.
     fn rule_words(
@@ -965,7 +965,7 @@ impl Analysis<'_> {
     }
 
     /// Checks the commands in `command`'s substitutions (`$(…)`, backticks,
-    /// PowerShell's `(…)`) against the rules. Only the rules: the guard
+    /// PowerShell's `(…)`) against the rules. Only the rules. The guard
     /// doesn't follow the paths they act on.
     fn substitutions(
         &mut self,
@@ -990,7 +990,7 @@ impl Analysis<'_> {
     }
 
     /// The commands `find -exec`, `-execdir`, `-ok` and `-okdir` run,
-    /// checked against the rules only: the deletes `find` itself does are
+    /// checked against the rules only. The deletes `find` itself does are
     /// checked with its other arguments.
     fn find_commands(&mut self, rest: &[Word], command: &Command, scope: &Scope, depth: usize) {
         if self.rules.is_empty() {
@@ -1031,7 +1031,7 @@ impl Analysis<'_> {
         }
     }
 
-    /// Runs `check` for the rules only: the path findings it adds are
+    /// Runs `check` for the rules only. The path findings it adds are
     /// dropped.
     fn rules_only(&mut self, check: impl FnOnce(&mut Self)) {
         let (findings, pipeline) = (self.findings.len(), self.pipeline);
@@ -1040,8 +1040,8 @@ impl Analysis<'_> {
         self.pipeline = pipeline;
     }
 
-    /// A command the guard can't read in advance, which `what` runs:
-    /// refused while there are rules, since they can't check it.
+    /// A command the guard can't read in advance, which `what` runs.
+    /// It is refused while there are rules, since they can't check it.
     fn unchecked(&mut self, what: &str) {
         if !self.rules.is_empty() && self.refusal.is_none() {
             self.refusal = Some(rules::unchecked(what));
@@ -1125,7 +1125,7 @@ impl Analysis<'_> {
         }
     }
 
-    /// What a command receives through the pipeline: the upstream listing,
+    /// What a command receives through the pipeline, the upstream listing,
     /// or the working directory's contents when that is unknown.
     fn pipeline_input(&mut self, scope: &Scope, op: Op, program: &str) {
         let listed = scope.listings.get(&self.pipeline).cloned();
@@ -1386,7 +1386,7 @@ impl Analysis<'_> {
             return false;
         };
         let (operator, rhs) = match first.pieces.get(1) {
-            // `$x='a'`: the operator and value are in the same word.
+            // `$x='a'` puts the operator and value in the same word.
             Some(Piece::Text(text)) => {
                 let Some(operator) = OPERATORS.into_iter().find(|op| text.starts_with(op)) else {
                     return false;
@@ -1430,7 +1430,7 @@ impl Analysis<'_> {
     }
 
     /// The directory a wrapper's `options` run its command in, when they name
-    /// one (`env -C`, `env --chdir=`, `sudo -D`, `unshare -w`): resolved from
+    /// one (`env -C`, `env --chdir=`, `sudo -D`, `unshare -w`), resolved from
     /// `from` as `cd` resolves it, `None` inside when it is only known when the
     /// command runs.
     fn wrapper_directory(
@@ -1619,7 +1619,7 @@ impl Analysis<'_> {
                 .literal()
                 .and_then(|text| text.strip_prefix('-').map(str::to_ascii_lowercase))
             else {
-                // powershell.exe runs a bare argument as a command; pwsh runs it as a file.
+                // powershell.exe runs a bare argument as a command, and pwsh runs it as a file.
                 if name == "powershell" {
                     match self.join(dialect, scope, &rest[index..]) {
                         Some(text) => self.nested(ShellDialect::PowerShell, &text, scope, depth),
@@ -2234,7 +2234,7 @@ impl Analysis<'_> {
 
 // ------------------------------------------------------------- word helpers
 
-/// The command a word names: its file name, lowercase, without `.exe`.
+/// The command a word names, its file name, lowercase, without `.exe`.
 fn command_name(word: &Word) -> Option<String> {
     let text = word.literal()?;
     let name = base_name(&text);
@@ -2287,7 +2287,7 @@ fn strip_word_prefix(word: &Word, prefix: &str) -> Option<Word> {
     })
 }
 
-/// `NAME=value`: the name and the value (`None` for `NAME+=value`).
+/// `NAME=value` split into the name and the value (`None` for `NAME+=value`).
 fn assignment(word: &Word) -> Option<(String, Option<Word>)> {
     let Some(Piece::Text(text)) = word.pieces.first() else {
         return None;
@@ -2336,7 +2336,7 @@ fn names_repository(name: &str) -> bool {
     REPOSITORY_VARIABLES.contains(&name)
 }
 
-/// Whether a wrapper's option sets one of git's repository variables:
+/// Whether a wrapper's option sets one of git's repository variables, such as
 /// `env GIT_DIR=…`, `sudo GIT_DIR=…`, `strace -E GIT_DIR=…`.
 fn sets_repository(option: &str) -> bool {
     let option = option
@@ -2349,7 +2349,7 @@ fn sets_repository(option: &str) -> bool {
 }
 
 /// How many of `rest`'s first words are options (and with `assignments`,
-/// `NAME=value` words): `valued` options take the next word as their value.
+/// `NAME=value` words). `valued` options take the next word as their value.
 fn leading_options(rest: &[Word], valued: &[&str], assignments: bool) -> usize {
     let mut index = 0;
     while let Some(word) = rest.get(index) {
@@ -2378,7 +2378,7 @@ const FLOCK_VALUED: &[&str] = &["-w", "--timeout", "-E", "--conflict-exit-code"]
 const WATCH_VALUED: &[&str] = &["-n", "--interval", "-q", "--equexit"];
 
 /// The text a program runs through a shell from its `-c` option or one of
-/// its `long` options: `su -c 'git push'`, `script -qc make log`,
+/// its `long` options, such as `su -c 'git push'`, `script -qc make log`,
 /// `su --command='git push'`.
 fn command_option(rest: &[Word], long: &[&str]) -> Option<Word> {
     let mut words = rest.iter();
@@ -2386,7 +2386,7 @@ fn command_option(rest: &[Word], long: &[&str]) -> Option<Word> {
         let Some(Piece::Text(text)) = word.pieces.first() else {
             continue;
         };
-        // `-c`, short options ending with it (`-qc`), or a long option: the
+        // `-c`, short options ending with it (`-qc`), or a long option. The
         // text is the next word.
         let short = text.len() > 1
             && text.starts_with('-')
@@ -2410,7 +2410,7 @@ fn command_option(rest: &[Word], long: &[&str]) -> Option<Word> {
 }
 
 /// Words that name what `name` runs, if `name` only prefixes another command
-/// (`sudo`, `env`, `then`): how many following words belong to it.
+/// (`sudo`, `env`, `then`), given as how many following words belong to it.
 fn skip_prefix(dialect: ShellDialect, name: &str, rest: &[Word]) -> Option<usize> {
     let options =
         |valued: &[&str], skip_assignments: bool| leading_options(rest, valued, skip_assignments);
@@ -2464,7 +2464,7 @@ fn skip_prefix(dialect: ShellDialect, name: &str, rest: &[Word]) -> Option<usize
                     _ => Some(lock + 1),
                 }
             }
-            // `taskset <mask> <command>` (`-c`: a list for the mask); with
+            // `taskset <mask> <command>` (`-c` takes a list for the mask), and with
             // `-p` it changes a running process instead.
             "taskset" => {
                 let skipped = options(&[], false);
@@ -2563,7 +2563,7 @@ fn skip_prefix(dialect: ShellDialect, name: &str, rest: &[Word]) -> Option<usize
                 ],
                 false,
             )),
-            // `watch -x` runs its arguments; without `-x`, their text
+            // `watch -x` runs its arguments, and without `-x`, their text
             // through `sh -c` (checked as nested shell text).
             "watch" => {
                 let skipped = options(WATCH_VALUED, false);
@@ -2641,7 +2641,7 @@ fn sources_script(dialect: ShellDialect, command: &Command) -> bool {
     )
 }
 
-/// Operands of a POSIX command: words after its options. `valued` options
+/// Operands of a POSIX command, the words after its options. `valued` options
 /// take the next word as their value.
 fn posix_operands<'w>(rest: &'w [Word], valued: &[&str]) -> Vec<&'w Word> {
     let mut operands = Vec::new();
@@ -2676,7 +2676,7 @@ fn cmd_operands(rest: &[Word]) -> Vec<&Word> {
         .collect()
 }
 
-/// `find` start points: the words before the first expression.
+/// `find` start points, the words before the first expression.
 fn find_paths(rest: &[Word]) -> Vec<&Word> {
     rest.iter()
         .take_while(|word| {
@@ -2844,7 +2844,7 @@ fn powershell_arguments(rest: &[Word]) -> PowerShellArguments<'_> {
     }
 }
 
-/// PowerShell's `-EncodedCommand`: base64 of UTF-16LE text.
+/// PowerShell's `-EncodedCommand` is base64 of UTF-16LE text.
 fn decode_utf16_base64(text: &str) -> Option<String> {
     let mut bytes = Vec::new();
     let mut buffer = 0u32;

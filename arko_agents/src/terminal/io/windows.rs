@@ -41,7 +41,7 @@ fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
     Ok(bytes)
 }
 
-// Standard Windows argv quoting. cmd /C has its own command-string grammar;
+// Standard Windows argv quoting. cmd /C has its own command-string grammar, so
 // its final argument is enclosed verbatim instead of escaping shell syntax.
 fn quote(value: &OsStr) -> OsString {
     use std::os::windows::ffi::OsStringExt;
@@ -133,7 +133,7 @@ fn pipe() -> io::Result<(File, File)> {
         lpSecurityDescriptor: null_mut(),
         bInheritHandle: 1,
     };
-    // SAFETY: valid out-pointers; returned handles are each owned exactly once.
+    // SAFETY: valid out-pointers, and returned handles are each owned exactly once.
     unsafe {
         checked(CreatePipe(&mut read, &mut write, &security, 65_536))?;
         Ok((File::from_raw_handle(read), File::from_raw_handle(write)))
@@ -154,7 +154,7 @@ struct Attributes(Vec<usize>);
 impl Attributes {
     fn new(count: u32) -> io::Result<Self> {
         let mut size = 0;
-        // SAFETY: first call queries required size; the Vec provides aligned storage.
+        // SAFETY: first call queries required size, and the Vec provides aligned storage.
         unsafe {
             InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size);
             if size == 0 {
@@ -201,7 +201,7 @@ impl Drop for Console {
     fn drop(&mut self) {
         let console = self.0;
         // ConPTY shutdown can wait for its output to drain. Keep that work off
-        // the async executor; the independent reader continues draining.
+        // the async executor, and the independent reader continues draining.
         std::thread::spawn(move || unsafe {
             ClosePseudoConsole(console);
         });
@@ -252,7 +252,7 @@ impl Child {
     }
 }
 
-// Peek before reading an anonymous byte pipe: a cancelled read leaves no
+// Peek before reading an anonymous byte pipe. A cancelled read leaves no
 // blocking worker behind, and only the available bytes are consumed.
 struct PipeReader {
     file: File,

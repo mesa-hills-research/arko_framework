@@ -97,7 +97,7 @@ impl CommandRule {
     }
 }
 
-/// The guard's rules, ready to match: paths resolved, patterns split.
+/// The guard's rules, ready to match, with paths resolved and patterns split.
 pub(super) struct Rules<'g> {
     style: PathStyle,
     rules: Vec<Rule<'g>>,
@@ -107,7 +107,7 @@ struct Rule<'g> {
     rule: &'g CommandRule,
     program: String,
     arguments: Vec<&'g str>,
-    /// `None`: anywhere. `Some(None)`: a directory that couldn't be
+    /// `None` means anywhere. `Some(None)` is a directory that couldn't be
     /// resolved, which no command is within.
     within: Option<Option<AbsPath>>,
 }
@@ -137,8 +137,8 @@ impl<'g> Rules<'g> {
         self.rules.is_empty()
     }
 
-    /// Checks one command: `words` from its program on (`None` for a word
-    /// only known when it runs), run in `directory`. `other_repository`:
+    /// Checks one command, with `words` from its program on (`None` for a word
+    /// only known when it runs), run in `directory`. `other_repository` means
     /// one of git's location variables (`GIT_DIR`, `GIT_INDEX_FILE`, …) is
     /// set for it, so git works elsewhere.
     pub fn check(
@@ -210,7 +210,7 @@ impl<'g> Rules<'g> {
     }
 
     /// git's arguments without the global options rules skip, and the
-    /// directory it runs in: none known when it works on another repository
+    /// directory it runs in, none known when it works on another repository
     /// or work tree, whatever `-C` says.
     fn git(
         &self,
@@ -289,8 +289,8 @@ fn unknown_program(words: &[Option<String>]) -> CommandRefusal {
     }
 }
 
-/// A refusal of a command whose text the guard can't know in advance:
-/// `what` runs it.
+/// A refusal of a command whose text the guard can't know in advance,
+/// where `what` runs it.
 pub(super) fn unchecked(what: &str) -> CommandRefusal {
     CommandRefusal {
         message: format!(

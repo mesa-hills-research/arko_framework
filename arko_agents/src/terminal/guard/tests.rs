@@ -293,7 +293,7 @@ fn real_devices_are_refused_next_to_network_paths() {
     );
 }
 
-/// Windows and PowerShell paths are not looked at differently: a path that
+/// Windows and PowerShell paths are not looked at differently, so a path that
 /// starts with `/dev` there is an ordinary one.
 #[test]
 fn windows_shells_treat_dev_tcp_like_any_other_path() {
@@ -683,7 +683,7 @@ fn dialects_come_from_the_shell_program() {
 
 // ------------------------------------------------------------------ rules
 
-/// Checks each command under `rules` on `host`: `true` when it may run.
+/// Checks each command under `rules` on `host`, with `true` when it may run.
 #[track_caller]
 fn expect_ruled(rules: &[CommandRule], host: &Host, dialect: ShellDialect, cases: &[(bool, &str)]) {
     let guard = CommandGuard {
@@ -832,7 +832,7 @@ fn a_deny_pattern_spans_words() {
 
 #[test]
 fn an_allow_list_catches_arguments_a_deny_rule_cant_read() {
-    // As the docs say: a deny rule matches the words the guard reads; an
+    // As the docs say, a deny rule matches the words the guard reads, and an
     // argument only known when the command runs matches only `*`.
     let hidden = ["cargo $(printf publish)", "sh -c 'cargo \"$1\"' _ publish"];
     for command in hidden {
@@ -876,7 +876,7 @@ fn a_rule_within_a_directory_needs_the_command_there() {
             (false, "cd scratch && git -C .. commit -m x"),
             (false, "git -C other commit -m x"),
             (false, "cd scratch-other && git commit -m x"),
-            // The directory isn't known: never within.
+            // The directory isn't known, so never within.
             (
                 false,
                 "cd \"$(git rev-parse --show-toplevel)\" && git commit -m x",
@@ -934,7 +934,7 @@ fn another_repository_stays_elsewhere_whatever_directory_follows() {
 #[test]
 fn a_subshell_keeps_its_directory_and_variables() {
     // `( … )` runs in a subshell, and so does each member of a pipeline but
-    // the last: a `cd` or an assignment there ends with it.
+    // the last. A `cd` or an assignment there ends with it.
     let rules = [
         CommandRule::allow("git status *"),
         CommandRule::allow("git *").within("scratch"),
@@ -957,7 +957,7 @@ fn a_subshell_keeps_its_directory_and_variables() {
             (false, "cd scratch | cat; git commit -m x"),
             (false, "ls | (cd scratch) | cat && git commit -m x"),
             // The last member runs in the current shell in zsh (and in bash
-            // with `lastpipe`): the directory isn't known after it.
+            // with `lastpipe`), so the directory isn't known after it.
             (false, "ls | cd scratch; git commit -m x"),
         ],
     );
@@ -1031,8 +1031,8 @@ fn a_background_list_runs_in_a_subshell() {
 
 #[test]
 fn a_group_or_compound_command_in_a_pipeline_keeps_its_directory() {
-    // A pipeline's member runs in a subshell whatever it is: a subshell, a
-    // `{ … }` group or a loop. In the shell itself, a group's `cd` lasts.
+    // A pipeline's member runs in a subshell whatever it is (a subshell, a
+    // `{ … }` group or a loop). In the shell itself, a group's `cd` lasts.
     expect_ruled(
         &scratch_rules(),
         &linux(),
@@ -1358,7 +1358,7 @@ fn a_wrappers_directory_is_where_its_command_runs() {
             (Protected, "unshare --wd / rm -rf *"),
             (Protected, "env -C /tmp sudo -D .. rm -rf *"),
             (Protected, "env -C / ls | xargs rm -rf"),
-            // Only known when it runs: outside the working directory.
+            // Only known when it runs, so outside the working directory.
             (Outside, "env -C \"$(cat dir.txt)\" rm -rf *"),
             (Outside, "sudo -D \"$(cat dir.txt)\" rm -rf build"),
         ],
@@ -1529,7 +1529,7 @@ fn windows_top_level() -> Host {
 }
 
 /// A workspace right under a drive's root, such as `D:\RoboEnv`, holds its
-/// files like any other: commands write, move and delete inside it, while
+/// files like any other. Commands write, move and delete inside it, while
 /// other top-level directories and the drive's root stay protected.
 #[test]
 fn a_workspace_at_the_top_of_a_drive_holds_its_files() {

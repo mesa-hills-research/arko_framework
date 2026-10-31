@@ -520,7 +520,7 @@ impl Running {
         )
     }
 
-    /// Whether its owner's workers keep it: it lasts while they run, and
+    /// Whether its owner's workers keep it. It lasts while they run, and
     /// one does.
     fn kept_by_workers(&self, manager: &Weak<TerminalManager>) -> bool {
         self.lifetime == MonitorLifetime::WhileWorkersRun

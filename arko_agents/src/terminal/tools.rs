@@ -63,7 +63,7 @@ pub(super) fn string<'a>(
             message: "expected a string".into(),
         })
 }
-/// A whole-number parameter: a number, or text holding one (as calls saved
+/// A whole-number parameter, a number, or text holding one (as calls saved
 /// before the parameters were integers give it).
 pub(super) fn number(
     params: &HashMap<String, Value>,
