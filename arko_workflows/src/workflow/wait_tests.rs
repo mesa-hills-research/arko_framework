@@ -1,4 +1,4 @@
-//! `wait_for_message`: who is offered it, how long it waits, what ends a
+//! `wait_for_message`, covering who is offered it, how long it waits, what ends a
 //! wait, and delivery of the awaited message at the next turn boundary.
 
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ fn builder(workspace: &Workspace, agents: &[&str]) -> WorkflowBuilder {
     builder_with(LLMClient::new(), workspace, agents)
 }
 
-/// `agent`'s workflow tool `name`, when it is offered; its prepared
+/// `agent`'s workflow tool `name`, when it is offered, and its prepared
 /// configuration must agree.
 fn tool(workflow: &Workflow, agent: &str, name: &str) -> Option<Arc<dyn Tool>> {
     let context = workflow.context();
@@ -71,7 +71,7 @@ fn offered(workflow: &Workflow, agent: &str, name: &str) -> bool {
     tool(workflow, agent, name).is_some()
 }
 
-/// A run of `agent` as the engine starts one: marked running, and its
+/// A run of `agent` as the engine starts one, marked running, and its
 /// command channel registered for message delivery and stops.
 struct Run {
     id: uuid::Uuid,
@@ -160,7 +160,7 @@ async fn until_status(workflow: &Workflow, agent: &str, status: AgentStatus) {
 #[test]
 fn the_wait_is_offered_to_agents_that_can_receive() {
     let workspace = Workspace::new();
-    // One agent, or messaging off: no agent is offered it, and the name is
+    // One agent, or messaging off, so no agent is offered it, and the name is
     // free for a host tool.
     for workflow in [
         builder(&workspace, &["coder"]),
@@ -179,7 +179,7 @@ fn the_wait_is_offered_to_agents_that_can_receive() {
         }
     }
 
-    // The lead may message only the worker; the worker no one; the auditor
+    // The lead may message only the worker, the worker no one, the auditor
     // everyone. So the auditor messages the lead and the worker, the lead
     // the worker, and no one the auditor.
     let agents = ["lead", "worker", "auditor"];
@@ -216,7 +216,7 @@ fn the_wait_is_offered_to_agents_that_can_receive() {
         );
     }
 
-    // The definition is static: the same for every agent, naming no agent
+    // The definition is static, the same for every agent, naming no agent
     // and no time.
     let definition = |agent: &str| {
         let tool = tool(&workflow, agent, WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
@@ -231,7 +231,7 @@ fn the_wait_is_offered_to_agents_that_can_receive() {
     }
     assert!(!lead.chars().any(|c| c.is_ascii_digit()), "{lead}");
 
-    // An agent that isn't offered it may have a tool of that name; one that
+    // An agent that isn't offered it may have a tool of that name, and one that
     // is may not, and nor may a global tool.
     let auditor = builder(&workspace, &agents)
         .messaging(policy.clone())
@@ -297,7 +297,7 @@ fn wait_limits_are_checked_at_build() {
 }
 
 /// The automatic limit follows each agent's model, settings and client
-/// auth; a fixed limit, the workflow's or the agent's own, replaces it.
+/// auth, and a fixed limit, the workflow's or the agent's own, replaces it.
 #[tokio::test]
 async fn automatic_limits_follow_each_agents_prompt_cache() {
     let workspace = Workspace::new();
@@ -415,7 +415,7 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
 }
 
 /// An automatic limit counts from the run's last model request, when its
-/// prompt cache was last used; a fixed limit doesn't.
+/// prompt cache was last used, and a fixed limit doesn't.
 #[tokio::test(start_paused = true)]
 async fn an_automatic_limit_counts_from_the_last_model_request() {
     let workspace = Workspace::new();
@@ -501,7 +501,7 @@ async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
 
 /// A wait that found a message not yet forwarded (the run's command channel
 /// is full), which the conversation then turns out to hold, waits on to its
-/// limit without spinning: its wait for the forward ends with the message.
+/// limit without spinning. Its wait for the forward ends with the message.
 #[tokio::test(start_paused = true)]
 async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -550,7 +550,7 @@ async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
         .unwrap()
         .unwrap();
     assert_eq!(result.unwrap(), "No messages after 30 s.");
-    // Woken when the forward deadline passed and at the limit; spinning on
+    // Woken when the forward deadline passed and at the limit. Spinning on
     // the passed deadline, it would be polled again at every step.
     let polls = polls.load(Ordering::SeqCst) - before;
     assert!(polls <= 4, "polled {polls} times");
@@ -656,7 +656,7 @@ async fn a_wait_ends_at_its_limit_which_the_model_can_only_shorten() {
     }
 }
 
-/// A start or finish of an agent the waiter works with ends the wait; the
+/// A start or finish of an agent the waiter works with ends the wait, and the
 /// start notice still comes at the next turn boundary. Other agents'
 /// starts don't end it.
 #[tokio::test]
@@ -712,7 +712,7 @@ async fn a_start_or_finish_ends_the_wait_and_start_notices_still_come() {
 }
 
 /// A stop of the workflow, or of the waiting run, ends even a long wait at
-/// once; a wait whose task is aborted leaves the agent running.
+/// once, and a wait whose task is aborted leaves the agent running.
 #[tokio::test]
 async fn stops_end_a_long_wait_at_once() {
     let workspace = Workspace::new();
@@ -750,7 +750,7 @@ async fn stops_end_a_long_wait_at_once() {
 }
 
 /// A graceful stop's wrap-up ends a long wait at once, through the call's
-/// stop signal: the agent is told to finish at its next turn boundary.
+/// stop signal. The agent is told to finish at its next turn boundary.
 #[tokio::test]
 async fn a_wrap_up_ends_a_long_wait_through_the_stop_signal() {
     let workspace = Workspace::new();
@@ -763,7 +763,7 @@ async fn a_wrap_up_ends_a_long_wait_through_the_stop_signal() {
     let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace)
         .with_stop(context.run_control.tools_signal());
     let tool = tool(&workflow, "lead", WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
-    // Bounded: a wait that ignored the signal would last the hour.
+    // Bounded, because a wait that ignored the signal would last the hour.
     let wait = tokio::time::timeout(
         Duration::from_secs(10),
         tool.execute(&task_context, HashMap::new()),
@@ -787,7 +787,7 @@ async fn a_wrap_up_ends_a_long_wait_through_the_stop_signal() {
     );
 }
 
-/// Only agent messages the conversation lacks end a wait as messages: not one
+/// Only agent messages the conversation lacks end a wait as messages, not one
 /// it holds already (still queued until the run completes), nor context
 /// notices, which end it through its context signal once the runtime has
 /// them.
@@ -848,7 +848,7 @@ fn user_text(body: &str) -> String {
     text.join("\n")
 }
 
-/// The tool calls a request body replays, in order: name and output.
+/// The tool calls a request body replays, in order, name and output.
 fn tool_results(body: &str) -> Vec<(String, String)> {
     let body: Value = serde_json::from_str(body).unwrap();
     let items = body["input"].as_array().unwrap();
@@ -874,8 +874,8 @@ fn tool_results(body: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// In native tool mode, against a scripted model: the lead asks the worker
-/// for a review and waits; the worker waits for work, then replies. Each
+/// In native tool mode, against a scripted model, the lead asks the worker
+/// for a review and waits, and the worker waits for work, then replies. Each
 /// wait ends when the message arrives, and the message is in the very next
 /// request, once, and acknowledged when its run completes.
 #[tokio::test]
@@ -884,7 +884,7 @@ async fn a_lead_and_a_worker_wait_for_each_other_in_native_mode() {
 }
 
 /// The same with every tool call approved by the workflow's driver (the
-/// agents' default): the message still reaches the very next request.
+/// agents' default). The message still reaches the very next request.
 #[tokio::test]
 async fn approved_waits_deliver_the_message_with_the_next_request() {
     lead_and_worker_wait_for_each_other(false).await;

@@ -1,6 +1,6 @@
-//! Append-only JSON-lines files: the durable record of finished work that
+//! Append-only JSON-lines files, the durable record of finished work that
 //! makes every stage resumable. A record is written (and synced) when its
-//! work is done; a crash loses at most the work in progress, which is done
+//! work is done, and a crash loses at most the work in progress, which is done
 //! again on the next start.
 
 use std::io::Write;
@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use crate::BenchResult;
 
 /// Reads every record of `path` (none when it doesn't exist). A line that
-/// doesn't parse (a write cut short by a crash) is skipped with a warning:
-/// its work is done again.
+/// doesn't parse (a write cut short by a crash) is skipped with a warning.
+/// Its work is done again.
 pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> BenchResult<Vec<T>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -77,7 +77,7 @@ impl Appender {
     }
 }
 
-/// A `LOCK` file holding this process's id: one process at a time works
+/// A `LOCK` file holding this process's id. One process at a time works
 /// in a directory (a run, the task generation, a `prepare`). A lock whose
 /// process is gone (it crashed) is taken over. Removed on drop.
 #[derive(Debug)]
@@ -91,7 +91,7 @@ impl DirLock {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("LOCK");
         // Created exclusively, so two processes starting at once can't both
-        // hold it; a lock whose process is gone is removed and tried again.
+        // hold it, and a lock whose process is gone is removed and tried again.
         for _ in 0..2 {
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -135,7 +135,7 @@ impl Drop for DirLock {
     }
 }
 
-/// Whether a process with this id runs (Linux: `/proc`; elsewhere a lock is
+/// Whether a process with this id runs (on Linux `/proc`, elsewhere a lock is
 /// taken as held, since there is no cheap check).
 fn process_alive(pid: u32) -> bool {
     if cfg!(target_os = "linux") {

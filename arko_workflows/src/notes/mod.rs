@@ -279,7 +279,7 @@ const SECTION_MARK: &str = "\n\n# Notes on your task\n\nNotes added while this w
 /// What a note may and may not do, as the agents are told.
 const NOTES_RULE: &str = "A note refines your task. It doesn't change your role's rules (what you may read, write or run, and whom you may message) or override the workflow's own notices, such as a request to stop. Where notes differ, the newer one takes precedence.";
 
-/// `prompt` without the notes its initial prompt was given: a completion
+/// `prompt` without the notes its initial prompt was given. A completion
 /// verifier quotes the task without them, and a handover restates it with
 /// the current ones.
 pub(crate) fn without_notes(prompt: &str) -> &str {
@@ -363,7 +363,7 @@ impl NoteBoard {
         self
     }
 
-    /// Takes `note`'s images and keeps them: in the run's image files, or in
+    /// Takes `note`'s images and keeps them in the run's image files, or in
     /// memory for a run that isn't persisted.
     fn keep_images(&self, note: &mut Note) -> Result<Vec<NoteImage>, String> {
         std::mem::take(&mut note.images)
@@ -507,7 +507,7 @@ impl NoteBoard {
         self.state.lock().notes.clone()
     }
 
-    /// Posts `note`: checks it, numbers it and logs it. With `id`, the note
+    /// Posts `note`, checking it, numbering it and logging it. With `id`, the note
     /// posted under that id already, if any, is returned instead.
     pub(crate) fn post(
         &self,
@@ -524,7 +524,7 @@ impl NoteBoard {
         })?;
         let posted = {
             let mut state = self.state.lock();
-            // (Checked again under the lock: two posts of one id insert once.)
+            // (Checked again under the lock, so two posts of one id insert once.)
             if let Some(posted) =
                 id.and_then(|id| state.notes.iter().find(|posted| posted.id == id))
             {
@@ -539,7 +539,7 @@ impl NoteBoard {
     }
 
     /// The notes section of the initial prompt of run `task_id` of `agent`
-    /// (`review` for a completion verifier's review): the standing notes it
+    /// (`review` for a completion verifier's review), made of the standing notes it
     /// receives, newest first and capped, and the ids of those it shows,
     /// which the task records with its prompt. Empty when there are none.
     /// The run has then been given every note so far.
@@ -569,7 +569,7 @@ impl NoteBoard {
     }
 
     /// The notes for the fresh conversation of run `task` of `agent` after a
-    /// handover, and for its conversation after Claude Code compacted it:
+    /// handover, and for its conversation after Claude Code compacted it, made of
     /// the standing notes it receives that its conversation holds whole, by
     /// the task's records, newest first and capped, as an initial prompt
     /// shows them, with the ids of those it shows. The notes still pending
@@ -610,7 +610,7 @@ impl NoteBoard {
     /// turn boundary, oldest first, as many as fit ([`PROMPT_MAX_NOTES`],
     /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown and their
     /// images, each labelled with its note, or `None` when there are none. Only
-    /// the notes shown count as given: the rest come at the next boundary.
+    /// the notes shown count as given, and the rest come at the next boundary.
     /// The update comes in two texts, the operator's notes (empty without
     /// one) and the others', each its own update.
     pub(crate) fn update_with_seqs(
@@ -639,7 +639,7 @@ impl NoteBoard {
             .collect::<Vec<_>>();
         let shown = fitting(&notes);
         let given = match notes.get(shown) {
-            // The newest shown: the notes after it wait for the next update.
+            // The newest shown, so the notes after it wait for the next update.
             Some(_) => notes[shown - 1].seq,
             None => newest,
         };
@@ -653,7 +653,7 @@ impl NoteBoard {
         });
         state.seen.insert(task_id, given);
         drop(state);
-        // Read outside the lock: an image may come from its file. The text
+        // Read outside the lock because an image may come from its file. The text
         // follows, since it says which images can't be given.
         taken.map(|(taken, more)| {
             let with_images = taken
@@ -723,7 +723,7 @@ impl NoteBoard {
     }
 
     /// [`recovered`](Self::recovered) by the notes `task` holds, in its
-    /// conversation or pending: it was given every note up to the first one
+    /// conversation or pending. It was given every note up to the first one
     /// it lacks. A note it holds after one it lacks doesn't count, since the
     /// one it lacks would never come again.
     fn held_in_conversation(&self, agent: &str, task: &arko_agents::Task, review: bool) {
@@ -754,7 +754,7 @@ impl NoteBoard {
         }
     }
 
-    /// Run `task` of `agent` was cut back (`Task::cut_back`): the notes it
+    /// Run `task` of `agent` was cut back (`Task::cut_back`). The notes it
     /// was given in the messages the cut removed are given again at its next
     /// turn boundary, as for a recovered run, except the one-time notes,
     /// which went with the messages around them (such as what the user wrote
@@ -770,7 +770,7 @@ impl NoteBoard {
     }
 
     /// Run `task_id` joined the workflow with a conversation of its own (a
-    /// branch, `Workflow::import_agent_run`): it counts as given every note
+    /// branch, `Workflow::import_agent_run`). It counts as given every note
     /// posted so far, as a run started now does, and gets the later ones.
     pub(crate) fn adopted(&self, ctx: &SharedContext, task_id: Uuid) {
         self.poll(ctx);
@@ -796,7 +796,7 @@ impl NoteBoard {
         }
     }
 
-    /// Whether a run of `agent` receives a note only when it names it: a
+    /// Whether a run of `agent` receives a note only when it names it, namely a
     /// completion verifier's `review` (the same agent run as an ordinary
     /// delegation target is not one), or a run of an agent set with
     /// `notes_by_name_only`.
@@ -805,7 +805,7 @@ impl NoteBoard {
     }
 
     /// Whether `agent` receives `note` in the runs it is posted for, as
-    /// posting checks and logs it: a completion verifier counts as
+    /// posting checks and logs it. A completion verifier counts as
     /// reviewing (it runs as one).
     fn receives_as_posted(&self, ctx: &SharedContext, note: &Note, agent: &str) -> bool {
         self.receives(
@@ -885,7 +885,7 @@ impl NoteBoard {
         Ok((note, recipients))
     }
 
-    /// Logs a posted note (once: notes restored from a checkpoint aren't
+    /// Logs a posted note (once, since notes restored from a checkpoint aren't
     /// posted again), in the log and the event log, and warns about the
     /// agents it can reach through messages although it excludes them.
     fn announce(&self, ctx: &SharedContext, posted: &PostedNote, recipients: &[String]) {
@@ -924,7 +924,7 @@ impl NoteBoard {
     }
 
     /// Whether a note's content reaching `agent` in a message (see
-    /// [`leaks`](Self::leaks)) is worth a warning, not just a debug line: it
+    /// [`leaks`](Self::leaks)) is worth a warning, not just a debug line, because it
     /// is for an agent the host marked independent (`notes_by_name_only`).
     /// A completion verifier runs only while it reviews, inside its target's
     /// call, and a message to it is refused at other times unless messages
@@ -1054,7 +1054,7 @@ fn insert(
 
 /// Whether `task` holds note `posted`, in its conversation or pending, as
 /// its records say by the note's id. For context it saved without ids, its
-/// text says: a user message, or context it took and hasn't added, with the
+/// text says. That is a user message, or context it took and hasn't added, with the
 /// note's item whole.
 fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
     match task.holding(&note_id(posted.seq)) {
@@ -1072,7 +1072,7 @@ fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
     }
 }
 
-/// Whether `task`'s conversation holds `posted` whole: by its records, or
+/// Whether `task`'s conversation holds `posted` whole, by its records, or
 /// by its text where only text can say. A note still pending doesn't count.
 fn recorded(task: &arko_agents::Task, posted: &PostedNote) -> bool {
     match task.holding(&note_id(posted.seq)) {
@@ -1109,7 +1109,7 @@ fn shown_ids(notes: &[&PostedNote]) -> Vec<String> {
         .collect()
 }
 
-/// Whether `note` may reach run `task_id`: a note for one run reaches
+/// Whether `note` may reach run `task_id`. A note for one run reaches
 /// that run only.
 /// Whether `agent` can be sent the images of `note`. A note for one run
 /// goes by the model that run works with, which may not be its agent's.
@@ -1164,7 +1164,7 @@ fn skipped(state: &NotesSnapshot, task_id: Uuid, posted: &PostedNote) -> bool {
             .is_some_and(|newest| posted.seq <= *newest)
 }
 
-/// Whether `c` is a line break or a control character: what a source
+/// Whether `c` is a line break or a control character, which a source
 /// agent's name may not contain.
 fn is_break_or_control(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
@@ -1211,7 +1211,7 @@ fn cut(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// What a note's list item says about its images: it has `count`, and
+/// What a note's list item says about its images. It has `count`, and
 /// `lost` of them can't be given.
 fn images_line(count: usize, lost: usize) -> Option<String> {
     let lost = lost.min(count);
@@ -1228,7 +1228,7 @@ fn images_line(count: usize, lost: usize) -> Option<String> {
     })
 }
 
-/// The start of a note's list item: the part that doesn't depend on its
+/// The start of a note's list item, the part that doesn't depend on its
 /// images, so a conversation that holds the item holds this.
 fn item_head(posted: &PostedNote) -> String {
     format!(
@@ -1259,7 +1259,7 @@ fn item(posted: &PostedNote) -> String {
     item_with(posted, 0)
 }
 
-/// How many of `notes`, from the first, fit in a prompt or an update: at
+/// How many of `notes`, from the first, fit in a prompt or an update, at
 /// most [`PROMPT_MAX_NOTES`], and no further note once it would pass
 /// [`PROMPT_MAX_BYTES`]. The first always (at least one, when there are
 /// any).
@@ -1284,7 +1284,7 @@ fn items(notes: &[&PostedNote], lost: &HashMap<u64, usize>) -> String {
         .collect()
 }
 
-/// The notes section of a prompt: `notes` (newest first) as many as fit,
+/// The notes section of a prompt, with `notes` (newest first) as many as fit,
 /// with a line counting the older ones left out. Empty without notes.
 fn section(notes: &[&PostedNote]) -> String {
     if notes.is_empty() {

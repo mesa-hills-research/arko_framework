@@ -1,12 +1,12 @@
-//! Arm C's dense search (opt-in): every arko_index chunk embedded with
+//! Arm C's dense search (opt-in), with every arko_index chunk embedded with
 //! Voyage (`prepare --dense`), and a query service in the benchmark process
 //! that the agents' `arko_index_dense` command asks over a Unix socket, so
 //! the Voyage key never reaches an agent's shell.
 //!
-//! arko_index itself is lexical only (dense search is planned for it); this
+//! arko_index itself is lexical only (dense search is planned for it), and this
 //! arm measures what dense retrieval over the same chunks would add.
 
-// The query service is Unix-only; elsewhere its parts are unused.
+// The query service is Unix-only, and elsewhere its parts are unused.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::BenchResult;
 use crate::repos::PreparedRepo;
 
-/// The variables `arko_index_dense` reads: the service's socket and the
+/// The variables `arko_index_dense` reads, the service's socket and the
 /// repository it searches.
 pub const SOCKET_VARIABLE: &str = "ARKO_DENSE_SOCKET";
 pub const REPO_VARIABLE: &str = "ARKO_DENSE_REPO";
@@ -40,7 +40,7 @@ pub struct DenseInfo {
     pub dimensions: usize,
     pub mock: bool,
     pub chunks: usize,
-    /// Embedding tokens billed (Voyage's count; estimated for the mock).
+    /// Embedding tokens billed (Voyage's count, or estimated for the mock).
     pub tokens: usize,
     pub build_ms: u64,
 }
@@ -63,8 +63,8 @@ pub struct ChunkMeta {
     pub end_byte: usize,
 }
 
-/// The offline embedder: words and identifier parts hashed into signed
-/// buckets, normalized. Deterministic; for dry runs and tests only.
+/// The offline embedder, words and identifier parts hashed into signed
+/// buckets, normalized. Deterministic, for dry runs and tests only.
 pub fn mock_embedding(text: &str, dimensions: usize) -> Vec<f32> {
     let mut vector = vec![0f32; dimensions.max(1)];
     for token in crate::dense::tokens(text) {
@@ -468,7 +468,7 @@ async fn answer(
     Ok(text)
 }
 
-/// `arko_index_dense QUERY`: asks the running benchmark's service.
+/// `arko_index_dense QUERY` asks the running benchmark's service.
 pub async fn query_command(query: &str, limit: usize) -> BenchResult<()> {
     #[cfg(unix)]
     {

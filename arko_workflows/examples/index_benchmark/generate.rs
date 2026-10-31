@@ -1,4 +1,4 @@
-//! Task generation: a writer agent writes questions with answer keys it has
+//! Task generation, a writer agent writes questions with answer keys it has
 //! checked in the code (`submit_question` checks every location against the
 //! checkout), a separate verifier agent answers each question blind and
 //! then judges the key, and the task set keeps the questions both agree on,
@@ -37,7 +37,7 @@ use crate::tasks::{
 };
 use crate::{Arm, BenchResult};
 
-/// The seed tasks: the earlier arko question sets (behaviour, depth and
+/// The seed tasks, the earlier arko question sets (behaviour, depth and
 /// breadth), converted to tasks with their keys checked at the pinned
 /// commit.
 pub const SEED_TASKS: &str = include_str!("seed-tasks.json");
@@ -168,7 +168,7 @@ fn normalized(question: &str) -> String {
         .collect()
 }
 
-/// What every writer run shares: the candidates file, the questions so
+/// What every writer run shares, the candidates file, the questions so
 /// far, and the id counters.
 pub struct GenerationState {
     candidates: Appender,
@@ -463,7 +463,7 @@ pub struct GenerateOptions {
     pub shell: ShellSettings,
     pub tasks_path: PathBuf,
     pub mock: bool,
-    /// The tools of the writer and the verifier: arm A's (a terminal) or
+    /// The tools of the writer and the verifier, arm A's (a terminal) or
     /// arm B's (with arko_index).
     pub writer_arm: Arm,
 }
@@ -486,7 +486,7 @@ fn paths(layout: &Layout) -> Paths {
 }
 
 /// Directories of a checkout that hold source files of its language, most
-/// files first: the focus areas handed to successive writer runs.
+/// files first, the focus areas handed to successive writer runs.
 fn focus_areas(checkout: &Path, language: &str) -> Vec<String> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut stack = vec![checkout.to_path_buf()];
@@ -553,7 +553,7 @@ fn seed_counts(seeds: &[BenchTask]) -> HashMap<(String, TaskKind), usize> {
     counts
 }
 
-/// Writer runs per repository and kind at most, over every `generate`:
+/// Writer runs per repository and kind at most, over every `generate`,
 /// enough to write twice the questions wanted.
 pub fn max_writer_runs(per_kind: usize, oversample: f64) -> usize {
     ((per_kind as f64 * oversample * 2.0).ceil() as usize).div_ceil(QUESTIONS_PER_WRITER_RUN) + 2
@@ -572,7 +572,7 @@ pub struct PairProgress {
     pub agreed: usize,
     /// Questions waiting for (another) verification.
     pub pending: usize,
-    /// Writer runs that ended for reasons of their own: they count against
+    /// Writer runs that ended for reasons of their own, they count against
     /// [`max_writer_runs`].
     pub writer_runs: usize,
     /// Writer runs of this `generate` that ended outside the writer's
@@ -581,7 +581,7 @@ pub struct PairProgress {
 }
 
 impl PairProgress {
-    /// Questions to write now: enough that the agreed questions, and the
+    /// Questions to write now, enough that the agreed questions, and the
     /// pending ones at the expected yield (one in `oversample`), reach
     /// `per_kind` with the seeds. None once the pair has had its writer runs.
     pub fn to_write(&self, per_kind: usize, oversample: f64, max_runs: usize) -> usize {
@@ -724,7 +724,7 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
     let per_kind = context.options.per_kind;
     let oversample = context.options.oversample;
     loop {
-        // Questions submitted since: count them, and verify them.
+        // Questions submitted since. Count them, and verify them.
         for candidate in context.state.take_new() {
             if let Some(progress) = progress.get_mut(&(candidate.repo.clone(), candidate.kind)) {
                 progress.pending += 1;
@@ -1035,7 +1035,7 @@ async fn write(context: &GenerateContext, job: WriterJob) -> WriterRecord {
     );
     let _ = std::fs::remove_dir_all(&scratch);
     // A run cancelled by the operator, or failed by a lost login, isn't the
-    // writer's: it isn't recorded. (Questions it submitted are kept.)
+    // writer's. It isn't recorded. (Questions it submitted are kept.)
     let not_the_writers = record.outcome == crate::runner::Outcome::Infra
         && (context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
     if !not_the_writers && let Err(error) = context.writers.append(&record) {
@@ -1056,9 +1056,9 @@ fn key_text(candidate: &Candidate) -> String {
     )
 }
 
-/// Verifies `candidate`; also returns whether the verification was
+/// Verifies `candidate`, and also returns whether the verification was
 /// recorded (one cancelled by the operator, or failed by a lost login, is
-/// not: it runs again).
+/// not. It runs again).
 async fn verify(context: &GenerateContext, candidate: &Candidate) -> (VerificationRecord, bool) {
     let mut record = VerificationRecord {
         candidate_id: candidate.id.clone(),
@@ -1174,7 +1174,7 @@ async fn verify(context: &GenerateContext, candidate: &Candidate) -> (Verificati
         context.save_transcript(&name, result.as_ref().and_then(|result| result.task().ok()));
     let _ = std::fs::remove_dir_all(&scratch);
     // A verification cancelled by a stop, or failed by a lost login, isn't
-    // the verifier's: it isn't recorded, and runs again later.
+    // the verifier's. It isn't recorded, and runs again later.
     let recorded = record.ok
         || !(context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
     if recorded && let Err(error) = context.verifications.append(&record) {
@@ -1183,8 +1183,8 @@ async fn verify(context: &GenerateContext, candidate: &Candidate) -> (Verificati
     (record, recorded)
 }
 
-/// Builds the task set: the seed tasks, then for each repository and kind
-/// the verified questions (the verifier agreed with the key; questions with
+/// Builds the task set, the seed tasks, then for each repository and kind
+/// the verified questions (the verifier agreed with the key, and questions with
 /// locations no longer in the checkout are dropped) in the order they were
 /// written, up to `per_kind` tasks per repository and kind with the seeds.
 pub fn assemble(layout: &Layout, per_kind: usize, path: &Path) -> BenchResult<Vec<BenchTask>> {
@@ -1460,14 +1460,14 @@ mod tests {
         assert_eq!(max_runs, 9);
         let fresh = PairProgress::default();
         assert_eq!(fresh.to_write(9, 1.5, max_runs), 14);
-        // Seeds count; pending questions count at the expected yield.
+        // Seeds count, and pending questions count at the expected yield.
         let seeded = PairProgress {
             seeded: 3,
             pending: 4,
             ..PairProgress::default()
         };
         assert_eq!(seeded.to_write(9, 1.5, max_runs), 5);
-        // The verifier disagreed with some: write more, until the runs are
+        // The verifier disagreed with some, so write more, until the runs are
         // used up.
         let short = PairProgress {
             agreed: 5,
@@ -1521,7 +1521,7 @@ mod tests {
         for _ in 0..3 {
             generate(options()).await.unwrap();
         }
-        // No writer run was the writer's: none is recorded, so none counts
+        // No writer run was the writer's, so none is recorded, so none counts
         // against the pair's runs, however often the login fails.
         let writers: Vec<WriterRecord> =
             read_jsonl(&layout.tasks_dir().join("writers.jsonl")).unwrap();

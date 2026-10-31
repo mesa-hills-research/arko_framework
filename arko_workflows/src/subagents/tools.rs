@@ -123,7 +123,7 @@ fn failed(message: String) -> ToolError {
     ToolError::ExecutionFailed(message)
 }
 
-/// Starts a subagent: offered to the workflow services' callers while their
+/// Starts a subagent, offered to the workflow services' callers while their
 /// depth allows.
 pub(crate) struct StartAgentTool {
     context: Arc<SharedContext>,
@@ -270,7 +270,7 @@ impl Tool for StartAgentTool {
     }
 }
 
-/// Sends a message to an agent run: a lead's to its runs, a run's to its
+/// Sends a message to an agent run, a lead's to its runs, a run's to its
 /// lead or its peers.
 pub(crate) struct MessageAgentTool {
     context: Arc<SharedContext>,
@@ -278,7 +278,7 @@ pub(crate) struct MessageAgentTool {
 }
 
 impl MessageAgentTool {
-    /// `caller`: offered to a run that may start runs.
+    /// `caller`, offered to a run that may start runs.
     pub(crate) fn new(context: Arc<SharedContext>, caller: bool) -> Self {
         Self { context, caller }
     }

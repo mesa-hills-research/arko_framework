@@ -1,4 +1,4 @@
-//! Operator notes through real runs (against a local model server): live
+//! Operator notes through real runs (against a local model server), covering live
 //! delivery, prompts, audiences, handovers, checkpoints and the control
 //! folder.
 
@@ -40,7 +40,7 @@ fn latest_checkpoint(workspace: &Workspace) -> std::path::PathBuf {
     run.join(name.trim())
 }
 
-/// The user text of a request body: what the agent was told.
+/// The user text of a request body, which is what the agent was told.
 fn user_text(body: &str) -> String {
     let body: Value = serde_json::from_str(body).unwrap();
     let mut text = Vec::new();
@@ -100,7 +100,7 @@ async fn done_server() -> ResponsesServer {
     .await
 }
 
-/// A server where an agent calls the probe twice and then completes; the
+/// A server where an agent calls the probe twice and then completes, and the
 /// first request is answered once `go` is notified.
 async fn probing_server(go: Arc<tokio::sync::Notify>) -> ResponsesServer {
     ResponsesServer::start_async(move |_, body| {
@@ -156,7 +156,7 @@ async fn a_note_reaches_a_running_agent_at_its_next_turn_boundary() {
         .iter()
         .map(|text| text.matches("Prefer the orbit method.").count())
         .collect::<Vec<_>>();
-    // Not in the request made before it was posted; then once, kept in the
+    // Not in the request made before it was posted, then once, kept in the
     // conversation.
     assert_eq!(counts, [0, 1, 1]);
     let update = &requests[1];
@@ -182,7 +182,7 @@ fn input_image(data: &str) -> Value {
     json!({"type": "input_image", "image_url": format!("data:image/png;base64,{data}")})
 }
 
-/// A one-time note's images reach a running agent with the note: after the
+/// A one-time note's images reach a running agent with the note, after the
 /// context update's text, each after a label naming the note. A note may be
 /// images alone.
 #[tokio::test]
@@ -509,7 +509,7 @@ async fn notes_with_images_are_one_time_and_for_models_that_take_them() {
 }
 
 /// A run started on a model of its own (`RunOptions::config`) gets a note's
-/// images by that model, not by its agent's: a model that takes no images
+/// images by that model, not by its agent's. A model that takes no images
 /// gets the line saying the image can't be shown.
 #[tokio::test]
 async fn a_note_s_images_go_by_the_run_s_own_model() {
@@ -543,7 +543,7 @@ async fn a_note_s_images_go_by_the_run_s_own_model() {
 }
 
 /// A note for one run is checked against that run's model, not its
-/// agent's: a run on a model that takes images is sent the image though its
+/// agent's. A run on a model that takes images is sent the image though its
 /// agent's model takes none, and a run on a model that takes none is refused
 /// a note with one. A note for the agent is refused only when neither its
 /// model nor that of one of its runs takes the image.
@@ -631,7 +631,7 @@ async fn a_note_s_images_are_checked_against_the_runs_that_get_it() {
 }
 
 /// After a resume from a checkpoint, a run of the agent that hasn't run again
-/// still counts for a note for the agent: its saved model takes the image,
+/// still counts for a note for the agent, because its saved model takes the image,
 /// though the agent's registered model takes none.
 #[tokio::test]
 async fn a_saved_run_s_model_counts_for_a_note_after_a_resume() {
@@ -673,7 +673,7 @@ async fn a_saved_run_s_model_counts_for_a_note_after_a_resume() {
 }
 
 /// A standing note is in the initial prompt of every later run, newest
-/// first; a one-time note isn't, and reaches a run that had started when it
+/// first, and a one-time note isn't, and reaches a run that had started when it
 /// was posted once, when that run is continued.
 #[tokio::test]
 async fn standing_notes_are_in_later_prompts_and_one_time_notes_reach_earlier_runs_once() {
@@ -710,7 +710,7 @@ async fn standing_notes_are_in_later_prompts_and_one_time_notes_reach_earlier_ru
     assert!(prompt.find("Cite every source.") < prompt.find("Use British spelling."));
     assert!(!prompt.contains("Skip the appendix"), "{prompt}");
 
-    // The first run started before all three: continued, it gets them once.
+    // The first run started before all three, and continued, it gets them once.
     workflow.continue_agent(&first, "Carry on.").await.unwrap();
     let continued = requests_of(&server, "Carry on.");
     assert_eq!(continued.len(), 1);
@@ -779,7 +779,7 @@ async fn a_note_posted_during_a_final_text_reply_reaches_the_continuation() {
     assert_eq!(carried[0].matches("Also show your working.").count(), 1);
 }
 
-/// The audience decides who gets a note: every agent, the agents named, or
+/// The audience decides who gets a note, namely every agent, the agents named, or
 /// all but those excluded. Completion verifiers' reviews and agents set
 /// with `notes_by_name_only` get only the notes that name them, and a
 /// verifier quotes its target's task without the target's notes. The
@@ -857,7 +857,7 @@ async fn the_audience_decides_who_gets_a_note_and_verifiers_only_when_named() {
     workflow.run_agent("checker", "Check it.").await.unwrap();
     let checker = &requests_of(&server, "Check it.")[0];
     assert!(!checker.contains("# Notes on your task"), "{checker}");
-    // Run by the host (or as a delegation target), not to review: the notes
+    // Run by the host (or as a delegation target), not to review, so it gets the notes
     // for all agents too.
     workflow
         .run_agent("reviewer", "Review the plan.")
@@ -960,7 +960,7 @@ async fn a_running_review_gets_only_the_notes_that_name_its_verifier() {
 }
 
 /// The messaging policy decides whether an agent a note excludes for its
-/// independence can get its content in a message: such leaks are warned
+/// independence can get its content in a message. Such leaks are warned
 /// about.
 #[tokio::test]
 async fn excluded_agents_the_recipients_may_message_are_found() {
@@ -1071,7 +1071,7 @@ async fn a_handover_carries_the_standing_notes() {
 
 /// After Claude Code compacts a Claude Code agent's conversation (against
 /// the scripted fake CLI of arko_agents' tests), the agent gets the
-/// standing notes it had been given again with its next input: a summary
+/// standing notes it had been given again with its next input, because a summary
 /// may leave them out.
 #[tokio::test]
 async fn a_claude_code_compaction_gives_the_standing_notes_again() {
@@ -1159,7 +1159,7 @@ async fn a_claude_code_compaction_gives_the_standing_notes_again() {
     let _ = std::fs::remove_dir_all(&fake);
 }
 
-/// A note posted under the host's id is posted once: posting it again,
+/// A note posted under the host's id is posted once. Posting it again,
 /// also after a resume from a checkpoint that saved it, returns the note
 /// already posted, whatever the text.
 #[tokio::test]
@@ -1250,7 +1250,7 @@ async fn posts_under_one_id_at_the_same_time_post_one_note() {
     assert_eq!(images.len(), 1, "{images:?}");
 }
 
-/// Notes are saved in checkpoints: a resumed workflow has them, a new run
+/// Notes are saved in checkpoints. A resumed workflow has them, a new run
 /// gets the standing ones, and a restored run continued after the resume
 /// isn't given again what it had been given, only what was posted since.
 #[tokio::test]
@@ -1318,7 +1318,7 @@ fn files_containing(dir: &std::path::Path, text: &str) -> Vec<std::path::PathBuf
 }
 
 /// A note's images are saved once, as files in the run directory's
-/// `images` folder, when the note is posted: the notes, the checkpoints and
+/// `images` folder, when the note is posted. The notes, the checkpoints and
 /// the event log name them. A resumed workflow reads them back when it
 /// gives the note, and the task files of the conversation that took them
 /// name them too.
@@ -1338,7 +1338,7 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
     let arko_ai::Image::Base64 { data, .. } = &image else {
         unreachable!()
     };
-    // For the run that finished: it gets the note when it is continued.
+    // For the run that finished, so it gets the note when it is continued.
     let posted = first
         .post_note(
             Note::new("See these.")
@@ -1399,7 +1399,7 @@ async fn note_images_are_saved_once_and_named_everywhere_else() {
 }
 
 /// A note's image is checked for every recipient when posted, from its
-/// header, and fitted when it is given: a BMP, which OpenAI doesn't take,
+/// header, and fitted when it is given. A BMP, which OpenAI doesn't take,
 /// reaches the agent as a PNG. An image that can't be read to convert it is
 /// refused when posted.
 #[tokio::test]
@@ -1481,8 +1481,8 @@ fn a_handover_shows_the_standing_notes_the_task_recorded() {
     assert!(!section.contains("Not given yet."), "{section}");
 }
 
-/// A checkpoint written while notes held their images still restores them:
-/// they move out of the notes as a posted note's do.
+/// A checkpoint written while notes held their images still restores them.
+/// They move out of the notes as a posted note's do.
 #[test]
 fn notes_saved_with_their_images_keep_them_when_restored() {
     let image = png("b2xk");
@@ -1549,7 +1549,7 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
     go.notify_one();
     server.wait_for_requests(2).await;
     assert!(user_text(&server.bodies()[1]).contains("Prefer the orbit method."));
-    // Saved during that request: the task as it was before the note was
+    // Saved during that request, the task as it was before the note was
     // added, and the note recorded as given.
     first.checkpoint().await.unwrap();
     let checkpoint = latest_checkpoint(&workspace);
@@ -1582,7 +1582,7 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         1,
         "{resent}"
     );
-    // Given once: the task holds it now.
+    // Given once, so the task holds it now.
     assert!(holds_text(
         result.task().unwrap(),
         "Prefer the orbit method."
@@ -1641,7 +1641,7 @@ async fn a_control_folder_note_written_while_running_is_picked_up() {
     );
 }
 
-/// The control folder is opt-in and needs persistence; a run directory
+/// The control folder is opt-in and needs persistence, and a run directory
 /// without one refuses a note, so it can't be lost unread.
 #[tokio::test]
 async fn the_control_folder_is_opt_in() {
@@ -1677,7 +1677,7 @@ async fn the_control_folder_is_opt_in() {
     );
 }
 
-/// Each note is logged once in the event log: posted in process or read
+/// Each note is logged once in the event log, posted in process or read
 /// from the control folder, however often the folder is read, and not again
 /// after a resume.
 #[tokio::test]
@@ -1839,7 +1839,7 @@ fn a_prompt_shows_the_newest_notes_within_the_caps() {
     assert_eq!(section(&[]), "");
 }
 
-/// No note can end the notes section early: every line of a note is
+/// No note can end the notes section early. Every line of a note is
 /// indented, so the task without its notes is exactly the task.
 #[test]
 fn a_note_cant_pass_for_a_heading() {
@@ -1853,7 +1853,7 @@ fn a_note_cant_pass_for_a_heading() {
     assert_eq!(without_notes("Do the work."), "Do the work.");
 }
 
-/// A writer that crashed mid-line leaves an unfinished line: it is never
+/// A writer that crashed mid-line leaves an unfinished line. It is never
 /// read as a note, and the next note is written on a line of its own.
 #[test]
 fn an_unfinished_line_in_the_control_folder_is_skipped() {
@@ -1887,7 +1887,7 @@ fn an_unfinished_line_in_the_control_folder_is_skipped() {
     assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
 }
 
-/// The JSON form of a note: only the text is required.
+/// The JSON form of a note, only the text is required.
 #[test]
 fn a_note_needs_only_its_text_in_json() {
     let note: Note = serde_json::from_str(r#"{"text": "hi"}"#).unwrap();
@@ -1911,7 +1911,7 @@ fn a_note_needs_only_its_text_in_json() {
     );
 }
 
-/// New notes past an update's cap aren't lost: an update shows the oldest
+/// New notes past an update's cap aren't lost. An update shows the oldest
 /// that fit, and the rest come at the next turn boundary. Here two notes of
 /// 9 KB each, posted while the agent is inside a tool call.
 #[tokio::test]
@@ -1961,7 +1961,7 @@ async fn new_notes_past_an_updates_cap_come_at_the_next_boundary() {
 }
 
 /// A continued run gets every one-time note posted since it last ran, also
-/// past an update's cap: 21 notes, 20 in the first update, the last one at
+/// past an update's cap, 21 notes, 20 in the first update, the last one at
 /// the next boundary (here, the next continuation's), each once.
 #[tokio::test]
 async fn a_continued_run_gets_every_one_time_note_past_the_cap() {
@@ -2078,7 +2078,7 @@ async fn a_note_for_one_run_reaches_that_run_alone() {
 }
 
 /// A one-time note posted before a run started never reaches it, also when
-/// the run is recovered after a crash: what it was given is read from its
+/// the run is recovered after a crash, so what it was given is read from its
 /// task only after its start.
 #[tokio::test]
 async fn a_recovered_run_isnt_given_a_one_time_note_posted_before_it_started() {
@@ -2130,7 +2130,7 @@ async fn a_recovered_run_isnt_given_a_one_time_note_posted_before_it_started() {
 }
 
 /// A note posted while an agent writes its handover report reaches the
-/// fresh conversation once: in the update before its first request, not
+/// fresh conversation once, in the update before its first request, not
 /// again at the next boundary.
 #[tokio::test]
 async fn a_note_posted_during_a_handover_report_is_given_once() {
@@ -2224,7 +2224,7 @@ async fn a_replaced_control_file_doesnt_post_its_notes_again() {
 }
 
 /// A source agent's name can't hold a line break or a control character
-/// (it is shown unindented in the note's label); line breaks in a note's
+/// (it is shown unindented in the note's label), and line breaks in a note's
 /// text are all made LF, so every line is indented.
 #[tokio::test]
 async fn names_and_line_breaks_cant_break_out_of_a_note() {
@@ -2263,7 +2263,7 @@ async fn names_and_line_breaks_cant_break_out_of_a_note() {
 }
 
 /// The leak warning is a warning for agents marked independent, and for
-/// completion verifiers only when messages are kept for finished agents;
+/// completion verifiers only when messages are kept for finished agents, and
 /// otherwise a verifier hears from others only while it reviews.
 #[tokio::test]
 async fn the_leak_warning_is_kept_for_paths_that_stay_open() {
@@ -2301,7 +2301,7 @@ fn hinted(server: &ResponsesServer, workspace: &Workspace, hint: Option<&str>) -
     builder.build().unwrap()
 }
 
-/// What `agent` is told when it is continued after `notes` were posted: the
+/// What `agent` is told when it is continued after `notes` were posted, the
 /// user text of the request.
 async fn told_after(
     workflow: &Workflow,

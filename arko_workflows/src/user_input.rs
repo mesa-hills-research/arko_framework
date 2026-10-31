@@ -33,7 +33,7 @@ pub trait UserInputHandler: Send + Sync {
     /// Takes questions the agent asked without waiting for the answer
     /// (`request.wait` is false). It runs in the background, while the agent
     /// goes on. An answer it returns reaches the agent in its mailbox, as a
-    /// subagent's report does: at its next turn boundary, or, for a run that
+    /// subagent's report does, at its next turn boundary, or, for a run that
     /// ended, when the host continues it (the workflow sends
     /// [`NewsWaiting`](crate::subagents::SubagentEventKind::NewsWaiting)).
     /// The default answers with [`respond`](Self::respond).
@@ -65,7 +65,7 @@ pub trait UserInputHandler: Send + Sync {
     }
 
     /// The number of the first of `count` questions agent run
-    /// `agent_run_id` (of agent `agent_name`) asks now: they are `q{n}`,
+    /// `agent_run_id` (of agent `agent_name`) asks now. They are `q{n}`,
     /// `q{n + 1}`, ... A host that gives out the numbers itself, one ask at
     /// a time, sees every id once across its runs, even runs at the same
     /// time, so an answer can't reach another run's question. `None` (the
@@ -83,7 +83,7 @@ pub trait UserInputHandler: Send + Sync {
     }
 
     /// Agent run `agent_run_id` (of agent `agent_name`) asked `asked`
-    /// (`wait`: it waits for the answer). Called as its runtime records
+    /// (`wait` means it waits for the answer). Called as its runtime records
     /// them, before the agent goes on and before [`asked`](Self::asked) or
     /// [`respond`](Self::respond) hears of them, so that
     /// [`open_questions`](Self::open_questions) has them for a handover or a

@@ -17,7 +17,7 @@ pub use plan::{
     PlanWindow, PlanWindowUsage,
 };
 
-/// Scale factor: store cost as integer micro-dollars for lock-free atomics.
+/// Scale factor to store cost as integer micro-dollars for lock-free atomics.
 const COST_SCALE: f64 = 1_000_000.0;
 
 /// The stored limit that stands for "no limit".
@@ -601,7 +601,7 @@ mod tests {
         assert!(cancel.hold_reason("coder").is_none(), "cancelled, not held");
     }
 
-    /// Each agent's totals add its calls up as they come: billed amounts, list
+    /// Each agent's totals add its calls up as they come. They hold billed amounts, list
     /// prices (a plan-covered call's estimate), tokens and calls. Manual
     /// costs aren't an agent's. A resumed budget rebuilds them from its
     /// ledger.

@@ -285,7 +285,7 @@ async fn forward(
                     // A waiter learns that the run is gone.
                     signal_arrival(&state.arrivals, task_id);
                 }
-                // Nothing has been acknowledged: every unsent message remains
+                // Nothing has been acknowledged, so every unsent message remains
                 // in the checkpoint-backed queue for the next invocation.
                 return;
             }
@@ -396,7 +396,7 @@ pub(crate) fn message_id(id: Uuid) -> String {
     format!("message:{id}")
 }
 
-/// What `task` holds of `message`: presented in one of its prompts, added
+/// What `task` holds of `message`, whether presented in one of its prompts, added
 /// as a runtime context update, or still pending, as the ids it recorded
 /// say. For context it saved without ids, its text says, as it did before
 /// tasks kept ids.
@@ -537,7 +537,7 @@ impl MessageBus {
 
     /// Registers a run started with the messages `in_prompt` in its prompt,
     /// and delivers live every other message queued for the agent that the
-    /// run doesn't hold (see [`AgentMessage::held_by`]): those queued since
+    /// run doesn't hold (see [`AgentMessage::held_by`]), meaning those queued since
     /// the prompt was built, and, for a run resumed without a prompt, those
     /// it hasn't seen.
     pub(crate) fn register_run(
@@ -547,7 +547,7 @@ impl MessageBus {
         sender: mpsc::Sender<UserCommand>,
         in_prompt: &[Uuid],
     ) {
-        // One critical section: a message sent meanwhile is either late here
+        // One critical section, so a message sent meanwhile is either late here
         // or delivered by `send`, never both.
         let mut guard = self.state.lock();
         let state = &mut *guard;
@@ -610,7 +610,7 @@ impl MessageBus {
     }
 
     /// Counts agent messages arriving for run `task_id` and their forwarding
-    /// to it: take the receiver, mark its value seen, then check
+    /// to it. Take the receiver, mark its value seen, then check
     /// [`unseen_messages`](Self::unseen_messages), and no arrival after the
     /// check goes unnoticed.
     pub(crate) fn watch_arrivals(&self, task_id: Uuid) -> watch::Receiver<u64> {
@@ -674,8 +674,8 @@ impl MessageBus {
     }
 
     /// Run `task_id`'s conversation got a context update holding what `ids`
-    /// name ([`AgentEvent::ContextInjected`](arko_agents::AgentEvent::ContextInjected)):
-    /// the agent messages among them are seen, also one it got the first
+    /// name ([`AgentEvent::ContextInjected`](arko_agents::AgentEvent::ContextInjected)).
+    /// The agent messages among them are seen, also one it got the first
     /// part of.
     pub(crate) fn seen(&self, agent_name: &str, task_id: Uuid, ids: &[String]) {
         if ids.is_empty() {
@@ -837,7 +837,7 @@ impl MessageBus {
     }
 
     /// Records what run `task_id` of `agent_name` holds as it stops (see
-    /// [`AgentMessage::held_by`]): the queued messages its conversation holds
+    /// [`AgentMessage::held_by`]), namely the queued messages its conversation holds
     /// (presented in `prompt_ids` or an earlier prompt, or added as a
     /// runtime context update, an echo in an assistant turn, a tool result,
     /// or a suffix doesn't count) and those it took from its command channel
@@ -846,7 +846,7 @@ impl MessageBus {
     /// resumed. When the run `completed`, the messages in its conversation
     /// are acknowledged and leave the queue. One it only took stays for the
     /// runs that haven't read it. The run's context notices are dropped
-    /// whatever the outcome: they describe the run's own context.
+    /// whatever the outcome, because they describe the run's own context.
     pub(crate) fn settle_run(
         &self,
         agent_name: &str,
@@ -855,7 +855,7 @@ impl MessageBus {
         completed: bool,
     ) {
         let task_id = task.id;
-        // The conversation is searched outside the lock (it can be long);
+        // The conversation is searched outside the lock (it can be long),
         // messages queued meanwhile aren't in it.
         let queued = self
             .state
@@ -1003,7 +1003,7 @@ mod tests {
         bus.settle_run(agent_name, &legacy_task(task_id, conversation()), &[], true);
     }
 
-    // Test watchdogs detect deadlocks; production delivery has no forced timeout.
+    // Test watchdogs detect deadlocks, and production delivery has no forced timeout.
     async fn received(receiver: &mut mpsc::Receiver<UserCommand>) -> String {
         let command = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
             .await
@@ -1019,7 +1019,7 @@ mod tests {
         arko_ai::Message::new_user(&format!("# Workflow context update\n\n{content}"))
     }
 
-    /// A run's unseen agent messages: sent after it started, not yet in its
+    /// A run's unseen agent messages, those sent after it started and not yet in its
     /// conversation. Messages in its prompt, delivered ones (still queued
     /// until acknowledged) and context notices don't count. Each arrival and
     /// forward is signalled.
@@ -1068,7 +1068,7 @@ mod tests {
         // run completes and acknowledges them.
         assert_eq!(bus.pending("lead").len(), 3);
 
-        // Unregistered: nothing is tracked, and the signal is gone.
+        // Unregistered, so nothing is tracked, and the signal is gone.
         arrivals.borrow_and_update();
         bus.unregister_active("lead", run);
         assert!(bus.unseen_messages("lead", run).senders.is_empty());
@@ -1106,11 +1106,11 @@ mod tests {
         );
         item.given = 9_000;
         task.queue_context(item);
-        // The rest still pending: held, but not acknowledged.
+        // The rest still pending, held but not acknowledged.
         bus.settle_run("lead", &task, &[], true);
         assert_eq!(bus.pending("lead").len(), 1);
         assert!(bus.pending("lead")[0].is_held_by(run));
-        // Recorded: acknowledged.
+        // Recorded and acknowledged.
         task.pending_context_injections.clear();
         task.conversation
             .add_user_message("# Workflow context update\n\nThe rest.");
@@ -1183,7 +1183,7 @@ mod tests {
         assert!(kept(&recorded_whole(&long), &long));
     }
 
-    /// A message sent while a run registers reaches it once: with the late
+    /// A message sent while a run registers reaches it once, with the late
     /// messages its registration queues, or through the send, never both.
     /// (With registration and the search for late messages in two critical
     /// sections, a send between them was delivered twice.)
@@ -1216,7 +1216,7 @@ mod tests {
             });
             registering.join().unwrap();
             let id = sending.join().unwrap();
-            // Outside a Tokio runtime no delivery worker runs: every delivery
+            // Outside a Tokio runtime no delivery worker runs, so every delivery
             // stays in the run's outbound queue.
             let state = bus.state.lock();
             let deliveries = state.active["lead"][&run]
@@ -1356,7 +1356,7 @@ mod tests {
 
         // complete_task can return before the runtime reads these commands or
         // commits their text to Task.conversation. Finalization must preserve
-        // the message even though channel delivery was successful; the
+        // the message even though channel delivery was successful. The
         // run's own context notice ends with it.
         complete_empty(&bus, "creator", task_id);
         bus.unregister_active("creator", task_id);
@@ -1433,7 +1433,7 @@ mod tests {
         .instructions("Test only".into())
         .build()
         .unwrap();
-        // No runtime/model request: feed a finished Task to the real shared
+        // No runtime/model request. Feed a finished Task to the real shared
         // finalizer, which all three workflow completion paths use.
         let workflow = crate::workflow::Workflow::builder()
             .name("message-finalization-test")
@@ -1801,7 +1801,7 @@ mod tests {
     }
 
     /// A handover marks the messages the old conversation held as read by
-    /// the run: they are not presented to it again, and they are
+    /// the run. They are not presented to it again, and they are
     /// acknowledged when it completes though the fresh conversation lacks
     /// them. Its own notices in the old conversation go. Unread messages
     /// stay.

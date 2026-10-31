@@ -1,6 +1,6 @@
-//! runctl: post a note to a workflow run from another process, stop one
-//! agent's runs while the rest of the workflow runs on, or show the run's
-//! status. Works with any arko workflow: RUN_DIR is its persistence
+//! runctl posts a note to a workflow run from another process, stops one
+//! agent's runs while the rest of the workflow runs on, or shows the run's
+//! status. Works with any arko workflow, where RUN_DIR is its persistence
 //! directory (`PersistenceConfig::new(RUN_DIR)`).
 //!
 //! Usage:
@@ -10,19 +10,19 @@
 //!   cargo run -p arko_workflows --example runctl -- stop RUN_DIR --run 5f0c…-… --wrap-up 120 --relaunch
 //!   cargo run -p arko_workflows --example runctl -- status RUN_DIR
 //!
-//! `note` needs a workflow built with `WorkflowBuilder::control_folder()`: it
+//! `note` needs a workflow built with `WorkflowBuilder::control_folder()`. It
 //! appends the note to `RUN_DIR/control/notes.jsonl` under the folder's own
 //! lock, never the run's, so it works while the run is live and while it is
 //! stopped. The workflow posts the note at its agents' next turn boundaries,
-//! or when it resumes, as `Workflow::post_note` does; a note naming an
+//! or when it resumes, as `Workflow::post_note` does, and a note naming an
 //! unknown agent is skipped there with a warning in its log. `stop` appends
-//! a request to `RUN_DIR/control/stops.jsonl` the same way; the running
+//! a request to `RUN_DIR/control/stops.jsonl` the same way, and the running
 //! workflow reads it within a second and stops the runs it names as
-//! `Workflow::stop_run` does: each is told to save its work and finish
+//! `Workflow::stop_run` does. Each is told to save its work and finish
 //! within the wrap-up (600 seconds unless `--wrap-up` or `--now`), then
 //! cancelled. The runs are retired unless `--relaunch`. A request written
 //! while the workflow isn't running is never applied. `status` reads the
-//! run's latest checkpoint; it needs no control folder.
+//! run's latest checkpoint, and it needs no control folder.
 //!
 //! Makes no model requests and needs no credentials.
 
@@ -45,7 +45,7 @@ struct Cli {
 enum Command {
     /// Post a note to the run's agents (the workflow must read a control folder).
     Note {
-        /// The run directory: the workflow's persistence directory.
+        /// The run directory, the workflow's persistence directory.
         run_dir: PathBuf,
         /// The note's text.
         #[arg(required_unless_present = "file", conflicts_with = "file")]
@@ -59,7 +59,7 @@ enum Command {
         /// Every agent except these.
         #[arg(long, value_delimiter = ',')]
         except: Vec<String>,
-        /// A one-time note: delivered once to the runs that have started,
+        /// A one-time note, delivered once to the runs that have started,
         /// not shown to later runs.
         #[arg(long)]
         once: bool,
@@ -74,7 +74,7 @@ enum Command {
     /// Stop an agent's running runs (or one run) while the rest of the
     /// workflow runs on (the workflow must read a control folder).
     Stop {
-        /// The run directory: the workflow's persistence directory.
+        /// The run directory, the workflow's persistence directory.
         run_dir: PathBuf,
         /// Every running run of this agent (its registration name).
         #[arg(long, required_unless_present = "run", conflicts_with = "run")]
@@ -99,7 +99,7 @@ enum Command {
     },
     /// Show the run's status from its latest checkpoint.
     Status {
-        /// The run directory: the workflow's persistence directory.
+        /// The run directory, the workflow's persistence directory.
         run_dir: PathBuf,
     },
 }

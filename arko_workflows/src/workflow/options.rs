@@ -35,7 +35,7 @@ pub struct RunOptions {
     pub config: Option<arko_agents::AgentConfig>,
 }
 
-// By hand, since a configuration has no `PartialEq` of its own: two are equal
+// By hand, since a configuration has no `PartialEq` of its own, so two are equal
 // when they save the same.
 impl PartialEq for RunOptions {
     fn eq(&self, other: &Self) -> bool {
@@ -189,7 +189,7 @@ impl ContinueOptions {
     }
 }
 
-/// `workspace` as a run's working directory: resolved against the
+/// `workspace` as a run's working directory, resolved against the
 /// workflow's `base` when relative, made absolute with `.` and `..` resolved
 /// lexically (as the workflow's own workspace is), and required to be an
 /// existing directory.

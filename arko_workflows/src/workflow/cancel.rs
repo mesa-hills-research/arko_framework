@@ -280,7 +280,7 @@ impl RunControl {
             }
             self.fire_tools_stop(cause.agent_reason());
             *self.stopped_at.lock() = Some(tokio::time::Instant::now());
-            // Queued before any agent takes its next step; the driver's own
+            // Queued before any agent takes its next step, and the driver's own
             // (awaited) CancelTask covers a full command channel.
             for sender in self.agents.lock().values() {
                 if let Some(sender) = sender.upgrade() {
@@ -772,7 +772,7 @@ impl WorkflowCancelHandle {
             reason: reason.clone(),
         };
         let Some(wrap_up) = wrap_up else {
-            // Ends a wrap-up under way at once; its stop stands.
+            // Ends a wrap-up under way at once, and its stop stands.
             if !self.control.stop(cause) {
                 return false;
             }
@@ -791,7 +791,7 @@ impl WorkflowCancelHandle {
         if !self.control.begin_wrap_up(record, cause, notice) {
             return false;
         }
-        // Nothing runs: nothing to wrap up.
+        // Nothing runs, so nothing to wrap up.
         if self.control.end_wrap_up_if_idle() {
             self.fire_stopped_hook();
             return true;
@@ -863,7 +863,7 @@ impl WorkflowCancelHandle {
     }
 
     /// Stops run `root` alone, then the runs inside its tool calls (a
-    /// delegated agent's, deeper ones after): returns whether `root`'s stop
+    /// delegated agent's, deeper ones after). It returns whether `root`'s stop
     /// began (or, without a wrap-up, ended its wrap-up).
     fn stop_one(
         &self,
@@ -930,7 +930,7 @@ impl WorkflowCancelHandle {
     /// Cancels run `task_id` for its stop `id` when the stop's wrap-up of
     /// `within` is over, unless the run ends (or is cancelled) first.
     fn time_run_wrap_up(&self, task_id: uuid::Uuid, id: uuid::Uuid, within: Duration) {
-        // Ended already: nothing to time.
+        // Ended already, so nothing to time.
         let Some(mut cancel) = self.control.run_cancel(task_id) else {
             return;
         };
@@ -944,7 +944,7 @@ impl WorkflowCancelHandle {
             self.control.cancel_run(task_id, Some(id));
             return;
         };
-        // Held weakly: once the workflow is dropped, the run's entry and
+        // Held weakly, so once the workflow is dropped, the run's entry and
         // with it the sender are gone, and the timer ends.
         let control = Arc::downgrade(&self.control);
         runtime.spawn(async move {

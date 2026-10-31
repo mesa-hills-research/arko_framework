@@ -549,7 +549,7 @@ impl ResourceTracker {
         ))
     }
 
-    /// A resource as an agent is told about it: a path relative to the
+    /// A resource as an agent is told about it, as a path relative to the
     /// workspace when inside it.
     fn describe(&self, resource: &ResourceId) -> String {
         let path = |path: &std::path::Path| {
@@ -623,7 +623,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tool_paths_resolve_as_the_built_in_tools_open_them() {
-        // The default effects: read_file, write_file, edit_file and
+        // The default effects are read_file, write_file, edit_file and
         // apply_diff on `path`, list_files on `directory`.
         let tracker = ResourceTracker::new(
             PathBuf::from("/workspace"),
@@ -658,7 +658,7 @@ mod tests {
                 )
             );
         }
-        // No shell expansion: the tools open the path as given.
+        // No shell expansion, since the tools open the path as given.
         assert_eq!(file("~/notes"), PathBuf::from("/workspace/~/notes"));
         assert_eq!(file("$HOME/notes"), PathBuf::from("/workspace/$HOME/notes"));
         // A path no tool can open has no key.
@@ -745,7 +745,7 @@ mod tests {
     }
 
     /// A finished reader is not told of a write (no notice, no conflict
-    /// hook), but its reads are kept: when its task is continued it learns
+    /// hook), but its reads are kept. When its task is continued it learns
     /// what changed, and a write it attempts without reading again still
     /// conflicts. A task that can't be continued forgets its reads.
     #[test]
@@ -784,7 +784,7 @@ mod tests {
         assert!(tracker.resume_actor(&reader).is_empty());
     }
 
-    /// After a resume no task runs: every actor of the checkpoint counts as
+    /// After a resume no task runs, so every actor of the checkpoint counts as
     /// finished until its task is continued.
     #[test]
     fn restored_readers_count_as_finished() {

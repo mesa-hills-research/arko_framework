@@ -1,13 +1,13 @@
-//! The dry run's model: a local server speaking the OpenAI Responses
+//! The dry run's model, a local server speaking the OpenAI Responses
 //! streaming protocol that plays each role with a fixed script. Its tool
 //! calls run for real (the shell, `submit_question`), so a dry run checks
 //! the whole pipeline (checkouts, indexes, the arms' tools, grading,
 //! resume, the report) and measures prompt and tool-output sizes, without a
 //! model call.
 //!
-//! Token counts are estimates: input is the request's text at 4 bytes per
+//! Token counts are estimates. Input is the request's text at 4 bytes per
 //! token, with the previous request of the same conversation counted as
-//! cached; output is the reply's text at 4 bytes per token plus a fixed
+//! cached, and output is the reply's text at 4 bytes per token plus a fixed
 //! number of reasoning tokens per call.
 
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ pub struct MockSettings {
     /// Reasoning tokens reported for every call.
     pub reasoning_tokens: usize,
     /// Shell commands a scripted solver (and verifier) runs before it
-    /// answers: searches and reads in turn.
+    /// answers, searches and reads in turn.
     pub solver_steps: usize,
     /// How long each reply takes, to rehearse stops and resumes.
     pub delay: std::time::Duration,
@@ -189,7 +189,7 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// A reply: a tool call, or text.
+/// A reply, a tool call, or text.
 enum Action {
     Call(&'static str, Value),
 }
@@ -281,7 +281,7 @@ fn question_of(view: &View) -> String {
         .unwrap_or_default()
 }
 
-/// The words of `text` most worth searching for: identifiers in backticks
+/// The words of `text` most worth searching for, identifiers in backticks
 /// first, then the longest other words.
 fn keywords(text: &str) -> Vec<String> {
     let mut words: Vec<String> = text
@@ -306,9 +306,9 @@ fn keywords(text: &str) -> Vec<String> {
     words
 }
 
-/// The `round`th search a scripted agent runs, in its arm: arms B and C
+/// The `round`th search a scripted agent runs, in its arm. Arms B and C
 /// search the question, then its keywords one by one (arm C alternates
-/// dense and lexical search); arm A greps the keywords one by one.
+/// dense and lexical search), and arm A greps the keywords one by one.
 fn search_command(instructions: &str, question: &str, round: usize) -> String {
     let words = keywords(question);
     let query = if round == 0 || words.is_empty() {
@@ -334,7 +334,7 @@ fn search_command(instructions: &str, question: &str, round: usize) -> String {
     }
 }
 
-/// The first `path:line` a search printed: an `rg` line or a search2 JSON
+/// The first `path:line` a search printed, an `rg` line or a search2 JSON
 /// line.
 fn first_hit(output: &str) -> Option<(String, u32)> {
     for line in output.lines() {
@@ -476,7 +476,7 @@ fn writer(view: &View) -> Action {
         return Action::Call("complete_task", json!({"summary": "mock: no files"}));
     }
     let file = &files[(hash_of(&[&view.cache_key]) as usize) % files.len()];
-    // The definitions of one file: from arko_index's outline when the
+    // The definitions of one file, from arko_index's outline when the
     // writer has it, else from a grep for definition keywords.
     let has_index = view.instructions.contains("arko_index outline");
     if shells == 1 {
@@ -621,7 +621,7 @@ fn verifier(view: &View, steps: usize) -> Action {
 }
 
 /// A local server that refuses every request with HTTP 401
-/// `invalid_api_key`, as a lost login does: its URL.
+/// `invalid_api_key`, as a lost login does. It returns its URL.
 #[cfg(test)]
 pub async fn unauthorized_server() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

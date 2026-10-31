@@ -42,7 +42,7 @@ impl EventHub {
 }
 
 impl Drop for EventHub {
-    /// The workflow is gone: its subscribers get what is queued, then `None`.
+    /// The workflow is gone, so its subscribers get what is queued, then `None`.
     fn drop(&mut self) {
         for queue in self.subscribers.lock().iter().filter_map(Weak::upgrade) {
             queue.close();
@@ -83,7 +83,7 @@ impl Queue {
     }
 }
 
-/// The text of `last` that `event` joins: both chunks of the same kind
+/// The text of `last` that `event` joins, both chunks of the same kind
 /// from the same run.
 fn joined<'a>(last: &'a mut WorkflowEvent, event: &WorkflowEvent) -> Option<&'a mut String> {
     if last.agent_run_id != event.agent_run_id {

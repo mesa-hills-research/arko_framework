@@ -1,5 +1,5 @@
-//! The agents' terminal: one `shell` tool that runs a command in the
-//! read-only checkout and returns its output. Every arm gets the same tool;
+//! The agents' terminal, one `shell` tool that runs a command in the
+//! read-only checkout and returns its output. Every arm gets the same tool, and
 //! the arms differ only in the programs on its `PATH` and its environment.
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ pub const SHELL_TOOL: &str = "shell";
 pub struct ShellSettings {
     /// Default and maximum time a command may run.
     pub timeout: Duration,
-    /// Output returned to the agent: the first and last half of this many
+    /// Output returned to the agent, the first and last half of this many
     /// bytes, with a note of what was left out.
     pub max_output_bytes: usize,
     /// Calls after which the tool answers with a request to finish instead
@@ -34,7 +34,7 @@ pub struct ShellSettings {
     pub max_calls: usize,
 }
 
-/// Called once when an agent goes on calling after the limit: the job
+/// Called once when an agent goes on calling after the limit. The job
 /// stops the run.
 pub type LimitCallback = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -186,7 +186,7 @@ impl ShellTool {
     }
 }
 
-/// Output read up to a cap: the first `cap / 2` bytes, the last `cap / 2`
+/// Output read up to a cap, the first `cap / 2` bytes, the last `cap / 2`
 /// bytes, and how many bytes there were in all.
 #[derive(Debug, Default)]
 struct CappedOutput {
@@ -251,9 +251,9 @@ async fn kill_group(pid: Option<u32>) {
     let _ = pid;
 }
 
-/// The simple commands of a command line, as words: split at `;`, `|`,
+/// The simple commands of a command line, as words, split at `;`, `|`,
 /// `&`, parentheses, braces, backticks and newlines, and into words at
-/// whitespace, all outside quotes; quotes and backslashes removed.
+/// whitespace, all outside quotes, and quotes and backslashes removed.
 pub fn simple_commands(command: &str) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     let mut words: Vec<String> = Vec::new();
@@ -309,7 +309,7 @@ pub fn simple_commands(command: &str) -> Vec<Vec<String>> {
     commands
 }
 
-/// The programs a command line runs: the first word of each simple command
+/// The programs a command line runs, the first word of each simple command
 /// (see [`simple_commands`]), after variable assignments, shell keywords
 /// and wrappers such as `xargs` or `timeout` with their options, and the
 /// program of a `find ... -exec`. Approximate (`bash -c '...'` counts as
@@ -385,7 +385,7 @@ pub fn programs_in(command: &str) -> Vec<String> {
     programs
 }
 
-/// Which arko_index programs a command runs: (`arko_index` or
+/// Which arko_index programs a command runs (`arko_index` or
 /// `arko_index_cli`, `arko_index_dense`).
 pub fn index_programs(command: &str) -> (bool, bool) {
     let mut index = false;
@@ -401,7 +401,7 @@ pub fn index_programs(command: &str) -> (bool, bool) {
     (index, dense)
 }
 
-/// Variables that hold credentials: never passed to the agents' commands.
+/// Variables that hold credentials, never passed to the agents' commands.
 pub fn is_sensitive(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     name.ends_with("_API_KEY")

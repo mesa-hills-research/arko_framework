@@ -1,4 +1,4 @@
-//! Background subagents end to end, against the local model server: starts,
+//! Background subagents end to end, against the local model server, covering starts,
 //! reports at turn boundaries and through waits, messages both ways, the
 //! queue, stops, isolation, per-run workspaces, questions, receipts, and
 //! checkpoints.
@@ -20,10 +20,10 @@ use crate::test_support::{
 use crate::workflow::result::AgentRunStatus;
 use crate::{Workflow, WorkflowBuilder};
 
-/// A model turn: the tool it calls and its arguments.
+/// A model turn, the tool it calls and its arguments.
 pub(super) type Step = (&'static str, Value);
 
-/// Which conversation a request belongs to: a subagent's (`r1`, `r2`, ...)
+/// Which conversation a request belongs to, a subagent's (`r1`, `r2`, ...)
 /// or the lead's.
 pub(super) fn role(body: &str) -> String {
     for n in 1..10 {
@@ -34,7 +34,7 @@ pub(super) fn role(body: &str) -> String {
     "lead".to_string()
 }
 
-/// How many tool results a request sends: the turn its conversation is at.
+/// How many tool results a request sends, the turn its conversation is at.
 pub(super) fn turn(body: &str) -> usize {
     body.matches("\"function_call_output\"").count()
 }
@@ -262,7 +262,7 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     assert!(worker.contains("Count the files."));
     assert!(worker.contains("started by agent `lead` (your lead)"));
     assert!(worker.contains("Keep it under about 16 KB, and put long detail in a file"));
-    // The lead may start runs and use the blocking tool; the subagent
+    // The lead may start runs and use the blocking tool, and the subagent
     // talks with its lead only.
     let lead_tools = offered(&lead[0]);
     for tool in [
@@ -317,7 +317,7 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
 
 /// A subagent's end is told once its result is recorded, so the result
 /// read at the news has the run's latest request, which a host times the
-/// run's prompt cache by: the request its run announced last, at its first
+/// run's prompt cache by, namely the request its run announced last, at its first
 /// end and again at the end of its continuation.
 #[tokio::test]
 async fn a_subagent_s_end_is_told_with_its_latest_request_recorded() {
@@ -375,7 +375,7 @@ async fn a_subagent_s_end_is_told_with_its_latest_request_recorded() {
             sent.push(sent_at.unwrap());
         }
     }
-    // One request each time: its first end, then its continuation's.
+    // One request each time, its first end, then its continuation's.
     assert_eq!(sent.len(), 2, "{sent:?}");
     for ((_, record), sent) in told.iter().zip(&sent) {
         assert_eq!(record.latest().map(|request| request.sent_at), Some(*sent));
@@ -510,7 +510,7 @@ async fn news_for_an_idle_lead_waits_and_reaches_its_next_turn() {
 }
 
 /// Messages go both ways while a subagent runs, and each wait returns the
-/// text itself: the subagent asks, the lead answers, the subagent reports.
+/// text itself. The subagent asks, the lead answers, the subagent reports.
 /// A message to the finished subagent continues its run, with its context.
 #[tokio::test]
 async fn messages_go_both_ways_and_a_finished_subagent_continues() {
@@ -573,7 +573,7 @@ async fn messages_go_both_ways_and_a_finished_subagent_continues() {
         answered.contains("Your lead sent you a message:\n\nUse blue."),
         "{answered}"
     );
-    // Continued: the same conversation, with the message after the report.
+    // Continued, the same conversation, with the message after the report.
     let continued = worker.last().unwrap();
     assert!(continued.contains("Painted it blue."));
     assert!(continued.contains("Now make it red."));
@@ -582,8 +582,8 @@ async fn messages_go_both_ways_and_a_finished_subagent_continues() {
     assert_eq!(records[0].report.as_deref(), Some("Painted it red."));
 }
 
-/// The host's message goes as the lead's would, under the host's heading:
-/// a finished subagent continues with it. The lead gets a copy with its
+/// The host's message goes as the lead's would, under the host's heading.
+/// A finished subagent continues with it. The lead gets a copy with its
 /// news, after the report before it and before the report it brings.
 #[tokio::test]
 async fn the_hosts_message_continues_a_subagent_and_its_lead_gets_a_copy() {
@@ -673,7 +673,7 @@ async fn starts_over_the_cap_wait_in_a_queue() {
     let lead = bodies_of(&server, "lead");
     let queued = result_of(&lead[2], "lead", 1);
     assert!(queued.starts_with("Queued r2 (agent `worker`)"), "{queued}");
-    // Each report reaches the lead once: at a turn boundary, or in the wait.
+    // Each report reaches the lead once, at a turn boundary, or in the wait.
     let all = result_of(&lead[4], "lead", 3);
     assert!(all.contains("Two."), "{all}");
     assert!(lead[4].contains("One."));
@@ -780,7 +780,7 @@ async fn a_queued_start_stopped_starts_with_a_later_message() {
     );
 }
 
-/// A lead's stop winds its subagent down: the subagent saves its progress
+/// A lead's stop winds its subagent down. The subagent saves its progress
 /// and reports, and the lead is told which run stopped and why. A message
 /// restarts it where it stopped.
 #[tokio::test]
@@ -1127,7 +1127,7 @@ async fn a_host_stop_before_registration_is_applied_and_allows_restart() {
 }
 
 /// A subagent's question goes to its lead, and the lead's message answers
-/// it: the subagent gets the answer as its question's.
+/// it. The subagent gets the answer as its question's.
 #[tokio::test]
 async fn a_subagents_question_goes_to_its_lead() {
     let server = serve(vec![
@@ -1244,7 +1244,7 @@ async fn a_subagents_question_reaches_its_lead_with_its_structure() {
 }
 
 /// Linked subagents message each other, up to the cap between two of
-/// their lead's messages; the lead may get a copy.
+/// their lead's messages, and the lead may get a copy.
 #[tokio::test]
 async fn linked_subagents_message_each_other_up_to_a_cap() {
     let server = serve(vec![
@@ -1302,7 +1302,7 @@ async fn linked_subagents_message_each_other_up_to_a_cap() {
     let lead = bodies_of(&server, "lead");
     let all = lead.iter().map(|body| body.as_str()).collect::<String>();
     assert!(all.contains("sent r1 a message (a copy for you)"));
-    // Unlinked, r1 can't message r2's peers it doesn't know: r2 linked them both ways.
+    // Unlinked, r1 can't message r2's peers it doesn't know, and r2 linked them both ways.
     assert_eq!(
         workflow.subagents()[1].peers,
         vec![workflow.subagents()[0].run_id]
@@ -1394,7 +1394,7 @@ async fn runs_of_a_group_message_each_other() {
     assert!(runs[2].peers.is_empty());
 }
 
-/// A run works in the directory it is given: the host's
+/// A run works in the directory it is given, namely the host's
 /// `run_agent_with`, and `start_agent`'s `workspace` (inside the caller's
 /// directory only).
 #[tokio::test]
@@ -1459,7 +1459,7 @@ async fn runs_work_in_their_own_directories() {
 }
 
 /// A start that is refused, by the host's hook or for its workspace, doesn't
-/// use up a handle: the next one gets the handle the refused one would have had.
+/// use up a handle. The next one gets the handle the refused one would have had.
 #[tokio::test]
 async fn a_refused_start_does_not_use_up_a_handle() {
     let workspace = Workspace::new();
@@ -1531,7 +1531,7 @@ impl WorkspaceProvider for Folders {
 }
 
 /// An isolated subagent works in the workspace the host's provider makes,
-/// which is kept for its later runs and removed on request; a host
+/// which is kept for its later runs and removed on request, and a host
 /// parameter of `start_agent` reaches the host's hook.
 #[tokio::test]
 async fn an_isolated_subagent_works_in_its_providers_workspace() {
@@ -1638,7 +1638,7 @@ fn user_text(body: &str) -> String {
 
 /// The host's start context comes first in a run's first message, with the
 /// task under its own heading after it, and is asked for as each run
-/// starts; a run it gives none (or blank text) starts as without it. A
+/// starts, and a run it gives none (or blank text) starts as without it. A
 /// handover restates it with the task.
 #[tokio::test]
 async fn the_hosts_start_context_opens_the_first_message() {
@@ -1874,7 +1874,7 @@ async fn a_finished_subagent_goes_on_from_its_task_after_a_resume() {
     let records = resumed.subagents();
     assert_eq!(records[0].state, SubagentState::Finished);
     assert_eq!(records[0].report.as_deref(), Some("First report."));
-    // Changed after the build: its continuation has the change.
+    // Changed after the build, so its continuation has the change.
     let state: Value =
         serde_json::from_str(&std::fs::read_to_string(&checkpoint).unwrap()).unwrap();
     let record = state["agent_runs"]
@@ -1965,7 +1965,7 @@ async fn a_group_holds_after_a_resume() {
 }
 
 /// Background runs need workflow services, and host parameters may not
-/// take `start_agent`'s own names; a host tool may not take a subagent
+/// take `start_agent`'s own names, and a host tool may not take a subagent
 /// tool's name.
 #[test]
 fn the_builder_checks_the_subagents_configuration() {
@@ -2036,7 +2036,7 @@ fn a_snapshot_loads_with_defaults() {
 }
 
 /// A lead cut back to before the message whose turn started a subagent
-/// (`ContinueOptions::cut_back_to`) abandoned that timeline: the subagent
+/// (`ContinueOptions::cut_back_to`) abandoned that timeline. The subagent
 /// is detached, and its report, waiting for the lead, isn't given to the
 /// cut conversation. It stays in the subagent's record.
 #[tokio::test]
@@ -2105,7 +2105,7 @@ async fn a_cut_back_lead_gets_no_mail_from_a_subagent_it_no_longer_started() {
 }
 
 /// A subagent's prompt cache is refreshed with the tools of its own
-/// requests, which its depth decides: a subagent that may itself start
+/// requests, which its depth decides. A subagent that may itself start
 /// subagents is offered no `start_agent` at the deepest level, and neither
 /// is its refresh.
 #[tokio::test]
@@ -2174,7 +2174,7 @@ async fn a_subagent_s_refresh_offers_the_tools_of_its_depth() {
 
 /// A cut back detaches only the subagents the lead started in the messages
 /// it removes. One started before a handover replaced the conversation
-/// isn't in them: it stays attached, and its answer to the lead's next
+/// isn't in them. It stays attached, and its answer to the lead's next
 /// message reaches the lead.
 #[tokio::test]
 async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {

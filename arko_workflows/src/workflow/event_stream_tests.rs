@@ -1,4 +1,4 @@
-//! The lossless event subscription under a burst: several agents streaming
+//! The lossless event subscription under a burst, several agents streaming
 //! thousands of chunks into a subscriber that keeps falling behind.
 
 use std::collections::HashMap;

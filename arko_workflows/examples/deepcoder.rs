@@ -340,7 +340,7 @@ fn agent_config(
 }
 
 /// OAuth environment variables, then the Codex `auth.json`, then
-/// `OPENAI_API_KEY`. A client from `auth.json` keeps the file in step: every
+/// `OPENAI_API_KEY`. A client from `auth.json` keeps the file in step. Every
 /// token refresh reads it again first, and rotated tokens are saved to it at
 /// once.
 fn build_client() -> ExampleResult<LLMClient> {
@@ -750,7 +750,7 @@ async fn main() -> ExampleResult<()> {
     }
     .await;
     // A token refresh still in flight holds the credentials until its new
-    // tokens are saved: wait for it before the runtime shuts down.
+    // tokens are saved, so wait for it before the runtime shuts down.
     client.openai_chatgpt_oauth_credentials().await;
     let (orchestrator_result, result) = run?;
 

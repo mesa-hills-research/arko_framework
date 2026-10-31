@@ -239,7 +239,7 @@ impl Tool for ListRecipientsTool {
     }
 }
 
-/// One line per agent: its name, role, and status.
+/// One line per agent with its name, role, and status.
 pub(crate) fn render_recipients(
     context: &SharedContext,
     statuses: &[(String, AgentStatus)],
@@ -264,8 +264,8 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
         .map_or("", |config| config.role_description.as_str())
 }
 
-/// The notices a running agent receives at each safe turn boundary: once,
-/// a graceful stop's wrap-up notice, and one line for every agent it may
+/// The notices a running agent receives at each safe turn boundary. They are
+/// a graceful stop's wrap-up notice (once), and one line for every agent it may
 /// message that started or finished after the registry version it has seen.
 /// It also holds the agent's requests while it is over its budget.
 pub(crate) struct ActivityNotices {
@@ -277,7 +277,7 @@ pub(crate) struct ActivityNotices {
 
 impl arko_agents::TurnContextSource for ActivityNotices {
     fn turn_context(&self, task_id: uuid::Uuid) -> Option<String> {
-        // A completion verifier finishes its review: its verdict decides a
+        // A completion verifier finishes its review, so its verdict decides a
         // completion made in the wrap-up before its agent was told.
         let wrap_up = (!self.review)
             .then(|| self.context.run_control.wrap_up_notice(task_id))

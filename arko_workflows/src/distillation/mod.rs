@@ -79,7 +79,7 @@ pub(crate) mod tests {
                 targeted("mismatch").reasoning(ReasoningConfig::anthropic(1_024)),
                 "reasoning provider",
             ),
-            // Targets are required: agents and tools, read_file included.
+            // Targets are required (agents and tools, read_file included).
             (
                 DistillationConfig::new("untargeted", Model::openai_gpt_5_6_luna()),
                 "needs at least one target agent and one target tool",
@@ -161,7 +161,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Only settings the user set, or the provider honours, are sent: on
+    /// Only settings the user set, or the provider honours, are sent. On
     /// ChatGPT OAuth, which rejects an output limit and can't turn caching
     /// off, a distiller asks for neither (arko_ai would drop each with a
     /// warning), unless its limit was set explicitly.
@@ -215,7 +215,7 @@ pub(crate) mod tests {
                 "short summary"
             );
         }
-        // (response, reason, retryable): refusals and token-limit cuts would
+        // (response, reason, retryable). Refusals and token-limit cuts would
         // most likely repeat, so they are not retried.
         let rejected = [
             (
@@ -242,7 +242,7 @@ pub(crate) mod tests {
                 "summary incomplete",
                 true,
             ),
-            // No stop reason: a live response without one (OpenRouter
+            // No stop reason, meaning a live response without one (OpenRouter
             // `finish_reason: null`, Anthropic `stop_reason: null`) or one
             // saved before stop reasons existed. Completeness can't be told.
             (
@@ -508,7 +508,7 @@ pub(crate) mod tests {
             context: workflow.context().clone(),
         };
         let task = task_context(&workflow);
-        // About 16,700 tokens of input and 4,000 of output: over 20,000.
+        // About 16,700 tokens of input and 4,000 of output, over 20,000.
         let large = "x".repeat(50_000);
         let outcome = interceptor
             .intercept("read_file", &large, &HashMap::new(), &task)
@@ -622,7 +622,7 @@ pub(crate) mod tests {
         assert_eq!(server.requests(), 1);
         assert_eq!(context.budget.total_spent(), 0.25);
         let records = context.distillation_records.read();
-        // The explanation is not counted; the kept message text is.
+        // The explanation is not counted, and the kept message text is.
         assert_eq!(records[0].output_chars, "Here is a summ".len());
         assert_eq!(
             records[0].rejection.as_deref(),
@@ -677,7 +677,7 @@ pub(crate) mod tests {
 /// count against the limit, and models such as Claude Opus 5.5 (adaptive
 /// thinking) or GPT-5.5 and later (medium effort) reason by default, so the
 /// limit leaves room for reasoning as well as the summary. It is a cap, not
-/// a target: a summary cut off at the limit is billed but not used.
+/// a target. A summary cut off at the limit is billed but not used.
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 16_000;
 
 impl DistillationConfig {
@@ -775,7 +775,7 @@ impl DistillationConfig {
     /// request goes to the ChatGPT OAuth backend.
     ///
     /// Without a set limit, the default limit is sent where the provider
-    /// takes one: a summary is meant to be short, and the cap bounds what a
+    /// takes one, since a summary is meant to be short, and the cap bounds what a
     /// runaway response costs (a summary cut off at it is not used). The
     /// ChatGPT OAuth backend rejects a limit, so none is sent there.
     fn generation_config(&self, chatgpt_oauth: bool) -> arko_ai::GenerationConfig {
@@ -794,7 +794,7 @@ impl DistillationConfig {
     /// the output of `tool_name` called with `params` (JSON) by an agent
     /// working on `task_prompt`.
     ///
-    /// Prompt caching is turned off where the provider allows it: each
+    /// Prompt caching is turned off where the provider allows it. Each
     /// request is a one-off whose prompt ends with a tool output no later
     /// request repeats, so a cache write (billed above the input rate on
     /// Anthropic and on OpenAI models that bill cache writes) would never be
@@ -870,12 +870,12 @@ fn response_text(response: &arko_ai::GenerationResponse) -> String {
         .join("\n")
 }
 
-/// Bytes per token for estimating a distillation request: the starting
+/// Bytes per token for estimating a distillation request, the starting
 /// ratio of arko_agents' overflow guard, about right for code and English
 /// and on the side of more tokens.
 const DISTILLATION_BYTES_PER_TOKEN: f64 = 3.0;
 
-/// The estimated input tokens of a distillation request: its system
+/// The estimated input tokens of a distillation request, from its system
 /// message and messages, by bytes.
 fn distillation_input_tokens(conversation: &arko_ai::Conversation) -> usize {
     let bytes = conversation.system_message.as_ref().map_or(0, String::len)
@@ -890,7 +890,7 @@ fn distillation_input_tokens(conversation: &arko_ai::Conversation) -> usize {
 }
 
 /// The distilled text when `response` is a complete summary, else why it
-/// can't stand in for the tool output: a refusal (whatever text accompanies
+/// can't stand in for the tool output, namely a refusal (whatever text accompanies
 /// it), a turn cut short by a token limit, a turn that ended any other way
 /// than the model finishing (including an unreported stop reason), or no
 /// text at all.
@@ -906,7 +906,7 @@ fn complete_summary(response: &arko_ai::GenerationResponse) -> Result<String, Re
         }
         // `Other("unknown")` is a response without a stop reason (OpenRouter
         // `finish_reason: null`, an Anthropic `stop_reason: null`, or a
-        // response saved before stop reasons existed): whether the summary
+        // response saved before stop reasons existed). Whether the summary
         // is complete can't be told, so it is not used.
         reason => {
             return rejection(format!("summary incomplete (stop reason {reason:?})"), true);
@@ -938,7 +938,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
         params: &HashMap<String, Value>,
         task_context: &TaskContext<'_>,
     ) -> Result<InterceptedResult, ToolError> {
-        // A stopped run's agent is ending: no summary is paid for.
+        // A stopped run's agent is ending, so no summary is paid for.
         if self.context.run_control.is_stopped()
             || !self
                 .config
@@ -957,7 +957,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             chatgpt_oauth,
         );
         // An output over the distiller model's own input limit can't be
-        // distilled: the request would fail. It is kept, unchanged and
+        // distilled, because the request would fail. It is kept, unchanged and
         // unbilled (the agent's overflow guard shortens it if the agent's
         // own model can't take it either), and the skip is recorded.
         if let Some(limit) = self.client.max_input_tokens(&self.config.model).await {
@@ -1045,7 +1045,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             )
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
         }
-        // The text the model generated, joined as a summary is: the message
+        // The text the model generated, joined as a summary is, the message
         // text, plus the partial output a refusal moved out of the message
         // (safety classifier, content filter). A refusal's explanation is not
         // counted.
@@ -1088,7 +1088,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 );
                 Ok(InterceptedResult::Unchanged)
             }
-            // The interception failure policy may retry; the tool output is
+            // The interception failure policy may retry, and the tool output is
             // kept once it gives up.
             Err(Rejection { reason, .. }) => Err(ToolError::ExecutionFailed(format!(
                 "distiller '{}' result not used: {reason}",

@@ -1,17 +1,17 @@
-//! Variant arms: arms with arm B's tools whose index was built, whose search
+//! Variant arms, arms with arm B's tools whose index was built, whose search
 //! results render, or whose tool section reads, another way, for A/B tests of
 //! arko_index options and prompts on the same tasks and solvers.
 //!
-//! A variants file defines them; `prepare-variants` builds one index per variant
+//! A variants file defines them. `prepare-variants` builds one index per variant
 //! and repository (`indexes/<repo>@<variant>/`), or reuses another arm's index
-//! (`base`), and records them in `variants.json`; `run --arms B,NAME,...` runs
+//! (`base`), and records them in `variants.json`. `run --arms B,NAME,...` runs
 //! them. In a variant arm,
 //! `arko_index` is the CLI itself, or a script that adds the variant's
 //! `search2` flags. When the index embeds, `search2` goes through a service in
 //! the benchmark process that runs the CLI with the embedding key, so the key
 //! never reaches an agent's shell (like arm C's `arko_index_dense`).
 
-// The search service is Unix-only; elsewhere its parts are unused.
+// The search service is Unix-only, and elsewhere its parts are unused.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::BTreeMap;
@@ -30,12 +30,12 @@ pub const SOCKET_VARIABLE: &str = "ARKO_INDEX_SEARCH_SOCKET";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantSpec {
-    /// The arm's name: 1 to 32 letters, digits, `-` or `_`, other than A, B, C.
+    /// The arm's name, 1 to 32 letters, digits, `-` or `_`, other than A, B, C.
     pub name: String,
     /// What the variant tests, for the report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Another arm whose index this one uses instead of building its own: `B`,
+    /// Another arm whose index this one uses instead of building its own, `B`,
     /// `C` (B's index and arm C's `arko_index_dense`), or a variant with an
     /// index of its own, as that arm's index is when a run starts. `index`
     /// stays empty then, and `search`, `prompt` and `tools_text` stay this
@@ -52,9 +52,9 @@ pub struct VariantSpec {
     /// `["--text"]` or `["--mode", "lexical"]`.
     #[serde(default)]
     pub search: Vec<String>,
-    /// The solver's tool section: `standard` (the default: arm B's, its hybrid
+    /// The solver's tool section, `standard` (the default, which is arm B's, its hybrid
     /// version when the index embeds, arm C's with `base` C) or `guided` (which
-    /// tool to use when, with worked examples: `prompts::TOOLS_GUIDED`).
+    /// tool to use when, with worked examples in `prompts::TOOLS_GUIDED`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// A tool paragraph of your own instead (`{rg}` becomes the note on
@@ -77,7 +77,7 @@ impl VariantSpec {
         self.base.as_deref() == Some("C")
     }
 
-    /// The prompt's name: `standard`, `guided`, or `own text` (`tools_text`).
+    /// The prompt's name, `standard`, `guided`, or `own text` (`tools_text`).
     pub fn prompt_name(&self) -> &str {
         if self.tools_text.is_some() {
             "own text"
@@ -150,7 +150,7 @@ impl VariantSpec {
         Ok(())
     }
 
-    /// The `index2` flags of a build: the variant's, with the offline hashing
+    /// The `index2` flags of a build, the variant's, with the offline hashing
     /// embedder for `--mock-embeddings`.
     pub fn build_flags(&self, mock_embeddings: bool) -> Vec<String> {
         let mut flags = Vec::new();
@@ -169,12 +169,12 @@ impl VariantSpec {
     }
 }
 
-/// `--flag=value` and `--flag` alike: the flag's name.
+/// `--flag=value` and `--flag` alike, the flag's name.
 fn flag_name(flag: &str) -> &str {
     flag.split_once('=').map_or(flag, |(name, _)| name)
 }
 
-/// Reads a variants file: a JSON list of [`VariantSpec`]s.
+/// Reads a variants file, a JSON list of [`VariantSpec`]s.
 pub fn load_specs(path: &Path) -> BenchResult<Vec<VariantSpec>> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
@@ -219,7 +219,7 @@ pub struct VariantIndex {
     /// Whether it has embeddings (its `dense.json`).
     pub dense: bool,
     pub build_ms: u64,
-    /// The CLI's stderr: counts, embedding tokens, the report summary.
+    /// The CLI's stderr, counts, embedding tokens, the report summary.
     pub summary: String,
 }
 
@@ -285,7 +285,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
     // Variants with an index of their own first, then those that reuse one.
     let (own, based): (Vec<&VariantSpec>, Vec<&VariantSpec>) =
         options.specs.iter().partition(|spec| spec.base.is_none());
-    // The indexes to build: those not built with the same flags, CLI and commit
+    // The indexes to build, those not built with the same flags, CLI and commit
     // yet. A definition's other fields (description, search flags, prompt) leave
     // its indexes as they are.
     let mut stale = std::collections::BTreeSet::new();
@@ -436,7 +436,7 @@ fn build(
 ) -> BenchResult<VariantIndex> {
     std::fs::create_dir_all(dir)?;
     set_writable(dir, true);
-    // The index's saved embedding settings go: the CLI would otherwise keep the
+    // The index's saved embedding settings go, because the CLI would otherwise keep the
     // ones flags leave out (an earlier definition's cap, quantization or text),
     // so each build is what its flags say. The embedding cache stays.
     match std::fs::remove_file(dir.join("dense.json")) {
@@ -452,7 +452,7 @@ fn build(
     let mut command = std::process::Command::new(cli);
     command.arg("index2").args(flags);
     // With embeddings, the CLI embeds in the background once lexical search is ready
-    // unless told to wait: the index is complete before it is made read-only.
+    // unless told to wait. The index is complete before it is made read-only.
     if flags
         .iter()
         .any(|flag| matches!(flag_name(flag), "--embed" | "--embed-config"))
@@ -527,7 +527,7 @@ pub fn for_arms(
             })?
             .clone();
         // variants.json holds a copy of the base's records from when this
-        // variant was prepared: the base may have been rebuilt since.
+        // variant was prepared. The base may have been rebuilt since.
         if let Some(base) = variant.spec.base.clone() {
             variant.repos = match base.as_str() {
                 "B" | "C" => repos
@@ -584,7 +584,7 @@ pub fn for_arms(
 }
 
 /// Refuses variants whose searches embed their queries with Voyage when
-/// `VOYAGE_API_KEY` is unset, as arm C does: without it every `search2` of
+/// `VOYAGE_API_KEY` is unset, as arm C does, because without it every `search2` of
 /// theirs would fail.
 pub fn check_embedding_key(
     variants: &BTreeMap<String, PreparedVariant>,
@@ -635,7 +635,7 @@ fn embedding_provider(dir: &Path) -> BenchResult<Option<String>> {
     Ok(info["embedder"]["provider"].as_str().map(str::to_string))
 }
 
-/// The `arko_index` a variant arm's shell runs: the CLI itself, or a script
+/// The `arko_index` a variant arm's shell runs, the CLI itself, or a script
 /// that adds the variant's `search2` flags, or one that sends `search2` to the
 /// run's search service (when the index embeds).
 pub fn arko_index_program(
@@ -681,7 +681,7 @@ struct SearchReply {
 /// The output kept of one search, per stream.
 const MAX_REPLY_BYTES: usize = 4 << 20;
 
-/// The run's search service for variant arms whose index embeds: runs
+/// The run's search service for variant arms whose index embeds, running
 /// `arko_index search2` with the variant's flags in this process's environment,
 /// which holds the embedding key.
 pub struct SearchService {
@@ -811,7 +811,7 @@ async fn search(
     })
 }
 
-/// `index-search VARIANT search2 ARGS...`: a variant arm's `arko_index search2`,
+/// `index-search VARIANT search2 ARGS...`, a variant arm's `arko_index search2`,
 /// answered by the running benchmark's search service. Returns the exit code.
 pub async fn search_command(variant: &str, args: &[String]) -> BenchResult<i32> {
     #[cfg(unix)]
@@ -1023,7 +1023,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = crate::test_dir("prepare-variants");
         let layout = Layout::new(&dir.join("out")).unwrap();
-        // A fake CLI: `index2 FLAGS -- CHECKOUT DIR` logs its flags and
+        // A fake CLI, `index2 FLAGS -- CHECKOUT DIR` logs its flags and
         // publishes a generation.
         let log = dir.join("builds.log");
         let cli = dir.join("fake_cli");
@@ -1071,7 +1071,7 @@ mod tests {
         };
         prepare(specs("", "baseline"), &repos).unwrap();
         assert_eq!(builds(), 2, "lex and scope");
-        // A new description builds nothing; new flags rebuild.
+        // A new description builds nothing, and new flags rebuild.
         prepare(specs("", "reworded"), &repos).unwrap();
         assert_eq!(builds(), 2);
         prepare(
@@ -1091,7 +1091,7 @@ mod tests {
             "variants.json keeps the copy from when lex-guided was prepared"
         );
 
-        // A running run of lex-guided reads lex's index: rebuilding it waits for
+        // A running run of lex-guided reads lex's index. Rebuilding it waits for
         // the run. Other variants build beside it, and so do based ones.
         let run_dir = layout.run_dir("guided");
         std::fs::create_dir_all(&run_dir).unwrap();

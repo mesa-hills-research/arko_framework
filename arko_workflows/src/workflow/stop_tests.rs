@@ -1,4 +1,4 @@
-//! Graceful stops: the wrap-up, blameless results, restarting what a stop
+//! Graceful stops, covering the wrap-up, blameless results, restarting what a stop
 //! ended after a resume, the signal helper, and saved stops.
 
 use std::collections::HashMap;
@@ -115,7 +115,7 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("the workflow call returned")
 }
 
-/// A server for the coder (`CODER-TASK`: it calls `saver`, and completes
+/// A server for the coder (`CODER-TASK`, which calls `saver`, and completes
 /// once told the run is stopping), a reviewer that never gets an answer
 /// (`REVIEWER-TASK`), and runs restarted after a stop, which complete.
 async fn server() -> ResponsesServer {
@@ -146,8 +146,8 @@ fn drain_record(result: &AgentResult) -> &StopRecord {
 }
 
 /// With a wrap-up, no new run starts, running tools see their stop signal,
-/// and agents are told to finish: one completes. Cancelling then ends the
-/// wrap-up at once with the stop's cause; the agent still running is
+/// and agents are told to finish, and one completes. Cancelling then ends the
+/// wrap-up at once with the stop's cause, and the agent still running is
 /// cancelled, the stop is checkpointed (in the form older versions read
 /// as a cancellation), and both results are marked as ended by the stop.
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn a_wrap_up_lets_agents_finish_then_the_run_is_cancelled_and_checkpointed
     ));
 
     // The coder's tool saw its stop signal, and the coder was told to
-    // finish; it completed, blamelessly.
+    // finish, and it completed, blamelessly.
     let coded = within(coder).await.unwrap().unwrap();
     assert_eq!(coded.status, AgentRunStatus::Completed);
     assert_eq!(coded.summary, "Stopped at step 3.");
@@ -222,7 +222,7 @@ async fn a_wrap_up_lets_agents_finish_then_the_run_is_cancelled_and_checkpointed
     assert_eq!(told, 1, "the coder is told once, the reviewer never asked");
     assert!(!workflow.is_cancelled(), "the reviewer still runs");
 
-    // Cancelling ends the wrap-up; the stop's cause stands.
+    // Cancelling ends the wrap-up, and the stop's cause stands.
     assert!(workflow.cancel());
     assert!(matches!(
         within(reviewer).await.unwrap(),
@@ -250,7 +250,7 @@ async fn a_wrap_up_lets_agents_finish_then_the_run_is_cancelled_and_checkpointed
     assert_eq!(fired[0]["stop_kind"], "drain");
     assert_eq!(fired[0]["reason"], "deploying a fix");
 
-    // The checkpoint records the stop and the marks; the stop is saved as
+    // The checkpoint records the stop and the marks, and the stop is saved as
     // a cancellation with the stop beside it.
     let (_, saved, state) = latest_checkpoint(&workspace);
     assert_eq!(saved["cancellation"]["cause"], "Requested");
@@ -271,8 +271,8 @@ async fn a_wrap_up_lets_agents_finish_then_the_run_is_cancelled_and_checkpointed
     );
 }
 
-/// The wrap-up ends once no agent runs any more, long before its time:
-/// the run is stopped then, and the last run's call returns the stop.
+/// The wrap-up ends once no agent runs any more, long before its time.
+/// The run is stopped then, and the last run's call returns the stop.
 #[tokio::test]
 async fn a_wrap_up_ends_when_the_last_agent_finishes() {
     let workspace = Workspace::new();
@@ -333,7 +333,7 @@ async fn a_wrap_up_ends_when_its_time_is_up() {
 }
 
 /// Without a wrap-up a stop cancels at once, like `cancel`, with its own
-/// cause; with nothing running a wrap-up stops at once.
+/// cause, and with nothing running a wrap-up stops at once.
 #[tokio::test]
 async fn a_stop_without_a_wrap_up_or_with_nothing_running_stops_at_once() {
     let workspace = Workspace::new();
@@ -386,7 +386,7 @@ async fn a_stop_without_a_wrap_up_or_with_nothing_running_stops_at_once() {
 
 /// After resuming from a stopped run's checkpoint, `stopped_runs` lists the
 /// runs the stop ended (not the one that finished before it), and
-/// `restart` relaunches each: the completed one is continued, the cancelled
+/// `restart` relaunches each. The completed one is continued, the cancelled
 /// one reopened with the note. Restarted, they are no longer listed.
 #[tokio::test]
 async fn restart_after_resume_relaunches_the_runs_a_stop_ended() {
@@ -481,7 +481,7 @@ async fn stop_on_signals_stops_the_run_on_sigterm() {
         }
     })
     .await;
-    // The reviewer doesn't finish: end the wrap-up.
+    // The reviewer doesn't finish, so end the wrap-up.
     assert!(workflow.cancel());
     assert!(within(reviewer).await.unwrap().is_err());
     assert_eq!(
@@ -494,7 +494,7 @@ async fn stop_on_signals_stops_the_run_on_sigterm() {
     listener.abort();
 }
 
-/// Saved data stays loadable both ways: a checkpoint from before graceful
+/// Saved data stays loadable both ways. A checkpoint from before graceful
 /// stops loads (a plain cancellation, results without stop marks), and a
 /// stop this version saves reads, in the form older versions know, as a
 /// plain cancellation.
@@ -585,7 +585,7 @@ fn checks_coder(builder: WorkflowBuilder) -> WorkflowBuilder {
     )
 }
 
-/// A completion made after the wrap-up notice reports progress: its
+/// A completion made after the wrap-up notice reports progress. Its
 /// completion verifier doesn't review it (it would reject it as
 /// incomplete, failing the run), the run is marked as ended by the stop,
 /// and after a resume it is continued, and its next completion reviewed.
@@ -630,7 +630,7 @@ async fn a_completion_after_the_notice_is_reviewed_only_once_the_run_is_continue
     });
     within(saver.started.notified()).await;
     assert!(workflow.stop(StopRequest::drain("deploying a fix").wrap_up(Duration::from_secs(600))));
-    // The last agent to end ends the wrap-up: its call returns the stop.
+    // The last agent to end ends the wrap-up, and its call returns the stop.
     assert!(matches!(
         within(coder).await.unwrap(),
         Err(WorkflowError::Cancelled)
@@ -667,7 +667,7 @@ async fn a_completion_after_the_notice_is_reviewed_only_once_the_run_is_continue
 }
 
 /// A delegated run that completes after the wrap-up notice reports
-/// progress, unreviewed: `stopped_runs` leaves it to its caller, so the
+/// progress, unreviewed. `stopped_runs` leaves it to its caller, so the
 /// caller's `run_workflow_agent` result names it after the progress
 /// report. The restarted caller resumes it with `resume_run`, and its next
 /// completion is reviewed.
@@ -805,7 +805,7 @@ async fn a_delegated_run_told_to_wrap_up_is_named_to_its_caller_and_reviewed_onc
 }
 
 /// A completion the agent made in the wrap-up before it was told (its
-/// model answered after the stop began) is its own: the completion
+/// model answered after the stop began) is its own. The completion
 /// verifier's review may start then, isn't told to wrap up, and decides
 /// it.
 #[tokio::test]
@@ -961,8 +961,8 @@ async fn finish_during_a_wrap_up_waits_for_the_stop() {
     assert!(within(reviewer).await.unwrap().is_err());
 }
 
-/// A delegation in flight when the stop cancels it: the caller's call names
-/// the delegated run, and after the resume only the caller is listed;
+/// A delegation in flight when the stop cancels it. The caller's call names
+/// the delegated run, and after the resume only the caller is listed, and
 /// restarted, it resumes that run (`resume_run`) instead of starting the
 /// work again.
 #[tokio::test]
@@ -970,7 +970,7 @@ async fn a_delegation_the_stop_cancelled_is_resumed_by_its_restarted_caller() {
     let workspace = Workspace::new();
     let server = ResponsesServer::start(|_, body| {
         if !body.contains("CODER-TASK") {
-            // The delegated run: answered once reopened.
+            // The delegated run, answered once reopened.
             return (body.contains("CHILD-TASK") && body.contains(REOPENED))
                 .then(|| complete_turn("child", "Child finished."));
         }
@@ -1087,7 +1087,7 @@ async fn a_delegation_the_stop_cancelled_is_resumed_by_its_restarted_caller() {
 }
 
 /// After a stop, the next build may not change the configuration of an
-/// agent with a run the stop cancelled: the resume is refused, as for a
+/// agent with a run the stop cancelled. The resume is refused, as for a
 /// run that can be continued (reopened, the run would keep the old one),
 /// and the error names the fields that changed.
 #[tokio::test]
@@ -1152,7 +1152,7 @@ async fn a_note_posted_in_the_wrap_up_follows_the_notice() {
         async move { workflow.run_agent("coder", "CODER-TASK").await }
     });
     within(saver.started.notified()).await;
-    // The call runs until the stop: the note waits for its turn boundary.
+    // The call runs until the stop, and the note waits for its turn boundary.
     workflow
         .post_note(crate::notes::Note::new(
             "NOTE-IN-WRAP-UP: start the next module.",

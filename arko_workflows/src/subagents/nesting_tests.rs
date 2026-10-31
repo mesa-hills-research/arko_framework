@@ -1246,7 +1246,7 @@ async fn a_hook_can_withhold_the_start_tools_from_one_subagent() {
 /// message and when it resumes from a checkpoint.
 #[tokio::test]
 async fn the_hooks_answer_stays_for_a_continued_and_a_resumed_subagent() {
-    // Continued: r1 finishes, and a message from the lead continues it.
+    // Continued, r1 finishes, and a message from the lead continues it.
     let server = serve_tree(vec![("lead", vec![start("First.")])]).await;
     let workspace = Workspace::new();
     let workflow = nested_builder(
@@ -1273,7 +1273,7 @@ async fn the_hooks_answer_stays_for_a_continued_and_a_resumed_subagent() {
     assert!(!tools.contains(&"start_agent".to_string()), "{tools:?}");
     assert_eq!(offered(&requests[1]), tools);
 
-    // Resumed: r1 waits at its gate when the workflow stops, and the
+    // Resumed, r1 waits at its gate when the workflow stops, and the
     // resumed workflow relaunches it.
     let server = serve_tree(vec![
         ("lead", vec![start("First.")]),
@@ -1516,7 +1516,7 @@ async fn waiting_for_a_run_that_is_not_the_callers_is_refused_at_once() {
     gate.open.notify_one();
 }
 
-/// A peer the lead linked the caller with can be waited for: its message
+/// A peer the lead linked the caller with can be waited for. Its message
 /// ends the wait.
 #[tokio::test]
 async fn waiting_for_a_linked_peer_ends_with_its_message() {
@@ -1795,7 +1795,7 @@ async fn begin(
         .unwrap()
 }
 
-/// A wait that is cancelled gives its place back to nobody: the run holds
+/// A wait that is cancelled gives its place back to nobody. The run holds
 /// its place again.
 #[tokio::test]
 async fn a_cancelled_wait_leaves_no_waiter_behind() {
@@ -1874,7 +1874,7 @@ async fn stopping_the_run_the_host_drives_leaves_its_subagents_working() {
     let lead = workflow.subagents()[0].caller_run_id;
     assert!(workflow.stop_run(lead, StopRequest::operator("esc"), RunStopIntent::Relaunch));
     let _ = within(run).await.unwrap();
-    // It is still working: it finishes when its gate opens.
+    // It is still working, and it finishes when its gate opens.
     assert_eq!(workflow.subagents()[0].state, SubagentState::Running);
     gate.open.notify_one();
     until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
@@ -1953,7 +1953,7 @@ async fn a_report_on_its_way_is_let_through_when_the_run_or_the_workflow_is_stop
         // r1's `complete_task` arrives, with r2 still working.
         release.notify_one();
         until(|| workflow.subagents()[0].state == SubagentState::Stopped).await;
-        // It was not refused: no request followed the report.
+        // It was not refused. No request followed the report.
         let requests = bodies_of(&server, "r1");
         assert_eq!(requests.len(), 2, "workflow stop {workflow_stop}");
         assert_eq!(

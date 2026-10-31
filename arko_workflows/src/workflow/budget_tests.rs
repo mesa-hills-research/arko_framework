@@ -1,6 +1,6 @@
-//! Budgets: agents held over the budget (`BudgetExceededPolicy::Pause`, the
-//! default) and released by a raise, live or on resume; runs cancelled by
-//! the budget (`Cancel`) reopened; limits saved with checkpoints.
+//! Budgets, covering agents held over the budget (`BudgetExceededPolicy::Pause`, the
+//! default) and released by a raise, live or on resume, runs cancelled by
+//! the budget (`Cancel`) reopened, and limits saved with checkpoints.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +25,7 @@ use crate::test_support::{
 use crate::workflow::engine::REOPENED_NOTE;
 use crate::workflow::result::AgentRunStatus;
 
-/// A model call of the test server costs this much; a budget of
+/// A model call of the test server costs this much, and a budget of
 /// `LOW` is exceeded by the first call.
 const LOW: f64 = 1e-6;
 
@@ -33,7 +33,7 @@ const LOW: f64 = 1e-6;
 const ERROR_NOTE: &str = "resulted in an error";
 
 /// Answers "Delegate." with a `run_workflow_agent` call running `reviewer`
-/// ("Review."), and completes once it has a result; any other task calls
+/// ("Review."), and completes once it has a result, and any other task calls
 /// `gate`, then completes.
 async fn server() -> ResponsesServer {
     ResponsesServer::start(|_, body| {
@@ -228,9 +228,9 @@ fn continue_after_error() -> AgentResume {
 }
 
 /// Over the workflow's budget, an agent run the host started is held
-/// before its next request and returned paused: its tool call ran, nothing
+/// before its next request and returned paused. Its tool call ran, nothing
 /// was cancelled, and `OnBudgetExceeded` fired once. Resumed without a
-/// raise it is held again without a request; after `set_budget` raises the
+/// raise it is held again without a request, and after `set_budget` raises the
 /// limit, it continues where it was, without an error note.
 #[tokio::test]
 async fn an_agent_over_the_workflow_budget_pauses_until_it_is_raised() {
@@ -254,7 +254,7 @@ async fn an_agent_over_the_workflow_budget_pauses_until_it_is_raised() {
     assert_eq!(paused.status, AgentRunStatus::Paused);
     assert!(workflow.cancellation().is_none());
 
-    // Still over the budget: held again, nothing sent.
+    // Still over the budget, held again, nothing sent.
     let error = within(workflow.resume_agent(&paused, continue_after_error()))
         .await
         .unwrap_err();
@@ -277,7 +277,7 @@ async fn an_agent_over_the_workflow_budget_pauses_until_it_is_raised() {
     assert_eq!(gate.calls(), 1);
 }
 
-/// An agent's own budget holds only that agent's runs; raising it
+/// An agent's own budget holds only that agent's runs, and raising it
 /// releases them.
 #[tokio::test]
 async fn an_agent_over_its_own_budget_pauses_and_the_others_run() {
@@ -318,7 +318,7 @@ async fn an_agent_over_its_own_budget_pauses_and_the_others_run() {
 }
 
 /// With `wait_for_budget_raise`, a run the host started waits in the call
-/// while it is held; a live raise releases it.
+/// while it is held, and a live raise releases it.
 #[tokio::test]
 async fn a_live_raise_releases_a_waiting_run() {
     let workspace = Workspace::new();
@@ -348,7 +348,7 @@ async fn a_live_raise_releases_a_waiting_run() {
 }
 
 /// A run inside another agent's tool call waits for a raise (its parent
-/// waits on the call): the budget blocks the whole run until
+/// waits on the call). The budget blocks the whole run until
 /// `set_agent_budget` releases it.
 #[tokio::test]
 async fn a_live_raise_releases_a_delegated_run() {
@@ -377,7 +377,7 @@ async fn a_live_raise_releases_a_delegated_run() {
     assert!(!workflow.is_budget_blocked());
 }
 
-/// A run paused by the budget, resumed with a higher budget, continues:
+/// A run paused by the budget, resumed with a higher budget, continues.
 /// `resume_agent` sends its held request. A limit raised while it was live
 /// is kept by a resume that passes the original limit.
 #[tokio::test]
@@ -423,17 +423,17 @@ async fn resuming_with_a_higher_budget_continues_a_paused_run() {
     assert_eq!(limit(fresh().budget(2.0)), Some(2.0), "the builder's");
     assert_eq!(limit(fresh()), None, "none set");
 
-    // A checkpoint from before limits were saved: the builder's.
+    // A checkpoint from before limits were saved, the builder's.
     let mut json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     json.as_object_mut().unwrap().remove("budget_limits");
     std::fs::write(&path, json.to_string()).unwrap();
     assert_eq!(limit(fresh().budget(LOW)), Some(LOW));
 }
 
-/// The budget holds a delegated run and blocks the whole run; the host
+/// The budget holds a delegated run and blocks the whole run, and the host
 /// stops there (the process ends). Resumed with a higher budget,
 /// recovering the delegating run recovers the held run, which continues
-/// from its pause: nothing runs twice.
+/// from its pause, nothing runs twice.
 #[tokio::test]
 async fn a_held_delegation_continues_after_a_resume_with_a_higher_budget() {
     let workspace = Workspace::new();
@@ -497,7 +497,7 @@ async fn a_held_delegation_continues_after_a_resume_with_a_higher_budget() {
     assert!(bodies[2].contains("gate passed"), "{}", bodies[2]);
 }
 
-/// Under `Cancel` the agent over the budget is cancelled; raised, the
+/// Under `Cancel` the agent over the budget is cancelled, and raised, the
 /// run is reopened where it stopped, with its identity.
 #[tokio::test]
 async fn a_run_cancelled_by_the_budget_is_reopened() {
@@ -614,7 +614,7 @@ async fn an_aborted_agent_keeps_its_latest_saved_task() {
     );
     assert!(aborted.task().unwrap().conversation.messages.len() >= 2);
 
-    // The call may have been aborted before the tool itself started: its
+    // The call may have been aborted before the tool itself started. Its
     // write-ahead save comes first.
     let calls = block.calls();
     assert!(calls <= 1);
@@ -624,8 +624,8 @@ async fn an_aborted_agent_keeps_its_latest_saved_task() {
     assert_eq!(block.calls(), calls, "in doubt, not run again");
 }
 
-/// Saved data from before budget holds loads: tasks and checkpoints
-/// without the new fields; the new cause and wait reason round-trip.
+/// Saved data from before budget holds loads. Tasks and checkpoints
+/// without the new fields, and the new cause and wait reason round-trip.
 #[test]
 fn saved_data_with_and_without_budget_holds_loads() {
     let cause: arko_agents::ErrorRecoveryCause =

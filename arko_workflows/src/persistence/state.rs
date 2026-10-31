@@ -28,7 +28,7 @@ pub struct WorkflowState {
     /// created before the ledger was introduced.
     #[serde(default)]
     pub cost_ledger: CostLedger,
-    // Older checkpoints may contain `oauth_exempt_agents`; it is ignored now
+    // Older checkpoints may contain `oauth_exempt_agents`, and it is ignored now
     // that subscription calls record a billed amount of zero.
     #[serde(default)]
     pub freshness_snapshot: Option<FreshnessSnapshot>,
@@ -198,7 +198,7 @@ impl TaskFile {
                     .images
                     .with(|| serde_json::from_str::<arko_agents::Task>(&json))?;
                 // An image file gone or damaged doesn't keep the task from
-                // loading: the image becomes a line saying so.
+                // loading. The image becomes a line saying so.
                 let gone = task.settle_unavailable_images();
                 if !gone.is_empty() {
                     warnings.push(format!(
@@ -225,7 +225,7 @@ impl TaskFile {
     pub(crate) fn state_warning(&self, task: &arko_agents::Task) -> Option<String> {
         let now = AgentRunStatus::of_state(&task.current_state);
         // A cancellation older versions recorded as a failure loads as
-        // cancelled: the same outcome. A run that was running is
+        // cancelled, the same outcome. A run that was running is
         // interrupted whatever state its task was saved in (a wait the
         // workflow was answering, say).
         let same = now == self.status
@@ -396,7 +396,7 @@ mod tests {
     }
 
     /// A checkpoint from an early version still loads, with fields this
-    /// version doesn't know: the removed OAuth exemption set, and settings
+    /// version doesn't know, the removed OAuth exemption set, and settings
     /// of the removed MESI layer an application may have stored alongside.
     #[test]
     fn an_early_checkpoint_with_removed_fields_still_loads() {

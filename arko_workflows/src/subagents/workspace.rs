@@ -249,7 +249,7 @@ impl WorkspaceProvider for GitWorktreeProvider {
         let branch;
         {
             let _one_at_a_time = self.lock.lock().await;
-            // A free name: an earlier workflow run may have left `r1`.
+            // A free name, because an earlier workflow run may have left `r1`.
             let mut name = request.handle.clone();
             let mut n = 1;
             loop {
@@ -725,7 +725,7 @@ mod tests {
             run_git(&repository, &["branch", "--list", "test/r1"]),
             "test/r1"
         );
-        // A later workflow run's `r1` gets a free name: the branch stayed.
+        // A later workflow run's `r1` gets a free name, because the branch stayed.
         let again = provider.create(&request).await.unwrap();
         assert_eq!(again.root, Some(workspace.0.join("worktrees/r1-2")));
         assert_eq!(again.branch.as_deref(), Some("test/r1-2"));

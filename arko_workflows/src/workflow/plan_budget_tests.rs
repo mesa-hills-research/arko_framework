@@ -1,6 +1,6 @@
-//! Plan budgets: agents held once a plan usage window's points are used
-//! (as reported with each response), released by a raise; each plan
-//! counted and limited on its own; the counting saved with checkpoints and
+//! Plan budgets, covering agents held once a plan usage window's points are used
+//! (as reported with each response), released by a raise, each plan
+//! counted and limited on its own, and the counting saved with checkpoints and
 //! kept by a resume.
 
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ fn level(index: usize) -> f64 {
 }
 
 /// Answers the first two requests of each task with a `gate` call (the
-/// second waiting for 20 points to be counted), then completes; each
+/// second waiting for 20 points to be counted), then completes, and each
 /// response reports the plan usage of [`level`].
 async fn server() -> ResponsesServer {
     let index = Arc::new(AtomicUsize::new(0));
@@ -167,7 +167,7 @@ fn assert_close(actual: Option<f64>, expected: f64) {
 /// Past the five-hour limit, the agent is held before its next request,
 /// as for a dollar budget, and `OnBudgetExceeded` names the window once.
 /// Raising the limit lets it go on. The counting is saved with the
-/// checkpoint; a resume keeps the run's baseline and the higher limit.
+/// checkpoint, and a resume keeps the run's baseline and the higher limit.
 #[tokio::test]
 async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     let workspace = Workspace::new();
@@ -212,7 +212,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
         assert_eq!(crossings[0]["plan_points_limit"], 10.0);
     }
 
-    // Still over: held again without a request.
+    // Still over, held again without a request.
     let paused = workflow.agent_result(*task_id).unwrap();
     let resume = || AgentResume::ContinueAfterError { note: None };
     let error = within(workflow.resume_agent(&paused, resume()))
@@ -252,7 +252,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     assert_eq!(plan.usage, Default::default());
     drop(workflow);
 
-    // Resumed: the higher limit applies, and the counting goes on from the
+    // Resumed, the higher limit applies, and the counting goes on from the
     // run's baseline (a new run's report at 61 adds nothing).
     let resumed = build(
         &server,
@@ -276,7 +276,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     assert_close(resumed.plan_usage_spent().five_hour, 21.0);
     drop(resumed);
 
-    // No plan budget on the builder: none, the counting kept.
+    // No plan budget on the builder, none, the counting kept.
     let path = latest(&workspace);
     let resumed = build(
         &server,
@@ -288,7 +288,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     assert_close(resumed.plan_usage_spent().five_hour, 21.0);
     drop(resumed);
 
-    // A checkpoint from before plans were counted apart: its counting goes
+    // A checkpoint from before plans were counted apart. Its counting goes
     // on, taken over by the first plan to report.
     let mut json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let plan = json["plan_budget"].as_object_mut().unwrap();
@@ -318,7 +318,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     drop(resumed);
     let path = latest(&workspace);
 
-    // A checkpoint from before plan budgets: the builder's, counting afresh.
+    // A checkpoint from before plan budgets, the builder's, counting afresh.
     let mut json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     json.as_object_mut().unwrap().remove("plan_budget");
     std::fs::write(&path, json.to_string()).unwrap();
@@ -380,7 +380,7 @@ async fn under_cancel_a_plan_window_over_its_limit_cancels_the_agent() {
     );
 }
 
-/// A plan's own limit counts only that plan's reports: a Claude Code limit
+/// A plan's own limit counts only that plan's reports. A Claude Code limit
 /// leaves the ChatGPT agent going, and a ChatGPT limit, replacing the
 /// general one for ChatGPT, holds it.
 #[tokio::test]

@@ -39,7 +39,7 @@ fn builder(workspace: &Workspace, agents: &[&str]) -> WorkflowBuilder {
     builder_with(LLMClient::new(), workspace, agents)
 }
 
-/// The workflow's messaging tools for `agent`, when it is offered them; the
+/// The workflow's messaging tools for `agent`, when it is offered them, and the
 /// agent's prepared configuration must agree.
 fn messaging_tools(workflow: &Workflow, agent: &str) -> Option<(Arc<dyn Tool>, Arc<dyn Tool>)> {
     let context = workflow.context();
@@ -219,7 +219,7 @@ fn the_messaging_tools_are_static() {
 }
 
 /// `list_recipients` reports each permitted recipient, never the agent
-/// itself, through a run: not started, running, waiting, finished.
+/// itself, through a run, not started, running, waiting, finished.
 #[tokio::test]
 async fn list_recipients_reports_statuses_through_a_run() {
     let workspace = Workspace::new();
@@ -268,7 +268,7 @@ async fn list_recipients_reports_statuses_through_a_run() {
     assert_eq!(workflow.agent_status("nobody"), None);
 }
 
-/// Statuses as a real run goes through them: not started, running, waiting
+/// Statuses as a real run goes through them, not started, running, waiting
 /// out a provider rate limit, finished.
 #[tokio::test]
 async fn statuses_follow_a_rate_limited_run() {
@@ -360,9 +360,9 @@ fn delegation_targets_are_named_in_the_delegation_tool() {
     }
 }
 
-/// A restricted sender sees and reaches only its recipients; an
-/// unrestricted one reaches every other agent; one permitted no one isn't
-/// offered the tools; not-started and finished recipients are refused,
+/// A restricted sender sees and reaches only its recipients, and an
+/// unrestricted one reaches every other agent, one permitted no one isn't
+/// offered the tools, and not-started and finished recipients are refused,
 /// waiting ones reached. Agents started through workflow services get their
 /// tools from the same registry and follow the same policy.
 #[tokio::test]
@@ -395,7 +395,7 @@ async fn a_policy_and_the_recipient_status_decide_who_can_be_messaged() {
         "- `lead` (lead role): not_started"
     );
 
-    // Not permitted, unknown, or itself: refused without naming others.
+    // Not permitted, unknown, or itself, refused without naming others.
     for to in ["worker_b", "auditor", "nobody", "worker_a"] {
         let error = send(&workflow, "worker_a", to, &workspace)
             .await
@@ -468,7 +468,7 @@ async fn the_bus_refuses_a_message_to_its_sender() {
 }
 
 /// The initial prompt lists the permitted recipients, with their roles and
-/// statuses, once; a continuation adds no list, and neither does a
+/// statuses, once, and a continuation adds no list, and neither does a
 /// completion verifier's prompt, nor the target prompt it quotes.
 #[tokio::test]
 async fn only_the_initial_prompt_lists_the_recipients() {
@@ -525,7 +525,7 @@ async fn only_the_initial_prompt_lists_the_recipients() {
         "{first}"
     );
     assert!(!first.contains("reviewer role"), "{first}");
-    // The continuation's request: still the one list, from the initial prompt.
+    // The continuation's request, still the one list, from the initial prompt.
     let last = user_text(writer.last().unwrap());
     assert!(last.contains("Draft it again."), "{last}");
     assert_eq!(last.matches(ROSTER).count(), 1, "{last}");
@@ -543,7 +543,7 @@ async fn only_the_initial_prompt_lists_the_recipients() {
 }
 
 /// An agent learns once that a recipient started mid-task, including one
-/// started dynamically through workflow services, in its next user message;
+/// started dynamically through workflow services, in its next user message, and
 /// before that it can't message it. Its tool definitions don't change.
 #[tokio::test]
 async fn a_running_agent_is_told_once_when_a_recipient_starts() {
@@ -597,7 +597,7 @@ async fn a_running_agent_is_told_once_when_a_recipient_starts() {
         tokio::spawn(async move { services.run_agent("lead", "worker", "Work on it.").await });
     server.wait_for_requests(2).await;
     started.notify_one();
-    // The lead's three requests: before the notice, with it, and after.
+    // The lead's three requests, before the notice, with it, and after.
     server.wait_for_requests(4).await;
     let lead_bodies = server
         .bodies()
@@ -675,7 +675,7 @@ async fn agents_started_together_see_each_other_running() {
 }
 
 /// A continued run gets a message its task took from the channel but never
-/// added (it stopped first, `Task::pending_context_injections`) once: in
+/// added (it stopped first, `Task::pending_context_injections`) once, in
 /// the continuation prompt, with the other messages not yet acknowledged.
 /// Other context the task kept comes, once, at its first turn boundary.
 #[tokio::test]
@@ -723,7 +723,7 @@ async fn a_continued_run_gets_the_context_its_task_kept_once() {
     assert!(workflow.context().messages.pending("lead").is_empty());
 }
 
-/// Resuming restores statuses and what each run was told: a continued run
+/// Resuming restores statuses and what each run was told. A continued run
 /// learns once of a recipient that started again after the resume, and
 /// nothing twice.
 #[tokio::test]
@@ -845,7 +845,7 @@ fn message_queues_from_an_early_checkpoint_load_on_resume() {
     let _ = WaitReason::Paused;
 }
 
-/// A handover in a workflow: the fresh conversation restates the task
+/// A handover in a workflow. The fresh conversation restates the task
 /// without the messages its prompt delivered (the report covers them) and
 /// with a current list of recipients, and those messages are still
 /// acknowledged when the run completes.
@@ -866,7 +866,7 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
                 json!({ "report": "REPORT: drafted the intro in British spelling." }),
             )
         } else {
-            // Under the threshold, then over it: a conversation that starts
+            // Under the threshold, then over it. A conversation that starts
             // over it doesn't hand over.
             let turns = tool_outputs(body);
             tool_call_turn(&format!("p{turns}"), "probe", json!({})).replace(
@@ -934,7 +934,7 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
 }
 
 /// With `keep_messages_for_finished`, a message to a finished agent is
-/// queued for its next run, which gets it in its prompt; without it, the
+/// queued for its next run, which gets it in its prompt, and without it, the
 /// message is refused (see above).
 #[tokio::test]
 async fn messages_to_a_finished_agent_can_be_kept_for_its_next_run() {
@@ -1038,7 +1038,7 @@ async fn a_running_agent_is_told_when_a_recipient_finishes() {
             "{}",
             lead_bodies[1]
         );
-        // It started and finished between the lead's requests: no start
+        // It started and finished between the lead's requests, so no start
         // notice.
         assert!(
             !lead_bodies[1].contains("is now running"),
@@ -1074,7 +1074,7 @@ async fn a_kept_message_reaches_a_continued_agent_in_its_first_request() {
 }
 
 /// A Claude Code agent in a workflow (against the scripted fake CLI of
-/// arko_agents' tests): it gets its messages in its prompt, its built-in
+/// arko_agents' tests). It gets its messages in its prompt, its built-in
 /// `Read` is tracked for freshness through the workflow's middleware, and
 /// its completion acknowledges the messages.
 #[tokio::test]
@@ -1139,7 +1139,7 @@ async fn a_claude_code_agent_runs_in_a_workflow() {
     assert!(log.contains("Look at the notes."), "{log}");
     assert!(log.contains("builtin Read ran"), "{log}");
     assert!(context.messages.pending("reader").is_empty());
-    // The read is tracked: a later write by someone else is a change since.
+    // The read is tracked, so a later write by someone else is a change since.
     let tracker = context.resource_tracker.as_ref().unwrap();
     // The resource as the tracker names it (paths resolve per platform).
     let (file, _) = tracker

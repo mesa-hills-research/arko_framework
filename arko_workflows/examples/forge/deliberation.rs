@@ -1,9 +1,9 @@
-//! Deliberation: one-way-door decisions are proposed independently,
+//! With deliberation, one-way-door decisions are proposed independently,
 //! criticised, answered, tested and ruled on, instead of being made in one
 //! turn of the architect. See `README.md` ("Deliberation").
 //!
 //! The architect frames a decision with `request_deliberation` and ends its
-//! turn. The forge then runs each stage as agent runs: proposers on different
+//! turn. The forge then runs each stage as agent runs, with proposers on different
 //! models, a critic per proposal, the proposers' rebuttals (in their own
 //! conversations), a second critique round, spikes on contested claims, and
 //! a ruling by judges or by the architect itself. Every agent submits its
@@ -42,7 +42,7 @@ pub const CRITIC: &str = "critic";
 pub const SPIKER: &str = "spiker";
 pub const JUDGE: &str = "judge";
 
-/// The registered name of slot `index` (from 0) of `role`: `proposer-1`.
+/// The registered name of slot `index` (from 0) of `role`, such as `proposer-1`.
 pub fn agent(role: &str, index: usize) -> String {
     format!("{role}-{}", index + 1)
 }
@@ -52,11 +52,11 @@ pub fn agent(role: &str, index: usize) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum Level {
-    /// Two proposers, one critique round, no spikes; the architect rules;
-    /// only the top-level architecture.
+    /// Two proposers, one critique round, no spikes. The architect rules.
+    /// Only the top-level architecture.
     Light,
-    /// Four proposers, two critique rounds, up to three spikes per decision;
-    /// a separate judge rules; every one-way door.
+    /// Four proposers, two critique rounds, up to three spikes per decision.
+    /// A separate judge rules. Every one-way door.
     Full,
 }
 
@@ -69,10 +69,10 @@ pub enum Gate {
 }
 
 /// The deliberation flags, as given. `--deliberate` turns it on and picks
-/// the preset; the others override the preset's values.
+/// the preset, and the others override the preset's values.
 #[derive(Debug, Clone, Default, clap::Args, Serialize, Deserialize)]
 pub struct Flags {
-    /// Deliberate on one-way-door decisions: `light` or `full`. Off when
+    /// Deliberate on one-way-door decisions with `light` or `full`. Off when
     /// omitted.
     #[arg(long, value_enum)]
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct Flags {
     pub proposers: Option<u32>,
 
     /// The proposers' models, comma-separated, each `id` or `id:effort`
-    /// (`gpt-6.1-sol:xhigh`); used in turn when there are more proposers.
+    /// (`gpt-6.1-sol:xhigh`), used in turn when there are more proposers.
     #[arg(
         long,
         requires = "deliberate",
@@ -94,7 +94,7 @@ pub struct Flags {
     #[serde(default)]
     pub proposer_models: Vec<String>,
 
-    /// The critics' models, in proposal order; by default each proposal's
+    /// The critics' models, in proposal order. By default each proposal's
     /// critic runs on the next proposer's model.
     #[arg(
         long,
@@ -105,7 +105,7 @@ pub struct Flags {
     #[serde(default)]
     pub critic_models: Vec<String>,
 
-    /// 1: critique and rebuttal. 2: then a focused re-critique of what the
+    /// 1 is critique and rebuttal. 2 adds a focused re-critique of what the
     /// rebuttals contested.
     #[arg(long, requires = "deliberate", value_parser = clap::value_parser!(u32).range(1..=2))]
     #[serde(default)]
@@ -116,12 +116,12 @@ pub struct Flags {
     #[serde(default)]
     pub spikes: Option<u32>,
 
-    /// The model that runs spikes; the architect's when omitted.
+    /// The model that runs spikes. The architect's when omitted.
     #[arg(long, requires = "deliberate", value_name = "MODEL")]
     #[serde(default)]
     pub spike_model: Option<String>,
 
-    /// Who rules: `lead` (the architect), or one or more models,
+    /// Who rules is `lead` (the architect), or one or more models,
     /// comma-separated (several vote as a panel).
     #[arg(
         long,
@@ -149,12 +149,12 @@ pub struct Flags {
 pub struct Config {
     pub level: Level,
     pub proposers: Vec<ModelSpec>,
-    /// One per proposer: the critic of proposal `i`.
+    /// One per proposer. The critic of proposal `i`.
     pub critics: Vec<ModelSpec>,
     pub rounds: u32,
     pub spikes: u32,
     pub spiker: ModelSpec,
-    /// Empty: the architect rules.
+    /// Empty. The architect rules.
     pub judges: Vec<ModelSpec>,
     pub gate: Gate,
     pub max_decisions: u32,
@@ -162,8 +162,8 @@ pub struct Config {
 
 impl Flags {
     /// The settings for a new run, or `None` without `--deliberate`.
-    /// `openai`: whether OpenAI models can be reached (a ChatGPT login or a
-    /// key); the presets use Claude models only without it.
+    /// `openai` tells whether OpenAI models can be reached (a ChatGPT login or a
+    /// key). The presets use Claude models only without it.
     pub fn resolve(&self, architect: &ModelSpec, openai: bool) -> Result<Option<Config>, String> {
         let Some(level) = self.deliberate else {
             return Ok(None);
@@ -343,7 +343,7 @@ impl Config {
 pub struct Ledger {
     #[serde(default)]
     pub decisions: Vec<Decision>,
-    /// The decision whose stages are running: the one the agents' submit
+    /// The decision whose stages are running. The one the agents' submit
     /// tools record into.
     #[serde(default)]
     pub active: Option<String>,
@@ -374,7 +374,7 @@ pub struct Decision {
     /// `None` until the contested claims to test are chosen.
     #[serde(default)]
     pub spikes: Option<Vec<Spike>>,
-    /// By judge slot; the architect's ruling is slot 0.
+    /// By judge slot. The architect's ruling is slot 0.
     #[serde(default)]
     pub rulings: Vec<Option<Ruling>>,
     #[serde(default)]
@@ -393,7 +393,7 @@ pub struct Decision {
 /// The decision as the architect framed it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
-    /// A short name for it (records, file names, log lines); see
+    /// A short name for it (records, file names, log lines), see
     /// [`name`](Self::name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -409,7 +409,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The decision's short name: its title, or else (a frame without one,
+    /// The decision's short name, its title, or else (a frame without one,
     /// such as an older ledger's) its question's first sentence, cut to 100
     /// characters. The whole question stays in the record's "The decision".
     pub fn name(&self) -> String {
@@ -432,7 +432,7 @@ impl Frame {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proposal {
-    /// The model that drafted it (the record names it; critics and judges
+    /// The model that drafted it (the record names it, but critics and judges
     /// don't see it).
     #[serde(default)]
     pub model: String,
@@ -480,7 +480,7 @@ pub struct Finding {
 #[serde(rename_all = "snake_case")]
 pub enum Answer {
     Accept,
-    /// Right in part: the design is revised for that part, and the rest is
+    /// Right in part. The design is revised for that part, and the rest is
     /// contested (the argument says which).
     AcceptInPart,
     Incorrect,
@@ -619,7 +619,7 @@ pub enum Standing {
     Conceded,
     /// The critic withdrew it.
     Withdrawn,
-    /// Still disputed: the judges rule on it.
+    /// Still disputed. The judges rule on it.
     Contested,
 }
 
@@ -753,7 +753,7 @@ impl Decision {
     }
 }
 
-/// Merges the judges' rulings: the design with the most votes (a tie goes
+/// Merges the judges' rulings into the design with the most votes (a tie goes
 /// to the judge listed first), and on each contested finding the majority
 /// (a tie upholds it). The rationale, grafts and reasons for the losers
 /// come from the judges who chose the winner.
@@ -835,7 +835,7 @@ pub fn merge(rulings: &[Ruling], contested: &[String]) -> (Ruling, BTreeMap<Stri
 #[derive(Debug)]
 pub struct Store {
     path: PathBuf,
-    /// The workflow's crate: records go to its `decisions/` folder.
+    /// The workflow's crate. Records go to its `decisions/` folder.
     crate_dir: PathBuf,
     ledger: Mutex<Ledger>,
 }
@@ -910,8 +910,8 @@ impl Store {
         }
     }
 
-    /// Settles decision `id` from its rulings: merges them, writes the
-    /// record, and records the outcome. Returns the record's path relative
+    /// Settles decision `id` from its rulings by merging them, writing the
+    /// record, and recording the outcome. Returns the record's path relative
     /// to the crate.
     pub fn decide(&self, id: &str, config: &Config) -> io::Result<String> {
         let ledger = self.get();
@@ -990,7 +990,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
-/// A file name from a question: its first words, lowercase, with dashes.
+/// A file name from a question, its first words, lowercase, with dashes.
 fn slug(text: &str) -> String {
     let words: Vec<String> = text
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -1194,7 +1194,7 @@ fn indent(text: &str) -> String {
     text.lines().map(|line| format!("  {line}\n")).collect()
 }
 
-/// The decision record: what was decided, why, and what lost.
+/// The decision record, what was decided, why, and what lost.
 pub fn render_record(decision: &Decision, config: &Config) -> String {
     let mut text = format!("# {}: {}\n\n", decision.id, decision.frame.name());
     if let Some(later) = &decision.reopened_by {
@@ -1374,7 +1374,7 @@ fn tool_definition(name: &str, description: &str, schema: Value) -> ToolDefiniti
 }
 
 /// The parameters as `T`. Some models send an array or object as its JSON
-/// text; that is accepted too.
+/// text, and that is accepted too.
 fn parse<T: DeserializeOwned>(params: HashMap<String, Value>) -> Result<T, ToolError> {
     let object = params
         .into_iter()
@@ -1564,12 +1564,12 @@ pub enum Part {
 #[derive(Debug)]
 pub struct Submit {
     pub part: Part,
-    /// The agent's slot: the proposal it wrote or reviews, its spike, its
+    /// The agent's slot, the proposal it wrote or reviews, its spike, its
     /// seat on the panel.
     pub slot: usize,
     pub store: Arc<Store>,
     pub config: Config,
-    /// The architect ruling in the lead's seat: the tool settles the
+    /// The architect ruling in the lead's seat. The tool settles the
     /// decision and returns the record.
     pub lead: bool,
 }
@@ -1748,7 +1748,7 @@ impl Submit {
         }
     }
 
-    /// Records the submission of a run whose first prompt is `prompt`: into
+    /// Records the submission of a run whose first prompt is `prompt`, into
     /// the decision its marker names, or for the architect, the active one.
     fn record(&self, prompt: &str, params: HashMap<String, Value>) -> Result<String, ToolError> {
         let slot = self.slot;
@@ -1763,7 +1763,7 @@ impl Submit {
                     .get(slot)
                     .map(ModelSpec::to_string)
                     .unwrap_or_default();
-                // Each part is taken in its own stage only: a design replaced
+                // Each part is taken in its own stage only. A design replaced
                 // after its review would leave the findings, and the critic's
                 // reply, about a design the ledger no longer has.
                 self.store.record_into(target, |decision| {
@@ -1890,7 +1890,7 @@ impl Submit {
                                 .join(", ")
                         ));
                     }
-                    // Every contested finding needs a ruling; a ruling on one
+                    // Every contested finding needs a ruling, and a ruling on one
                     // already conceded or withdrawn is settled already, and
                     // dropped. Only ids that aren't findings are refused.
                     let known: Vec<String> = decision
@@ -2034,7 +2034,7 @@ impl Tool for Submit {
 }
 
 // ---------------------------------------------------------------------------
-// The host side: running the stages
+// The host side, running the stages
 
 /// Runs the requested deliberations and hands their records to the
 /// architect.
@@ -2045,7 +2045,7 @@ pub struct Deliberator<'a> {
     pub config: &'a Config,
     pub arko: &'a Path,
     pub target_dir: &'a Path,
-    /// What this process tried once: error pauses resumed, by run, and jobs
+    /// What this process tried once, error pauses resumed, by run, and jobs
     /// started afresh after their run failed for a credential or the
     /// configuration, by a key from the job ([`Job::fresh_start`]).
     pub resumed: Mutex<HashSet<uuid::Uuid>>,
@@ -2056,7 +2056,7 @@ pub struct Deliberator<'a> {
 /// One agent's part in a stage.
 struct Job {
     agent: String,
-    /// The first line of the run's prompt: the run to start, or the earlier
+    /// The first line of the run's prompt, the run to start, or the earlier
     /// stage's run to continue.
     marker: String,
     /// Continue the earlier stage's run with `prompt`, instead of starting
@@ -2064,7 +2064,7 @@ struct Job {
     continues: bool,
     prompt: String,
     /// The prompt of a fresh run with the same marker, when the run failed
-    /// for a credential or the configuration: the start prompt, or for a
+    /// for a credential or the configuration, the start prompt, or for a
     /// continuation, one that carries its context.
     fresh: String,
     /// Whether the agent's part is in.
@@ -2091,7 +2091,7 @@ impl Job {
         }
     }
 
-    /// Continues the run `role` started in `stage` with `prompt`; `fresh`
+    /// Continues the run `role` started in `stage` with `prompt`, and `fresh`
     /// is the same request with its context, for a fresh run.
     fn next(
         role: &str,
@@ -2111,7 +2111,7 @@ impl Job {
 
     /// The job's key among what this process tried once
     /// ([`Deliberator::resumed`]), from its agent and its prompt's first line
-    /// (its stage: a rebuttal continues the proposal's run, under the same
+    /// (its stage, where a rebuttal continues the proposal's run, under the same
     /// marker).
     fn fresh_start(&self) -> uuid::Uuid {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2121,7 +2121,7 @@ impl Job {
 }
 
 /// Why the forge stops when `agent` (on `model`, when known) can't reach its
-/// model, also when started afresh: the request needs a new credential or a
+/// model, also when started afresh. The request needs a new credential or a
 /// configuration change.
 pub(crate) fn login_reason(agent: &str, model: Option<&ModelSpec>, error: &str) -> String {
     let openai = model
@@ -2145,7 +2145,7 @@ pub(crate) fn login_reason(agent: &str, model: Option<&ModelSpec>, error: &str) 
     )
 }
 
-/// Stops the forge, saved, with exit status 3: an agent's model request
+/// Stops the forge, saved, with exit status 3 when an agent's model request
 /// needs a new credential or a configuration change (`reason`).
 pub(crate) async fn login_stop(workflow: &Workflow, state_dir: &Path, reason: &str) -> ! {
     if let Err(error) = workflow.checkpoint().await {
@@ -2166,10 +2166,10 @@ const AFRESH_CRITIC: &str = "You reviewed the proposal below for the decision be
 
 /// The error, when `run` failed because its model request needs a new
 /// credential or a configuration change (arko's
-/// `ErrorRecoveryCause::NonRetryable`: an expired or invalidated login, a
+/// `ErrorRecoveryCause::NonRetryable`, such as an expired or invalidated login, a
 /// bad key), as the run's failure records it (`AgentResult::failure_cause`).
 /// A run saved before arko recorded that is read from its state changes in
-/// the event log (`events.jsonl` in the state directory): the run went from
+/// the event log (`events.jsonl` in the state directory). The run went from
 /// that pause straight to its failure.
 pub(crate) fn login_failure(state_dir: &Path, run: &AgentResult) -> Option<String> {
     #[derive(Deserialize)]
@@ -2180,7 +2180,7 @@ pub(crate) fn login_failure(state_dir: &Path, run: &AgentResult) -> Option<Strin
     if run.status != AgentRunStatus::Failed {
         return None;
     }
-    // A request too large for the model fails that run alone: no credential
+    // A request too large for the model fails that run alone. No credential
     // or configuration change is needed.
     if matches!(
         run.failure_kind(),
@@ -2253,7 +2253,7 @@ impl Deliberator<'_> {
             for decision in &pending {
                 if decision.outcome.is_none() {
                     match self.deliberate(&decision.id).await {
-                        // Only `drive` interrupts a deliberation: an agent's
+                        // Only `drive` interrupts a deliberation. An agent's
                         // login or configuration needs the user.
                         Err(WorkflowError::AgentInterrupted { reason, .. }) => {
                             login_stop(self.workflow, self.state_dir, &reason).await
@@ -2274,7 +2274,7 @@ impl Deliberator<'_> {
                 }
             }
             let prompt = match to_rule {
-                // The architect rules: it gets the dossier, and its
+                // The architect rules. It gets the dossier, and its
                 // `submit_ruling` settles the decision.
                 Some(decision) => {
                     let id = decision.id.clone();
@@ -2295,7 +2295,7 @@ impl Deliberator<'_> {
                         )
                     }
                 }
-                // Every pending decision is settled: the architect gets all
+                // Every pending decision is settled. The architect gets all
                 // their outcomes at once.
                 None => {
                     let ids: Vec<String> = pending.iter().map(|d| d.id.clone()).collect();
@@ -2583,7 +2583,7 @@ impl Deliberator<'_> {
             self.run_stage(id, jobs).await?;
         }
 
-        // The ruling: the architect's (in `settle`), or the judges'.
+        // The ruling, the architect's (in `settle`), or the judges'.
         if config.judges.is_empty() {
             return Ok(());
         }
@@ -2623,11 +2623,11 @@ impl Deliberator<'_> {
 
     /// Drives `job`'s run until its part is in, or the run can't get there.
     /// A run whose model request needs a new credential or a configuration
-    /// change (an expired login) isn't the end of the job: a failed one
+    /// change (an expired login) isn't the end of the job. A failed one
     /// starts again afresh once per process, and when that fails the same
     /// way (or a paused one was resumed once already), the forge stops,
     /// saved ([`login_stop`](Self::login_stop)), so the user can sign in
-    /// again and resume; the resumed forge starts the job afresh again.
+    /// again and resume, and the resumed forge starts the job afresh again.
     async fn drive(&self, id: &str, job: &Job) -> Result<(), WorkflowError> {
         let agent = job.agent.as_str();
         let mut nudges = 0;
@@ -2731,7 +2731,7 @@ impl Deliberator<'_> {
                     ..
                 })
                 | Some(AgentPause::ToolApproval { .. }) => return None,
-                // A credential, the CLI, the configuration: once per
+                // A credential, the CLI, the configuration, once per
                 // process, in case it was fixed before a resume.
                 Some(AgentPause::ErrorRecovery {
                     cause: ErrorRecoveryCause::NonRetryable,
@@ -2742,7 +2742,7 @@ impl Deliberator<'_> {
                     }
                     Call::Resume(run.clone())
                 }
-                // The budget, an outage, a usage limit: go on.
+                // The budget, an outage, a usage limit, go on.
                 Some(AgentPause::ErrorRecovery { .. }) => Call::Resume(run.clone()),
                 None => Call::Recover(run.clone()),
             },
@@ -2777,7 +2777,7 @@ impl Deliberator<'_> {
 }
 
 /// The decisions the finished `architect` run is still to be given, in the
-/// order it framed them: those it hasn't been given, and those the forge
+/// order it framed them, namely those it hasn't been given, and those the forge
 /// stopped giving it before the continuation was saved (the run has made
 /// no request since).
 fn to_deliver(ledger: &Ledger, architect: &AgentResult) -> Vec<Decision> {
@@ -2844,7 +2844,7 @@ fn is_fatal(error: &WorkflowError) -> bool {
     )
 }
 
-/// What a spike tests: the finding, the design it's about, and both sides.
+/// What a spike tests, the finding, the design it's about, and both sides.
 fn spike_brief(decision: &Decision, spike: &Spike) -> String {
     let Some(finding) = decision.finding(&spike.finding) else {
         return format!("Finding {} (no longer recorded).", spike.finding);
@@ -3060,7 +3060,7 @@ mod tests {
             .into_iter()
             .map(|spike| spike.finding)
             .collect();
-        // Minor findings aren't tested; withdrawn and conceded ones neither.
+        // Minor findings aren't tested, and withdrawn and conceded ones neither.
         assert_eq!(chosen, ["P2-F1", "P1-F2"]);
     }
 
@@ -3155,9 +3155,9 @@ mod tests {
             decisions: vec![decision],
             active: None,
         };
-        // Stopped before the continuation was saved: given again.
+        // Stopped before the continuation was saved, given again.
         assert_eq!(to_deliver(&ledger, &architect(run_id, 7)).len(), 1);
-        // The continuation ran (it made requests): delivered.
+        // The continuation ran (it made requests), delivered.
         assert!(to_deliver(&ledger, &architect(run_id, 8)).is_empty());
         // Another architect run (a fresh start reads `decisions/` itself).
         assert!(to_deliver(&ledger, &architect(uuid::Uuid::new_v4(), 3)).is_empty());
@@ -3202,7 +3202,7 @@ mod tests {
                 ),
             ])
         };
-        // A ruling on an unknown finding is refused; one on a finding that
+        // A ruling on an unknown finding is refused, and one on a finding that
         // was conceded (P1-F1) is accepted and dropped.
         let mut unknown = params("P1");
         unknown.insert(
@@ -3225,7 +3225,7 @@ mod tests {
                 {"finding": "P2-F1", "upheld": true, "reason": "the spike showed it"}
             ]),
         );
-        // D2 is still to be deliberated: rule, then end the turn.
+        // D2 is still to be deliberated, so rule, then end the turn.
         let reply = ruling.record("Build it.", settled).unwrap();
         let recorded = store.decision("D1").unwrap().rulings[0].clone().unwrap();
         assert_eq!(recorded.rulings.len(), 2);
@@ -3235,7 +3235,7 @@ mod tests {
                 .join("decisions/D1-how-should-the-workflow-recover-after.md")
                 .is_file()
         );
-        // The last ruling: build.
+        // The last ruling tells the architect to build.
         store
             .update(|ledger| ledger.active = Some("D2".into()))
             .unwrap();
@@ -3304,7 +3304,7 @@ mod tests {
             submit(part).record(prompt, params).unwrap_err().to_string()
         };
 
-        // D1 has been through every stage: none of its parts can be replaced.
+        // D1 has been through every stage, so none of its parts can be replaced.
         let d1 = "[forge D1 proposal 1]\n";
         assert!(refusal(Part::Proposal, proposal(), d1).contains("can't be replaced now"));
         assert!(refusal(Part::Findings, findings(), d1).contains("can't be replaced now"));
@@ -3313,7 +3313,7 @@ mod tests {
         assert_eq!(d1.proposals[0].as_ref().unwrap().title, "host loop");
         assert_eq!(d1.findings_of(0).len(), 2);
 
-        // D2 has only its proposals: nothing to answer or reply to yet, and
+        // D2 has only its proposals, so nothing to answer or reply to yet, and
         // the design may still be replaced.
         let d2 = "[forge D2 proposal 1]\n";
         assert!(refusal(Part::Rebuttal, rebuttal(), d2).contains("hasn't been reviewed yet"));
@@ -3584,7 +3584,7 @@ mod tests {
             builder.build().unwrap()
         }
 
-        /// The deliberator of a new process: nothing tried yet.
+        /// The deliberator of a new process, nothing tried yet.
         fn deliberator<'a>(&'a self, workflow: &'a Workflow) -> Deliberator<'a> {
             Deliberator {
                 workflow,
@@ -3688,7 +3688,7 @@ mod tests {
         drop(deliberator);
         drop(workflow);
 
-        // Resumed: the job starts afresh rather than taking the failed run as
+        // Resumed, the job starts afresh rather than taking the failed run as
         // final.
         let pointer = std::fs::read_to_string(fixture.state_dir.join("latest-checkpoint")).unwrap();
         let resumed = fixture.workflow(Some(fixture.state_dir.join(pointer.trim())));
@@ -3720,7 +3720,7 @@ mod tests {
         deliberator.drive("D1", &job).await.unwrap();
         assert_eq!(runs(&workflow, &job).len(), 1);
         assert_eq!(requests.load(Ordering::SeqCst), 0);
-        // An agent in Claude Code pauses for its login instead; one this
+        // An agent in Claude Code pauses for its login instead, and one this
         // process resumed already stops the forge, as a failed one does.
         let paused = failed_run(
             &fixture,
@@ -3776,7 +3776,7 @@ mod tests {
                 .count()
         };
         // Failed for its login (the recorded cause), started afresh once,
-        // failed again: the forge stops (`call` saves and exits with 3).
+        // failed again. The forge stops (`call` saves and exits with 3).
         let first = architect(false);
         match first
             .attempt(workflow.run_agent(crate::ARCHITECT, "Build it."))
@@ -3885,7 +3885,7 @@ mod tests {
         log(vec![line(run_id, pause("non_retryable"))]);
         run.status = AgentRunStatus::Completed;
         assert_eq!(classify(&run), None);
-        // The cause recorded with the failure comes first; the log is only
+        // The cause recorded with the failure comes first, and the log is only
         // for runs saved before arko recorded it.
         run.status = AgentRunStatus::Failed;
         run.error = Some("can't succeed: 401".into());
@@ -3950,7 +3950,7 @@ mod tests {
         let long = "What is the top-level architecture of the workflow, taken as one design? (1) the topology; (2) recovery; (3) state; (4) models.";
         let mut decision = decision();
         decision.frame.question = long.into();
-        // An older ledger's frame has no title: the first sentence.
+        // An older ledger's frame has no title, the first sentence.
         assert_eq!(
             decision.frame.name(),
             "What is the top-level architecture of the workflow, taken as one design?"

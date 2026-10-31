@@ -1,9 +1,9 @@
-//! Basic example: sequential multi-agent workflow.
+//! Basic example of a sequential multi-agent workflow.
 //!
 //! Usage:
 //!   cargo run -p arko_workflows --example basic_workflow
 //!
-//! Takes no arguments: it expects the workspace `./my-project` and the agent
+//! Takes no arguments. It expects the workspace `./my-project` and the agent
 //! configurations `configs/architect.json` and `configs/coder.json` (edit the
 //! paths in `main`). Needs credentials for the providers those configurations
 //! use, from the environment (see `LLMClient::from_env`).

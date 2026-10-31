@@ -87,7 +87,7 @@ async fn move_first(jobs: &TerminalManager) -> uuid::Uuid {
     .await
 }
 
-/// An agent's call moves when the host moves it: the agent goes on with the
+/// An agent's call moves when the host moves it. The agent goes on with the
 /// job's ID as the call's result, and the job keeps running after the run.
 #[tokio::test]
 async fn an_agents_call_moves_to_the_background() {

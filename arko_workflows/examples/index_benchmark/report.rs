@@ -1,4 +1,4 @@
-//! The report: correctness and cost per arm and kind with confidence
+//! The report, correctness and cost per arm and kind with confidence
 //! intervals, paired differences between arms, and the cost/quality
 //! frontier.
 
@@ -169,7 +169,7 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-/// One settled cell: the task, its final attempt, and the grading.
+/// One settled cell, the task, its final attempt, and the grading.
 #[derive(Debug, Clone)]
 pub struct Row<'a> {
     pub task: &'a BenchTask,
@@ -183,7 +183,7 @@ impl Row<'_> {
         self.attempt.outcome == Outcome::Answered
     }
 
-    /// The grader's pass: false for a run that didn't answer; `None` for an
+    /// The grader's pass, false for a run that didn't answer, `None` for an
     /// answer not graded.
     pub fn pass(&self) -> Option<bool> {
         if !self.answered() {
@@ -199,7 +199,7 @@ impl Row<'_> {
         self.grade.and_then(|grade| grade.item_score)
     }
 
-    /// The deterministic check: `None` when the key has nothing checkable.
+    /// The deterministic check, `None` when the key has nothing checkable.
     pub fn det_pass(&self) -> Option<bool> {
         let checkable = self
             .task
@@ -222,7 +222,7 @@ impl Row<'_> {
     }
 }
 
-/// The settled cells of a run: for each task, arm and sample, the last
+/// The settled cells of a run, for each task, arm and sample, the last
 /// final attempt and its first successful grading.
 pub fn rows<'a>(
     tasks: &'a [BenchTask],
@@ -283,7 +283,7 @@ pub struct GroupStats {
     pub index_calls: f64,
     /// Share of cells whose agent ran arko_index at least once.
     pub index_adoption: f64,
-    /// Working time: wall time less waits for usage limits and retries.
+    /// Working time, wall time less waits for usage limits and retries.
     pub work_seconds: Estimate,
     pub median_work_seconds: f64,
     pub api_cost: Estimate,
@@ -301,7 +301,7 @@ fn clusters_of<'a>(rows: &[&Row<'a>], value: impl Fn(&Row<'a>) -> Option<f64>) -
     by_task.into_values().collect()
 }
 
-/// A rate over cells with a 95% interval: Wilson's when every task has one
+/// A rate over cells with a 95% interval, Wilson's when every task has one
 /// cell (or there is only one task), else a bootstrap that resamples tasks
 /// with all their samples.
 fn rate<'a>(
@@ -425,7 +425,7 @@ pub fn paired_stats(
     resamples: usize,
     rng: &mut Rng,
 ) -> PairedStats {
-    // Per task and arm: the mean over samples of each figure.
+    // Per task and arm, the mean over samples of each figure.
     type Means = (Option<f64>, Option<f64>, Option<f64>, f64, f64, f64, f64);
     let mut per_task: BTreeMap<&str, HashMap<Arm, Vec<&Row<'_>>>> = BTreeMap::new();
     for row in rows {
@@ -1285,7 +1285,7 @@ mod tests {
         assert!((estimate.value - 24.5).abs() < 1e-9);
         assert!(estimate.low < 24.5 && estimate.high > 24.5);
         assert!(estimate.low > 18.0 && estimate.high < 31.0, "{estimate:?}");
-        // One cluster: no interval to speak of.
+        // One cluster, so no interval to speak of.
         let single = bootstrap_mean(&[vec![1.0, 3.0]], 100, &mut rng);
         assert_eq!(
             (single.value, single.low, single.high, single.n),
@@ -1303,13 +1303,13 @@ mod tests {
         let mut attempts = Vec::new();
         let mut grades = Vec::new();
         for (i, task) in tasks.iter().enumerate() {
-            // Arm A: right on t0 and t1, wrong on t2, failed on t3.
+            // Arm A, right on t0 and t1, wrong on t2, failed on t3.
             let a = match i {
                 0 | 1 => attempt(&task.id, Arm::A, Outcome::Answered, right, 200_000),
                 2 => attempt(&task.id, Arm::A, Outcome::Answered, wrong, 300_000),
                 _ => attempt(&task.id, Arm::A, Outcome::Limit, "", 4_000_000),
             };
-            // Arm B: right everywhere, with fewer tokens.
+            // Arm B, right everywhere, with fewer tokens.
             let b = attempt(&task.id, Arm::B, Outcome::Answered, right, 100_000);
             if a.outcome == Outcome::Answered {
                 grades.push(grade(&a, i < 2, i < 2));
@@ -1362,9 +1362,9 @@ mod tests {
         assert_eq!((a.cells, a.answered, a.over_limit, a.graded), (4, 3, 1, 3));
         assert_eq!(a.pass_rate.n, 4);
         assert!((a.pass_rate.value - 0.5).abs() < 1e-9);
-        // Item scores: 1, 1, 0, 0 (no answer).
+        // Item scores, 1, 1, 0, 0 (no answer).
         assert!((a.item_score.value - 0.5).abs() < 1e-9);
-        // The check: right, right, wrong location, no answer.
+        // The check, right, right, wrong location, no answer.
         assert!((a.det_pass_rate.value - 0.5).abs() < 1e-9);
         assert!((a.input_tokens.value - 1_175_000.0).abs() < 1e-6);
         let b = find(Arm::B, "all");
@@ -1388,7 +1388,7 @@ mod tests {
         assert!((paired.input_tokens.value + 1_075_000.0).abs() < 1e-6);
         assert_eq!((paired.wins, paired.ties, paired.losses), (2, 2, 0));
 
-        // B is cheaper and better: A is off the frontier.
+        // B is cheaper and better, so A is off the frontier.
         let on = |arm: Arm| {
             report
                 .frontier
@@ -1425,11 +1425,11 @@ mod tests {
                 let mut a = attempt(&task.id, Arm::A, Outcome::Answered, right, 1000);
                 a.attempt_id = format!("{}-{sample}", task.id);
                 a.sample = sample;
-                // Five minutes of work; arm A also waited three hours for a
+                // Five minutes of work, and arm A also waited three hours for a
                 // usage limit on t0.
                 a.active_ms = 300_000;
                 a.wall_ms = if task.id == "t0" { 11_100_000 } else { 300_000 };
-                // Samples of a task agree: t0..t2 pass, t3..t5 fail.
+                // Samples of a task agree, t0..t2 pass, t3..t5 fail.
                 let pass = task.id < "t3".to_string();
                 grades.push(grade(&a, pass, pass));
                 attempts.push(a);
@@ -1469,7 +1469,7 @@ mod tests {
             .unwrap();
         assert!((all.work_seconds.value - 300.0).abs() < 1e-9);
         assert!((all.median_work_seconds - 300.0).abs() < 1e-9);
-        // 18 cells, but six independent tasks: the interval is that of six
+        // 18 cells, but six independent tasks, so the interval is that of six
         // tasks, much wider than Wilson's for 18 cells.
         assert!((all.pass_rate.value - 0.5).abs() < 1e-9);
         let cells = wilson(9, 18);

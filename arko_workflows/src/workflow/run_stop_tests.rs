@@ -1,4 +1,4 @@
-//! Stopping one agent run while the workflow runs on: its wrap-up, its
+//! Stopping one agent run while the workflow runs on, covering its wrap-up, its
 //! cancellation when the wrap-up is over, the host's intent (retire or
 //! relaunch) across a resume, delegated runs, and the control folder.
 
@@ -152,7 +152,7 @@ fn running(workflow: &Workflow, agent: &str) -> uuid::Uuid {
     runs[0]
 }
 
-/// A server for the coder (`CODER-TASK`: it calls `saver`, and completes
+/// A server for the coder (`CODER-TASK`, which calls `saver`, and completes
 /// once told its run is stopping), a reviewer that never gets an answer
 /// (`REVIEWER-TASK`), another agent that waits at its gate (`OTHER-TASK`),
 /// a run that completes at once (`EARLY-TASK`), runs restarted or
@@ -242,9 +242,9 @@ impl AtomicUsizeCounter {
     }
 }
 
-/// A stop of one run with a wrap-up: its tools see their stop signal, it
+/// A stop of one run with a wrap-up. Its tools see their stop signal, it
 /// is told to finish, and its completion is a progress report that its
-/// completion verifier doesn't review; the run call returns it, marked.
+/// completion verifier doesn't review, and the run call returns it, marked.
 /// Meanwhile new runs start, and the other running agent's tools see no
 /// stop.
 #[tokio::test]
@@ -346,7 +346,7 @@ async fn a_run_stopped_alone_wraps_up_while_the_others_run_on() {
 }
 
 /// A run that doesn't finish within its wrap-up is cancelled (within the
-/// grace period): its call returns `AgentStopped`, which isn't a failure,
+/// grace period). Its call returns `AgentStopped`, which isn't a failure,
 /// and the run, stopped to be relaunched, is listed by `stopped_runs` at
 /// once and restarted while the workflow runs.
 #[tokio::test]
@@ -412,7 +412,7 @@ async fn a_run_that_does_not_wrap_up_in_time_is_cancelled_then_relaunched() {
     assert!(workflow.stopped_runs().is_empty());
 }
 
-/// Without a wrap-up a run is cancelled at once; in a parallel batch it
+/// Without a wrap-up a run is cancelled at once, and in a parallel batch it
 /// comes back in its place, and doesn't stop the others under fail-fast.
 #[tokio::test]
 async fn a_run_stopped_without_a_wrap_up_is_cancelled_at_once_and_its_batch_runs_on() {
@@ -462,7 +462,7 @@ async fn a_run_stopped_without_a_wrap_up_is_cancelled_at_once_and_its_batch_runs
     assert!(workflow.stopped_runs().is_empty(), "a retired run");
 }
 
-/// The host's intent is saved with the results: after a resume, a run
+/// The host's intent is saved with the results. After a resume, a run
 /// stopped to be relaunched is listed and continued, and a retired one is
 /// not listed and `restart` refuses it, also when a workflow stop ended it
 /// in its wrap-up (its own stop stands).
@@ -507,7 +507,7 @@ async fn retire_and_relaunch_are_kept_across_a_resume() {
         StopRequest::operator("replacing it").wrap_up(Duration::from_secs(3_600)),
         RunStopIntent::Retire
     ));
-    // A drain ends the run's wrap-up: its own stop stands on its result.
+    // A drain ends the run's wrap-up, and its own stop stands on its result.
     assert!(workflow.stop(StopRequest::drain("deploying a fix")));
     assert!(matches!(
         within(reviewer).await.unwrap(),
@@ -567,7 +567,7 @@ async fn retire_and_relaunch_are_kept_across_a_resume() {
     assert!(resumed.stopped_runs().is_empty());
 }
 
-/// A stop under way is saved with the live checkpoint: when the process
+/// A stop under way is saved with the live checkpoint. When the process
 /// ends in a run's wrap-up, the resume keeps the host's intent, so a
 /// retired run is not listed for recovery, and one to relaunch is.
 #[tokio::test]
@@ -605,7 +605,7 @@ async fn a_run_the_process_ended_in_its_wrap_up_keeps_its_intent() {
     let wrap_up = StopRequest::operator("replacing it").wrap_up(Duration::from_secs(3_600));
     assert!(workflow.stop_run(coder_id, wrap_up.clone(), RunStopIntent::Retire));
     assert!(workflow.stop_run(reviewer_id, wrap_up, RunStopIntent::Relaunch));
-    // The coder is told, and waits on its model; the stops are saved.
+    // The coder is told, and waits on its model, and the stops are saved.
     until(|| server.bodies().iter().any(|body| body.contains(RUN_NOTICE))).await;
     let run = run_dir(&workspace);
     until(|| {
@@ -648,7 +648,7 @@ async fn a_run_the_process_ended_in_its_wrap_up_keeps_its_intent() {
 }
 
 /// A server for a lead that delegates `CODER-TASK` to the coder and, given
-/// a note that it can resume the coder's run, resumes it; a lead told to
+/// a note that it can resume the coder's run, resumes it, and a lead told to
 /// stop finishes.
 async fn delegation_server() -> ResponsesServer {
     ResponsesServer::start(|_, body| {
@@ -736,7 +736,7 @@ async fn a_delegated_run_stopped_alone_is_named_to_its_caller_which_can_resume_i
     assert!(!workflow.is_cancelled());
 }
 
-/// A delegated run retired without a wrap-up is cancelled at once: its
+/// A delegated run retired without a wrap-up is cancelled at once. Its
 /// caller's call fails, naming the run as retired, and resuming it is
 /// refused.
 #[tokio::test]
@@ -796,8 +796,8 @@ async fn a_retired_delegated_run_cant_be_resumed_by_its_caller() {
     assert!(coder.stopped_by().unwrap().is_retired());
 }
 
-/// Stopping a run stops the runs inside its tool calls too: the delegated
-/// run wraps up and reports to its caller, which then wraps up itself; both
+/// Stopping a run stops the runs inside its tool calls too. The delegated
+/// run wraps up and reports to its caller, which then wraps up itself, and both
 /// are marked with the stop.
 #[tokio::test]
 async fn stopping_a_run_stops_the_runs_it_delegated_to() {
@@ -833,7 +833,7 @@ async fn stopping_a_run_stops_the_runs_it_delegated_to() {
     assert!(workflow.stopped_runs().is_empty());
 }
 
-/// Another process stops a run through the control folder: the running
+/// Another process stops a run through the control folder. The running
 /// workflow reads the request within a second. A request written before
 /// the workflow was built is skipped.
 #[tokio::test]
@@ -888,7 +888,7 @@ async fn a_control_folder_request_stops_a_running_run() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1], written);
 
-    // Requests name a run or an agent; the folder must exist.
+    // Requests name a run or an agent, and the folder must exist.
     let both = ControlStop {
         agent: Some("coder".to_string()),
         ..ControlStop::run(uuid::Uuid::new_v4(), "x")
@@ -904,7 +904,7 @@ async fn a_control_folder_request_stops_a_running_run() {
 }
 
 /// Records saved before runs could be stopped alone load without an
-/// intent, and a workflow stop is still saved without one; a hand-written
+/// intent, and a workflow stop is still saved without one, and a hand-written
 /// stop request needs only its target.
 #[test]
 fn records_without_an_intent_load_and_requests_default() {
@@ -983,9 +983,9 @@ async fn relaunch_server() -> ResponsesServer {
 }
 
 /// A host may relaunch a run as soon as `stopped_runs` lists it, while the
-/// old launch's driver is still finishing: the relaunched run keeps its own
+/// old launch's driver is still finishing. The relaunched run keeps its own
 /// stop state, so it can be stopped alone, and a workflow stop gives it a
-/// wrap-up. (The hook holds the old driver where it is anyway: its result
+/// wrap-up. (The hook holds the old driver where it is anyway. Its result
 /// recorded, not yet unregistered.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_run_relaunched_while_its_old_launch_finishes_keeps_its_stop_state() {
@@ -1048,7 +1048,7 @@ async fn a_run_relaunched_while_its_old_launch_finishes_keeps_its_stop_state() {
 }
 
 /// A delegated run the host retired, which the process ended in its
-/// wrap-up, stays retired when its caller is recovered: the caller's call
+/// wrap-up, stays retired when its caller is recovered. The caller's call
 /// fails, naming it, instead of running it again.
 #[tokio::test]
 async fn a_retired_delegated_run_stays_stopped_when_its_caller_is_recovered() {

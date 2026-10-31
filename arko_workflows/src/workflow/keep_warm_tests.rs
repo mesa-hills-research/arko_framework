@@ -19,8 +19,8 @@ fn builder(server: &ResponsesServer, workspace: &Workspace) -> WorkflowBuilder {
         .agent("main", chat)
 }
 
-/// A run waiting for the user's next message keeps its prompt cache warm:
-/// its next request with a ping after it goes out, its cost is charged to
+/// A run waiting for the user's next message keeps its prompt cache warm.
+/// Its next request with a ping after it goes out, its cost is charged to
 /// the agent, and the run's conversation stays as it was.
 #[tokio::test]
 async fn an_idle_run_s_prompt_cache_is_kept_warm() {
@@ -74,7 +74,7 @@ async fn an_idle_run_s_prompt_cache_is_kept_warm() {
     );
 }
 
-/// A non-streamed reply, as a refresh asks for: one word, its input mostly
+/// A non-streamed reply, as a refresh asks for. One word, its input mostly
 /// read from the cache.
 fn refresh_reply() -> Reply {
     Reply::Status {
@@ -114,8 +114,8 @@ fn bodies(server: &ResponsesServer) -> Vec<Value> {
         .collect()
 }
 
-/// A run paused for a tool approval waits with a call that has no output:
-/// a message can't follow it, so its last request goes again unchanged,
+/// A run paused for a tool approval waits with a call that has no output.
+/// A message can't follow it, so its last request goes again unchanged,
 /// which ends where the cache entry its next request reads ends.
 #[tokio::test]
 async fn a_run_paused_for_an_approval_sends_its_last_request_again() {
@@ -149,7 +149,7 @@ async fn a_run_paused_for_an_approval_sends_its_last_request_again() {
     assert_eq!(bodies[1]["max_output_tokens"], 16);
 }
 
-/// A refresh is charged as a model call is, and saved at once: the live
+/// A refresh is charged as a model call is, and saved at once. The live
 /// checkpoint holds its cost. With a budget exceeded, nothing is sent.
 #[tokio::test]
 async fn a_refresh_is_charged_saved_and_held_to_the_budget() {

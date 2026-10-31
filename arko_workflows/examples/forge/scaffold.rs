@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A crate name from `name`: lowercase letters, digits, `-` and `_`,
+/// A crate name from `name`, lowercase letters, digits, `-` and `_`,
 /// starting with a letter.
 pub fn crate_name(name: &str) -> Option<String> {
     let name: String = name
@@ -128,13 +128,13 @@ uuid = {{ version = "1.8.0", features = ["v4", "serde"] }}
     )
 }
 
-/// One failed check: what ran, and the end of its output.
+/// One failed check, what ran, and the end of its output.
 pub struct CheckFailure {
     pub check: String,
     pub output: String,
 }
 
-/// The checks every forged crate must pass: it builds, its tests pass, its
+/// The checks every forged crate must pass, it builds, its tests pass, its
 /// CLI starts, and its docs exist.
 pub async fn check(dir: &Path, target_dir: &Path) -> Result<Vec<String>, CheckFailure> {
     let mut passed = Vec::new();

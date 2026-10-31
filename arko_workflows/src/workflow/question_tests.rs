@@ -1,4 +1,4 @@
-//! Questions an agent asks without waiting: the user input handler's answer
+//! Questions an agent asks without waiting, the user input handler's answer
 //! reaches the agent in its mailbox, and a handover asks the handler which
 //! questions are still open.
 
@@ -74,7 +74,7 @@ async fn asking_server(answer: &'static str) -> ResponsesServer {
     .await
 }
 
-/// Runs the asking agent until it has read `answer`: at once, or after the
+/// Runs the asking agent until it has read `answer`. At once, or after the
 /// answer reached its mailbox and woke it (its run had ended).
 async fn run_until_answered(workflow: &Workflow, answer: &str) {
     let result = within(workflow.run_agent("lead", "Format the code."))
@@ -209,7 +209,7 @@ impl UserInputHandler for Held {
     }
 }
 
-/// An answer that comes after the asking run ended wakes it: the host
+/// An answer that comes after the asking run ended wakes it. The host
 /// hears `NewsWaiting` about the run itself, and the run it continues
 /// reads the answer.
 #[tokio::test]
