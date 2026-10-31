@@ -954,7 +954,8 @@ impl Task {
     /// It takes a task between turns, one completed, awaiting the user's
     /// answer, or cancelled (a turn the cancellation left open is settled
     /// first, as when the task runs again). Returns `InvalidTaskState`
-    /// otherwise, and for an empty `request`.
+    /// otherwise, and for a `request` that is empty or over
+    /// [`MAX_REPORT_REQUEST_BYTES`](crate::handover::MAX_REPORT_REQUEST_BYTES).
     pub fn request_report(&mut self, request: Option<String>) -> Result<(), ArkoAgentsError> {
         if !matches!(
             self.current_state,
@@ -974,6 +975,15 @@ impl Task {
             return Err(ArkoAgentsError::InvalidTaskState(
                 "a report's request must not be empty".to_string(),
             ));
+        }
+        if let Some(request) = request.as_deref()
+            && request.len() > crate::handover::MAX_REPORT_REQUEST_BYTES
+        {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a report's request may be at most {} bytes, and this one is {} bytes",
+                crate::handover::MAX_REPORT_REQUEST_BYTES,
+                request.len()
+            )));
         }
         self.set_state(TaskState::InProgress);
         // Claude Code writes it in a copy of the session, which the task

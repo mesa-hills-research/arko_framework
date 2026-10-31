@@ -1833,7 +1833,8 @@ Before a model request, once that request is estimated to have at
    `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
    (`DEFAULT_REPORT_REQUEST` for an agent that gives it with the `handover_report` tool,
    `DEFAULT_TEXT_REPORT_REQUEST` for one that replies with it, or `report_request` for
-   either) and emits `HandoverRequested`. It waits
+   either, at most `MAX_REPORT_REQUEST_BYTES`, 8,000 bytes, so it fits a Claude Code hook)
+   and emits `HandoverRequested`. It waits
    for a boundary where a user message can go, so not while calls wait for results, and not
    for a refusal fallback's request. A conversation whose first request was already over
    the threshold doesn't hand over (the fresh one would start over it too). A warning is
@@ -1929,7 +1930,7 @@ arko_workflows engine does all three for every agent it runs.
 `Task::request_report(request)` asks for the report alone, without a handover, such as before
 the work goes on in another conversation on another model. The task's next run sends `request`
 (by default `DEFAULT_REPORT_ONLY_REQUEST`, or `DEFAULT_TEXT_REPORT_ONLY_REQUEST` where the report
-is a reply) and rejects every other call, `complete_task` included, until the report comes. The
+is a reply, and at most `MAX_REPORT_REQUEST_BYTES`) and rejects every other call, `complete_task` included, until the report comes. The
 task then completes with the report as its summary, and the conversation keeps the request and the
 report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
 in a copy of its session (a fork) that the task goes on in, so the session is left as it was for a
