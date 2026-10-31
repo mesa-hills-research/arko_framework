@@ -53,7 +53,7 @@ use super::AgentHandle;
 ///
 /// The chain applies the agent's
 /// [`InterceptionFailurePolicy`] to
-/// each stage: a failing stage is retried up to the policy's attempts and,
+/// each stage. A failing stage is retried up to the policy's attempts and,
 /// if it still fails, skipped, so the next stage (and the agent) gets the
 /// output of the last stage that succeeded. A failure never undoes an
 /// earlier stage's work (such as a redaction), and a stage that succeeded
@@ -244,9 +244,9 @@ fn fire_hooks(
     HookResult::Continue
 }
 
-/// Stops the run because a hook at `point` returned `Abort(reason)`: every
+/// Stops the run because a hook at `point` returned `Abort(reason)`. Every
 /// running agent is told to stop and later run calls fail. Returns the run's
-/// stop error: a run already stopped keeps its first cause.
+/// stop error. A run already stopped keeps its first cause.
 pub(crate) fn abort_run(ctx: &SharedContext, point: &HookPoint, reason: String) -> WorkflowError {
     let cause = CancelCause::AbortedByHook {
         hook_point: format!("{point:?}"),
@@ -342,7 +342,7 @@ async fn publish_event(
         ctx.messages.seen(agent_name, agent_run_id, ids);
     }
     if let Some(persistence) = persistence {
-        // Never fails: a failed write is logged and retried.
+        // Never fails, since a failed write is logged and retried.
         persistence
             .append_event(agent_name, agent_run_id, event)
             .await;
@@ -379,7 +379,7 @@ fn charge_usage(
     cost_result
 }
 
-/// Whether a charge fires `OnBudgetExceeded`: under
+/// Whether a charge fires `OnBudgetExceeded`, under
 /// [`BudgetExceededPolicy::Pause`] once per crossing of the limit, under
 /// `Cancel` for every charge over it.
 pub(crate) fn reports_exceeded(
@@ -394,7 +394,7 @@ pub(crate) fn reports_exceeded(
 
 /// The error for a request agent `agent_name` may not make because a budget
 /// is exceeded (the workflow's, the agent's, or a plan window's), whatever
-/// the policy: for a request no run waits on, such as a prompt cache
+/// the policy, for a request no run waits on, such as a prompt cache
 /// refresh.
 fn budget_refusal(ctx: &SharedContext, agent_name: &str) -> Option<WorkflowError> {
     let budget = &ctx.budget;
@@ -443,12 +443,12 @@ fn plan_budget_error(ctx: &SharedContext) -> Option<WorkflowError> {
 }
 
 /// Answers an agent held before a model request because a budget is
-/// exceeded ([`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)):
-/// once the budget is raised, it continues. A run inside another agent's
+/// exceeded ([`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)).
+/// Once the budget is raised, it continues. A run inside another agent's
 /// tool call (`nested`) waits for the raise, and so does one the host
 /// started under `WorkflowBuilder::wait_for_budget_raise`. Any other is
 /// paused for its caller ([`WorkflowError::AgentPaused`]). A stop of the
-/// run ends the wait. Not an automatic recovery: `ErrorRecoveryPolicy`
+/// run ends the wait. Not an automatic recovery, since `ErrorRecoveryPolicy`
 /// doesn't count it.
 async fn answer_budget_hold(
     agent_name: &str,
@@ -527,7 +527,7 @@ struct RecoveryState {
     last_error: String,
 }
 
-/// Suspends the agent for its caller's decision: the run call returns
+/// Suspends the agent for its caller's decision. The run call returns
 /// [`WorkflowError::AgentPaused`].
 async fn pause_for_caller(
     agent_name: &str,
@@ -569,10 +569,10 @@ pub(super) fn auto_approval_warning(
     ))
 }
 
-/// Stops a nested run (inside another agent's tool call: a completion
+/// Stops a nested run (inside another agent's tool call, such as a completion
 /// verifier or a delegated run) that needs a decision the workflow leaves
-/// to the caller: its parent waits on the call, so it can't be paused.
-/// Ending it keeps the outcome bounded: a verifier's failed review, or a
+/// to the caller. Its parent waits on the call, so it can't be paused.
+/// Ending it keeps the outcome bounded, namely a verifier's failed review, or a
 /// tool error for the delegating agent.
 fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> WorkflowError {
     let reason = format!(
@@ -586,8 +586,8 @@ fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> Wo
 }
 
 /// Decides tool calls awaiting approval under the workflow's approval
-/// policy: a decision per call, or `None` to pause the agent for its
-/// caller. A `nested` run (inside another agent's tool call) can't pause:
+/// policy, a decision per call, or `None` to pause the agent for its
+/// caller. A `nested` run (inside another agent's tool call) can't pause.
 /// under `RespectAgentConfig` its `complete_task` is approved (its caller
 /// waits for its result), and a call left undecided stops it instead. Each
 /// approved call's approval reason is kept for the tool hooks until it has
@@ -627,7 +627,7 @@ async fn decide_tool_calls(
     Ok(Some(decisions))
 }
 
-/// A nested run's calls under `RespectAgentConfig`: `complete_task` is
+/// A nested run's calls under `RespectAgentConfig`, `complete_task` is
 /// approved. Any other call is left undecided (`None`), since no one can
 /// be asked.
 fn approve_nested_completions(
@@ -682,7 +682,7 @@ async fn decide_tool_calls_by_policy(
                     tool_description: call.tool_description.clone(),
                     reason: call.approval_reason.clone(),
                 };
-                // The handler may wait on a person; a stop doesn't.
+                // The handler may wait on a person, but a stop doesn't.
                 let outcome = tokio::select! {
                     biased;
                     _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
@@ -800,8 +800,8 @@ fn count_failed_request(
     }
 }
 
-/// A report on request under way, in `SharedContext::reports_in_flight`:
-/// the result its report run ended in, once it has ended, and the latest
+/// A report on request under way, in `SharedContext::reports_in_flight`,
+/// with the result its report run ended in, once it has ended, and the latest
 /// task its runtime reported, kept in memory only.
 #[derive(Default)]
 pub(crate) struct ReportState {
@@ -809,7 +809,7 @@ pub(crate) struct ReportState {
     pub latest: Arc<parking_lot::Mutex<Option<Task>>>,
 }
 
-/// The task snapshot sink of a report run on request: it keeps the latest
+/// The task snapshot sink of a report run on request. It keeps the latest
 /// task in memory, and saves nothing.
 struct LatestTask(Arc<parking_lot::Mutex<Option<Task>>>);
 
@@ -824,8 +824,8 @@ impl arko_agents::TaskSnapshotSink for LatestTask {
 /// A report on request under way (see
 /// [`Workflow::request_report`](super::Workflow::request_report)), from the
 /// report run's launch until the report comes or the run is put back as it
-/// was. While it lasts, the run is in `SharedContext::reports_in_flight`:
-/// its error-recovery pauses go back to the caller, its report run is never
+/// was. While it lasts, the run is in `SharedContext::reports_in_flight`.
+/// Its error-recovery pauses go back to the caller, its report run is never
 /// saved (its task is kept in memory alone, and its end isn't recorded),
 /// and checkpoints keep recording the run as it was last saved. Dropped
 /// before the report came (the call ended in an error, or was dropped
@@ -877,7 +877,7 @@ impl ReportInFlight {
         }
     }
 
-    /// The report came, in run result `result`: the run is recorded with
+    /// The report came, in run result `result`. The run is recorded with
     /// it as any run is at its end, saved and checkpointed with persistence,
     /// by a task of its own, which runs to its end whatever becomes of the
     /// caller (see [`ReportCommit`]). Returns that task.
@@ -1027,7 +1027,7 @@ impl Drop for ReportCommit {
 }
 
 /// The task of a run that wrote no report on request, put back as it was
-/// `before` the request: still counting the model calls the report run
+/// `before` the request, still counting the model calls the report run
 /// (`attempt`) made, and holding the context that reached it meanwhile for
 /// its next turn. The report run held that context back (its end recorded
 /// the messages among it as held by the run), so all of it is still to be
@@ -1072,7 +1072,7 @@ fn message_ids(ids: &[uuid::Uuid]) -> Vec<String> {
 }
 
 /// Answers `error`, reported at an error-recovery pause, under the
-/// workflow's error recovery policy and the pause's cause: continues (after
+/// workflow's error recovery policy and the pause's cause. It continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
 /// run (inside another agent's tool call) can't pause, so it fails instead.
 async fn answer_recovery_pause(
@@ -1176,7 +1176,7 @@ async fn answer_recovery_pause(
             Ok(())
         }
         // A completion a verifier could not review is left paused even inside
-        // another agent's call: the run call returns `VerifierFailed` at
+        // another agent's call, and the run call returns `VerifierFailed` at
         // once, so nothing waits on the pause.
         RecoveryAction::ReturnToCaller
             if nested && cause != arko_agents::ErrorRecoveryCause::Middleware =>
@@ -1220,12 +1220,12 @@ async fn answer_recovery_pause(
 /// the agent.
 ///
 /// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
-/// agent too: the loop returns `AgentCancelled` with its reason. So does the
+/// agent too, and the loop returns `AgentCancelled` with its reason. So does the
 /// run's own stop ([`Workflow::stop_run`](super::Workflow::stop_run)) once
-/// it cancels the run: the loop returns `AgentStopped`.
+/// it cancels the run, and the loop returns `AgentStopped`.
 ///
 /// `paused` is the cause (and error kind) of the error-recovery pause the
-/// agent starts in (a resumed or recovered run): a runtime reports an error
+/// agent starts in (a resumed or recovered run). A runtime reports an error
 /// about it (such as a refusal change it can't apply) without reporting the
 /// pause again.
 #[allow(clippy::too_many_arguments)]
@@ -1332,7 +1332,7 @@ async fn drive_events(
             let _ = cmd_tx.try_send(UserCommand::CancelTask);
             return Err(error);
         }
-        // Any other state: the agent is past its pause, and an error it
+        // Any other state means the agent is past its pause, and an error it
         // reported without one needs no decision.
         if let AgentEvent::TaskStateChanged(state) = &event
             && !matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. })
@@ -1393,7 +1393,7 @@ async fn drive_events(
             },
 
             AgentEvent::UsageReported(ref usage) => {
-                // A model call went through: the next pause starts a new
+                // A model call went through, so the next pause starts a new
                 // series of automatic waits.
                 recovery.repeat = 0;
                 recovery.failed_requests = 0;
@@ -1454,9 +1454,9 @@ async fn drive_events(
             }
 
             // An error-recovery pause is reported as the state change that
-            // gives its cause and an error needing a decision; it is answered
+            // gives its cause and an error needing a decision, and it is answered
             // once both have arrived, whichever comes first (arko's runtimes
-            // report the state first; a pause they are still in, also one a
+            // report the state first, and a pause they are still in, also one a
             // run was resumed in, can be reported again with an error alone,
             // such as a refusal change they can't apply). The error's text
             // is what the host is told.
@@ -1613,7 +1613,7 @@ async fn answer_questions(
             asked,
             wait: true,
         };
-        // The handler may wait on a person; a stop doesn't.
+        // The handler may wait on a person, but a stop doesn't.
         let response = tokio::select! {
             biased;
             _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
@@ -1644,10 +1644,10 @@ async fn answer_questions(
 }
 
 /// What an agent is told when it asked without waiting and no one can
-/// answer: the workflow has no user input handler.
+/// answer, because the workflow has no user input handler.
 pub(crate) const NO_ONE_TO_ASK: &str = "No one can answer questions in this workflow, so go on with your defaults and say in your result what you assumed.";
 
-/// Questions the agent asked without waiting for the answer: the user input
+/// Questions the agent asked without waiting for the answer. The user input
 /// handler takes them in the background
 /// ([`UserInputHandler::asked`](crate::user_input::UserInputHandler::asked)),
 /// and an answer it returns reaches the agent in its mailbox, as a
@@ -1709,7 +1709,7 @@ fn ask_later(
 }
 
 /// Answers the wait a recovered task was saved in, as the driver answered
-/// it when the agent reached it: a recovered agent waits for the command
+/// it when the agent reached it. A recovered agent waits for the command
 /// without announcing the wait again. The tool approvals it awaits are
 /// decided under the approval policy, an error-recovery pause under the
 /// error recovery policy, and its questions by the user input handler. Each
@@ -1792,7 +1792,7 @@ async fn answer_saved_wait(
     }
 }
 
-/// Whether `error` is an agent suspended for its caller, not a failure: it
+/// Whether `error` is an agent suspended for its caller, not a failure. It
 /// waits for input or is paused (also when a completion verifier could not
 /// review its completion), and the run can go on.
 pub(crate) fn is_pause(error: &WorkflowError) -> bool {
@@ -1805,7 +1805,7 @@ pub(crate) fn is_pause(error: &WorkflowError) -> bool {
 }
 
 /// Whether `error` says the host stopped the run alone
-/// ([`WorkflowError::AgentStopped`]): not a failure.
+/// ([`WorkflowError::AgentStopped`]), not a failure.
 pub(crate) fn is_run_stop(error: &WorkflowError) -> bool {
     matches!(error, WorkflowError::AgentStopped { .. })
 }
@@ -1841,15 +1841,15 @@ pub(crate) struct StartOptions {
     /// one (a subagent's, as the host's hook changed it, or the host's own,
     /// see `host_config`).
     pub config: Option<AgentConfig>,
-    /// `config` is the host's ([`RunOptions::config`](super::RunOptions::config)):
-    /// the task keeps it as one the host gave it ([`Task::reconfigured`]).
+    /// `config` is the host's ([`RunOptions::config`](super::RunOptions::config)).
+    /// The task keeps it as one the host gave it ([`Task::reconfigured`]).
     pub host_config: bool,
     /// Images that go with the prompt (see
     /// [`RunOptions::images`](super::RunOptions::images)).
     pub images: Vec<arko_ai::Image>,
 }
 
-/// A message to an agent run: its text, images after it, and the
+/// A message to an agent run, with its text, images after it, and the
 /// configuration the run continues with, when the host changes it (see
 /// [`ContinueOptions::reconfigure`](super::ContinueOptions::reconfigure)).
 pub(crate) struct UserInput<'a> {
@@ -1908,12 +1908,12 @@ fn builder_invalid(error: arko_agents::ArkoAgentsError) -> WorkflowError {
     }
 }
 
-/// `images` as `config`'s model can be sent them: each one over the model's
+/// `images` as `config`'s model can be sent them, each one over the model's
 /// limits shrunk to fit them ([`arko_ai::Model::sendable_image`]), or an
 /// error naming the one that can't be sent and why. With `held`, the
 /// conversation they join, also an error when a request would then hold
 /// more images, or more image data, than the model's provider takes
-/// ([`arko_ai::Model::image_limits`]): every later request would fail.
+/// ([`arko_ai::Model::image_limits`]), because every later request would fail.
 pub(crate) fn sendable_images(
     agent_name: &str,
     config: &AgentConfig,
@@ -1981,7 +1981,7 @@ pub(crate) fn sendable_images(
 
 /// An error unless `config`'s model can be sent each of `images`, as it is
 /// or fitted, judged from each one's header without decoding it
-/// ([`arko_ai::Model::check_image`]): for checking every recipient before
+/// ([`arko_ai::Model::check_image`]), for checking every recipient before
 /// fitting for one.
 pub(crate) fn check_sendable_images(
     agent_name: &str,
@@ -2027,7 +2027,7 @@ fn image_load<'a>(messages: impl Iterator<Item = &'a arko_ai::Message>) -> (usiz
     load
 }
 
-/// What a run is, for the workflow tools it gets: how deep it is (see
+/// What a run is, for the workflow tools it gets, namely how deep it is (see
 /// [`StartedRun::depth`]), whether it is a background subagent, and whether
 /// the host's hook offers it the tools that start agent runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2059,7 +2059,7 @@ impl From<u32> for RunRole {
 }
 
 /// The configuration a run of `agent_name` in `role` starts with from
-/// `base_config`: the workflow's tools added (see
+/// `base_config`, with the workflow's tools added (see
 /// [`WorkflowEngine::prepare_agent_config_for`]).
 fn prepare_config(
     agent_name: &str,
@@ -2077,7 +2077,7 @@ fn prepare_config(
     {
         skills.subagent = true;
     }
-    // A chat (`AgentToolConfig::chat`) stays one: it gets none of the
+    // A chat (`AgentToolConfig::chat`) stays one, so it gets none of the
     // workflow's tools.
     if config.tool_config.chat {
         return config;
@@ -2163,7 +2163,7 @@ impl RunRole {
     }
 }
 
-/// Which subagent tools a run of `agent_name` in `role` gets: the caller's
+/// Which subagent tools a run of `agent_name` in `role` gets, namely the caller's
 /// (it may start subagents), and those for talking with its runs or its
 /// lead.
 fn subagent_tools(ctx: &SharedContext, agent_name: &str, role: RunRole) -> (bool, bool) {
@@ -2177,7 +2177,7 @@ fn subagent_tools(ctx: &SharedContext, agent_name: &str, role: RunRole) -> (bool
     (caller, talks)
 }
 
-/// Whether a run of `agent_name` in `role` is offered `run_workflow_agent`:
+/// Whether a run of `agent_name` in `role` is offered `run_workflow_agent`,
 /// a caller, unless the subagents configuration hides it from callers, or
 /// from subagents as deep as subagents may nest.
 fn offers_blocking_tool(ctx: &SharedContext, agent_name: &str, role: RunRole) -> bool {
@@ -2226,7 +2226,7 @@ impl<T> Drop for AbortAll<T> {
     }
 }
 
-/// A run marked running in the registry before its start: abandoned unless
+/// A run marked running in the registry before its start, abandoned unless
 /// released once the start has been attempted (the start abandons it itself
 /// if it fails).
 struct Reservation {
@@ -2254,7 +2254,7 @@ impl Drop for Reservation {
 pub(crate) const SUPERSEDED_AFTER_RESTART: &str = "Superseded because the workflow stopped while this agent ran inside another agent's tool call, and that call was not resumed when its agent was recovered (a completion is reviewed again by a new review).";
 
 /// Whether `run` was cancelled because another run replaced it (see
-/// [`SUPERSEDED_AFTER_RESTART`]): it is not reopened, as that would do its
+/// [`SUPERSEDED_AFTER_RESTART`]). It is not reopened, as that would do its
 /// work twice (a review's verdict would reach no one).
 pub(crate) fn is_superseded(run: &AgentResult) -> bool {
     run.task().is_ok_and(|task| {
@@ -2279,7 +2279,7 @@ pub(crate) fn without_roster(prompt: &str) -> &str {
 /// `WorkflowEngine::pending_messages`).
 const MESSAGES_HEADING: &str = "\n\n# Messages from other agents:\n";
 
-/// The task part of an initial prompt: `prompt` without the messages it
+/// The task part of an initial prompt, namely `prompt` without the messages it
 /// delivered, its notes, and the list of agents it may message.
 pub(crate) fn task_part(prompt: &str) -> &str {
     let prompt = crate::notes::without_notes(without_roster(prompt));
@@ -2290,7 +2290,7 @@ pub(crate) fn task_part(prompt: &str) -> &str {
 }
 
 /// What a workflow does when one of its agents hands its conversation over
-/// ([`arko_agents::handover`]): the messages the old conversation held are
+/// ([`arko_agents::handover`]). The messages the old conversation held are
 /// recorded as read by the run (and acknowledged when it completes, as if
 /// its conversation still held them), the freshness tracker forgets the
 /// run's reads (the fresh conversation holds none of their content), and
@@ -2359,7 +2359,7 @@ impl HandoverHook for WorkflowHandover {
             context.push_str(ROSTER_HEADING);
             context.push_str(&render_recipients(ctx, &roster));
         }
-        // The subagents it started and still waits for: the report may not
+        // The subagents it started and still waits for, since the report may not
         // name them.
         if let Some(workers) = ctx.subagents.workers_section(task.id) {
             if !context.is_empty() {
@@ -2504,7 +2504,7 @@ pub(crate) struct StartedRun {
 /// What an agent runtime's task returned.
 type Joined = Result<Result<Task, arko_agents::ArkoAgentsError>, tokio::task::JoinError>;
 
-/// An agent runtime's task, aborted if its handle is dropped first: an
+/// An agent runtime's task, aborted if its handle is dropped first. An
 /// agent whose driver is dropped (for example the driver of a delegated
 /// agent inside an agent that was itself aborted) doesn't keep running
 /// unsupervised.
@@ -2551,7 +2551,7 @@ fn stop_deadline(ctx: &SharedContext, depth: u32) -> tokio::time::Instant {
         .unwrap_or_else(|| start + std::time::Duration::from_secs(30 * 365 * 86_400))
 }
 
-/// Waits for an agent that is being stopped to end: sends it `CancelTask`,
+/// Waits for an agent that is being stopped to end. It sends it `CancelTask`,
 /// records its last events and usage meanwhile (its generic cancellation
 /// replaced by `ended`), and aborts it at `deadline`. `None` means the agent
 /// was aborted.
@@ -2568,10 +2568,10 @@ async fn wind_down(
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Option<Joined> {
     let mut events_open = true;
-    // A tool call waiting for something (`wait_for_message`) returns now; the
+    // A tool call waiting for something (`wait_for_message`) returns now, and the
     // runtime reads the command only once the call has returned.
     ctx.run_control.stop_agent(agent_run_id);
-    // Sent while events are drained: an agent blocked on a full event
+    // Sent while events are drained, because an agent blocked on a full event
     // channel must be able to take the command.
     let cancel = cmd_tx.send(UserCommand::CancelTask);
     tokio::pin!(cancel);
@@ -2610,13 +2610,13 @@ async fn wind_down(
     }
 }
 
-/// Drives a started agent run to its result: runs the event loop, stops the
+/// Drives a started agent run to its result. It runs the event loop, stops the
 /// agent when the workflow must (aborting it after the run's grace period),
 /// records the final task, and maps it to the call's outcome. Once the run
 /// is stopped the outcome is the stop's error. The agent's result is
 /// recorded either way.
 ///
-/// Boxed: an agent run's driver is large, and its callers (including a
+/// Boxed because an agent run's driver is large, and its callers (including a
 /// verifier's run inside the agent runtime's tool call) keep only a
 /// pointer to it on the stack.
 pub(crate) fn drive_to_result<'a>(
@@ -2651,7 +2651,7 @@ async fn drive_run_to_result(
         launch,
     } = run;
     host_decisions.set(true);
-    // Until the end is recorded below: if this future is dropped (and with
+    // Until the end is recorded below, if this future is dropped (and with
     // it, the agent's task aborted), the run is recorded as abandoned.
     let mut abandoned = Abandoned {
         ctx,
@@ -2729,7 +2729,7 @@ async fn drive_run_to_result(
         .await
     } else {
         if drive_result.is_err() {
-            // Suspended for its caller: the agent's last events (its
+            // Suspended for its caller, but the agent's last events (its
             // suspension) are still recorded.
             while let Some(event) = event_rx.recv().await {
                 publish_event(&agent_name, agent_run_id, &event, ctx, persistence).await;
@@ -2778,12 +2778,12 @@ async fn drive_run_to_result(
             run_status(&task.current_state)
         }),
     );
-    // The runtime has ended: nothing more is delivered to it, and no notice
+    // The runtime has ended, so nothing more is delivered to it, and no notice
     // is queued for it while its messages are settled.
     ctx.messages.unregister_active(&agent_name, agent_run_id);
     let result = match final_task {
         Ok(mut task) => {
-            // The runtime records its generic reason for a CancelTask; the
+            // The runtime records its generic reason for a CancelTask, but the
             // workflow knows why it sent it.
             if let Some(ended) = ended
                 && matches!(&task.current_state, TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER)
@@ -2832,7 +2832,7 @@ async fn drive_run_to_result(
         });
     }
     match drive_result {
-        // Its own stop's cancel came after it completed: the completion
+        // Its own stop's cancel came after it completed, so the completion
         // (a progress report, if it was told) is its outcome.
         Err(WorkflowError::AgentStopped { .. }) if result.status == AgentRunStatus::Completed => {
             Ok(result)
@@ -2844,7 +2844,7 @@ async fn drive_run_to_result(
     }
 }
 
-/// What a run call returns for a run that ended as `result`: the result
+/// What a run call returns for a run that ended as `result`, the result
 /// when it completed, else the error its status stands for.
 pub(crate) fn run_outcome(result: AgentResult) -> Result<AgentResult, WorkflowError> {
     let agent = result.agent_name.clone();
@@ -2889,9 +2889,9 @@ pub(crate) fn run_outcome(result: AgentResult) -> Result<AgentResult, WorkflowEr
     }
 }
 
-/// Whether task `parent` holds call `tool_call_id` open: recorded running,
+/// Whether task `parent` holds call `tool_call_id` open, recorded running,
 /// without a result. Recovering the task settles the call, and with it the
-/// agent run the call started: resumed with it, or superseded.
+/// agent run the call started, resumed with it or superseded.
 pub(crate) fn holds_open_call(parent: &Task, tool_call_id: uuid::Uuid) -> bool {
     parent
         .running_tool_calls
@@ -2900,7 +2900,7 @@ pub(crate) fn holds_open_call(parent: &Task, tool_call_id: uuid::Uuid) -> bool {
 }
 
 /// Whether interrupted run `parent`, once recovered, settles `child`, an
-/// interrupted run started inside its tool call `tool_call_id`: resumes it
+/// interrupted run started inside its tool call `tool_call_id`, and either resumes it
 /// or supersedes it (see `WorkflowEngine::supersede_children`). It does
 /// when the call is open ([`holds_open_call`]), and always for a
 /// completion verifier's review (its `complete_task` call runs again).
@@ -2923,10 +2923,10 @@ pub(crate) fn is_verifier_agent(ctx: &SharedContext, agent_name: &str) -> bool {
         .any(|config| config.verifier_agent == agent_name)
 }
 
-/// Whether `run`, started inside another run's tool call, is orphaned: that
+/// Whether `run`, started inside another run's tool call, is orphaned. That
 /// run can't resume it any more. It isn't running, and it ended (or has no
 /// record), or it stopped with the call answered (the call failed, and its
-/// result named this run). An orphaned run is its own: the host recovers
+/// result named this run). An orphaned run is its own, so the host recovers
 /// it ([`Workflow::recover_agent`](super::Workflow::recover_agent) lists
 /// and accepts it, releasing its parent link), and any caller permitted to
 /// run its agent may resume it (`run_workflow_agent` with `resume_run`).
@@ -2945,7 +2945,7 @@ pub(crate) fn is_orphaned(ctx: &SharedContext, run: &AgentResult) -> bool {
 }
 
 /// Fails, for the host, unless `run` (started inside another run's tool
-/// call) is orphaned ([`is_orphaned`]): otherwise the run that started it
+/// call) is orphaned ([`is_orphaned`]). Otherwise the run that started it
 /// resumes it, or recovering that run does.
 fn refuse_unless_orphaned(ctx: &SharedContext, run: &AgentResult) -> Result<(), WorkflowError> {
     let Some(parent) = run.info().parent else {
@@ -3013,7 +3013,7 @@ pub(crate) struct Recovery<'a> {
 /// What a reopened run is told first (see [`WorkflowEngine::reopen_agent`]).
 pub(crate) const REOPENED_NOTE: &str = "Your run was stopped before it finished and has now been reopened: continue your task where you were. Tool calls reported as cancelled or stopped did not finish; check their effects before repeating them.";
 
-/// The message a reopened run gets: [`REOPENED_NOTE`], then `prompt`.
+/// The message a reopened run gets. It is [`REOPENED_NOTE`], then `prompt`.
 pub(crate) fn reopened_message(prompt: &str) -> String {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -3024,7 +3024,7 @@ pub(crate) fn reopened_message(prompt: &str) -> String {
 }
 
 /// Unregisters a run dropped before it was driven (its runtime task is
-/// aborted with it): its agent is finished, cancelled, unless another run
+/// aborted with it). Its agent is finished, cancelled, unless another run
 /// of it is running.
 pub(crate) fn abandon_run(run: &StartedRun, ctx: &SharedContext) {
     abandon(
@@ -3046,11 +3046,11 @@ fn abandon(
     // A report run on request leaves the run as it was, reads and all.
     let report_run = ctx.registry.is_report(agent_run_id);
     ctx.registry.finish(agent_run_id, AgentRunStatus::Cancelled);
-    // Not recorded: no longer saved either.
+    // Not recorded, so no longer saved either.
     if let Some(journal) = journal {
         journal.end_live_run(agent_run_id);
     }
-    // Not recorded, so it can't be continued: freshness forgets its reads.
+    // Not recorded, so it can't be continued, and freshness forgets its reads.
     if let Some(tracker) = &ctx.resource_tracker
         && !report_run
     {
@@ -3089,7 +3089,7 @@ fn run_status(state: &TaskState) -> AgentRunStatus {
     AgentRunStatus::of_state(state)
 }
 
-/// Why the workflow stopped an agent: the run's stop, or the error the
+/// Why the workflow stopped an agent, which is the run's stop or the error the
 /// driver stopped it for (an exceeded budget, an interruption, a hook).
 fn stop_reason(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) -> String {
     match (ctx.run_control.cancellation(), drive_result) {
@@ -3150,7 +3150,7 @@ pub(crate) fn record_result(ctx: &SharedContext, result: AgentResult) {
     crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
 }
 
-/// Records an agent run that stopped: its result (replacing an earlier one
+/// Records an agent run that stopped, with its result (replacing an earlier one
 /// of the same task), the messages it holds (acknowledged when it completed,
 /// `prompt_ids` are the messages its prompt presented), its lifecycle hook,
 /// and, with persistence, its task and a checkpoint.
@@ -3167,10 +3167,10 @@ pub(crate) async fn finalize_agent_task(
         .lock()
         .retain(|_, (task_id, _)| *task_id != agent_run_id);
     // A report run on request (see `ReportInFlight`) changes nothing of the
-    // run's here, not even what it read: the report call records the run
+    // run's here, not even what it read. The report call records the run
     // once the report came, or puts it back as it was.
     let report_run = ctx.reports_in_flight.lock().contains_key(&agent_run_id);
-    // A task that can be continued keeps its reads; freshness no longer
+    // A task that can be continued keeps its reads, and freshness no longer
     // notifies it (a continuation is told what changed). First, so that no
     // notice is queued for it once its messages are settled.
     if let Some(tracker) = &ctx.resource_tracker
@@ -3187,9 +3187,9 @@ pub(crate) async fn finalize_agent_task(
         tracker.finish_actor(&ActorId::new(agent_run_id, &agent_name), continued);
     }
     if !report_run {
-        // Channel acceptance is not consumption: complete_task may finish
+        // Channel acceptance is not consumption, because complete_task may finish
         // with unread InjectContext commands. Only context in the
-        // conversation counts as read; context taken but not added stays
+        // conversation counts as read, and context taken but not added stays
         // with the task.
         ctx.messages.settle_run(
             &agent_name,
@@ -3197,13 +3197,13 @@ pub(crate) async fn finalize_agent_task(
             prompt_ids,
             matches!(task.current_state, TaskState::Completed { .. }),
         );
-        // Its subagent mail too: what it holds leaves the mailbox, the rest
+        // Its subagent mail too. What it holds leaves the mailbox, and the rest
         // is given again.
         ctx.subagents.settle_run(ctx, &task);
     }
     let pause = AgentPause::of(&task.current_state);
     let mut result = AgentResult::of_task(agent_name.clone(), task);
-    // Ended by a stop the host asked for: not the agent's failure.
+    // Ended by a stop the host asked for, so not the agent's failure.
     result.stopped_by = ctx.run_control.stopped_by(agent_run_id, &result.status);
     let hook_point = match result.status {
         AgentRunStatus::Completed => HookPoint::PostAgentCompletion,
@@ -3218,7 +3218,7 @@ pub(crate) async fn finalize_agent_task(
     let failure_cause = result.failure_cause().cloned();
     let failure_kind = result.failure_kind();
     // With persistence, its task is saved first (a failure is logged and
-    // retried at the next checkpoint; it never fails the run). Spawned, so
+    // retried at the next checkpoint, and it never fails the run). Spawned, so
     // the result is recorded even if this call is dropped while it waits
     // for another save.
     match persistence {
@@ -3281,7 +3281,7 @@ pub(crate) async fn finalize_agent_task(
             }
             None => {}
         }
-        // A failure at a rejected error-recovery pause: its cause.
+        // A failure at a rejected error-recovery pause carries its cause.
         if let Some(cause) = &failure_cause {
             hook.metadata.insert(
                 "cause".to_string(),
@@ -3296,7 +3296,7 @@ pub(crate) async fn finalize_agent_task(
 
     // The live checkpoint no longer refers to the run's live file (which is
     // deleted then), and then the checkpoint recording its end is saved. A
-    // checkpoint that can't be saved is logged; the next one tries again.
+    // checkpoint that can't be saved is logged, and the next one tries again.
     // Nothing of a report run is saved, so it writes no checkpoint either.
     let persistence = persistence.filter(|_| !report_run);
     if let Some(persistence) = persistence
@@ -3569,7 +3569,7 @@ impl WorkflowEngine {
         })
     }
 
-    /// The middleware every agent's tool calls pass through: the run's
+    /// The middleware every agent's tool calls pass through, namely the run's
     /// cancellation, tool hooks, context freshness, and completion
     /// verification.
     pub(crate) fn build_execution_middleware(
@@ -3954,10 +3954,10 @@ impl WorkflowEngine {
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
-    /// Run a completion verifier at `depth`: its prompt gets no roster of
+    /// Run a completion verifier at `depth`. Its prompt gets no roster of
     /// the agents it may message.
     /// [`continue_at`](Self::continue_at) for a run inside another agent's
-    /// tool call: boxed here, so the caller keeps only a pointer to its
+    /// tool call, boxed here, so the caller keeps only a pointer to its
     /// large state on the stack.
     pub(crate) fn continue_nested<'a>(
         &'a self,
@@ -4037,7 +4037,7 @@ impl WorkflowEngine {
         ctx.run_control.check_admission(false)?;
         let limit = ctx.parallel.max_agents;
         // Each agent is admitted (PreAgentSpawn, budget, the run's stop)
-        // before any is marked running; one refused is that agent's error.
+        // before any is marked running, and one refused is that agent's error.
         let admitted = agents
             .iter()
             .map(|(name, _)| self.admit(name, None, false, ctx))
@@ -4089,7 +4089,7 @@ impl WorkflowEngine {
                 let reservation = match reservation? {
                     Some(reservation) => reservation,
                     None => {
-                        // Capped: wait for a place, unless the batch stops.
+                        // Capped, so wait for a place, unless the batch stops.
                         let permits = permits.expect("a capped batch has permits");
                         let place = tokio::select! {
                             biased;
@@ -4104,7 +4104,7 @@ impl WorkflowEngine {
                             place = permits.acquire_owned() => place,
                         };
                         _place = place.ok();
-                        // Admitted when the call began; the run may have
+                        // Admitted when the call began, but the run may have
                         // stopped, or the budget run out, since.
                         ctx_clone.run_control.check_admission(false)?;
                         if budget_cancels(&ctx_clone) && ctx_clone.budget.is_exceeded() {
@@ -4159,7 +4159,7 @@ impl WorkflowEngine {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(error)) => {
                     // An agent that paused, or that the host stopped alone,
-                    // is not a failure: its recorded result is returned
+                    // is not a failure, so its recorded result is returned
                     // with the others.
                     let paused = match &error {
                         WorkflowError::UserInputRequired { task_id, .. }
@@ -4214,7 +4214,7 @@ impl WorkflowEngine {
         options: super::RunOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentHandle, WorkflowError> {
-        // The caller chooses who drives it: `AgentHandle::wait` hands it to
+        // The caller chooses who drives it. `AgentHandle::wait` hands it to
         // the workflow.
         let options = StartOptions {
             driven: false,
@@ -4238,7 +4238,7 @@ impl WorkflowEngine {
         options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        // A completion a verifier could not review (`VerifierFailed`): the
+        // A completion a verifier could not review (`VerifierFailed`). The
         // prompt is the agent's next message (a cut back replaces it).
         if options.cut_back_to.is_none()
             && previous.status == AgentRunStatus::Paused
@@ -4319,7 +4319,7 @@ impl WorkflowEngine {
             &task.current_working_directory,
             role,
         )?;
-        // Running for its own ID alone: its agent's record and status, and
+        // Running for its own ID alone. Its agent's record and status, and
         // so checkpoints, stay as they were.
         if !ctx
             .registry
@@ -4479,10 +4479,10 @@ impl WorkflowEngine {
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
         ctx.messages.settle_run(agent_name, &task, &[], false);
-        // Cut back: the standing notes the removed messages gave it are
+        // Cut back. The standing notes the removed messages gave it are
         // given again (one-time notes went with them, and a cut to the first
         // message gets its notes in its prompt). The subagents it started in
-        // the removed messages are detached: their mail is withheld. The
+        // the removed messages are detached, so their mail is withheld. The
         // mail of the others the removed messages held is given again.
         if let Some(index) = input.cut_back_to {
             if index > 0 {
@@ -4492,12 +4492,12 @@ impl WorkflowEngine {
             ctx.subagents
                 .cut_back(ctx, &task, &messages[index.min(messages.len())..]);
         }
-        // No roster: the task's initial prompt has one. Start notices tell it
+        // No roster, because the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
         // The prompt presents the messages the task doesn't hold. A task
         // saved before holding was recorded may still have taken one it
-        // stopped before adding (`Task::pending_context_injections`): it
+        // stopped before adding (`Task::pending_context_injections`). It
         // doesn't get it twice.
         task.pending_context_injections.retain(|item| {
             !pending_message_ids.iter().any(|id| {
@@ -4509,7 +4509,7 @@ impl WorkflowEngine {
         // It counts as finished (no notices) until it is registered below.
         let actor = ActorId::new(task.id, agent_name.as_str());
         // Cut back, it no longer holds what it read in the removed messages
-        // (and can't tell which reads were kept): it reads again what it
+        // (and can't tell which reads were kept), so it reads again what it
         // needs, as after a handover.
         if input.cut_back_to.is_some()
             && let Some(tracker) = &ctx.resource_tracker
@@ -4527,7 +4527,7 @@ impl WorkflowEngine {
             .and_then(|tracker| tracker.changed_notice(&changed))
             .map_or_else(String::new, |notice| format!("\n\n{notice}"));
         let prepared = match (input.cut_back_to, &previous.status) {
-            // Cut back to its first message: it starts over from the prompt
+            // Cut back to its first message, so it starts over from the prompt
             // as a new run does, with the standing notes and its roster.
             (Some(0), _) => {
                 let (notes, note_ids) = ctx.notes.initial_section(ctx, agent_name, task.id, review);
@@ -4572,7 +4572,7 @@ impl WorkflowEngine {
             true,
             review,
         );
-        // Now registered, it is notified of writes; one made while it
+        // Now registered, it is notified of writes, and one made while it
         // started is told now.
         if let Some(tracker) = &ctx.resource_tracker {
             let since = tracker
@@ -4674,7 +4674,7 @@ impl WorkflowEngine {
             }
             (AgentPause::ErrorRecovery { cause, .. }, AgentResume::ResolveRefusal(changes)) => {
                 // A pause saved before causes were recorded (`Unknown`) may
-                // be a refusal: the runtime checks there is refused input.
+                // be a refusal, and the runtime checks there is refused input.
                 if !matches!(
                     cause,
                     arko_agents::ErrorRecoveryCause::Refusal
@@ -4728,7 +4728,7 @@ impl WorkflowEngine {
                 task.id
             )));
         }
-        // Resumed without a prompt: the messages it doesn't hold arrive as
+        // Resumed without a prompt, so the messages it doesn't hold arrive as
         // context updates.
         let run = self.launch(
             agent_name,
@@ -4788,11 +4788,11 @@ impl WorkflowEngine {
         let mut recovery = Recovery::default();
         if current.info().parent.is_some() {
             refuse_unless_orphaned(ctx, current)?;
-            // Nobody consumes its result but the host: a later stop doesn't
+            // Nobody consumes its result but the host, so a later stop doesn't
             // look for it in its parent's call.
             recovery.parent = Some(None);
         }
-        // Boxed: the recovery future is large, and a host awaits it on
+        // Boxed because the recovery future is large, and a host awaits it on
         // its own stack (a 2 MiB thread in debug builds).
         self.recover_nested(previous, ctx, recovery).await
     }
@@ -4849,7 +4849,7 @@ impl WorkflowEngine {
             ctx,
             self.persistence.as_ref(),
         );
-        // Saved now: an idle workflow has no running agent to save it with.
+        // Saved now because an idle workflow has no running agent to save it with.
         if let Some(persistence) = &self.persistence {
             let saved = if persistence.journals_tasks() {
                 persistence.write_live_checkpoint(ctx, false).await
@@ -4907,7 +4907,7 @@ impl WorkflowEngine {
                 previous.agent_run_id
             )));
         }
-        // As for `recover_agent`: a run its parent still settles is left to
+        // As for `recover_agent`, a run its parent still settles is left to
         // it (a completion verifier's review is done again by a new one).
         if current.info().parent.is_some() {
             refuse_unless_orphaned(ctx, &current)?;
@@ -4924,7 +4924,7 @@ impl WorkflowEngine {
     }
 
     /// [`recover_at`](Self::recover_at), boxed as
-    /// [`continue_nested`](Self::continue_nested) is: for a run inside the
+    /// [`continue_nested`](Self::continue_nested) is, for a run inside the
     /// tool call that recovers it.
     pub(crate) fn recover_nested<'a>(
         &'a self,
@@ -4938,12 +4938,12 @@ impl WorkflowEngine {
     }
 
     /// Continues interrupted agent run `previous` where its task was saved,
-    /// as `recovery` says: the calls it was running are settled by their
+    /// as `recovery` says. The calls it was running are settled by their
     /// tools' recovery modes as it starts, and a wait it was saved in is
-    /// answered again. The run is recovered once at a time: another
+    /// answered again. The run is recovered once at a time. Another
     /// recovery of it fails (or is waited for, see [`Recovery::wait`]), and
     /// a run whose recovery ended since `previous` was read isn't run
-    /// again: the outcome it recorded is returned.
+    /// again, and the outcome it recorded is returned.
     async fn recover_at(
         &self,
         previous: &AgentResult,
@@ -4954,17 +4954,17 @@ impl WorkflowEngine {
         let running = || {
             WorkflowError::BuilderInvalid(format!("agent run {agent_run_id} is running already"))
         };
-        // Whether another recovery of the run ended while this one waited:
-        // its outcome is this one's.
+        // Whether another recovery of the run ended while this one waited.
+        // Its outcome is this one's.
         let mut waited = false;
         let (claim, current, registry, skill_prompt_context, mut task) = loop {
-            // Its record now: a recovery that ended since `previous` was
+            // Its record now, since a recovery that ended since `previous` was
             // read recorded its outcome.
             let current = recorded_result(ctx, agent_run_id).unwrap_or_else(|| previous.clone());
             let reopening = recovery.reopen && current.status == AgentRunStatus::Cancelled;
             if current.status != AgentRunStatus::Interrupted && !reopening {
                 // Recovered (or resumed by an agent) since `previous` was
-                // read: its outcome is this call's.
+                // read, so its outcome is this call's.
                 if waited || previous.status == AgentRunStatus::Interrupted {
                     return run_outcome(current);
                 }
@@ -5040,15 +5040,15 @@ impl WorkflowEngine {
             task.parent = parent;
         }
         if let TaskState::Cancelled { reason } = &task.current_state {
-            // Reopened: it runs on as an interrupted task does, its open
+            // Reopened, it runs on as an interrupted task does, its open
             // calls settled first.
             let reason = format!("Reopened after it was cancelled: {reason}");
             task.set_state(TaskState::Interrupted { reason });
         }
         // The `run_workflow_agent` calls the run resumes (see
-        // `ToolRecovery::Resume`): open, without the host's own output or a
+        // `ToolRecovery::Resume`), open, without the host's own output or a
         // result already, and still offered. Their runs are recovered by
-        // them; every other interrupted run inside its open calls is
+        // them, and every other interrupted run inside its open calls is
         // superseded (a run inside a call answered already is orphaned, see
         // `is_orphaned`, and stays to be resumed).
         let resumed = if registry.get(RUN_WORKFLOW_AGENT_TOOL_NAME).is_some() {
@@ -5073,7 +5073,7 @@ impl WorkflowEngine {
         ctx.notes.recovered(agent_name, &task, false);
         ctx.subagents.recovered(&task);
         // Its caller's message goes with the task, as context taken and not
-        // yet added: it is added at the first turn boundary, after the
+        // yet added. It is added at the first turn boundary, after the
         // results of the calls it was running (and is saved with the task
         // until then).
         if let Some(message) = recovery
@@ -5090,7 +5090,7 @@ impl WorkflowEngine {
             .extend(recovery.images.iter().enumerate().map(|(index, image)| {
                 arko_agents::ContextImage::new(format!("Image {}:", index + 1), image.clone())
             }));
-        // Recovered without a prompt: the messages it doesn't hold arrive as
+        // Recovered without a prompt, so the messages it doesn't hold arrive as
         // context updates.
         let mut run = self.launch(
             agent_name,
@@ -5124,7 +5124,7 @@ impl WorkflowEngine {
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
-    /// Before interrupted run `task` is recovered: the interrupted runs
+    /// Before interrupted run `task` is recovered, the interrupted runs
     /// that ran inside its open tool calls (recorded running, without a
     /// result), other than those inside the `run_workflow_agent` calls it
     /// resumes (`resumed`, which recover theirs), are recorded cancelled,
@@ -5132,8 +5132,8 @@ impl WorkflowEngine {
     /// `complete_task` call, which runs again and starts a new review, and
     /// runs inside calls settled in doubt or answered with the host's own
     /// output. A run inside a call answered before the stop is orphaned
-    /// ([`is_orphaned`]): it stays, to be resumed. With `resumed` `None`
-    /// (`task` is superseded itself: it resumes nothing), every interrupted
+    /// ([`is_orphaned`]). It stays, to be resumed. With `resumed` `None`
+    /// (`task` is superseded itself, so it resumes nothing), every interrupted
     /// run inside its calls goes, whatever call it ran in.
     fn supersede_children<'a>(
         &'a self,
@@ -5262,10 +5262,10 @@ impl WorkflowExecutionMiddleware {
     }
 
     /// Answers a review that failed (the verifier's run failed, or its
-    /// verdict stayed unusable): within the verifier's `max_review_retries`,
+    /// verdict stayed unusable). Within the verifier's `max_review_retries`,
     /// the completion is rejected so the agent calls `complete_task` again
     /// and a new review runs. After that, the completion is neither accepted
-    /// nor rejected: the task is paused for its caller (continuable with
+    /// nor rejected. The task is paused for its caller (continuable with
     /// `continue_agent`) and the run call returns `VerifierFailed`. The
     /// count starts again after the pause.
     fn review_failed(
@@ -5363,7 +5363,7 @@ impl WorkflowExecutionMiddleware {
                 VerificationDecision::RejectedMinor => "REJECTED_MINOR",
                 VerificationDecision::RejectedMajor => "REJECTED_MAJOR",
             };
-            // Only a completed review continues: one that was stopped (its
+            // Only a completed review continues. One that was stopped (its
             // workflow stopped during a re-review, say) is replaced by a new
             // review, given the prior findings.
             let prior_result = prior_record
@@ -5679,7 +5679,7 @@ impl WorkflowExecutionMiddleware {
             }
         }
 
-        // A subagent that started subagents isn't done while they run: its
+        // A subagent that started subagents isn't done while they run, because its
         // report would reach its lead with their work still going on. A run
         // that is being stopped reports at once, whatever it still has.
         if call.tool_name != COMPLETE_TASK_TOOL_NAME {
@@ -5694,7 +5694,7 @@ impl WorkflowExecutionMiddleware {
             });
         }
 
-        // A run told to wrap up reports its progress: its completion is not
+        // A run told to wrap up reports its progress, so its completion is not
         // reviewed (the run it is continued in after a restart is).
         if call.tool_name == COMPLETE_TASK_TOOL_NAME
             && !self.context.run_control.was_told(execution.task_id)
@@ -5783,7 +5783,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
                         .messages
                         .inject_task(reader.task_id, notice)
                         .await;
-                    // An abort stops the run; the call's own result stands.
+                    // An abort stops the run, but the call's own result stands.
                     let _ = fire_hooks_on_context(
                         &self.context,
                         HookPoint::OnFreshnessConflict,
@@ -5810,7 +5810,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             | ToolExecutionOutcome::Error(output) => output,
         };
 
-        // The call has run: its approval reason is no longer needed.
+        // The call has run, so its approval reason is no longer needed.
         let approval_reason = self
             .context
             .approval_reasons
@@ -5827,7 +5827,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             hook.tool_result = Some(result.to_string());
             hook.original_tool_result = Some(result.to_string());
         });
-        // The call has run; the run stops, and the stop's CancelTask ends the
+        // The call has run. The run stops, and the stop's CancelTask ends the
         // agent before its next step.
         if let HookResult::Abort(reason) = hook_result {
             abort_run(&self.context, &HookPoint::PostToolExecution, reason);
@@ -5875,7 +5875,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        // Keep event_tx alive: an interrupted runtime has not closed its stream.
+        // Keep event_tx alive because an interrupted runtime has not closed its stream.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             drive_event_loop(
@@ -5902,7 +5902,7 @@ mod tests {
     }
 
     /// An error-recovery pause is decided by its cause whichever a runtime
-    /// reports first: the state change that gives the cause, or the error
+    /// reports first, the state change that gives the cause, or the error
     /// needing a decision. A non-retryable cause fails the run under
     /// `Automatic` in both orders (it was answered with an unknown cause,
     /// returned to the caller, when the error came first).
@@ -5984,7 +5984,7 @@ mod tests {
         assert!(rejected(&state_first), "{state_first:?}");
         assert!(rejected(&error_first), "{error_first:?}");
         // A pause the agent is still in, reported again with an error alone,
-        // is decided by that pause; an error the agent moved past without a
+        // is decided by that pause, and an error the agent moved past without a
         // pause needs no decision.
         let again = decide(vec![pause(), error(), error()]).await;
         assert_eq!(again.len(), 2, "{again:?}");
@@ -6005,7 +6005,7 @@ mod tests {
         ])
         .await;
         assert_eq!(past.len(), 1, "{past:?}");
-        // A run resumed at a pause starts in it: an error about it alone
+        // A run resumed at a pause starts in it, so an error about it alone
         // (a refusal change the runtime can't apply) is decided by its
         // cause, and its own text is what the host is told.
         let resumed = decide_from(
@@ -6439,7 +6439,7 @@ mod tests {
             last.contains("Re-read any of these before you edit it"),
             "{last}"
         );
-        // Told once: the first request of the continuation only.
+        // Told once, in the first request of the continuation only.
         assert_eq!(server.requests(), 3);
     }
 
@@ -6492,7 +6492,7 @@ mod tests {
     }
 
     /// A failing stage in a chain gets the agent's failure policy (its
-    /// retries, then its note) and is skipped: the agent gets the output of
+    /// retries, then its note) and is skipped. The agent gets the output of
     /// the stage before it, so a redaction stays in place. (The chain once
     /// failed as a whole and the runtime delivered the raw result, undoing
     /// the redaction.)

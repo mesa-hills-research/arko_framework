@@ -87,7 +87,7 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
 #[tokio::test]
 async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
     let workspace = Workspace::new();
-    // Every model request waits: the agent is mid-request when cancelled.
+    // Every model request waits, so the agent is mid-request when cancelled.
     let server = ResponsesServer::start(|_, _| None).await;
     let hooks = HookCounts::default();
     let workflow = Arc::new(
@@ -122,7 +122,7 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
         }
     );
     assert_eq!(result.cancellation.unwrap().cause, CancelCause::Requested);
-    // Ended by the host's stop: blameless.
+    // Ended by the host's stop, blameless.
     let stopped_by = agent.stopped_by().unwrap();
     assert_eq!(
         (stopped_by.kind, stopped_by.reason.as_str()),
@@ -227,7 +227,7 @@ async fn cancelling_a_paused_run_stops_a_spawned_agent() {
     );
 }
 
-/// Votes cast before the cancellation stand; no agent votes afterwards.
+/// Votes cast before the cancellation stand, and no agent votes afterwards.
 #[tokio::test]
 async fn cancelling_a_ballot_keeps_the_votes_already_cast() {
     let workspace = Workspace::new();
@@ -237,7 +237,7 @@ async fn cancelling_a_ballot_keeps_the_votes_already_cast() {
         let ballot_id = ballot_id.clone();
         let voted = voted.clone();
         move |_, body| {
-            // The coder votes once; every other request waits.
+            // The coder votes once, and every other request waits.
             (body.contains("Vote as the coder") && voted.fetch_add(1, Ordering::SeqCst) == 0).then(
                 || {
                     let id = ballot_id.lock().unwrap();
@@ -334,7 +334,7 @@ async fn a_cancelled_durable_step_is_in_doubt_and_retried_on_resume() {
         Err(WorkflowError::Cancelled)
     ));
     assert_eq!(workflow.in_doubt_steps().await.unwrap().len(), 1);
-    // A later step doesn't start: nothing more is journaled.
+    // A later step doesn't start, so nothing more is journaled.
     let journal = workspace.0.join(".run/durable/journal.jsonl");
     let records = std::fs::read_to_string(&journal).unwrap().lines().count();
     let later: Result<String, _> = workflow
@@ -348,7 +348,7 @@ async fn a_cancelled_durable_step_is_in_doubt_and_retried_on_resume() {
         records
     );
 
-    // Resuming starts the run again; the step in doubt runs once more.
+    // Resuming starts the run again, and the step in doubt runs once more.
     let (checkpoint, state) = latest_checkpoint(&workspace);
     assert_eq!(
         state.cancellation.map(|cancellation| cancellation.cause),
@@ -414,7 +414,7 @@ async fn an_agent_that_does_not_stop_is_aborted_after_the_grace_period() {
     );
 }
 
-/// `PreToolExecution` abort: the call doesn't run, the agent is cancelled,
+/// `PreToolExecution` abort. The call doesn't run, the agent is cancelled,
 /// and the run is aborted.
 #[tokio::test]
 async fn a_pre_tool_hook_abort_aborts_the_run_before_the_call() {
@@ -469,7 +469,7 @@ async fn a_pre_tool_hook_abort_aborts_the_run_before_the_call() {
     assert!(!workflow.cancel());
 }
 
-/// `PreToolExecution` reject: the call doesn't run, the agent reads the
+/// `PreToolExecution` reject. The call doesn't run, the agent reads the
 /// hook's reason, and the run goes on.
 #[tokio::test]
 async fn a_pre_tool_hook_reject_tells_the_agent_why() {
@@ -504,7 +504,7 @@ async fn a_pre_tool_hook_reject_tells_the_agent_why() {
     assert!(workflow.cancellation().is_none());
 }
 
-/// `PostToolExecution` abort: the call has run; the agent makes no further
+/// `PostToolExecution` abort. The call has run, and the agent makes no further
 /// model call and the run is aborted.
 #[tokio::test]
 async fn a_post_tool_hook_abort_aborts_the_run_after_the_call() {
@@ -596,7 +596,7 @@ async fn the_tool_middleware_enforces_the_stop() {
             .unwrap(),
         ToolExecutionDecision::Continue
     );
-    // The write makes the reviewer's read stale; the hook's abort stops the
+    // The write makes the reviewer's read stale, and the hook's abort stops the
     // run, and the write's own outcome stands.
     middleware
         .after(
@@ -621,7 +621,7 @@ async fn the_tool_middleware_enforces_the_stop() {
 }
 
 /// An agent delegated through `run_workflow_agent` and stuck in a tool call
-/// winds down within half its parent's time: it is aborted and recorded
+/// winds down within half its parent's time. It is aborted and recorded
 /// before its parent is, and its tool call doesn't keep running.
 #[tokio::test]
 async fn a_stuck_delegated_agent_is_aborted_and_recorded_before_its_parent() {
@@ -735,7 +735,7 @@ async fn a_dropped_parallel_call_stops_its_agents() {
     .await;
 }
 
-/// A verifier running when the run is cancelled decides nothing: the target
+/// A verifier running when the run is cancelled decides nothing. The target
 /// is cancelled, not failed.
 #[tokio::test]
 async fn a_verifier_running_at_the_stop_cancels_its_target() {

@@ -9,7 +9,7 @@ use super::*;
 use crate::notes::Note;
 use crate::test_support::{ResponsesServer, Workspace, agent_config, text_turn};
 
-/// A chat: its reply in text ends its task.
+/// A chat. Its reply in text ends its task.
 fn chat() -> AgentConfig {
     let mut config = agent_config("Main");
     config.tool_config.text_reply_ends_task = true;
@@ -52,7 +52,7 @@ fn input_texts(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// An edited message: the run goes on from just before it, with the new
+/// An edited message. The run goes on from just before it, with the new
 /// text in its place and the messages after it gone.
 #[tokio::test]
 async fn an_edited_message_replaces_it_and_what_came_after() {
@@ -83,7 +83,7 @@ async fn an_edited_message_replaces_it_and_what_came_after() {
     assert!(!sent.iter().any(|text| text.contains("joke")));
     assert_eq!(edited.task().unwrap().conversation.messages.len(), 4);
 
-    // Not a message the host sent: refused, nothing sent.
+    // Not a message the host sent, refused, nothing sent.
     let requests = server.requests();
     let error = workflow
         .continue_agent_with(&edited, "x", ContinueOptions::new().cut_back_to(1))
@@ -148,7 +148,7 @@ async fn a_cut_gives_standing_notes_again_but_not_one_time_ones() {
     assert!(!sent.contains("Go on.\n"), "{sent}");
 }
 
-/// A branch is a run of its own: imported, it continues from the copied
+/// A branch is a run of its own. Imported, it continues from the copied
 /// conversation, and the original goes on with all of its own.
 #[tokio::test]
 async fn a_branch_goes_on_apart_from_the_original() {
@@ -192,7 +192,7 @@ async fn a_branch_goes_on_apart_from_the_original() {
     assert!(error(workflow.import_agent_run("main", running)).contains("only a completed task"));
 }
 
-/// A branch at the first message has no conversation: imported and
+/// A branch at the first message has no conversation. Imported and
 /// continued cut back to its first message, it starts over from the new
 /// prompt as a run of its own, and the original keeps its conversation.
 #[tokio::test]
@@ -223,7 +223,7 @@ async fn a_branch_at_the_first_message_starts_over_from_the_next() {
     assert_eq!(original.task().unwrap().conversation.messages.len(), 4);
 }
 
-/// A cut back is reported as the run goes on: `ConversationCutBack` names
+/// A cut back is reported as the run goes on. `ConversationCutBack` names
 /// the message and how many went, before the run's own events.
 #[tokio::test]
 async fn a_cut_back_is_reported_in_the_events() {
@@ -259,7 +259,7 @@ async fn a_cut_back_is_reported_in_the_events() {
     assert_eq!(cut, 0, "before the run's own events");
 }
 
-/// A run cut back no longer holds what it read in the removed messages: it
+/// A run cut back no longer holds what it read in the removed messages. It
 /// isn't told what changed since then (it reads again what it needs).
 #[tokio::test]
 async fn a_cut_back_forgets_what_the_removed_messages_read() {
@@ -305,7 +305,7 @@ async fn a_cut_back_forgets_what_the_removed_messages_read() {
     assert!(!last.contains("Changed since you last read them"), "{last}");
 }
 
-/// A run can go on in another directory: it works there from then
+/// A run can go on in another directory. It works there from then
 /// on, and its prompt is written again.
 #[tokio::test]
 async fn a_run_goes_on_in_another_directory() {
@@ -333,7 +333,7 @@ async fn a_run_goes_on_in_another_directory() {
     assert!(refused.to_string().contains("does not exist"), "{refused}");
 }
 
-/// A Claude Code run moves too: its tools work in the new directory, while
+/// A Claude Code run moves too. Its tools work in the new directory, while
 /// the CLI resumes its session in the directory the session started in,
 /// where Claude Code finds it, with the new directory open to it and the
 /// new prompt.

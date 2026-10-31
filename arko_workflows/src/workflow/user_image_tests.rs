@@ -100,7 +100,7 @@ async fn a_run_and_its_continuation_send_their_images_with_their_prompts() {
 }
 
 /// Images the agent's model can't take are refused before a request is
-/// made, with the reason: a model without image input, and an image by URL
+/// made, with the reason. A model without image input, and an image by URL
 /// for a model that takes images as data only.
 #[tokio::test]
 async fn images_a_model_can_t_take_are_refused_before_anything_is_sent() {
@@ -236,7 +236,7 @@ fn sized_png(width: u32, height: u32) -> arko_ai::Image {
 }
 
 /// An image the agent's model can't take as it is is fitted before it is
-/// sent: here a BMP, which OpenAI doesn't take, becomes a PNG.
+/// sent. Here a BMP, which OpenAI doesn't take, becomes a PNG.
 #[tokio::test]
 async fn an_image_the_model_cant_take_as_it_is_is_fitted_before_it_is_sent() {
     let workspace = Workspace::new();
@@ -265,7 +265,7 @@ async fn an_image_the_model_cant_take_as_it_is_is_fitted_before_it_is_sent() {
 }
 
 /// A conversation that holds as many images, or as much image data, as a
-/// request to its model takes is sent no more: every later request would
+/// request to its model takes is sent no more. Every later request would
 /// fail. The refusal says how to make room.
 #[tokio::test]
 async fn a_conversation_full_of_images_takes_no_more() {
@@ -313,7 +313,7 @@ async fn a_conversation_full_of_images_takes_no_more() {
 }
 
 /// A session whose image file was deleted or damaged after it was saved
-/// still resumes: each such image becomes a line saying it is gone, in the
+/// still resumes. Each such image becomes a line saying it is gone, in the
 /// message that held it, and the run reports them as it goes on.
 #[tokio::test]
 async fn a_session_resumes_without_the_image_files_it_lost() {

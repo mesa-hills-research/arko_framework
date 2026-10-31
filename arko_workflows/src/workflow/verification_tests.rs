@@ -1,4 +1,4 @@
-//! Completion verification through real runs: re-review with prior
+//! Completion verification through real runs, re-review with prior
 //! findings, and failed reviews.
 
 use std::sync::Arc;
@@ -49,7 +49,7 @@ fn verifier_bodies(server: &ResponsesServer) -> Vec<String> {
 }
 
 /// A new review of a task after a rejection is given the prior verdict and
-/// findings by default; with `include_prior_findings(false)` it is a first
+/// findings by default, and with `include_prior_findings(false)` it is a first
 /// review again.
 #[tokio::test]
 async fn a_re_review_is_given_the_prior_findings_unless_opted_out() {
@@ -85,8 +85,8 @@ async fn a_re_review_is_given_the_prior_findings_unless_opted_out() {
 }
 
 /// A review that fails (here, a verdict that never follows the contract)
-/// doesn't fail the task: the completion is rejected so the agent calls
-/// `complete_task` again, up to `max_review_retries`; then the task is
+/// doesn't fail the task. The completion is rejected so the agent calls
+/// `complete_task` again, up to `max_review_retries`, and then the task is
 /// paused, neither accepted nor rejected, and the call returns
 /// `VerifierFailed`. The verdict is asked for again `max_format_retries`
 /// times per review.
@@ -113,7 +113,7 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
                 crate::hooks::HookResult::Continue
             })
         })
-        // A pause is not a failure: neither hook fires.
+        // A pause is not a failure, so neither hook fires.
         .hook(crate::hooks::HookPoint::OnWorkflowFailed, {
             let hooks_failed = hooks_failed.clone();
             Arc::new(move |_| {
@@ -168,7 +168,7 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
 }
 
 /// A task whose completion a verifier could not review is left paused,
-/// not cancelled: `continue_agent` gives it the prompt as its next message,
+/// not cancelled. `continue_agent` gives it the prompt as its next message,
 /// and its next completion is reviewed again (with the full count of
 /// retries). (The task was once cancelled, and could not be continued.)
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
     let paused = workflow.agent_result(task_id).unwrap();
     assert_eq!(paused.status, AgentRunStatus::Paused);
 
-    // Continued, it completes again; the review fails again (the count
+    // Continued, it completes again, and the review fails again (the count
     // started over), and the task is paused again.
     let error = workflow
         .continue_agent(&paused, "The verifier is back; complete again.")
@@ -238,7 +238,7 @@ async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
     assert_eq!(coder_bodies().len(), 3);
 }
 
-/// Opens once the test says so; counts the calls that got through.
+/// Opens once the test says so, and counts the calls that got through.
 #[derive(Debug, Default)]
 struct Gate {
     open: tokio::sync::Notify,
@@ -272,7 +272,7 @@ impl arko_agents::Tool for Gate {
 }
 
 /// In a parallel run, a task whose completion its verifier could not
-/// review is a pause, not a failure: its paused result comes back with the
+/// review is a pause, not a failure. Its paused result comes back with the
 /// others, and `fail_fast` doesn't stop the agent still running (it waits
 /// until the pause is recorded).
 #[tokio::test]

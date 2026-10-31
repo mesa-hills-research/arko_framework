@@ -1,4 +1,4 @@
-//! The task journal: agent runs saved as they run, and recovered after the
+//! The task journal, with agent runs saved as they run, and recovered after the
 //! workflow stops while they run (a crash, simulated by freezing the run
 //! directory and dropping the workflow).
 
@@ -85,9 +85,9 @@ async fn until(mut done: impl FnMut() -> bool) {
     .await;
 }
 
-/// Stops `workflow` as a crash would: from now on nothing reaches its run
+/// Stops `workflow` as a crash would. From now on nothing reaches its run
 /// directory, and its runs are dropped. The agent runtimes' own tasks may
-/// run on (blocked in a tool or a held request): a test must not count on
+/// run on (blocked in a tool or a held request). A test must not count on
 /// what they do after the crash, such as the server's request count while
 /// one of them could still send.
 async fn crash<T>(workflow: Arc<Workflow>, runs: Vec<tokio::task::JoinHandle<T>>) {
@@ -122,7 +122,7 @@ fn user_messages(body: &str) -> usize {
 }
 
 /// Runs `coder` with `probe` (blocking) in a workflow that crashes while
-/// the probe runs; returns the checkpoint to resume from.
+/// the probe runs, and returns the checkpoint to resume from.
 async fn crash_mid_tool(
     server: &ResponsesServer,
     workspace: &Workspace,
@@ -219,10 +219,10 @@ async fn a_recovered_run_takes_the_registered_embedded_skills() {
 }
 
 /// A run that crashed while its tool call ran comes back interrupted with
-/// its task, and `recover_agent` continues it where it was: the call (in
+/// its task, and `recover_agent` continues it where it was. The call (in
 /// doubt by default) is answered without running again, no message is
 /// added, and the run keeps its identity. Once it ends, its live file is
-/// gone and the latest checkpoint records its result; each model call is
+/// gone and the latest checkpoint records its result, and each model call is
 /// charged once.
 #[tokio::test]
 async fn a_run_that_crashed_mid_tool_is_recovered_where_it_was() {
@@ -482,7 +482,7 @@ async fn without_the_task_journal_running_agents_are_not_saved() {
     crash(workflow, vec![run]).await;
 }
 
-/// The task journal's files are compact JSON unless `pretty_json` is set;
+/// The task journal's files are compact JSON unless `pretty_json` is set, and
 /// checkpoints stay pretty. Once a run ends its live file is deleted, the
 /// latest checkpoint is a versioned one, and the live checkpoint still
 /// resumes (it refers to no deleted file).
@@ -561,7 +561,7 @@ async fn journal_files_are_compact_unless_pretty_and_go_when_runs_end() {
     }
 }
 
-/// A server for delegation: `coder` (prompt "Delegate.") runs `reviewer`
+/// A server for delegation. `coder` (prompt "Delegate.") runs `reviewer`
 /// (prompt "Block."), which calls `block`. Once a call has a result, each
 /// completes. While `hold_reviewer` is set, the reviewer's requests wait.
 async fn delegation_server(hold_reviewer: Arc<AtomicBool>) -> ResponsesServer {
@@ -612,7 +612,7 @@ fn delegating(
         .persistence(config(workspace))
 }
 
-/// Crashes while `coder`'s delegated reviewer is stuck in `block`; returns
+/// Crashes while `coder`'s delegated reviewer is stuck in `block`, and returns
 /// the checkpoint to resume from.
 async fn crash_mid_delegation(
     server: &ResponsesServer,
@@ -653,8 +653,8 @@ fn result_of(workflow: &Workflow, agent: &str) -> AgentResult {
         .unwrap()
 }
 
-/// A crash while a delegated agent runs: only the delegating run is
-/// listed; recovering it recovers the delegated run (same identity, in
+/// A crash while a delegated agent runs. Only the delegating run is
+/// listed, and recovering it recovers the delegated run (same identity, in
 /// doubt about its stuck call), whose result becomes the delegating call's
 /// result. Neither starts again.
 #[tokio::test]
@@ -704,7 +704,7 @@ async fn a_delegated_run_is_recovered_through_its_parent() {
 }
 
 /// A delegated run that completed before the crash, while its parent's
-/// call result was not saved yet, is not run again: recovering the parent
+/// call result was not saved yet, is not run again. Recovering the parent
 /// returns its result.
 #[tokio::test]
 async fn a_delegated_run_that_completed_is_not_run_again() {
@@ -749,7 +749,7 @@ async fn a_delegated_run_that_completed_is_not_run_again() {
     assert!(bodies[3].contains("reviewed"), "{}", bodies[3]);
 }
 
-/// A delegated run the crash came before any save of (it ran no tool: runs
+/// A delegated run the crash came before any save of (it ran no tool, because runs
 /// are saved before their first) runs when its parent is recovered.
 #[tokio::test]
 async fn a_delegated_run_never_saved_runs_when_its_parent_is_recovered() {
@@ -872,8 +872,8 @@ async fn parallel_runs_and_their_delegations_are_recovered_together() {
     assert_eq!(server.requests(), 8, "nothing started again");
 }
 
-/// A completion verifier reviewing when the workflow stopped is superseded:
-/// recovering its target reviews the completion again with a new review,
+/// A completion verifier reviewing when the workflow stopped is superseded.
+/// Recovering its target reviews the completion again with a new review,
 /// and the stopped review is recorded cancelled.
 #[tokio::test]
 async fn a_review_interrupted_by_a_crash_is_done_again() {
@@ -947,7 +947,7 @@ async fn a_review_interrupted_by_a_crash_is_done_again() {
     assert_eq!(records.len(), 1);
     assert_ne!(records[0].verifier_task_id, stopped_review.agent_run_id);
     assert!(resumed.interrupted_runs().is_empty());
-    // A superseded review is not reopened: the new review replaced it.
+    // A superseded review is not reopened, because the new review replaced it.
     let error = resumed.reopen_agent(superseded, "").await.unwrap_err();
     assert!(
         matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("superseded")),
@@ -957,7 +957,7 @@ async fn a_review_interrupted_by_a_crash_is_done_again() {
 
 /// A run saved while the workflow's approval handler decided its call
 /// comes back waiting, and recovering it has the call decided again (here
-/// approved by the default policy): it runs.
+/// approved by the default policy). It runs.
 #[tokio::test]
 async fn an_approval_wait_is_decided_again_on_recovery() {
     struct Undecided;
@@ -1038,7 +1038,7 @@ async fn an_approval_wait_is_decided_again_on_recovery() {
 
 /// While one run runs and another has finished, a versioned checkpoint
 /// records the running one with a version of its task (never its live
-/// file), and retention keeps what the live checkpoint refers to: the
+/// file), and retention keeps what the live checkpoint refers to, namely the
 /// running task's live file and the versions it names. Resuming from the
 /// versioned checkpoint recovers the running run.
 #[tokio::test]
@@ -1116,7 +1116,7 @@ async fn versioned_checkpoints_record_running_runs_and_retention_keeps_live_file
 }
 
 /// A server whose first request calls `probe` and whose later requests
-/// complete; while `hold` is set, the later requests wait for it.
+/// complete, and while `hold` is set, the later requests wait for it.
 async fn probe_then_complete(hold: Option<Arc<tokio::sync::Notify>>) -> ResponsesServer {
     ResponsesServer::start_async(move |index, _| {
         let hold = hold.clone();
@@ -1140,7 +1140,7 @@ async fn probe_then_complete(hold: Option<Arc<tokio::sync::Notify>>) -> Response
 }
 
 /// Without auto-checkpoints, `latest-checkpoint` still names the newest
-/// state once a run ends: the live checkpoint recording its end, not a
+/// state once a run ends, namely the live checkpoint recording its end, not a
 /// versioned checkpoint written while it ran (which records it running).
 #[tokio::test]
 async fn latest_names_the_newest_checkpoint_without_auto_checkpoints() {
@@ -1202,7 +1202,7 @@ fn latest_request(result: &AgentResult) -> Option<(usize, i64)> {
 }
 
 /// Runs `coder` (a probe call, then completion) in a workflow that crashes
-/// as the run's end reaches `point`; returns the run's result and the
+/// as the run's end reaches `point`, and returns the run's result and the
 /// checkpoint to resume from.
 async fn crash_as_the_run_ends(
     server: &ResponsesServer,
@@ -1227,9 +1227,9 @@ async fn crash_as_the_run_ends(
 }
 
 /// A crash after a run's result is recorded (its task version written) and
-/// before any checkpoint records it: the run comes back interrupted, with
+/// before any checkpoint records it. The run comes back interrupted, with
 /// its last request as its latest, and recovering it finishes it without
-/// running its calls again; each model call is charged once.
+/// running its calls again, and each model call is charged once.
 #[tokio::test]
 async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
     let workspace = Workspace::new();
@@ -1252,7 +1252,7 @@ async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
     let saved = resumed.interrupted_runs().remove(0);
     assert_eq!(saved.agent_run_id, ended.agent_run_id);
     // The save it comes back from is the run's last, or one before it, and
-    // its latest request is the one of its own last model call: never one
+    // its latest request is the one of its own last model call, never one
     // it doesn't hold.
     let last = latest_request(&ended).expect("the run's last request");
     let restored = resumed.agent_result(ended.agent_run_id).unwrap();
@@ -1283,7 +1283,7 @@ async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
 }
 
 /// A crash after the live checkpoint recorded a run's end, before the
-/// versioned checkpoint after it: `latest-checkpoint` names the live
+/// versioned checkpoint after it. `latest-checkpoint` names the live
 /// checkpoint, which records the run completed.
 #[tokio::test]
 async fn a_crash_before_the_checkpoint_after_a_run_keeps_its_end() {
@@ -1311,7 +1311,7 @@ async fn a_crash_before_the_checkpoint_after_a_run_keeps_its_end() {
 }
 
 /// A run restored from its live file stays in every checkpoint while its
-/// task can't be saved as a version: checkpoints refer to the live file
+/// task can't be saved as a version. Checkpoints refer to the live file
 /// (which is kept), and a resume from them still recovers it.
 #[tokio::test]
 async fn a_restored_run_stays_recorded_while_it_cannot_be_versioned() {
@@ -1362,7 +1362,7 @@ async fn a_restored_run_stays_recorded_while_it_cannot_be_versioned() {
 
 /// Recovering a run whose delegation can't resume (the tool isn't offered
 /// any more) supersedes the delegated run and the run that one delegated
-/// to in turn: none is left interrupted.
+/// to in turn, so none is left interrupted.
 #[tokio::test]
 async fn superseding_a_delegated_run_supersedes_its_own_delegations() {
     let workspace = Workspace::new();
@@ -1447,7 +1447,7 @@ async fn superseding_a_delegated_run_supersedes_its_own_delegations() {
 }
 
 /// A group of calls recovery simply runs again (`Rerun`) doesn't wait for
-/// the task to be saved: the call runs while every write is held.
+/// the task to be saved. The call runs while every write is held.
 #[tokio::test]
 async fn a_rerun_call_does_not_wait_for_the_save() {
     let workspace = Workspace::new();
@@ -1472,7 +1472,7 @@ async fn a_rerun_call_does_not_wait_for_the_save() {
 }
 
 /// The live checkpoint is written again only when a resume would read
-/// something new from it: not for a running task's progress alone (its
+/// something new from it, not for a running task's progress alone (its
 /// live file has that), but for a cost it can't tell from the tasks.
 #[tokio::test]
 async fn the_live_checkpoint_is_rewritten_only_when_the_state_changes() {
@@ -1568,7 +1568,7 @@ impl Drop for FakeClaude {
 }
 
 /// A Claude Code agent whose CLI can't start fails under `Automatic`, as an
-/// agent of arko's own runtime does for an error retrying can't fix: the
+/// agent of arko's own runtime does for an error retrying can't fix. The
 /// runtime reports the pause's cause before the error, so the policy sees
 /// it (it saw an unknown cause before, and returned the agent paused).
 #[tokio::test]
@@ -1614,7 +1614,7 @@ async fn a_claude_code_agent_that_cant_start_fails_with_its_cause() {
 }
 
 /// A Claude Code agent that isn't signed in (or whose login expired) fails
-/// under `Automatic` with that cause: Claude Code starts, and reports it
+/// under `Automatic` with that cause. Claude Code starts, and reports it
 /// on the first turn, as `authentication_failed` (it was retried for ever,
 /// as a session failure).
 #[tokio::test]
@@ -1648,7 +1648,7 @@ async fn a_claude_code_agent_that_cant_sign_in_fails_with_its_cause() {
 }
 
 /// A Claude Code agent's refused input can't be changed (Claude Code keeps
-/// its own conversation): `ResolveRefusal` is refused at once, and the
+/// its own conversation). `ResolveRefusal` is refused at once, and the
 /// agent stays paused for another decision.
 #[tokio::test]
 async fn a_claude_code_refusal_cant_be_resolved_by_changing_its_input() {
@@ -1728,7 +1728,7 @@ impl arko_agents::Tool for FailingTool {
 }
 
 /// A Claude Code agent's pause after its turn (here a tool error under
-/// `ToolErrorPolicy::PauseAndAwaitApproval`) is decided by the workflow:
+/// `ToolErrorPolicy::PauseAndAwaitApproval`) is decided by the workflow.
 /// `Automatic` continues it. (Claude Code reported such a pause by its
 /// state alone, and the run call waited for ever.) The error is reported
 /// once, by the pause, naming its call, as arko's own runtime reports it
@@ -1739,7 +1739,7 @@ async fn a_claude_code_agents_tool_error_pause_is_continued() {
     let boom = json!({"tool": "mcp__arko__boom", "input": {}, "id": "toolu_boom"});
     let complete = json!({"tool": "mcp__arko__complete_task", "input": {"summary": "done"}});
     for (policy, script, turns, reports) in [
-        // One turn: the error is the call's result, and the model goes on.
+        // One turn. The error is the call's result, and the model goes on.
         (
             ToolErrorPolicy::InformAgentAndContinue,
             json!([[boom, complete]]),
@@ -1846,7 +1846,7 @@ async fn a_claude_code_agent_its_verifier_cant_review_is_returned_and_continued(
 }
 
 /// A Claude Code agent running a tool call when the workflow crashed is
-/// recovered like any other: its session resumes (`--resume`), and its
+/// recovered like any other. Its session resumes (`--resume`), and its
 /// first message says the call's outcome is unknown.
 #[tokio::test]
 async fn a_claude_code_agent_is_recovered_after_a_crash() {
@@ -1922,12 +1922,12 @@ fn outputs(body: &str) -> usize {
 }
 
 /// A server for orphaned delegations. `coder` ("Delegate.") runs
-/// `reviewer` ("Block."); once its call failed naming the reviewer's run,
+/// `reviewer` ("Block."). Once its call failed naming the reviewer's run,
 /// it resumes that run once ("Finish the review."), or, while
-/// `hang_after_note` is set, its request waits; then it completes.
+/// `hang_after_note` is set, its request waits, and then it completes.
 /// `planner` ("Resume the review.") resumes the run in `run` with the same
-/// message, then completes. `reviewer` calls `block`; resumed with the
-/// message, it calls `block` once more (`block-again`); it completes once
+/// message, then completes. `reviewer` calls `block`. Resumed with the
+/// message, it calls `block` once more (`block-again`), and it completes once
 /// a call has a result.
 async fn orphan_server(
     run: Arc<parking_lot::Mutex<Option<uuid::Uuid>>>,
@@ -1970,10 +1970,10 @@ async fn orphan_server(
 }
 
 /// A crash while `coder`'s delegated reviewer runs, then a resume where the
-/// reviewer's agent budget is spent: recovering the coder's call fails, and
+/// reviewer's agent budget is spent. Recovering the coder's call fails, and
 /// its result names the reviewer's run and says the coder can resume it.
 /// The coder tries (`resume_run`), is refused by the budget again, and
-/// completes: the reviewer is orphaned, listed for the host with its parent
+/// completes. The reviewer is orphaned, listed for the host with its parent
 /// link. Returns the checkpoint after that and the reviewer's result.
 async fn orphan_delegation(
     server: &ResponsesServer,
@@ -1981,7 +1981,7 @@ async fn orphan_delegation(
 ) -> (std::path::PathBuf, AgentResult) {
     let path = crash_mid_delegation(server, workspace).await;
     let resumed = delegating(server, workspace, ProbeTool::new("block", false), 4)
-        // Refused at admission: the recovery of the delegated run fails.
+        // Refused at admission, so the recovery of the delegated run fails.
         .budget_exceeded_policy(BudgetExceededPolicy::Cancel)
         .agent_budget("reviewer", 1e-12)
         .resume_from(&path)
@@ -2038,8 +2038,8 @@ async fn orphan_delegation(
 }
 
 /// A delegated run whose recovery through its parent's call fails is named
-/// in the call's result and left interrupted; once its parent completed,
-/// it is orphaned: listed by `interrupted_runs` (with its parent link) and
+/// in the call's result and left interrupted. Once its parent completed,
+/// it is orphaned, listed by `interrupted_runs` (with its parent link) and
 /// recovered by the host, which releases the link. It runs once.
 #[tokio::test]
 async fn a_delegation_that_cannot_be_recovered_is_named_and_left_to_the_host() {
@@ -2066,7 +2066,7 @@ async fn a_delegation_that_cannot_be_recovered_is_named_and_left_to_the_host() {
     assert!(resumed.interrupted_runs().is_empty());
 }
 
-/// Another agent resumes an orphaned run with `resume_run`: the run
+/// Another agent resumes an orphaned run with `resume_run`. The run
 /// continues its own task with the caller's message, and its parent link
 /// points at the resuming call, so that after a crash only the caller is
 /// listed and recovering it recovers the run in that call.
@@ -2141,7 +2141,7 @@ async fn an_agent_resumes_an_orphaned_run_and_a_later_crash_finds_it_there() {
 
 /// A run whose parent's call was answered (it failed, naming the run)
 /// before the parent stopped is not superseded when the parent is
-/// recovered: the parent resumes it (`resume_run`), in a new call its
+/// recovered. The parent resumes it (`resume_run`), in a new call its
 /// link then points at. Meanwhile it is listed as orphaned.
 #[tokio::test]
 async fn a_run_whose_call_was_answered_stays_for_its_parent_to_resume() {
@@ -2151,7 +2151,7 @@ async fn a_run_whose_call_was_answered_stays_for_its_parent_to_resume() {
     let path = crash_mid_delegation(&server, &workspace).await;
     let workflow = Arc::new(
         delegating(&server, &workspace, ProbeTool::new("block", false), 4)
-            // Refused at admission: the recovery of the delegated run fails.
+            // Refused at admission, so the recovery of the delegated run fails.
             .budget_exceeded_policy(BudgetExceededPolicy::Cancel)
             .agent_budget("reviewer", 1e-12)
             .resume_from(&path)
@@ -2231,7 +2231,7 @@ async fn refusal(
 }
 
 /// `resume_run` resumes a run of the named agent that the caller's run
-/// started (or an orphaned one), within the active-call limit; anything
+/// started (or an orphaned one), within the active-call limit, and anything
 /// else is refused with the reason. Resumed, the run continues its own
 /// task with the message, inside the new call.
 #[tokio::test]
@@ -2294,7 +2294,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
         let error = refusal(&services, caller, caller_run, agent, run).await;
         assert!(error.contains(expected), "{expected}: {error}");
     }
-    // A run that failed can't be resumed (a cancelled one is reopened: see
+    // A run that failed can't be resumed (a cancelled one is reopened, see
     // `budget_tests`).
     let mut cancelled = reviewer.task().unwrap().clone();
     cancelled.id = uuid::Uuid::new_v4();
@@ -2375,7 +2375,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
 }
 
 /// A delegated run already being recovered when its parent's call
-/// recovers it is waited for, not run twice: the call returns the outcome
+/// recovers it is waited for, not run twice. The call returns the outcome
 /// that recovery recorded. The host can't recover it meanwhile.
 #[tokio::test]
 async fn a_delegated_run_being_recovered_is_waited_for_not_run_twice() {
@@ -2450,7 +2450,7 @@ async fn a_delegated_run_being_recovered_is_waited_for_not_run_twice() {
 
 /// A Claude Code agent whose delegation can't be recovered is told, in
 /// the first message of its resumed session, which run it ran and that it
-/// can resume it; once it completed, the run is orphaned for the host.
+/// can resume it, and once it completed, the run is orphaned for the host.
 #[tokio::test]
 async fn a_claude_code_parent_is_told_which_delegated_run_it_can_resume() {
     let workspace = Workspace::new();
@@ -2486,7 +2486,7 @@ async fn a_claude_code_parent_is_told_which_delegated_run_it_can_resume() {
     crash(workflow, vec![run]).await;
 
     let resumed = claude_code(ProbeTool::new("block", false))
-        // Refused at admission: the recovery of the delegated run fails.
+        // Refused at admission, so the recovery of the delegated run fails.
         .budget_exceeded_policy(BudgetExceededPolicy::Cancel)
         .agent_budget("reviewer", 1e-12)
         .resume_from(&path)
@@ -2523,7 +2523,7 @@ async fn a_claude_code_parent_is_told_which_delegated_run_it_can_resume() {
 }
 
 /// A completion verifier's review interrupted by a crash is superseded when
-/// its target is recovered, never run again: resuming doesn't check its
+/// its target is recovered, never run again. Resuming doesn't check its
 /// agent's configuration, which may have changed.
 #[tokio::test]
 async fn a_review_nobody_resumes_does_not_need_its_configuration() {
@@ -2589,7 +2589,7 @@ async fn a_review_nobody_resumes_does_not_need_its_configuration() {
 }
 
 /// The images of a task the journal already holds are not copied again at
-/// each safe point: the latest snapshot is refreshed in place, to equal the
+/// each safe point. The latest snapshot is refreshed in place, to equal the
 /// task, and keeps its images. With `--nocapture` the test prints what a
 /// safe point costs against a clone of the task (about 15 MB of images).
 #[tokio::test]
@@ -2647,7 +2647,7 @@ async fn the_journal_keeps_the_images_it_holds_at_each_safe_point() {
     let held = manager.live_image_addresses(id);
     assert_eq!(held.len(), 10);
 
-    // Safe points that add only text: the snapshot keeps its images.
+    // Safe points that add only text, so the snapshot keeps its images.
     let (mut cloning, mut reporting) = (Duration::ZERO, Duration::ZERO);
     for step in 0..5 {
         task.conversation
@@ -2854,7 +2854,7 @@ async fn a_note_taken_before_a_claude_code_compaction_isnt_given_again_on_recove
         .unwrap();
     within(hold.started.notified()).await;
     assert!(running_call_saved(&workspace));
-    // What the agent was sent: its inputs, and the context with its calls'
+    // What the agent was sent was its inputs, and the context with its calls'
     // results.
     let given = || {
         let texts = fake
@@ -2909,7 +2909,7 @@ async fn a_note_taken_before_a_claude_code_compaction_isnt_given_again_on_recove
 /// behind it before that message is done, which the second call's hook (H2)
 /// takes, raising the notes' mark. No call's result is reported, so H1 is
 /// never acknowledged, and the third call, which holds, is saved with the
-/// task. The workflow then crashes: persistence freezes first, and the run
+/// task. The workflow then crashes. Persistence freezes first, and the run
 /// is dropped with no end of its session. The saved task still holds both
 /// notes, behind the notes' mark, so the recovered run gets them, the
 /// operator's note included.
@@ -2945,7 +2945,7 @@ async fn notes_waiting_behind_a_users_message_survive_a_crash() {
         let workflow = workflow.clone();
         async move { workflow.run_agent("coder", "Search it.").await }
     });
-    // After the first input: the operator's note goes with the first
+    // After the first input, the operator's note goes with the first
     // search's hook, as the user's message.
     until(|| !fake.logged("user").is_empty()).await;
     workflow
@@ -2982,7 +2982,7 @@ async fn notes_waiting_behind_a_users_message_survive_a_crash() {
         .unwrap();
     let saved = resumed.interrupted_runs().remove(0);
     let task = saved.task().unwrap();
-    // Read from the task itself: both notes wait, the operator's first, and
+    // Read from the task itself. Both notes wait, the operator's first, and
     // the mark covers them.
     let pending = task.pending_texts();
     let operator = pending

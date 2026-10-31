@@ -146,7 +146,7 @@ async fn a_report_s_request_is_the_host_s_and_other_calls_wait() {
     assert_eq!(input.matches(rejected).count(), 2, "{input}");
 }
 
-/// An error at the report's request: the error policy's automatic recovery
+/// An error at the report's request. The error policy's automatic recovery
 /// doesn't apply. The caller gets the pause with its cause and kind, and the
 /// run is as it was before the request, its model calls still counted.
 async fn a_failed_report(
@@ -263,7 +263,7 @@ async fn a_report_at_a_plan_limit_doesn_t_wait_for_the_reset() {
     assert_eq!(restored.status, AgentRunStatus::Completed);
 }
 
-/// Stopping the run cancels the report: the caller gets the stop, and the
+/// Stopping the run cancels the report. The caller gets the stop, and the
 /// run is as it was before the request.
 #[tokio::test]
 async fn a_report_is_cancelled_by_stopping_the_run() {
@@ -354,7 +354,7 @@ enum NoReport {
 
 /// A peer's message that reaches the run while it writes a report that
 /// doesn't come is held back, as during any report, and is given once when
-/// the run goes on: in the same workflow, or after a resume from a
+/// the run goes on, in the same workflow, or after a resume from a
 /// checkpoint.
 #[tokio::test]
 async fn a_message_during_a_report_that_doesn_t_come_is_given_once() {
@@ -514,7 +514,7 @@ async fn a_report_s_failure_says_why_under_every_error_policy() {
     }
 }
 
-/// The same for a Claude Code agent: a login Claude Code lacks, and a plan
+/// The same for a Claude Code agent, a login Claude Code lacks, and a plan
 /// limit it reports reached, under each error policy.
 #[tokio::test]
 async fn a_claude_code_report_s_failure_says_why_under_every_error_policy() {
@@ -578,7 +578,7 @@ async fn a_claude_code_report_s_failure_says_why_under_every_error_policy() {
 }
 
 /// A Claude Code report that doesn't come leaves the session as it was,
-/// since it was written in a copy: the run's next input goes on in the
+/// since it was written in a copy. The run's next input goes on in the
 /// session it had, which holds neither the request nor what the model wrote
 /// of it. That holds for a session the runtime recorded no transcript entries
 /// of too (saved by an older version, or compacted), which can't be cut back.
@@ -676,7 +676,7 @@ fn checkpoint_files(run_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// A report run is never saved. Checkpoints taken during the report, and
 /// the one its end writes, record the run as it was last saved, without
 /// the report's request. A resume from one has nothing to resume or wait
-/// for: no model is asked, though the resumed server answers every request
+/// for. No model is asked, though the resumed server answers every request
 /// with a plan limit.
 #[tokio::test]
 async fn a_report_run_is_never_saved_in_a_checkpoint() {
@@ -814,7 +814,7 @@ async fn a_dropped_report_call_leaves_the_run_to_go_on() {
     assert_eq!(saved.task().unwrap().conversation.messages.len(), length);
     drop(resumed);
 
-    // The automatic policy decides its pauses again: a refused credential
+    // The automatic policy decides its pauses again. A refused credential
     // fails the run rather than coming back as a pause for the caller.
     let error = workflow
         .continue_agent(&went_on, "Fail now.")
@@ -827,7 +827,7 @@ async fn a_dropped_report_call_leaves_the_run_to_go_on() {
 }
 
 /// A report asked of a result other than the recorded one (here, with a
-/// note waiting), whose save then fails: the run put back as it was asked
+/// note waiting), whose save then fails, the run put back as it was asked
 /// of can't be saved, so checkpoints keep the state saved before, and a
 /// resume has that state.
 #[tokio::test]
@@ -920,7 +920,7 @@ async fn a_claude_code_run_goes_on_in_its_report_s_copy_after_a_resume() {
     assert!(history.contains("REPORT: started the work."), "{history}");
 }
 
-/// A server for the guard's edges: the agent's first run says "Sure.", and a
+/// A server for the guard's edges, the agent's first run says "Sure.", and a
 /// report request is answered as `report` says, by the number of results
 /// the request carries.
 async fn edge_server(
@@ -939,7 +939,7 @@ async fn edge_server(
     .await
 }
 
-/// A report that came is recorded by a task of its own: the caller
+/// A report that came is recorded by a task of its own. The caller
 /// dropping the call while the run's result is being saved (the save held
 /// up here) leaves the run recorded with its report all the same.
 #[tokio::test]
@@ -1063,7 +1063,7 @@ async fn a_report_run_aborted_after_a_turn_gives_back_what_it_took() {
     assert_eq!(input.matches("Use British spelling.").count(), 1, "{input}");
 }
 
-/// The roster says what the run's saved result says: a report run never
+/// The roster says what the run's saved result says. A report run never
 /// shows as running, and a report that failed, one dropped, and a resume
 /// from a checkpoint taken during one leave the agent finished as before.
 #[tokio::test]
@@ -1115,7 +1115,7 @@ async fn the_roster_keeps_the_run_s_status_through_a_report() {
     assert!(resumed.interrupted_runs().is_empty());
 }
 
-/// A dropped report leaves the run's reads as they were: a continuation
+/// A dropped report leaves the run's reads as they were. A continuation
 /// is still told about a file another agent changed after the run read it.
 #[tokio::test]
 async fn a_dropped_report_keeps_what_the_run_read() {
@@ -1176,8 +1176,8 @@ async fn report_came(workflow: &Workflow) {
     assert!(came.is_ok());
 }
 
-/// A run whose report came counts as running until its result is saved:
-/// a continuation and another report asked meanwhile (the save held up
+/// A run whose report came counts as running until its result is saved.
+/// A continuation and another report asked meanwhile (the save held up
 /// here) are refused, as for any running run, and the run goes on once
 /// it is saved.
 #[tokio::test]
@@ -1225,7 +1225,7 @@ async fn a_run_whose_report_came_runs_until_its_result_is_saved() {
 
 /// A checkpoint taken while the result of a report that came is recorded
 /// (here, queued for the save before it) records the run and its messages
-/// as they were before: a peer's message the report run held back is given
+/// as they were before. A peer's message the report run held back is given
 /// once when the run goes on after a resume from it.
 #[tokio::test]
 async fn a_checkpoint_crossing_a_report_s_save_keeps_its_messages() {
@@ -1315,7 +1315,7 @@ fn probe_calls_turn(count: usize) -> String {
 /// A report run the workflow's stop aborts after its grace period, after
 /// a turn that took a peer's message, gives the run put back the model
 /// call and the message, from the latest task its runtime reported. The
-/// run misses the stop: its driver is held up writing the event log, so the
+/// run misses the stop. Its driver is held up writing the event log, so the
 /// run's events fill their channel and it waits to send more, and messages
 /// fill its command channel, so the stop can't queue its cancellation.
 #[tokio::test]
@@ -1579,7 +1579,7 @@ async fn released_report_server(
 }
 
 /// Whether checkpoint `path` records the peer's message as held by run
-/// `run` and the run's task without it: a resume from it would lose the
+/// `run` and the run's task without it. A resume from it would lose the
 /// message, but for the reconciliation on load.
 async fn records_the_message_held_without_it(path: &std::path::Path, run: uuid::Uuid) -> bool {
     let state = crate::persistence::PersistenceManager::load_checkpoint(path)

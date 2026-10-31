@@ -172,7 +172,7 @@ async fn a_resume_reads_a_completed_runs_task_when_it_is_needed() {
         .resume_from(&path)
         .build()
         .unwrap();
-    // Changed after the build: the task read now has the change.
+    // Changed after the build, so the task read now has the change.
     let mut task: arko_agents::Task =
         serde_json::from_str(&std::fs::read_to_string(file_of(&first)).unwrap()).unwrap();
     task.initial_task_prompt = "Changed after the build.".into();
@@ -206,7 +206,7 @@ async fn a_resume_reads_a_completed_runs_task_when_it_is_needed() {
         continued.conversation.messages.len() > first.task().unwrap().conversation.messages.len()
     );
 
-    // The other run's task file is gone: its result lists as before, and
+    // The other run's task file is gone. Its result lists as before, and
     // going on with it fails.
     let other = resumed.agent_result(second.agent_run_id).unwrap();
     assert_eq!(
@@ -252,7 +252,7 @@ async fn a_resume_into_another_run_directory_reads_every_task() {
 }
 
 /// A checkpoint written before task files were referenced (holding the
-/// results with their tasks) still resumes; the next checkpoint writes the
+/// results with their tasks) still resumes, and the next checkpoint writes the
 /// task files and refers to them.
 #[tokio::test]
 async fn a_checkpoint_holding_its_tasks_still_resumes() {
@@ -308,7 +308,7 @@ async fn a_checkpoint_holding_its_tasks_still_resumes() {
     );
 }
 
-/// Every checkpoint is kept by default; `keep_last_checkpoints(n)` keeps the
+/// Every checkpoint is kept by default, and `keep_last_checkpoints(n)` keeps the
 /// newest `n`, including those of an earlier process.
 #[tokio::test]
 async fn checkpoints_are_kept_unless_retention_is_set() {
@@ -343,7 +343,7 @@ async fn checkpoints_are_kept_unless_retention_is_set() {
     }
 }
 
-/// Each checkpoint refers to the task versions it saw: a task that runs on
+/// Each checkpoint refers to the task versions it saw. A task that runs on
 /// gets a new version, and an older checkpoint still reads the task as it
 /// was then. (Checkpoints once shared one task file, which held its latest
 /// state.)
@@ -388,7 +388,7 @@ async fn an_older_checkpoint_reads_the_task_as_it_was() {
     }
 }
 
-/// A task that didn't change is written once: every checkpoint refers to
+/// A task that didn't change is written once. Every checkpoint refers to
 /// the same version, in this process and after a resume.
 #[tokio::test]
 async fn an_unchanged_task_is_written_once() {
@@ -427,7 +427,7 @@ async fn an_unchanged_task_is_written_once() {
 }
 
 /// With retention, the task versions only deleted checkpoints referred to
-/// are deleted too; those a kept checkpoint refers to stay, and so do the
+/// are deleted too, and those a kept checkpoint refers to stay, and so do the
 /// task files of older versions (`agents/<id>.json`).
 #[tokio::test]
 async fn retention_deletes_only_task_versions_no_kept_checkpoint_refers_to() {
@@ -460,9 +460,9 @@ async fn retention_deletes_only_task_versions_no_kept_checkpoint_refers_to() {
     }
 }
 
-/// A task state that can't be saved doesn't fail the run: the checkpoint
+/// A task state that can't be saved doesn't fail the run. The checkpoint
 /// is still written, refers to the task's last saved version, and records
-/// that its latest state is missing; a resume from it says so and restores
+/// that its latest state is missing, and a resume from it says so and restores
 /// the task as last saved. The next checkpoint saves the latest state. A
 /// task never saved is left out of the checkpoint (and not restored).
 #[tokio::test]
@@ -525,7 +525,7 @@ async fn a_task_state_that_cant_be_saved_is_retried_and_reported() {
         "{warnings:?}"
     );
 
-    // Writing works again: the next checkpoint saves the latest state.
+    // Writing works again, so the next checkpoint saves the latest state.
     failing().store(false, std::sync::atomic::Ordering::SeqCst);
     workflow.checkpoint().await.unwrap();
     let (_, checkpoint) = latest(&workspace);
@@ -583,7 +583,7 @@ async fn until(mut done: impl FnMut() -> bool) {
 /// A run call dropped while its finished run waits to be saved (behind
 /// another write) still records the result, and saves it once writing goes
 /// on. (The result was once recorded only after the save, so dropping the
-/// call then lost it: `agent_result` found nothing to continue.)
+/// call then lost it. `agent_result` found nothing to continue.)
 #[tokio::test]
 async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
     use crate::messaging::registry::AgentStatus;
@@ -591,7 +591,7 @@ async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
     let server = done_server().await;
     let workflow = Arc::new(
         builder(&server, &workspace)
-            // Without the task journal: its save before a tool call runs
+            // Without the task journal. Its save before a tool call runs
             // would wait for the held writes.
             .persistence(PersistenceConfig::new(run_dir(&workspace)).task_journal(false))
             .build()
@@ -602,7 +602,7 @@ async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
         let workflow = workflow.clone();
         async move { workflow.run_agent("coder", "Write it.").await }
     });
-    // The run ended; its call waits to save the result.
+    // The run ended, and its call waits to save the result.
     until(|| {
         matches!(
             workflow.agent_status("coder"),
@@ -619,7 +619,7 @@ async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
     until(|| !versions(&workspace, result.agent_run_id).is_empty()).await;
 }
 
-/// An event log that can't be written doesn't stop the agents: the run
+/// An event log that can't be written doesn't stop the agents. The run
 /// completes, and the events are written once writing works again.
 #[tokio::test]
 async fn an_event_log_that_cant_be_written_doesnt_stop_the_run() {
@@ -643,7 +643,7 @@ async fn an_event_log_that_cant_be_written_doesnt_stop_the_run() {
 }
 
 /// Resuming keeps memory content by tier name under the configuration's
-/// access; a checkpoint tier the configuration lacks stops the build unless
+/// access, and a checkpoint tier the configuration lacks stops the build unless
 /// it is dropped or renamed.
 #[tokio::test]
 async fn resumed_memory_follows_the_configuration() {
@@ -718,7 +718,7 @@ async fn resumed_memory_follows_the_configuration() {
 
 /// Keeping the last zero checkpoints fails the build, so no checkpoint is
 /// deleted. (A zero count on the former public `Option<usize>` field
-/// deleted every checkpoint in the directory after each save: the one just
+/// deleted every checkpoint in the directory after each save. The one just
 /// written and every earlier process's, with their task versions.) Every
 /// checkpoint is kept by default.
 #[tokio::test]

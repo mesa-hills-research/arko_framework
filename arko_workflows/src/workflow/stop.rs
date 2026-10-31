@@ -217,7 +217,7 @@ impl StopRecord {
         }
     }
 
-    /// The record of `cause`, a stop the host asked for: a
+    /// The record of `cause`, a stop the host asked for, namely a
     /// [`Workflow::stop`](crate::Workflow::stop), or a
     /// [`cancel`](crate::Workflow::cancel) (recorded as an operator's stop
     /// with the reason `Workflow cancelled.`). `None` for a hook's abort.
@@ -396,7 +396,7 @@ pub fn stop_on_signals(
                 }
                 _ => {
                     log::warn!("Signal {number} a third time. Exiting.");
-                    // Exiting runs no destructors: the commands' children
+                    // Exiting runs no destructors, so the commands' children
                     // and the MCP servers, in their own process groups,
                     // would outlive it.
                     arko_agents::kill_stop_aware_commands();

@@ -187,7 +187,7 @@ impl WorkflowMetadata {
     }
 }
 
-/// Whether `executable` is found: as a file when it is a path, otherwise in
+/// Whether `executable` is found, as a file when it is a path, otherwise in
 /// a directory of `path`. Each of `extensions` (Windows' `PATHEXT`) is tried
 /// after the name as given. On Unix, the file must be executable.
 fn find_executable(executable: &str, path: Option<&OsStr>, extensions: &[String]) -> bool {

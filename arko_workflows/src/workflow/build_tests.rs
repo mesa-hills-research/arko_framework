@@ -94,7 +94,7 @@ fn offered(workflow: &Workflow, agent: &str, tools: &[&str]) -> Vec<bool> {
         .collect()
 }
 
-/// A verifier must name the agents it verifies: one without a target fails
+/// A verifier must name the agents it verifies. One without a target fails
 /// to build, and one with targets gates only them (never its own agent).
 #[test]
 fn a_verifier_needs_an_explicit_target() {
@@ -118,7 +118,7 @@ fn a_verifier_needs_an_explicit_target() {
 }
 
 /// A verifier reviews `complete_task` calls, and gives its verdict with
-/// one: an agent it reviews, and its own agent, can't end their tasks with a
+/// one. An agent it reviews, and its own agent, can't end their tasks with a
 /// reply in text. Other agents can.
 #[test]
 fn text_endings_are_refused_where_a_verifier_reviews_or_runs() {
@@ -157,9 +157,9 @@ fn text_endings_are_refused_where_a_verifier_reviews_or_runs() {
         .unwrap();
 }
 
-/// Memory tools follow each agent's access: `read_memory` for an agent that
+/// Memory tools follow each agent's access. `read_memory` for an agent that
 /// can read a tier, `write_memory` for one that can write one,
-/// `list_memories` for either, none for an agent without access; and
+/// `list_memories` for either, none for an agent without access, and
 /// `list_memories` names only the tiers the agent can access.
 #[tokio::test]
 async fn memory_tools_follow_each_agents_access() {
@@ -221,7 +221,7 @@ async fn memory_tools_follow_each_agents_access() {
 }
 
 /// Of the workflow's tools, only those whose calls change nothing are
-/// read-only: `read_memory`, `list_memories`, `list_recipients` and
+/// read-only. `read_memory`, `list_memories`, `list_recipients` and
 /// `list_agents`, besides the built-in reads. The tools that write, send,
 /// start or stop runs, or take messages and reports aren't.
 #[test]
@@ -283,7 +283,7 @@ fn only_the_workflow_tools_that_read_are_read_only() {
     }
 }
 
-/// Every agent-name list is checked at build: memory access sets, workflow
+/// Every agent-name list is checked at build. Memory access sets, workflow
 /// services callers and targets, and voters. Tier names must be unique.
 #[test]
 fn agent_name_lists_are_validated_at_build() {
@@ -402,8 +402,8 @@ fn the_workspace_is_normalized_to_an_absolute_path() {
     );
 }
 
-/// How each workflow tool declares itself to the agent runtime: read-only
-/// tools may run beside other parallel-safe calls; tools whose order
+/// How each workflow tool declares itself to the agent runtime. Read-only
+/// tools may run beside other parallel-safe calls, and tools whose order
 /// matters (a message, a write, a vote, a delegated run) or that wait
 /// don't. The waiting and delegating tools opt out of the host tool time
 /// limit, and a delegated run isn't interrupted mid-call (the workflow

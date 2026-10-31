@@ -1,4 +1,4 @@
-//! A run continued with a new configuration (`ContinueOptions::reconfigure`):
+//! A run continued with a new configuration (`ContinueOptions::reconfigure`),
 //! the switch between a chat and an agent, in the same conversation.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use crate::test_support::{
     ProbeTool, ResponsesServer, Workspace, agent_config, text_turn, tool_call_turn,
 };
 
-/// The agent as a chat (`AgentToolConfig::chat`): offered no tools, its
+/// The agent as a chat (`AgentToolConfig::chat`). Offered no tools, its
 /// reply in text ends its task.
 fn chat() -> AgentConfig {
     let mut config = agent_config("Main");
@@ -22,7 +22,7 @@ fn chat() -> AgentConfig {
     config
 }
 
-/// The agent as an agent: offered the probe.
+/// The agent as an agent, offered the probe.
 fn agent() -> AgentConfig {
     let mut config = chat();
     config.tool_config.chat = false;
@@ -53,7 +53,7 @@ fn tool_names(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A chat continued as an agent: the same run and conversation, with its
+/// A chat continued as an agent, the same run and conversation, with its
 /// prompt cache key, now offered its tools (the workflow's added, as for a
 /// new run) under a system prompt from the new configuration. As a chat it
 /// had none of them. A resume keeps the new configuration, though the
@@ -118,7 +118,7 @@ async fn a_chat_continued_as_an_agent_keeps_its_conversation_and_gets_tools() {
     assert_eq!(tool_names(&last), ["probe"]);
 }
 
-/// The model stays: another one is refused before anything runs.
+/// The model stays. Another one is refused before anything runs.
 #[tokio::test]
 async fn a_run_is_reconfigured_with_its_model() {
     let workspace = Workspace::new();
@@ -139,7 +139,7 @@ async fn a_run_is_reconfigured_with_its_model() {
     assert_eq!(server.requests(), 1);
 }
 
-/// Only an agent set as a chat goes without the workflow's tools: one that
+/// Only an agent set as a chat goes without the workflow's tools. One that
 /// lists no tools of its own (its reply in text ending its task) still gets
 /// the tools registered for it, as before.
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn only_a_chat_goes_without_the_workflow_s_tools() {
         .iter()
         .map(|body| serde_json::from_str(body).unwrap())
         .collect();
-    // The workflow's tools: the one registered for it, and messaging.
+    // The workflow's tools, the one registered for it, and messaging.
     let quiet_tools = tool_names(&bodies[0]);
     assert!(
         quiet_tools.contains(&"probe".to_string()),
@@ -195,7 +195,7 @@ fn instructions(body: &str) -> String {
 }
 
 /// With `keep_saved_configs`, an agent registered with another
-/// configuration resumes: its saved runs keep theirs (a continued run is
+/// configuration resumes. Its saved runs keep theirs (a continued run is
 /// sent its own instructions) and its new runs take the new one. Without
 /// it, the change refuses the resume.
 #[tokio::test]
@@ -248,7 +248,7 @@ async fn saved_runs_keep_their_configuration_and_new_runs_take_the_registered_on
 }
 
 /// A saved run kept with its own configuration still needs the tools it
-/// offers: a resume without one is refused, naming it.
+/// offers. A resume without one is refused, naming it.
 #[tokio::test]
 async fn a_kept_configuration_needs_its_tools() {
     let workspace = Workspace::new();
@@ -391,7 +391,7 @@ async fn a_resume_only_tool_serves_a_kept_run_and_is_not_offered_to_others() {
     assert_eq!(stand_in.calls(), 1);
 }
 
-/// A kept Claude Code run needs its host tools too: only Claude Code's own
+/// A kept Claude Code run needs its host tools too. Only Claude Code's own
 /// tools are the CLI's, and a host tool that is gone refuses the resume.
 #[tokio::test]
 async fn a_kept_claude_code_configuration_needs_its_host_tools() {
@@ -439,7 +439,7 @@ async fn a_kept_claude_code_configuration_needs_its_host_tools() {
 }
 
 /// A new run started on a configuration of its own (`RunOptions::config`),
-/// here on another model, without rebuilding the workflow: its requests go
+/// here on another model, without rebuilding the workflow. Its requests go
 /// to that model with that configuration's tools and instructions. The
 /// task keeps it, also across a resume from a checkpoint that doesn't keep
 /// saved configurations, while new runs take the registered one.
@@ -563,7 +563,7 @@ async fn a_new_run_moves_between_an_api_model_and_claude_code() {
 
 /// A handover of a run that keeps the configuration it was saved with
 /// (`keep_saved_configs`) starts the fresh conversation on the agent's
-/// configuration as registered now: a run saved with an old tool set comes
+/// configuration as registered now. A run saved with an old tool set comes
 /// out with the current one, and the current instructions.
 #[tokio::test]
 async fn a_handover_of_a_saved_run_takes_the_registered_configuration() {
@@ -677,7 +677,7 @@ async fn a_handover_of_a_run_on_the_host_s_configuration_keeps_it() {
                 serde_json::json!({"report": "REPORT: probed once."}),
             )
         } else {
-            // Under the handover size, then over it: a conversation that
+            // Under the handover size, then over it. A conversation that
             // starts over it doesn't hand over.
             let size = match body.matches("\"function_call_output\"").count() {
                 0 => "\"input_tokens\":5000",
@@ -716,7 +716,7 @@ async fn a_handover_of_a_run_on_the_host_s_configuration_keeps_it() {
 }
 
 /// A configuration given for a run doesn't make an agent of a name that
-/// isn't registered: the run isn't started, and no model is asked.
+/// isn't registered. The run isn't started, and no model is asked.
 #[tokio::test]
 async fn a_run_on_its_own_configuration_needs_a_registered_agent() {
     let workspace = Workspace::new();
@@ -913,7 +913,7 @@ async fn a_handover_sees_a_change_of_load_skill_s_entry() {
         .build()
         .unwrap();
     let context = workflow.context();
-    // Saved before the entry: the runtime gave load_skill auto-approval.
+    // Saved before the entry. The runtime gave load_skill auto-approval.
     let mut config = workflow
         .engine
         .prepare_agent_config("main", &saved_config, context);
@@ -939,7 +939,7 @@ async fn a_handover_sees_a_change_of_load_skill_s_entry() {
 }
 
 /// A configuration the runtime leaves out at a handover (its skills don't
-/// load) changes none of the run's settings: its automatic
+/// load) changes none of the run's settings. Its automatic
 /// `wait_for_message` limit stays by the configuration it keeps.
 #[tokio::test]
 async fn a_handover_configuration_left_out_leaves_the_run_s_settings() {

@@ -171,7 +171,7 @@ async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("the workflow call returned")
 }
 
-/// `ApproveAll` is the default: a call the agent's configuration marks for
+/// `ApproveAll` is the default. A call the agent's configuration marks for
 /// approval runs, and the tool hooks get why it needed approval.
 #[tokio::test]
 async fn approve_all_is_the_default_and_hooks_get_the_approval_reason() {
@@ -201,7 +201,7 @@ async fn approve_all_is_the_default_and_hooks_get_the_approval_reason() {
         .and_then(|(_, reason)| reason.clone())
         .expect("the hook saw the probe's approval reason");
     assert!(probe_reason.tool_not_auto_approved);
-    // complete_task is auto-approved: no reason.
+    // complete_task is auto-approved, so no reason.
     assert!(
         seen.iter()
             .any(|(tool, reason)| tool.as_deref() == Some("complete_task") && reason.is_none())
@@ -211,7 +211,7 @@ async fn approve_all_is_the_default_and_hooks_get_the_approval_reason() {
     assert!(workflow.context().approval_reasons.lock().is_empty());
 }
 
-/// Under `ApproveAll` one warning per agent: at its first call its
+/// Under `ApproveAll` one warning per agent, at its first call its
 /// configuration would have held, naming the tool and saying its other such
 /// calls are approved without further warnings. (It was once one per agent,
 /// tool and reason.)
@@ -258,7 +258,7 @@ async fn approve_all_warns_once_per_agent_naming_the_first_tool() {
 }
 
 /// `RespectAgentConfig` pauses the agent for its caller instead of running
-/// the call; `OnAgentPaused` fires once and `OnWorkflowFailed` doesn't.
+/// the call, and `OnAgentPaused` fires once and `OnWorkflowFailed` doesn't.
 /// Resuming with a decision runs (or rejects) the call.
 #[tokio::test]
 async fn respect_agent_config_pauses_for_the_caller_and_resume_decides() {
@@ -336,7 +336,7 @@ impl ToolApprovalHandler for Deciding {
 }
 
 /// A handler decides each call the configuration marks for approval, as it
-/// is asked; its `Pause` pauses the agent for the caller.
+/// is asked, and its `Pause` pauses the agent for the caller.
 #[tokio::test]
 async fn an_approval_handler_decides_each_call() {
     for outcome in [
@@ -406,11 +406,11 @@ async fn automatic_recovery_sends_the_request_again_after_retries_run_out() {
 }
 
 /// The agent's opt-in `user_command_timeout_seconds` doesn't cut short a
-/// decision the workflow owns: the workflow decides every wait of the runs
+/// decision the workflow owns. The workflow decides every wait of the runs
 /// it drives, so their waits aren't timed at all (a run-level setting,
 /// `HostDecisions`, not saved with the task). Here automatic recovery's
-/// wait before it continues is longer than the timeout. (Real time; the
-/// outcome doesn't depend on timing: no wait of the run is timed.)
+/// wait before it continues is longer than the timeout. (Real time, and the
+/// outcome doesn't depend on timing, because no wait of the run is timed.)
 #[tokio::test]
 async fn the_agents_command_timeout_does_not_cut_a_recovery_wait_short() {
     let workspace = Workspace::new();
@@ -452,7 +452,7 @@ impl ToolApprovalHandler for SlowApproval {
     }
 }
 
-/// Nor does it cut short an approval handler deciding. (Real time; the
+/// Nor does it cut short an approval handler deciding. (Real time, and the
 /// outcome doesn't depend on timing.)
 #[tokio::test]
 async fn the_agents_command_timeout_does_not_cut_an_approval_handler_short() {
@@ -474,9 +474,9 @@ async fn the_agents_command_timeout_does_not_cut_an_approval_handler_short() {
 }
 
 /// Nor does it end a wait while the workflow is paused, before the driver
-/// has even seen the wait: the workflow still owns the decision, and
+/// has even seen the wait. The workflow still owns the decision, and
 /// decides once resumed. (The agent waits for approval from when its first
-/// response arrives; the workflow resumes 2 s after that, past the agent's
+/// response arrives, and the workflow resumes 2 s after that, past the agent's
 /// 1 s timeout. The outcome doesn't depend on timing.)
 #[tokio::test]
 async fn the_agents_command_timeout_does_not_end_a_wait_while_the_workflow_is_paused() {
@@ -514,7 +514,7 @@ async fn the_agents_command_timeout_does_not_end_a_wait_while_the_workflow_is_pa
 }
 
 /// An agent whose events the caller handles itself (`into_parts`) keeps its
-/// command timeout: the caller decides its waits, not the workflow.
+/// command timeout. The caller decides its waits, not the workflow.
 #[tokio::test]
 async fn an_agent_driven_through_into_parts_keeps_its_command_timeout() {
     let workspace = Workspace::new();
@@ -540,7 +540,7 @@ async fn an_agent_driven_through_into_parts_keeps_its_command_timeout() {
 }
 
 /// `Automatic` fails a run clearly on an error retrying can't fix, without
-/// sending it again; `OnWorkflowFailed` fires once.
+/// sending it again, and `OnWorkflowFailed` fires once.
 #[tokio::test]
 async fn automatic_recovery_fails_clearly_on_an_error_retrying_cant_fix() {
     let workspace = Workspace::new();
@@ -603,7 +603,7 @@ async fn a_failure_at_a_pause_records_its_cause() {
         result.failure_cause(),
         Some(&ErrorRecoveryCause::NonRetryable)
     );
-    // A 401: the credential is lost.
+    // A 401, meaning the credential is lost.
     assert_eq!(
         result.failure_kind(),
         Some(arko_ai::ErrorKind::Authentication)
@@ -654,7 +654,7 @@ async fn limited_recovery_stops_after_its_count() {
     assert_eq!(server.requests(), 2);
 }
 
-/// `ReturnToCaller` pauses the agent at an error-recovery pause; resuming
+/// `ReturnToCaller` pauses the agent at an error-recovery pause, and resuming
 /// continues (the request is sent again unchanged) or fails it.
 #[tokio::test]
 async fn return_to_caller_pauses_at_recovery_and_resume_continues_or_fails() {
@@ -775,7 +775,7 @@ async fn a_pause_returned_to_the_caller_carries_its_error_kind() {
     );
 }
 
-/// An agent that pauses in a parallel run is not a failure: the others run
+/// An agent that pauses in a parallel run is not a failure. The others run
 /// on, and its result comes back with theirs, to be continued. A failure is
 /// returned, with `OnWorkflowFailed` once per call.
 #[tokio::test]
@@ -909,7 +909,7 @@ impl Tool for Relay {
 }
 
 /// Continuing a run that waited for input presents no message its
-/// conversation already holds: one added at a turn boundary before the
+/// conversation already holds, namely one added at a turn boundary before the
 /// question is not in the continuation prompt, and the run's completion
 /// acknowledges it. (The continuation once presented it again.)
 #[tokio::test]
@@ -1040,7 +1040,7 @@ async fn resuming_a_paused_run_delivers_no_message_twice() {
 
 /// A message a run took from its channel but hadn't added when it stopped
 /// (`Task::pending_context_injections`) reaches it once when it is
-/// continued: from the task, not again in the prompt.
+/// continued, from the task, not again in the prompt.
 #[tokio::test]
 async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
     let workspace = Workspace::new();
@@ -1068,7 +1068,7 @@ async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
     let WorkflowError::UserInputRequired { task_id, .. } = error else {
         panic!("{error:?}");
     };
-    // As when the runtime takes a message just as the task suspends: the
+    // As when the runtime takes a message just as the task suspends. The
     // task keeps it, and finalization records that it holds it.
     let context = workflow.context();
     let message = context
@@ -1093,7 +1093,7 @@ async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
     assert!(context.messages.pending("lead").is_empty());
 }
 
-/// A server answering by prompt: `Fail.` with a 401 (the run fails),
+/// A server answering by prompt, `Fail.` with a 401 (the run fails),
 /// `Hold.` never (until `release` is notified), anything else completing.
 async fn by_prompt(release: Arc<tokio::sync::Notify>) -> ResponsesServer {
     ResponsesServer::start_async(move |_, body| {
@@ -1123,7 +1123,7 @@ fn two_agents(server: &ResponsesServer, workspace: &Workspace) -> WorkflowBuilde
 }
 
 /// With `max_parallel_agents(1)` the second agent starts only when the
-/// first has finished (it is not running meanwhile); results keep input
+/// first has finished (it is not running meanwhile), and results keep input
 /// order.
 #[tokio::test]
 async fn a_concurrency_cap_starts_agents_as_places_free_up() {
@@ -1224,7 +1224,7 @@ async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
 /// An agent running inside another agent's tool call (here a completion
 /// verifier with a default configuration, which auto-approves no call)
 /// can't be paused for the caller. Under `RespectAgentConfig` its
-/// `complete_task` is approved, so its review completes; another call it
+/// `complete_task` is approved, so its review completes, and another call it
 /// needs approved, or its question without a user input handler, stops it
 /// with a reason, so the review fails, a bounded number of times, and the
 /// call returns `VerifierFailed` (the target is left paused for its
@@ -1259,7 +1259,7 @@ async fn a_nested_run_completes_under_its_own_config_and_is_stopped_on_other_dec
             })
         })
         .await;
-        // A default configuration: every call needs approval, complete_task
+        // A default configuration, meaning every call needs approval, complete_task
         // included (ask_user is exempt).
         let mut reviewer = AgentConfig::builder(
             "reviewer".to_string(),
@@ -1351,7 +1351,7 @@ async fn a_nested_run_completes_under_its_own_config_and_is_stopped_on_other_dec
 }
 
 /// A run waiting for input in a checkpoint saved before messages recorded
-/// who holds them still gets no message twice when continued: what its
+/// who holds them still gets no message twice when continued, because what its
 /// conversation holds is recorded again first.
 #[tokio::test]
 async fn a_waiting_run_from_an_older_checkpoint_gets_no_message_twice() {
@@ -1393,7 +1393,7 @@ async fn a_waiting_run_from_an_older_checkpoint_gets_no_message_twice() {
         panic!("{error:?}");
     };
     drop(first);
-    // As an older version saved it: no held_by.
+    // As an older version saved it, no held_by.
     let name = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
     let path = run_dir.join(name.trim());
     let mut checkpoint: Value =
@@ -1494,7 +1494,7 @@ async fn seen(causes: &parking_lot::Mutex<Vec<ErrorRecoveryCause>>) -> Vec<Error
 }
 
 /// `Automatic` continues at once after a pause on tool errors (the agent's
-/// opt-in `ToolErrorPolicy::PauseAndAwaitApproval`); the call's result
+/// opt-in `ToolErrorPolicy::PauseAndAwaitApproval`), and the call's result
 /// reports the error, and nothing says a user approved.
 #[tokio::test]
 async fn automatic_recovery_continues_after_tool_errors() {
@@ -1556,11 +1556,11 @@ fn refusal() -> Reply {
 }
 
 /// `ResolveRefusal` changes a refusal pause's input. A resolution for
-/// another pause, or without a change, is refused at once; changes the
+/// another pause, or without a change, is refused at once, and changes the
 /// runtime can't apply leave the agent paused, and the call returns with
-/// the runtime's error (it waited for ever once: the resumed run's driver
+/// the runtime's error (it waited for ever once, because the resumed run's driver
 /// didn't know the pause it started in, and held the error for a pause
-/// that never came); changes it can apply continue the agent.
+/// that never came), and changes it can apply continue the agent.
 #[tokio::test]
 async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused() {
     use arko_agents::RefusalResolution;
@@ -1597,7 +1597,7 @@ async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused(
         .await
         .unwrap_err();
     assert!(invalid(&refused, "at least one change"), "{refused:?}");
-    // A change the runtime can't apply: paused again, with its error.
+    // A change the runtime can't apply, paused again, with its error.
     let unknown = RefusalResolution::RemoveUserMessage { message_index: 99 };
     let resume = AgentResume::ResolveRefusal(vec![unknown]);
     let error = within(workflow.resume_agent(&paused, resume))
@@ -1616,7 +1616,7 @@ async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused(
     assert!(error.contains("Message 99"), "{error}");
     let paused = workflow.agent_result(task_id).unwrap();
     assert_eq!(paused.status, AgentRunStatus::Paused);
-    // One it can: the changed input is sent, and the agent completes.
+    // One it can, the changed input is sent, and the agent completes.
     let rephrase = RefusalResolution::RephraseUserMessage {
         message_index: prompt,
         text: "Write it politely.".into(),
@@ -1655,9 +1655,9 @@ async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused(
 }
 
 /// A refusal pause saved before pauses recorded their cause loads as
-/// `Unknown`: `ResolveRefusal` is accepted, and the runtime checks the
+/// `Unknown`. `ResolveRefusal` is accepted, and the runtime checks the
 /// changes. One it can't apply returns the agent paused again (decided as
-/// an unknown cause, under any policy); one it can continues the agent.
+/// an unknown cause, under any policy), and one it can continues the agent.
 #[tokio::test]
 async fn a_refusal_pause_saved_without_its_cause_can_be_resolved() {
     use arko_agents::{RefusalResolution, TaskState};

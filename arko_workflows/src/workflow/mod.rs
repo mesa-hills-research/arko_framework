@@ -65,7 +65,7 @@ pub struct Workflow {
 }
 
 /// Dropping the workflow aborts its background subagents' drivers (see
-/// [`crate::subagents`]): their runs stop where they are, as after a crash.
+/// [`crate::subagents`]). Their runs stop where they are, as after a crash.
 /// The monitors its workers kept see no workers from then on.
 impl Drop for Workflow {
     fn drop(&mut self) {
@@ -88,7 +88,7 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -128,7 +128,7 @@ impl Workflow {
         .await
     }
 
-    /// Settles a finished run call: a failure fires `OnWorkflowFailed` once
+    /// Settles a finished run call. A failure fires `OnWorkflowFailed` once
     /// (whose abort replaces the error), and once the run is stopped the call
     /// returns the stop's error and the stop is checkpointed. A pause (an
     /// agent waiting for input, or paused for a decision) and a cancellation
@@ -160,7 +160,7 @@ impl Workflow {
     }
 
     /// `Err` with the stop's error once the run is stopped, and with
-    /// `Cancelled` during a graceful stop's wrap-up: no agent run starts
+    /// `Cancelled` during a graceful stop's wrap-up, so no agent run starts
     /// then.
     async fn ensure_admitting(&self) -> Result<(), WorkflowError> {
         self.ensure_running().await?;
@@ -205,7 +205,7 @@ impl Workflow {
         prompt: &str,
         options: ContinueOptions,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -292,7 +292,7 @@ impl Workflow {
         previous: &AgentResult,
         request: Option<&str>,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -318,7 +318,7 @@ impl Workflow {
         previous: &AgentResult,
         resume: crate::policy::AgentResume,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -409,7 +409,7 @@ impl Workflow {
         &self,
         previous: &AgentResult,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -832,7 +832,7 @@ impl Workflow {
             .into_iter()
             .map(|result| result.agent_run_id)
             .collect::<HashSet<_>>();
-        // Only the runs that may be listed are copied: interrupted ones, and
+        // Only the runs that may be listed are copied, namely interrupted ones, and
         // those a stop ended.
         let results = self
             .context
@@ -879,7 +879,7 @@ impl Workflow {
             })
             .collect::<Vec<_>>();
         // A run started inside the tool call of a run listed too is left to
-        // that run: restarted, it resumes it (a call it was running), or was
+        // that run. Restarted, it resumes it (a call it was running), or was
         // told its ID (a call that failed with it) to resume it with
         // `run_workflow_agent`'s `resume_run`.
         let listed = candidates
@@ -1224,7 +1224,7 @@ impl Workflow {
         prompt: &str,
         options: ContinueOptions,
     ) -> Result<AgentResult, WorkflowError> {
-        // Boxed: an `AgentResult` is large, and each layer holding one
+        // Boxed because an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
             self.ensure_admitting().await?;
@@ -1710,7 +1710,7 @@ impl AgentHandle {
 
 impl Drop for AgentHandle {
     fn drop(&mut self) {
-        // Dropped unused: the runtime task is aborted with the run.
+        // Dropped unused, so the runtime task is aborted with the run.
         if let Some(run) = self.run.take() {
             engine::abandon_run(&run, &self.context);
         }
@@ -2505,7 +2505,7 @@ impl WorkflowBuilder {
             }
         }
 
-        // Claude Code runs its built-in tools itself: their output can't be
+        // Claude Code runs its built-in tools itself, so their output can't be
         // replaced.
         for distiller in &self.distillation_configs {
             let claude_code_target = self.agents.iter().any(|(name, config)| {
@@ -2600,7 +2600,7 @@ impl WorkflowBuilder {
             &self.distillation_configs,
         );
 
-        // Agents offered the workflow's send_message tool: those with a
+        // Agents offered the workflow's send_message tool, those with a
         // permitted recipient.
         let mut roster = agent_names.iter().cloned().collect::<Vec<_>>();
         roster.sort();
@@ -2612,7 +2612,7 @@ impl WorkflowBuilder {
                     .filter(|agent| !policy.recipients_of(agent, &roster).is_empty())
                     .cloned()
                     .collect::<HashSet<_>>();
-                // Offered `wait_for_message`: another agent may message it.
+                // Offered `wait_for_message`, because another agent may message it.
                 let receiving = roster
                     .iter()
                     .filter(|agent| roster.iter().any(|sender| policy.permits(sender, agent)))
@@ -2836,7 +2836,7 @@ impl WorkflowBuilder {
             _ => None,
         };
 
-        // The limits: the builder's, or the checkpoint's where it recorded
+        // The limits are the builder's, or the checkpoint's where it recorded
         // a higher one (see `resume_from`).
         let recorded_limits = resume_state
             .as_ref()
@@ -2904,7 +2904,7 @@ impl WorkflowBuilder {
             budget.restore_plan_usage(recorded);
         }
         // On resume the configuration decides access, limits and write
-        // modes; the checkpoint supplies content and history by tier name.
+        // modes, and the checkpoint supplies content and history by tier name.
         let memory = match &resume_state {
             Some(state) => self.memory_config.unwrap_or_default().restore(
                 state.memory_snapshot.clone(),
@@ -3022,7 +3022,7 @@ impl WorkflowBuilder {
             voters: self.voters.clone().unwrap_or_default(),
             event_tx,
             event_hub: Default::default(),
-            // Last: the registry and the subagents above read the results
+            // Last because the registry and the subagents above read the results
             // first, and then they move in instead of being copied.
             agent_results: parking_lot::RwLock::new(resumed_results),
         });
@@ -3073,7 +3073,7 @@ impl Default for WorkflowBuilder {
     }
 }
 
-/// A limit on resume: the builder's (`configured`) unless the checkpoint
+/// A limit on resume, the builder's (`configured`) unless the checkpoint
 /// recorded a higher one. None when the builder sets none.
 fn resumed_limit(configured: Option<f64>, recorded: Option<f64>) -> Option<f64> {
     match (configured, recorded) {
@@ -3084,7 +3084,7 @@ fn resumed_limit(configured: Option<f64>, recorded: Option<f64>) -> Option<f64> 
 
 /// The workspace as an absolute path with `.` and `..` resolved lexically
 /// (symbolic links are kept), so paths the agents and freshness tracking
-/// derive from it compare equal. `std::fs::canonicalize` is not used: on
+/// derive from it compare equal. `std::fs::canonicalize` is not used because on
 /// Windows it returns a verbatim `\\?\` path, which other tools and
 /// comparisons treat as a different path. The directory must exist.
 fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowError> {
@@ -3107,11 +3107,11 @@ fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowE
 /// A task that can be resumed (or restarted after a stop cancelled it) must
 /// keep the settings that define the agent's behavior. The task stores the prepared configuration, so compare it with
 /// the builder's user configuration after removing workflow-owned additions.
-/// Model registry snapshots are deliberately ignored: the provider and model
+/// Model registry snapshots are deliberately ignored. The provider and model
 /// id remain authoritative, while the registry may gain metadata between
 /// checkpoints. An interrupted run no one can reach, because recovering the
 /// run that started it supersedes it ([`superseded_on_recovery`]), is not
-/// checked: it never runs again.
+/// checked, since it never runs again.
 fn validate_resumed_agent_configs(
     agents: &[(String, AgentConfig)],
     global_tools: &[Arc<dyn arko_agents::tool::Tool>],
@@ -3151,7 +3151,7 @@ fn validate_resumed_agent_configs(
 
     for result in resumed_results {
         // Runs that can be continued, and runs a stop cancelled (restarted
-        // after the resume; see `Workflow::stopped_runs`). Runs cancelled
+        // after the resume, see `Workflow::stopped_runs`). Runs cancelled
         // otherwise, reopened only on request, keep the configuration saved
         // in their task.
         let continued = matches!(
@@ -3180,7 +3180,7 @@ fn validate_resumed_agent_configs(
             continue;
         }
         if keep_saved.contains(&result.agent_name) {
-            // Its own configuration drives it: only its tools must be here.
+            // Its own configuration drives it, so only its tools must be here.
             let saved = &result.info().agent_config;
             // A Claude Code agent's names of Claude Code's own tools are the
             // CLI's.
@@ -3223,7 +3223,7 @@ fn validate_resumed_agent_configs(
 }
 
 /// Whether interrupted run `result` is superseded, not run again, when the
-/// run that started it is recovered (see `WorkflowEngine::recover_at`): its
+/// run that started it is recovered (see `WorkflowEngine::recover_at`), namely when its
 /// parent is interrupted and holds the call it ran in open without resuming
 /// it (a completion verifier's review, a call the host answered with its
 /// own output), or its parent is superseded itself. A run whose parent
@@ -3263,7 +3263,7 @@ fn superseded_on_recovery(
 /// The paths of the fields that differ between two configurations as JSON
 /// (`instructions`, `tool_config.available_tool_names`,
 /// `llm_config.generation_config.max_tokens`), appended to `changed` in
-/// key order: an object is compared field by field, anything else (an
+/// key order. An object is compared field by field, anything else (an
 /// array, a value) as a whole.
 fn changed_fields(
     saved: &serde_json::Value,
@@ -3302,7 +3302,7 @@ fn changed_fields(
     }
 }
 
-/// The changed fields as one line: the first ten, then how many more.
+/// The changed fields as one line, the first ten, then how many more.
 fn describe_changed_fields(changed: &[String]) -> String {
     const SHOWN: usize = 10;
     let mut description = changed
@@ -3381,7 +3381,7 @@ fn normalized_resume_agent_config(
 
 /// Logs a warning for each tool name the freshness mapping or a distiller
 /// names that no agent is configured with, no workflow tool has, and no
-/// built-in tool has. Only a warning: MCP servers and skills add tools
+/// built-in tool has. Only a warning, because MCP servers and skills add tools
 /// whose names aren't known at build.
 fn warn_unknown_tool_names(
     workflow: &str,
