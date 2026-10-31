@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=32fd5c3155dfe482
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e7b246a5b0d89911
@@ -24,7 +24,7 @@ M {"content":[{"ToolResult":{"call_id":"g","is_error":true,"name":"gate","output
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=0edfdea0b145bd6a
 R msgs=1 model=gpt-5.6-luna request=a5ef761b7455627b
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8b315f7ec47cec34
@@ -41,7 +41,7 @@ E {"ErrorEncountered":{"error_message":"Tool 'gate' execution failed: Execution 
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it"}} task=7b45e495ae13340e
 E {"TaskStateChanged":"InProgress"}
 R msgs=3 model=gpt-5.6-luna request=e6f4f46d056af0bf
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":32,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":121}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":32,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":121}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f06ffa8f08ee8db9

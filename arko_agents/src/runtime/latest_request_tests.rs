@@ -223,3 +223,75 @@ async fn a_handover_leaves_no_request_until_the_fresh_conversation_s_first() {
     assert_eq!(handed_over.latest_request, RequestRecord::NoRequest);
     assert_eq!(input(&task.latest_request), Some(250));
 }
+
+/// A crash leaves the task as its last save had it. A snapshot taken after
+/// the first request, with every later save lost, restores with that
+/// request as its latest, sent when the request was announced, and with
+/// the conversation that request answered. Run again, it goes on and its
+/// next request takes over.
+#[tokio::test]
+async fn a_task_restored_from_an_earlier_save_keeps_that_save_s_request() {
+    let (mut agent, mut events, _commands) = super::image_tests::harness(ToolCallingMode::Native);
+    let snapshots = recorded(&mut agent);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        calling("plain_text", serde_json::json!({}), 1_000),
+        calling("plain_text", serde_json::json!({}), 1_500),
+        completing(2_000),
+    ]);
+    timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let sent: Vec<_> = super::tool_call_tests::drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRequestStarted { sent_at, .. } => sent_at,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 3);
+    // The last save that has the first request as its latest, as a crash
+    // after it would leave it on disk.
+    let saved = snapshots
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|snapshot| input(&snapshot.latest_request) == Some(1_000))
+        .map(|snapshot| serde_json::to_string(snapshot).unwrap())
+        .unwrap();
+    let restored: Task = serde_json::from_str(&saved).unwrap();
+    let request = restored.latest_request.latest().unwrap();
+    assert_eq!(
+        request.sent_at.timestamp_millis(),
+        sent[0].timestamp_millis()
+    );
+    assert_eq!(restored.current_conversation_context_size(), Some(1_000));
+    assert_eq!(restored.usage_history.len(), 1);
+    let answered = restored
+        .conversation
+        .messages
+        .iter()
+        .filter(|message| message.role == ai::Role::Assistant)
+        .count();
+    assert_eq!(answered, 1, "the conversation of the first request");
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(super::image_tests::TextTool));
+    let (mut again, mut events, _commands) =
+        super::tool_call_tests::agent_for(restored, registry, Arc::new(ai::LLMClient::new()));
+    again.scripted_responses.get_mut().unwrap().extend([
+        calling("plain_text", serde_json::json!({}), 1_600),
+        completing(2_100),
+    ]);
+    let task = timeout(Duration::from_secs(5), again.run())
+        .await
+        .unwrap()
+        .unwrap();
+    super::tool_call_tests::drain(&mut events);
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let last = task.latest_request.latest().unwrap();
+    assert_eq!(last.input_tokens, 2_100);
+    assert!(last.sent_at > sent[0]);
+}

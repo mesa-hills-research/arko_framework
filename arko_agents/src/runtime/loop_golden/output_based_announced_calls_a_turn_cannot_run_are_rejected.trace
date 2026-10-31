@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2844bd42fcbc92cd
 R msgs=1 model=gpt-5.6-luna request=0b77995f5d37f1eb
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1a985cdea9c2defc
@@ -18,7 +18,7 @@ E {"ToolRejected":{"reason":"Error: Only one tool call or one batch of the same 
 E {"ToolRejected":{"reason":"Error: Only one tool call or one batch of the same tool can be used per turn.","tool_call_id":"id3","tool_name":"check"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=0917ba71cc1b798b
 R msgs=3 model=gpt-5.6-luna request=87b26f5abe33d2a8
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":61,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":88}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":61,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":88}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=92836071f2571819
@@ -37,7 +37,7 @@ E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 1/10)
 E {"RetryScheduled":{"attempt":1,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=12f2715888b5952e
 R msgs=5 model=gpt-5.6-luna request=ac146d0085a37ad9
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":163,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":248}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":163,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":248}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=59314e6296bdba64

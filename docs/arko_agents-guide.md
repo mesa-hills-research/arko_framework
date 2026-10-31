@@ -1073,7 +1073,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `ServiceWarning { text }` | A Claude Code agent's own message about a failed model request, such as "API Error: Connection lost mid-response." A host shows `text` as a warning line, apart from the reply. The conversation doesn't keep it. Claude Code ends the turn with an error that carries the same text, so an `ErrorEncountered` and a retry or pause follow. A host shows one line for the failure and shows those as a state, without repeating a message that holds the text of a `ServiceWarning` of the same turn. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual. A host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
-| `ModelRequestStarted { model, subagent, sizes, bytes_per_token }` | A model request is going out, reported just before each request (each attempt, a retry and a refusal fallback's included), or for a Claude Code model when its response starts. `sizes` is its `arko_ai::RequestSizes` (`None` for a Claude Code subagent's request, named by `subagent`), and `bytes_per_token` the ratio calibrated from the conversation's earlier requests (`calibrated_bytes_per_token`, `DEFAULT_BYTES_PER_TOKEN`, 3, before one was answered), which turns the sizes into tokens. A host times a prompt cache's lifetime from the latest one. |
+| `ModelRequestStarted { model, subagent, sizes, bytes_per_token, sent_at }` | A model request is going out, reported just before each request is sent, after any credential refresh (each attempt, a retry and a refusal fallback's included), or for a Claude Code model when its response starts. `sent_at` is that time, which the task's latest request records once the request finishes (`None` in events saved by an older version). `sizes` is its `arko_ai::RequestSizes` (`None` for a Claude Code subagent's request, named by `subagent`), and `bytes_per_token` the ratio calibrated from the conversation's earlier requests (`calibrated_bytes_per_token`, `DEFAULT_BYTES_PER_TOKEN`, 3, before one was answered), which turns the sizes into tokens. A host times a prompt cache's lifetime from the latest one. |
 | `StreamedOutputDiscarded { text_bytes, reasoning_bytes }` | The response the latest `ModelRequestStarted` (of the conversation's own requests) began failed after streaming part of it. A host drops the `AssistantResponseChunk` and `ReasoningChunk` text it showed since then (`text_bytes` and `reasoning_bytes` of it). It comes before the failure's `ErrorEncountered` and `RetryScheduled`, and a retry streams anew after its own `ModelRequestStarted`. In Claude Code it also comes when a response's stream stops before the response finished. Claude Code may then ask for the response again without streaming, and its text comes whole, with no `ModelRequestStarted` before it. A response that streams to its end is followed by its `UsageReported` instead. |
 | `ImagesUnavailable { reasons }` | Images of the task's conversation are gone (their saved files were deleted or damaged), each now a line `(image no longer available: REASON)` in its place (`Task::settle_unavailable_images`). Reported as the run starts. |
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. A Claude Code subagent's calls carry `ModelCallUsage::subagent`. |
@@ -1518,10 +1518,12 @@ cache by it, also for a task read back or a run that ended. `RequestRecord::Late
 `LatestRequest` with its send time (`sent_at`), its input (`input_tokens`, with
 `cached_tokens` and `cache_write_tokens`) and, for a Claude Code model, the lifetime its latest
 cache write showed (`cache_lifetime()`). The cache expires about `sent_at` plus the lifetime.
-In arko's own runtime `sent_at` is just before the provider call. Claude Code sends a Claude
-Code model's requests itself, so there it is the response's first streamed token, a few
-seconds late, and a host takes a margin off. A request to the refusal fallback's model, a
-Claude Code subagent's request and a request that failed leave the record as it was.
+It is the `sent_at` of the request's `ModelRequestStarted`. In arko's own runtime that is just
+before the provider call, after any credential refresh. Claude Code sends a Claude Code model's
+requests itself, so there it is the response's first streamed token, a few seconds late, and a
+host takes a margin off. Only a request whose response finished counts. A request to the refusal
+fallback's model, a Claude Code subagent's request, and a request that failed or whose stream
+Claude Code gave up on leave the record as it was.
 `RequestRecord::NoRequest` means nothing of the conversation is cached, as in a new task, and
 after a handover, a compaction, a cut back or a branch until the next request is answered. A
 task saved before the record existed reads as `RequestRecord::Unrecorded`, whose cache isn't

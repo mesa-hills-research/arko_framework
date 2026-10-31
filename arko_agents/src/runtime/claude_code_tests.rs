@@ -5587,6 +5587,7 @@ async fn each_request_is_reported_when_its_response_starts() {
                 subagent,
                 sizes,
                 bytes_per_token,
+                ..
             } => Some((model.clone(), subagent.clone(), *sizes, *bytes_per_token)),
             _ => None,
         })

@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4ab7ac29b7b326c0
 R msgs=1 model=gpt-5.6-luna request=1aa2e7d8ea30c8e4
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=aa9156312d344b49
@@ -16,7 +16,7 @@ E {"ToolResult":{"output":"step ran one","tool_call_id":"id2","tool_name":"step"
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=0b6b5434359232c4
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fd8088e52ec146e5
 R msgs=3 model=gpt-5.6-luna request=7d6ce318db55a162
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":47,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":69}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":47,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":69}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f39a33da7fb87d6c

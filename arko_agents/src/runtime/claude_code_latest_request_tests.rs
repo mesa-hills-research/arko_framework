@@ -112,3 +112,109 @@ async fn a_compaction_leaves_no_request_until_the_next() {
     assert_eq!(compacted.latest_request, RequestRecord::NoRequest);
     assert!(matches!(task.latest_request, RequestRecord::Latest(_)));
 }
+
+/// An older request a task may hold as its latest.
+fn older() -> RequestRecord {
+    RequestRecord::Latest(crate::task::LatestRequest::new(
+        chrono::DateTime::from_timestamp_millis(1_790_000_000_000).unwrap(),
+        &arko_ai::UsageInfo::new(500, 1),
+    ))
+}
+
+/// Runs a chat task whose latest request is `before` through the one turn
+/// `turn`, until it completes, or pauses at a failure and is cancelled
+/// there. Returns the task and every snapshot the runtime saved.
+async fn run_turn(turn: Value, before: &RequestRecord) -> (Task, Vec<Task>) {
+    let fake = Fake::new(json!([turn]));
+    let mut task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    task.latest_request = before.clone();
+    let recorder = Arc::new(Recorder::default());
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(
+                TaskState::Completed { .. } | TaskState::AwaitingErrorRecoveryApproval { .. }
+            )
+        )
+    })
+    .await;
+    let _ = run.commands.send(UserCommand::CancelTask).await;
+    let (task, _) = run.finish().await;
+    let snapshots = recorder
+        .snapshots()
+        .into_iter()
+        .map(|(snapshot, _)| snapshot)
+        .collect();
+    (task, snapshots)
+}
+
+/// A response that fails while it streams was never completed, so it
+/// counts for its usage alone: whether the turn then fails or the CLI
+/// exits, the task's latest request stays what it was, none or an older
+/// one, in the task and in every snapshot saved.
+#[tokio::test]
+async fn a_request_that_failed_while_it_streamed_is_not_the_latest() {
+    let failed = json!({"stream_fail": "The ans", "input_tokens": 9_999});
+    for before in [RequestRecord::NoRequest, older()] {
+        for end in [
+            json!({"fail": "API Error: 529 overloaded"}),
+            json!({"exit": 3}),
+        ] {
+            let (task, snapshots) = run_turn(json!([failed, end]), &before).await;
+            assert!(
+                task.usage_history
+                    .iter()
+                    .any(|usage| usage.input_tokens == 9_999),
+                "its usage counts: {end}"
+            );
+            assert_eq!(task.latest_request, before, "{end}");
+            for snapshot in &snapshots {
+                assert_eq!(snapshot.latest_request, before, "{end}");
+            }
+        }
+    }
+}
+
+/// The response that takes a failed one's place is the latest: a retry
+/// that streams, and a response Claude Code asks for again without
+/// streaming after it gave up on one's stream. No snapshot holds the one
+/// that didn't finish.
+#[tokio::test]
+async fn the_response_that_replaces_an_unfinished_one_is_the_latest() {
+    let turns = [
+        (
+            json!([
+                {"stream_fail": "The ans", "input_tokens": 9_999},
+                {"retry": {"attempt": 1, "max_retries": 10, "retry_delay_ms": 10,
+                           "error_status": 529, "error": "overloaded"}},
+                {"text": "The answer is four.", "stream": true, "input_tokens": 700},
+            ]),
+            700,
+        ),
+        (
+            json!([
+                {"stream_abandoned": "The ans", "input_tokens": 9_999},
+                {"text": "The answer is four.", "unstreamed": true, "input_tokens": 800},
+            ]),
+            800,
+        ),
+    ];
+    for before in [RequestRecord::NoRequest, older()] {
+        for (turn, input) in &turns {
+            let (task, snapshots) = run_turn(turn.clone(), &before).await;
+            assert!(matches!(task.current_state, TaskState::Completed { .. }));
+            let latest = task.latest_request.latest().expect("the replacement");
+            assert_eq!(latest.input_tokens, *input, "{turn}");
+            for snapshot in &snapshots {
+                let input = snapshot.latest_request.latest().map(|r| r.input_tokens);
+                assert_ne!(input, Some(9_999), "{turn}");
+            }
+        }
+    }
+}

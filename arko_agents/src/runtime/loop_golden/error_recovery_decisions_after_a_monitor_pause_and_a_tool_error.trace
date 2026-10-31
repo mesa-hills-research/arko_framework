@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":1000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a71bda0be70ce342
@@ -11,7 +11,7 @@ E {"ToolResult":{"output":"step ran one","tool_call_id":"id2","tool_name":"step"
 S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=24d4812d06c3e1b3
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=053ba8ebdf408740
 R msgs=3 model=gpt-5.6-luna request=3f2bff3bc9193e4c
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":16,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":16,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":900,"input_cost":0.0,"input_tokens":2000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 E {"CacheEfficiencyReported":{"call_efficiency":0.9,"calls":1,"rolling_efficiency":0.9}}
@@ -22,7 +22,7 @@ E {"ToolResult":{"output":"step ran two","tool_call_id":"id3","tool_name":"step"
 S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2a7c49e2eb2a0fa5
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1cac965b2208b330
 R msgs=5 model=gpt-5.6-luna request=6794ced7da2d98c8
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":36,"tool_definitions":605,"tool_results":32,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":36,"tool_definitions":605,"tool_results":32,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":200,"input_cost":0.0,"input_tokens":3000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 E {"CacheEfficiencyReported":{"call_efficiency":0.1,"calls":2,"rolling_efficiency":0.36666666666666664}}
@@ -39,7 +39,7 @@ E {"ErrorEncountered":{"error_message":"Prompt cache efficiency fell to 36.7% ov
 S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}} task=7b50f2219566265a
 E {"TaskStateChanged":"InProgress"}
 R msgs=7 model=gpt-5.6-luna request=b63936eb01626e64
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":56,"tool_definitions":605,"tool_results":50,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":56,"tool_definitions":605,"tool_results":50,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=8 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b8727d4e9615fc0c
@@ -63,7 +63,7 @@ M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ec4d84c1f6a2e79f
 R msgs=1 model=gpt-5.6-luna request=161791b120bc157e
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":1000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fbc30e68385022ba
@@ -73,7 +73,7 @@ E {"ToolResult":{"output":"step ran one","tool_call_id":"id8","tool_name":"step"
 S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f587791c53f66d0b
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fb533738e458f670
 R msgs=3 model=gpt-5.6-luna request=6c0f22f2b5a126d6
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":16,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":16,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":900,"input_cost":0.0,"input_tokens":2000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 E {"CacheEfficiencyReported":{"call_efficiency":0.9,"calls":1,"rolling_efficiency":0.9}}
@@ -84,7 +84,7 @@ E {"ToolResult":{"output":"step ran two","tool_call_id":"id9","tool_name":"step"
 S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=505c842169e927d5
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=725056b07d78ddc0
 R msgs=5 model=gpt-5.6-luna request=7e343d025ff41dfa
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":36,"tool_definitions":605,"tool_results":32,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":36,"tool_definitions":605,"tool_results":32,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":200,"input_cost":0.0,"input_tokens":3000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 E {"CacheEfficiencyReported":{"call_efficiency":0.1,"calls":2,"rolling_efficiency":0.36666666666666664}}
@@ -101,7 +101,7 @@ E {"ErrorEncountered":{"error_message":"Prompt cache efficiency fell to 36.7% ov
 S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}} task=b503eb2434efb312
 E {"TaskStateChanged":"InProgress"}
 R msgs=8 model=gpt-5.6-luna request=e0b3829bca08f024
-E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":56,"tool_definitions":605,"tool_results":50,"user_text":56}}}
+E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":56,"tool_definitions":605,"tool_results":50,"user_text":56}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=9 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=96650cbe1cd458d7
@@ -126,7 +126,7 @@ M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=dd141a74c84f17af
 R msgs=1 model=gpt-5.6-luna request=649347af4588141d
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d25642b8979377da
@@ -142,7 +142,7 @@ E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Execution 
 S durable=0 msgs=2 native_results=2 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=a0fe16a563c27d9c
 E {"TaskStateChanged":"InProgress"}
 R msgs=3 model=gpt-5.6-luna request=c3ab0c826d977558
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":37,"tool_definitions":605,"tool_results":88,"user_text":44}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":37,"tool_definitions":605,"tool_results":88,"user_text":44}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3d4ad6c8ffa3b26f

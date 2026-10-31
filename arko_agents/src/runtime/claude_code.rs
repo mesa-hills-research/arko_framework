@@ -683,6 +683,11 @@ struct PendingUsage {
     /// When the runtime first saw the request: its first streamed token, or
     /// its response for one that wasn't streamed.
     seen_at: chrono::DateTime<chrono::Utc>,
+    /// The response finished: its final `message_delta` came, or it came
+    /// whole without streaming. Only a finished response is the task's latest
+    /// request. One that failed or was abandoned while it streamed is
+    /// recorded for its usage alone.
+    complete: bool,
     usage: Value,
     model: Option<String>,
     /// Why the response stopped, and the details (a refusal's category
@@ -3340,12 +3345,14 @@ impl ClaudeCodeRun {
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
                     // The stream events report this request's usage, its
                     // final output included; this message's is a snapshot.
+                    // A response that wasn't streamed comes whole.
                     if !self.streamed.contains(&key) {
                         self.observe_usage(
                             key,
                             usage.clone(),
                             assistant.model.clone(),
                             assistant.parent_tool_use_id.clone(),
+                            (chrono::Utc::now(), true),
                         )
                         .await?;
                     }
@@ -3545,7 +3552,7 @@ impl ClaudeCodeRun {
                         self.streaming = message["id"].as_str().map(str::to_string);
                         self.retrying_since = None;
                     }
-                    self.request_started(message, &parent_tool_use_id).await?;
+                    let sent_at = self.request_started(message, &parent_tool_use_id).await?;
                     if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
                     {
                         self.streamed.insert(key.to_string());
@@ -3554,6 +3561,7 @@ impl ClaudeCodeRun {
                             usage.clone(),
                             message["model"].as_str().map(str::to_string),
                             parent_tool_use_id,
+                            (sent_at, false),
                         )
                         .await?;
                         self.check_handover_threshold().await?;
@@ -3581,6 +3589,7 @@ impl ClaudeCodeRun {
                         if pending.stop_reason.as_deref() == Some("refusal") {
                             self.refusal_details = pending.stop_details.clone();
                         }
+                        pending.complete = true;
                         self.flush_thread(&parent_tool_use_id).await?;
                     }
                 }
@@ -3977,13 +3986,16 @@ impl ClaudeCodeRun {
     /// request of its thread starts or the turn ends. Claude Code's
     /// `assistant` messages carry the output count as it stood when the
     /// stream started, and its turn result sums the turn's requests, so
-    /// neither gives a request's output.
+    /// neither gives a request's output. `(seen_at, complete)` says when the
+    /// request was first seen, and whether its response is already whole
+    /// (one that wasn't streamed).
     async fn observe_usage(
         &mut self,
         key: String,
         usage: Value,
         model: Option<String>,
         parent: Option<String>,
+        (seen_at, complete): (chrono::DateTime<chrono::Utc>, bool),
     ) -> Result<(), ArkoAgentsError> {
         if parent.is_none() {
             // Anthropic's input counts are exclusive: the uncached input,
@@ -4000,13 +4012,17 @@ impl ClaudeCodeRun {
             self.flush_thread(&parent).await?;
         }
         match self.pending_usage.get_mut(&parent) {
-            Some(pending) => pending.usage = usage,
+            Some(pending) => {
+                pending.usage = usage;
+                pending.complete |= complete;
+            }
             None => {
                 self.pending_usage.insert(
                     parent,
                     PendingUsage {
                         key,
-                        seen_at: chrono::Utc::now(),
+                        seen_at,
+                        complete,
                         usage,
                         model,
                         stop_reason: None,
@@ -4021,12 +4037,13 @@ impl ClaudeCodeRun {
     /// A request's response started (`message_start`, as early as Claude
     /// Code shows a request): reported with the conversation's size for its
     /// own requests, which, with the input the response reports, calibrates
-    /// the bytes per token reported with the next.
+    /// the bytes per token reported with the next. Returns the time it is
+    /// reported with, which stands for when it was sent.
     async fn request_started(
         &mut self,
         message: &Value,
         subagent: &Option<String>,
-    ) -> Result<(), ArkoAgentsError> {
+    ) -> Result<chrono::DateTime<chrono::Utc>, ArkoAgentsError> {
         let sizes = subagent
             .is_none()
             .then(|| ai::RequestSizes::of(&self.task.conversation, self.served_tools.as_ref()));
@@ -4034,11 +4051,13 @@ impl ClaudeCodeRun {
             || self.task.agent_config.llm_config.model.id.clone(),
             str::to_string,
         );
+        let sent_at = chrono::Utc::now();
         self.emit(AgentEvent::ModelRequestStarted {
             model,
             subagent: subagent.clone(),
             sizes,
             bytes_per_token: self.bytes_per_token,
+            sent_at: Some(sent_at),
         })
         .await?;
         if let (Some(sizes), Some(usage)) = (sizes, message.get("usage"))
@@ -4049,10 +4068,11 @@ impl ClaudeCodeRun {
         {
             self.bytes_per_token = ratio;
         }
-        Ok(())
+        Ok(sent_at)
     }
 
-    /// Records every thread's pending usage.
+    /// Records every thread's pending usage. A request that didn't finish
+    /// counts for its usage, and leaves the task's latest request as it was.
     async fn flush_usage(&mut self) -> Result<(), ArkoAgentsError> {
         let threads: Vec<Option<String>> = self.pending_usage.keys().cloned().collect();
         for thread in threads {
@@ -4163,7 +4183,8 @@ impl ClaudeCodeRun {
         Ok(self.usage_info(&result.raw["usage"], &model))
     }
 
-    /// Records a thread's pending usage.
+    /// Records a thread's pending usage, and the conversation's own request
+    /// as the task's latest once its response finished.
     async fn flush_thread(&mut self, thread: &Option<String>) -> Result<(), ArkoAgentsError> {
         let Some(pending) = self.pending_usage.remove(thread) else {
             return Ok(());
@@ -4198,7 +4219,7 @@ impl ClaudeCodeRun {
         let info = self.usage_info(&pending.usage, &model);
         if thread.is_some() {
             self.subagent_calls.push(self.task.usage_history.len());
-        } else {
+        } else if pending.complete {
             // The cache lifetime Claude Code chose, as its writes show (the
             // shorter when it wrote both), else as the conversation's last.
             let lifetime = if written_5m > 0 {

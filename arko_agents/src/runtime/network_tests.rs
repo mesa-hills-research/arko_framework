@@ -480,3 +480,108 @@ async fn a_paused_run_on_a_chatgpt_login_is_not_refreshed() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A ChatGPT login whose token is about to expire is renewed before the
+/// request. The request is announced, and timed, once the renewal is done
+/// (here it takes 300 ms), and the task's latest request has that same
+/// time, which the prompt cache lasts from.
+#[tokio::test]
+async fn a_request_is_timed_from_its_send_after_the_token_is_renewed() {
+    use base64::Engine as _;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let renewal: Arc<std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
+    let asked = renewal.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let head = loop {
+                    let mut chunk = [0; 16384];
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..n]);
+                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse().unwrap());
+                    if request.len() >= end + 4 + length {
+                        break head;
+                    }
+                };
+                if head.starts_with("post /token") {
+                    *asked.lock().unwrap() = Some(chrono::Utc::now());
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let body =
+                        r#"{"access_token":"renewed-access","refresh_token":"renewed-refresh"}"#;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(reply.as_bytes()).await.unwrap();
+                    return;
+                }
+                let call = serde_json::json!({
+                    "type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "complete_task", "arguments": "{\"summary\":\"done\"}",
+                    "status": "completed"
+                });
+                let response = serde_json::json!({
+                    "id": "resp_1", "object": "response", "created_at": 0,
+                    "status": "completed", "model": "gpt-5.6-luna", "output": [call],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                });
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {}\n\ndata: {}\n\n",
+                    serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": call}),
+                    serde_json::json!({"type": "response.completed", "response": response})
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    // An access token that expires in a minute, inside the refresh margin.
+    let expires = chrono::Utc::now().timestamp() + 60;
+    let claims =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expires}}}"#));
+    let (mut agent, mut events, _commands) = agent(&url, LLMRetryConfig::default());
+    agent.llm_client = Arc::new(
+        ai::LLMClient::new().with_openai_client(
+            ai::providers::openai::OpenAIClient::new_chatgpt_oauth(
+                &format!("header.{claims}.signature"),
+                Some("refresh"),
+                "account",
+            )
+            .with_base_url(&url)
+            .with_oauth_token_url(format!("{url}/token")),
+        ),
+    );
+    let task = tokio::time::timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let renewal = renewal.lock().unwrap().expect("the token was renewed");
+    let mut sent = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::ModelRequestStarted { sent_at, .. } = event {
+            sent.push(sent_at.unwrap());
+        }
+    }
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        sent[0] - renewal >= chrono::Duration::milliseconds(300),
+        "{} after the renewal was asked for",
+        sent[0] - renewal
+    );
+    assert_eq!(task.latest_request.latest().unwrap().sent_at, sent[0]);
+}

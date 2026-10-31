@@ -9,7 +9,7 @@ S durable=0 msgs=2 native_results=4 native_calls=1 text_results=0 running=0 inje
 E {"ToolRejected":{"reason":"The turn ended before this call ran. It was not run.","tool_call_id":"id3","tool_name":"gate"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b461dde265c6376b
 R msgs=3 model=gpt-5.6-luna request=64dcffaf9eafcb7c
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":18,"tool_calls":114,"tool_definitions":1297,"tool_results":325,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":18,"tool_calls":114,"tool_definitions":1297,"tool_results":325,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ce57f202e5d09196
@@ -32,7 +32,7 @@ E {"ToolResult":{"output":"reader ran r","tool_call_id":"id9","tool_name":"reade
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=5897afd1d0b76f66
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=cc89204c5297299c
 R msgs=3 model=gpt-5.6-luna request=c2506e99b89a87de
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":108,"image_tokens":0,"images":0,"system_prompt":18,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":311}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":108,"image_tokens":0,"images":0,"system_prompt":18,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":311}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b7025b6033d9d93a

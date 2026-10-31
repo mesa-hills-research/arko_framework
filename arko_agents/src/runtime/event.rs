@@ -237,16 +237,15 @@ pub enum AgentEvent {
     /// The task stream has ended.
     TaskStreamEnd,
     /// A model request of the task is going out. In arko's own runtime it
-    /// is emitted just before each request is sent, for every attempt, a retry
-    /// and a refusal fallback's request included. A Claude Code model's
-    /// requests are made by Claude Code, which shows one when its response
-    /// starts (its `message_start`), so it is emitted then, for the
-    /// conversation's own requests and its subagents'. A prompt cache is
-    /// refreshed by each request that reads or writes it, so a host times
-    /// the cache's lifetime from the latest one (its
-    /// `WorkflowEvent::timestamp` in arko_workflows). The
-    /// `ModelCallUsageReported` that follows tells whether it read or
-    /// wrote the cache.
+    /// is emitted just before each request is sent, after any credential
+    /// refresh, for every attempt, a retry and a refusal fallback's request
+    /// included. A Claude Code model's requests are made by Claude Code,
+    /// which shows one when its response starts (its `message_start`), so
+    /// it is emitted then, for the conversation's own requests and its
+    /// subagents'. A prompt cache is refreshed by each request that reads or
+    /// writes it, so a host times the cache's lifetime from the latest one
+    /// (its `sent_at`). The `ModelCallUsageReported` that follows tells
+    /// whether it read or wrote the cache.
     ModelRequestStarted {
         /// The model the request goes to, given by the configured model's id, or the
         /// refusal fallback's, or the model Claude Code reports.
@@ -269,6 +268,14 @@ pub enum AgentEvent {
         /// [`DEFAULT_BYTES_PER_TOKEN`](crate::runtime::DEFAULT_BYTES_PER_TOKEN)
         /// until one was answered.
         bytes_per_token: f64,
+        /// When it was sent, the time the task's latest request records once
+        /// it completes ([`Task::latest_request`](crate::Task::latest_request)).
+        /// In arko's own runtime that is just before the provider call, after
+        /// any credential refresh. For a Claude Code model it is when the
+        /// response's first token came. `None` in events saved by an older
+        /// version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sent_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// LLM usage information for a turn (cost and raw token counts).
     UsageReported(UsageInfo),

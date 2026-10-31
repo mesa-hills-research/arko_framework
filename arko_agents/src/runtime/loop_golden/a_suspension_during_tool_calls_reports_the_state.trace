@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=b9a1006c34354f9c
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":833,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":833,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=df8f411632d2ab95
@@ -22,7 +22,7 @@ M {"content":[{"ToolResult":{"call_id":"h","is_error":true,"name":"hangs","outpu
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=6a962e24140e884e
 R msgs=3 model=gpt-5.6-luna request=5094e1c0f67fd734
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":40,"tool_definitions":833,"tool_results":241,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":40,"tool_definitions":833,"tool_results":241,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2961fdef69b45f1b
