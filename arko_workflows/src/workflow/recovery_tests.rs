@@ -2905,8 +2905,11 @@ async fn a_note_taken_before_a_claude_code_compaction_isnt_given_again_on_recove
 }
 
 /// The operator's note goes to a Claude Code agent as the user's message
-/// during a turn, and a host's note comes behind it before that message is
-/// done. The workflow then crashes: persistence freezes first, and the run
+/// with the first of three calls side by side (H1), and a host's note comes
+/// behind it before that message is done, which the second call's hook (H2)
+/// takes, raising the notes' mark. No call's result is reported, so H1 is
+/// never acknowledged, and the third call, which holds, is saved with the
+/// task. The workflow then crashes: persistence freezes first, and the run
 /// is dropped with no end of its session. The saved task still holds both
 /// notes, behind the notes' mark, so the recovered run gets them, the
 /// operator's note included.
@@ -2916,10 +2919,11 @@ async fn notes_waiting_behind_a_users_message_survive_a_crash() {
     let fake = FakeClaude::new(json!([
         [
             {"sleep": 1.0},
-            {"tool": "Grep", "input": {"pattern": "a"}},
-            {"sleep": 1.5},
-            {"tool": "Grep", "input": {"pattern": "b"}},
-            {"tool": "mcp__arko__hold", "input": {}, "id": "toolu_hold"},
+            {"parallel": [
+                {"tool": "Grep", "input": {"pattern": "a"}},
+                {"tool": "Grep", "input": {"pattern": "b"}, "sleep_before": 1.5},
+                {"tool": "mcp__arko__hold", "input": {}, "id": "toolu_hold"},
+            ]},
         ],
         [{"tool": "mcp__arko__complete_task", "input": {"summary": "recovered"}}],
     ]));
@@ -2964,6 +2968,11 @@ async fn notes_waiting_behind_a_users_message_survive_a_crash() {
     within(hold.started.notified()).await;
     assert!(running_call_saved(&workspace));
     assert_eq!(fake.logged("midturn").len(), 1, "the operator's note went");
+    assert_eq!(
+        fake.logged("post").len(),
+        2,
+        "both searches' hooks were given"
+    );
     let path = latest(&workspace);
     crash(workflow, vec![run]).await;
 

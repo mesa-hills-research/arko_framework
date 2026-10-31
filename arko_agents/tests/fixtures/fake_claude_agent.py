@@ -46,6 +46,8 @@ the next turn's index). Steps:
                                          calls that run side by side, each
                                          with its hooks, their results
                                          reported afterwards in this order
+  a tool step with "sleep_before": 1.5   waits this many seconds before the
+                                         call, also in "parallel"
   {"exit": 3}                            the CLI crashes
   a tool step with "crash": "pre"        the CLI crashes once the call is
                                          allowed, before it runs; "post":
@@ -368,6 +370,7 @@ def hook(event, fields, tool_use_id):
 def call_tool(step, index, report=True):
     """Runs a tool step's call and its hooks, then reports its result, or
     returns the result message to report later when `report` is false."""
+    time.sleep(step.get("sleep_before", 0))
     name, tool_input = step["tool"], step.get("input", {})
     tool_use_id = step.get("id", "toolu_%d_%d" % (state["message"] + 1, index))
     assistant([{"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}], step)

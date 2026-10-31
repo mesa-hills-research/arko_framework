@@ -575,3 +575,256 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         "{splits} {notes} {late} {rests}"
     );
 }
+
+/// What a task holds of host item `id`, counted from its records and its
+/// pending list directly: the records' last parts and the items that wait.
+fn holdings(task: &crate::task::Task, id: &str) -> (usize, usize) {
+    let names = |ids: &[String]| ids.iter().any(|named| named == id);
+    let recorded = task
+        .context_records
+        .iter()
+        .flat_map(|record| &record.parts)
+        .filter(|part| part.last && names(&part.host_ids))
+        .count();
+    let pending = task
+        .pending_context_injections
+        .iter()
+        .filter(|item| names(&item.host_ids))
+        .count();
+    (recorded, pending)
+}
+
+/// Random runs of a real task whose source hands out context and typed
+/// items with ids and raises its mark in the same step, as a host's turn
+/// context source does. Hooks are given and reported out of order, the
+/// CLI's verdicts come in either order or cancel, turns end, and the task
+/// is saved as JSON. A crash restores any of the states saved before, with
+/// a fresh delivery, and the source gives again what lies past the restored
+/// mark. Checked without `Task::holding`:
+/// - every item the source handed out up to the task's mark is held once,
+///   whole in a record or waiting, and none past it,
+/// - every record is what the model was shown, a hook's text or a typed
+///   item's message,
+/// - the conversation in the end holds the source's texts once each, in the
+///   order it handed them out.
+#[test]
+fn a_task_restored_from_any_saved_state_holds_every_item_once() {
+    let config = crate::agent_config::AgentConfig::builder(
+        "property".into(),
+        "Property".into(),
+        crate::agent_config::AgentLLMConfig {
+            model: arko_ai::Model::openai_gpt_5_6_luna(),
+            generation_config: Default::default(),
+        },
+    )
+    .role_description("test".into())
+    .instructions("test".into())
+    .build()
+    .unwrap();
+    let (mut restores, mut marked, mut splits, mut notes) = (0, 0, 0, 0);
+    for seed in 1..=300u64 {
+        let mut random = Random(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
+        let mut task = crate::task::Task::new(
+            config.clone(),
+            "prompt".into(),
+            std::path::PathBuf::from("/w"),
+            None,
+        );
+        let mut delivery = Delivery::default();
+        // The source's items, by number, in the order it handed them out.
+        let mut accepted: Vec<(u64, PendingKind, String)> = Vec::new();
+        let mut saved = vec![serde_json::to_string(&task).unwrap()];
+        // What the model was shown and the conversation hasn't recorded.
+        let mut shown: Vec<String> = Vec::new();
+        let mut typed: Vec<(String, String)> = Vec::new();
+        let mut unreported: Vec<String> = Vec::new();
+        let mut calls = 0;
+        let queue = |task: &mut crate::task::Task, seq: u64, kind: &PendingKind, text: &str| {
+            let item = PendingContext::new(kind.clone(), text, vec![format!("n:{seq}")]);
+            task.queue_context(item);
+            task.raise_context_marks(&[("n".to_string(), seq)].into());
+        };
+        let record = |task: &mut crate::task::Task,
+                      shown: &mut Vec<String>,
+                      typed: &mut Vec<(String, String)>,
+                      done: Delivered| {
+            // The record is what went out: a hook's text, then the typed
+            // item sent with it, or the typed item alone.
+            let hook = match typed
+                .iter()
+                .position(|(_, note)| done.text.ends_with(note.as_str()))
+            {
+                Some(index) => {
+                    let (_, note) = typed.remove(index);
+                    let rest = &done.text[..done.text.len() - note.len()];
+                    (rest != heading()).then(|| {
+                        rest.strip_suffix("\n\n")
+                            .expect("a hook's text, then the typed item")
+                            .to_string()
+                    })
+                }
+                None => Some(done.text.clone()),
+            };
+            if let Some(hook) = hook {
+                let index = shown
+                    .iter()
+                    .position(|text| *text == hook)
+                    .expect("a record of a hook the model was shown");
+                shown.remove(index);
+            }
+            let message = task.conversation.messages.len();
+            task.conversation.add_user_message(&done.text);
+            task.record_context(message, done.parts);
+        };
+        for step in 0..random.below(60) + 1 {
+            calls += 1;
+            let call = format!("c{calls}");
+            match random.below(10) {
+                0..=2 => {
+                    for kind in [PendingKind::Context, PendingKind::Typed] {
+                        if random.below(3) > 0 || kind == PendingKind::Context {
+                            let seq = accepted.len() as u64 + 1;
+                            let text = random.text(if kind == PendingKind::Typed {
+                                3_000
+                            } else {
+                                30_000
+                            });
+                            queue(&mut task, seq, &kind, &text);
+                            accepted.push((seq, kind, text));
+                        }
+                    }
+                }
+                3 if !unreported.is_empty() => {
+                    let reported = unreported.remove(random.below(unreported.len()));
+                    for done in delivery
+                        .reported(&mut task.pending_context_injections, &reported)
+                        .0
+                    {
+                        record(&mut task, &mut shown, &mut typed, done);
+                    }
+                }
+                4 if !typed.is_empty() => {
+                    let uuid = typed[random.below(typed.len())].0.clone();
+                    let cancel = random.below(4) == 0;
+                    match delivery.note_settled(&mut task.pending_context_injections, &uuid, cancel)
+                    {
+                        Verdict::Done(done) => record(&mut task, &mut shown, &mut typed, done),
+                        Verdict::Waiting => typed.retain(|(sent, _)| *sent != uuid),
+                        _ => {}
+                    }
+                }
+                5 => saved.push(serde_json::to_string(&task).unwrap()),
+                6 if random.below(3) == 0 => {
+                    // A crash: the task as one of the states saved, the
+                    // delivery fresh, and what the source handed out past
+                    // the task's mark given again.
+                    restores += 1;
+                    let at = random.below(saved.len());
+                    saved.truncate(at + 1);
+                    task = serde_json::from_str(&saved[at]).unwrap();
+                    let mark = task.context_marks.get("n").copied().unwrap_or(0);
+                    marked += usize::from(mark > 0);
+                    delivery = Delivery::default();
+                    (shown, typed, unreported) = (Vec::new(), Vec::new(), Vec::new());
+                    for (seq, kind, text) in accepted.iter().filter(|(seq, ..)| *seq > mark) {
+                        queue(&mut task, *seq, kind, text);
+                    }
+                }
+                7 if random.below(3) == 0 => {
+                    // The turn ends: the next input carries what waits.
+                    delivery.settle();
+                    (shown, typed, unreported) = (Vec::new(), Vec::new(), Vec::new());
+                    let items = std::mem::take(&mut task.pending_context_injections);
+                    if !items.is_empty() {
+                        let text = items
+                            .iter()
+                            .map(|item| shown_from(item, item.given))
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let message = task.conversation.messages.len();
+                        task.conversation
+                            .add_user_message(&format!("{}{text}", heading()));
+                        task.record_context(
+                            message,
+                            items
+                                .iter()
+                                .map(|item| RecordedPart::of(item, true))
+                                .collect(),
+                        );
+                    }
+                }
+                _ => {
+                    if let Some(text) = delivery.fill(&task.pending_context_injections, &call) {
+                        assert!(text.len() <= HOOK_MAX_BYTES);
+                        splits += usize::from(text.ends_with(GOES_ON));
+                        shown.push(text);
+                    }
+                    if let Some((_, text)) = delivery.due_note(&task.pending_context_injections) {
+                        notes += 1;
+                        let uuid = format!("u{calls}");
+                        delivery.note_sent(&call, uuid.clone());
+                        typed.push((uuid, text));
+                    }
+                    unreported.push(call);
+                }
+            }
+            let mark = task.context_marks.get("n").copied().unwrap_or(0);
+            for (seq, ..) in &accepted {
+                let (recorded, pending) = holdings(&task, &format!("n:{seq}"));
+                assert_eq!(
+                    recorded + pending,
+                    usize::from(*seq <= mark),
+                    "seed {seed}, step {step}: item {seq} at mark {mark}"
+                );
+            }
+        }
+        // Every call is reported and every message completed, then the turn
+        // ends and the next input carries the rest.
+        while let Some(call) = unreported.pop() {
+            for done in delivery
+                .reported(&mut task.pending_context_injections, &call)
+                .0
+            {
+                record(&mut task, &mut shown, &mut typed, done);
+            }
+            for (uuid, _) in typed.clone() {
+                if let Verdict::Done(done) =
+                    delivery.note_settled(&mut task.pending_context_injections, &uuid, false)
+                {
+                    record(&mut task, &mut shown, &mut typed, done);
+                }
+            }
+        }
+        delivery.settle();
+        let rest = task
+            .pending_context_injections
+            .iter()
+            .map(|item| shown_from(item, item.given))
+            .collect::<Vec<_>>();
+        let messages = task
+            .conversation
+            .messages
+            .iter()
+            .filter_map(|message| message.content.first().and_then(arko_ai::Content::as_text))
+            .filter(|text| text.starts_with(&heading()))
+            .map(str::to_string)
+            .chain(rest)
+            .collect::<Vec<_>>();
+        let expected = accepted
+            .iter()
+            .map(|(_, _, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let got = stream(&messages);
+        assert!(
+            got == expected,
+            "seed {seed}: the conversation holds {} bytes, the source gave {}",
+            got.len(),
+            expected.len()
+        );
+    }
+    assert!(
+        restores > 50 && marked > 30 && splits > 100 && notes > 30,
+        "{restores} {marked} {splits} {notes}"
+    );
+}
