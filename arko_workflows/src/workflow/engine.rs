@@ -6597,3 +6597,63 @@ mod prompt_tests {
         assert_eq!(task_part(&own), own);
     }
 }
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    fn task() -> Task {
+        let mut task = Task::new(
+            crate::test_support::agent_config("Writer"),
+            "Write it.".into(),
+            std::env::temp_dir(),
+            None,
+        );
+        task.conversation.add_user_message("Write it.");
+        task.record_held_ids(0, vec!["message:1".into()]);
+        task.queue_context(arko_agents::PendingContext::new(
+            arko_agents::PendingKind::Context,
+            "Older context.",
+            vec!["mail:1".into()],
+        ));
+        task
+    }
+
+    /// A report run holds back all the context that reaches it, so putting
+    /// the task back keeps that context pending, numbered after what the task
+    /// had, and the records stay the task's own.
+    #[test]
+    fn a_rollback_keeps_the_context_a_report_run_held_back() {
+        let before = task();
+        let mut attempt = before.clone();
+        attempt.conversation.add_user_message("Write your report.");
+        attempt.queue_context(arko_agents::PendingContext::new(
+            arko_agents::PendingKind::Context,
+            "Mail during the report.",
+            vec!["mail:2".into()],
+        ));
+        let restored = report_rollback(before.clone(), &attempt);
+        assert_eq!(
+            restored.pending_texts(),
+            ["Older context.", "Mail during the report."]
+        );
+        assert_eq!(restored.next_context_item, attempt.next_context_item);
+        assert_eq!(restored.context_records, before.context_records);
+        assert_eq!(restored.conversation.messages.len(), 1);
+    }
+
+    /// A report run that recorded context would lose it in the rollback, which
+    /// the rollback refuses to hide.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a report run recorded context")]
+    fn a_rollback_of_a_report_run_that_recorded_context_is_caught() {
+        let before = task();
+        let mut attempt = before.clone();
+        attempt
+            .conversation
+            .add_user_message("# Workflow context update\n\nMail.");
+        attempt.record_held_ids(1, vec!["mail:2".into()]);
+        report_rollback(before, &attempt);
+    }
+}
