@@ -1252,19 +1252,19 @@ async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
     let saved = resumed.interrupted_runs().remove(0);
     assert_eq!(saved.agent_run_id, ended.agent_run_id);
     // The save it comes back from is the run's last, or one before it, and
-    // its latest request is that save's own: never one it doesn't hold.
+    // its latest request is the one of its own last model call: never one
+    // it doesn't hold.
     let last = latest_request(&ended).expect("the run's last request");
     let restored = resumed.agent_result(ended.agent_run_id).unwrap();
     let kept = latest_request(&restored).expect("the saved run's request");
-    assert!(kept.1 <= last.1, "{kept:?} after {last:?}");
-    let messages = |result: &AgentResult| result.task().unwrap().conversation.messages.len();
-    if messages(&restored) == messages(&ended) {
+    let calls = restored.info().model_calls;
+    assert!((1..=ended.info().model_calls).contains(&calls), "{calls}");
+    if calls == ended.info().model_calls {
         assert_eq!(kept, last);
     } else {
-        assert!(
-            kept.1 < last.1,
-            "{kept:?} with fewer messages than {last:?}"
-        );
+        let usage = &ended.task().unwrap().usage_history[calls - 1];
+        assert_eq!(kept.0, usage.input_tokens);
+        assert!(kept.1 <= last.1, "{kept:?} after {last:?}");
     }
     let result = within(resumed.recover_agent(&saved)).await.unwrap();
     assert_eq!(result.status, AgentRunStatus::Completed);
