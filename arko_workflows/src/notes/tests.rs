@@ -1676,28 +1676,18 @@ fn posted(seq: u64, text: &str) -> PostedNote {
     }
 }
 
-/// An update for a hook counts the characters of the host's notes only. The
-/// operator's notes reach the agent apart from the hook.
+/// An update takes notes up to its limits in count and bytes, whoever wrote
+/// them and whatever agent gets them, and the first always.
 #[test]
-fn an_update_for_a_hook_limits_the_notes_that_are_not_the_operators() {
-    let text = "n".repeat(4_000);
-    let by = |source: NoteSource| {
-        (1..=4)
-            .map(|seq| {
-                let mut note = posted(seq, &text);
-                note.note.source = source.clone();
-                note
-            })
-            .collect::<Vec<_>>()
-    };
-    let host = by(NoteSource::Host);
-    let host = host.iter().collect::<Vec<_>>();
-    assert_eq!(fitting(&host, 9_000), 2);
-    // The first always comes.
-    assert_eq!(fitting(&host, 100), 1);
-    let operator = by(NoteSource::Operator);
-    let operator = operator.iter().collect::<Vec<_>>();
-    assert_eq!(fitting(&operator, 100), 4);
+fn an_update_takes_notes_up_to_its_limits_and_the_first_always() {
+    let notes =
+        |count: u64, text: &str| (1..=count).map(|seq| posted(seq, text)).collect::<Vec<_>>();
+    let long = notes(4, &"n".repeat(6_000));
+    assert_eq!(fitting(&long.iter().collect::<Vec<_>>()), 2);
+    let alone = notes(2, &"n".repeat(MAX_NOTE_BYTES));
+    assert_eq!(fitting(&alone.iter().collect::<Vec<_>>()), 1);
+    let short = notes(30, "Short.");
+    assert_eq!(fitting(&short.iter().collect::<Vec<_>>()), PROMPT_MAX_NOTES);
 }
 
 /// A prompt shows the newest notes within the caps, the newest always in

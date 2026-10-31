@@ -1053,11 +1053,12 @@ impl crate::runtime::TurnContextSource for MarkedTypedNote {
 }
 
 /// A note given with a call's result that the CLI took, but exited before
-/// it reported the result: the task saved then neither holds the note nor
-/// keeps its mark, so a host that recovers it gives the note again. Once
-/// the result is reported with the note, the task holds both.
+/// it reported the result: the task never keeps the note's mark without
+/// the note, and once the session ends the note waits in the task again,
+/// with its mark, for the next input. Once the result is reported with the
+/// note, the task holds both.
 #[tokio::test]
-async fn a_note_the_cli_took_before_it_exited_leaves_no_mark() {
+async fn a_note_the_cli_took_before_it_exited_goes_back_with_its_mark() {
     let fake = Fake::new(json!([
         [{"tool": "Grep", "input": {"pattern": "a"}, "crash": "post"}],
         [{"tool": "Grep", "input": {"pattern": "b"}}, complete("Done")],
@@ -1079,6 +1080,10 @@ async fn a_note_the_cli_took_before_it_exited_leaves_no_mark() {
         )
     })
     .await;
+    let saved = saved_once(&recorder, |task| {
+        !task.pending_context_injections.is_empty()
+    })
+    .await;
     run.handle.abort();
     assert_eq!(fake.logged("midturn").len(), 1, "the CLI took the note");
     let holds = |task: &Task| {
@@ -1096,9 +1101,8 @@ async fn a_note_the_cli_took_before_it_exited_leaves_no_mark() {
             task.context_marks
         );
     }
-    let saved = &snapshots.last().unwrap().0;
-    assert!(!saved.context_marks.contains_key("notes"));
-    assert!(!holds(saved));
+    assert_eq!(saved.pending_context_injections, [TYPED_NOTE]);
+    assert_eq!(saved.context_marks.get("notes"), Some(&3));
     // Reported with its result, the note and its mark are kept.
     let fake = Fake::new(json!([[
         {"tool": "Grep", "input": {"pattern": "a"}},
@@ -6010,43 +6014,22 @@ async fn context_sent_while_an_arko_call_waits_ends_the_wait() {
     assert!(context.contains("The build finished."), "{context}");
 }
 
-/// Three items of 6,000 characters that a source gives as many at a time as
-/// the limit it is asked with allows, whole and in order.
+/// Three items of 6,000 bytes that a source gives one at a time, as a
+/// source that doesn't size its updates may.
 struct Items {
     left: std::sync::Mutex<Vec<String>>,
-    limits: std::sync::Mutex<Vec<usize>>,
 }
 
 impl crate::runtime::TurnContextSource for Items {
     fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
-        None
-    }
-
-    fn context_update_within(
-        &self,
-        _task_id: uuid::Uuid,
-        max_chars: usize,
-    ) -> Option<crate::runtime::TurnContext> {
-        self.limits.lock().unwrap().push(max_chars);
         let mut left = self.left.lock().unwrap();
-        let mut content = String::new();
-        while let Some(item) = left.first() {
-            let chars = content.chars().count() + item.chars().count() + 2;
-            if !content.is_empty() && chars > max_chars {
-                break;
-            }
-            if !content.is_empty() {
-                content.push_str("\n\n");
-            }
-            content.push_str(&left.remove(0));
-        }
-        (!content.is_empty()).then(|| content.into())
+        (!left.is_empty()).then(|| left.remove(0))
     }
 }
 
 /// Claude Code replaces the text of a hook over 10,000 characters with a
-/// preview, so the runtime asks a source for at most 9,500 and what doesn't
-/// fit comes with the next result, in order.
+/// preview, so a hook carries at most 9,500 bytes and what doesn't fit
+/// comes with the next result, in order.
 #[tokio::test]
 async fn context_over_the_hooks_limit_comes_with_the_next_results() {
     let fake = Fake::new(json!([[
@@ -6062,8 +6045,12 @@ async fn context_over_the_hooks_limit_comes_with_the_next_results() {
         None,
     );
     let items = Arc::new(Items {
-        left: std::sync::Mutex::new(["a", "b", "c"].map(|letter| letter.repeat(6_000)).to_vec()),
-        limits: Default::default(),
+        // The first goes with the task's first input.
+        left: std::sync::Mutex::new(
+            ["", "a", "b", "c"]
+                .map(|letter| letter.repeat(6_000))
+                .to_vec(),
+        ),
     });
     let runtime =
         AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(items.clone());
@@ -6080,11 +6067,10 @@ async fn context_over_the_hooks_limit_comes_with_the_next_results() {
         .collect();
     assert_eq!(hooked.len(), 3, "{}", hooked.len());
     for (hook, letter) in hooked.iter().zip(["a", "b", "c"]) {
-        assert!(hook.chars().count() <= 10_000, "{}", hook.chars().count());
+        assert!(hook.len() <= 9_500, "{}", hook.len());
         assert!(hook.contains(&letter.repeat(6_000)));
     }
     assert!(items.left.lock().unwrap().is_empty());
-    assert!(items.limits.lock().unwrap().iter().all(|max| *max <= 9_500));
 }
 
 /// The same for context sent to the agent (messages, terminal updates): the
@@ -6137,7 +6123,7 @@ async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
                 .map(str::to_string)
         })
         .collect();
-    assert!(hooked.iter().all(|hook| hook.chars().count() <= 10_000));
+    assert!(hooked.iter().all(|hook| hook.len() <= 9_500));
     // Each reached the agent whole, in order, and none with another.
     let order = ["a", "b", "c"].map(|letter| {
         let whole = letter.repeat(6_000);
@@ -6151,6 +6137,422 @@ async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
         at[0]
     });
     assert!(order[0] < order[1] && order[1] < order[2], "{order:?}");
+}
+
+/// A source that gives its updates one at a time, the first with the task's
+/// first input.
+struct Updates(std::sync::Mutex<std::collections::VecDeque<crate::runtime::TurnContext>>);
+
+impl crate::runtime::TurnContextSource for Updates {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        self.0.lock().unwrap().pop_front()
+    }
+}
+
+/// A runtime whose source gives `updates` after the first input's, each
+/// at a hook once the one before has gone, and saves snapshots in `recorder`.
+fn with_updates(
+    recorder: &Arc<Recorder>,
+    updates: Vec<crate::runtime::TurnContext>,
+) -> AgentRuntime {
+    let mut all = std::collections::VecDeque::from(updates);
+    all.push_front(Default::default());
+    recording(recorder).with_turn_context(Arc::new(Updates(std::sync::Mutex::new(all))))
+}
+
+/// A 16 KiB note of numbered lines, longer than a hook holds.
+fn long_note() -> String {
+    let mut note = String::new();
+    let mut line = 0;
+    while note.len() < 16 * 1024 {
+        line += 1;
+        note.push_str(&format!("Line {line:04} of the long note.\n"));
+    }
+    note.trim_end().to_string()
+}
+
+fn noted(note: &str, typed: &str) -> crate::runtime::TurnContext {
+    crate::runtime::TurnContext {
+        content: note.into(),
+        user_content: typed.into(),
+        marks: [("notes".to_string(), 3)].into(),
+        ..Default::default()
+    }
+}
+
+const GOES_ON: &str = "\n(This update goes on in the next one.)";
+const CONTINUED: &str = "(Continued from the previous update.)\n";
+
+/// The PostToolUse hooks' context, in order.
+fn hooked(fake: &Fake) -> Vec<String> {
+    fake.logged("post")
+        .iter()
+        .filter_map(|post| {
+            post["answer"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// The context updates `task` holds, recorded and then pending, as one text
+/// with each split item's markers taken out.
+fn held(task: &Task) -> String {
+    let heading = "# Workflow context update\n\n";
+    texts(task)
+        .into_iter()
+        .filter_map(|text| text.strip_prefix(heading).map(str::to_string))
+        .chain(task.pending_context_injections.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "")
+}
+
+/// The latest snapshot `pick` accepts, once the run has saved one.
+async fn saved_once(recorder: &Recorder, pick: impl Fn(&Task) -> bool) -> Task {
+    for _ in 0..200 {
+        if let Some((task, _)) = recorder
+            .snapshots()
+            .into_iter()
+            .rev()
+            .find(|(task, _)| pick(task))
+        {
+            return task;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pending = recorder
+        .snapshots()
+        .iter()
+        .map(|(task, _)| {
+            task.pending_context_injections
+                .iter()
+                .map(|item| item.len())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    panic!("no such snapshot, pending: {pending:?}");
+}
+
+async fn until_paused(run: &mut Run) {
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+}
+
+/// Claude Code exits after the hook with a long note's first part, before
+/// it reports the call's result. The task still holds the whole note
+/// pending, and the next input carries it once, whole, without markers.
+#[tokio::test]
+async fn a_part_never_acknowledged_leaves_its_note_whole_for_the_next_input() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "a"}, "crash": "post"}],
+        [complete("Done")],
+    ]));
+    let note = long_note();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = with_updates(&recorder, vec![noted(&note, "")]);
+    let mut run = start_with(task, runtime);
+    until_paused(&mut run).await;
+    let hooks = hooked(&fake);
+    assert!(hooks[0].len() <= 9_500 && hooks[0].ends_with(GOES_ON));
+    let saved = recorder.latest(|_| true);
+    assert_eq!(
+        saved.pending_context_injections,
+        std::slice::from_ref(&note)
+    );
+    assert_eq!(saved.context_marks.get("notes"), Some(&3));
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let input = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
+    assert_eq!(input.matches(&note).count(), 1);
+    assert!(!input.contains(GOES_ON.trim()) && !input.contains(CONTINUED.trim()));
+    assert!(task.pending_context_injections.is_empty());
+    assert_eq!(texts(&task).concat().matches(&note).count(), 1);
+}
+
+/// Once the first part's call is reported, the conversation holds the part
+/// with its marker and the queue starts with the rest, in one step: every
+/// snapshot holds the note once or not at all, and never its mark without
+/// it. Claude Code exiting with the rest in flight leaves the rest, and the
+/// typed note sent with its hook, pending in order for the next input.
+#[tokio::test]
+async fn an_acknowledged_part_leaves_its_rest_and_the_note_behind_it_pending() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"tool": "Grep", "input": {"pattern": "b"}, "crash": "post"},
+        ],
+        [complete("Done")],
+    ]));
+    let note = long_note();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = with_updates(&recorder, vec![noted(&note, TYPED_NOTE)]);
+    let mut run = start_with(task, runtime);
+    until_paused(&mut run).await;
+    // The session's end puts the note in the queue.
+    let saved = saved_once(&recorder, |task| task.pending_context_injections.len() == 2).await;
+    let snapshots = recorder.snapshots();
+    for (task, _) in &snapshots {
+        let held = held(task);
+        if task.context_marks.contains_key("notes") {
+            assert_eq!(held, format!("{note}\n\n{TYPED_NOTE}"));
+        } else {
+            assert!(held.is_empty() || held == note, "{held}");
+        }
+    }
+    // The first part's record and the rest pending.
+    assert!(snapshots.iter().any(|(task, _)| {
+        task.pending_context_injections
+            .first()
+            .is_some_and(|rest| rest.starts_with(CONTINUED))
+            && texts(task).iter().any(|text| text.ends_with(GOES_ON))
+    }));
+    assert_eq!(saved.pending_context_injections.len(), 2);
+    assert!(saved.pending_context_injections[0].starts_with(CONTINUED));
+    assert_eq!(saved.pending_context_injections[1], TYPED_NOTE);
+    assert_eq!(saved.context_marks.get("notes"), Some(&3));
+    assert_eq!(fake.logged("midturn").len(), 1, "sent with the rest's hook");
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    let input = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
+    let rest = input.find(CONTINUED).unwrap();
+    assert!(rest < input.find(TYPED_NOTE).unwrap());
+    assert_eq!(held(&task), format!("{note}\n\n{TYPED_NOTE}"));
+}
+
+/// Two calls that run side by side get a hook each. The later call's
+/// result comes first, and the hooks' texts join the conversation in the
+/// order the hooks were given, after both results.
+#[tokio::test]
+async fn hooks_of_parallel_calls_reported_out_of_order_keep_their_order() {
+    let fake = Fake::new(json!([[
+        {"parallel": [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"tool": "Grep", "input": {"pattern": "b"}},
+        ], "report": [1, 0]},
+        complete("Done"),
+    ]]));
+    let (a, b) = ("a".repeat(6_000), "b".repeat(6_000));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = with_updates(&recorder, vec![a.clone().into(), b.clone().into()]);
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let hooks = hooked(&fake);
+    assert!(hooks[0].contains(&a) && hooks[1].contains(&b));
+    let texts = texts(&task);
+    let at = |text: &str| texts.iter().position(|held| held.contains(text)).unwrap();
+    assert_eq!(at(&b), at(&a) + 1);
+    // Both calls' results come first, the later call's before.
+    let messages = &task.conversation.messages;
+    let results = |index: usize| {
+        messages[index]
+            .content
+            .iter()
+            .filter_map(|content| content.as_tool_result())
+            .map(|result| result.call_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        [results(at(&a) - 2), results(at(&a) - 1)].concat(),
+        [
+            Some("toolu_p0_1".to_string()),
+            Some("toolu_p0_0".to_string())
+        ]
+    );
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// A typed note behind a long note's rest isn't sent as the user's message
+/// until a hook carries the rest, and it comes after the rest.
+#[tokio::test]
+async fn a_typed_note_waits_until_a_hook_carries_what_is_ahead_of_it() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let note = long_note();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = with_updates(&recorder, vec![noted(&note, TYPED_NOTE)]);
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    // Sent with the second call's hook: the fake logs it as it reads it,
+    // which can be before it reads the hook's answer.
+    let events = fake
+        .log()
+        .iter()
+        .map(|entry| entry["event"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    let at = |event: &str| {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, logged)| *logged == event)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    };
+    let sent = at("midturn");
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0] > at("pre")[1], "{events:?}");
+    let hooks = hooked(&fake);
+    assert!(hooks[1].starts_with(&format!("# Workflow context update\n\n{CONTINUED}")));
+    assert!(!hooks.concat().contains("Use tabs."));
+    assert_eq!(held(&task), format!("{note}\n\n{TYPED_NOTE}"));
+    assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// A message given with an approval waits in the queue, so it comes after
+/// a long note's rest that was waiting before it.
+#[tokio::test]
+async fn an_approval_message_comes_after_the_rest_ahead_of_it() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Bash", "input": {"command": "cargo test"}},
+        complete("Tested"),
+    ]]));
+    let mut config = config(&fake, &["Grep", "Bash"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Bash".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let note = long_note();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(config, "Test.".into(), fake.workspace(), None);
+    let mut run = start_with(task, with_updates(&recorder, vec![noted(&note, "")]));
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: None,
+            message_to_agent: Some("Only the unit tests.".into()),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let hooks = hooked(&fake);
+    assert!(hooks.iter().all(|hook| hook.len() <= 9_500));
+    let rest = hooks[1].find(CONTINUED).unwrap();
+    let message = hooks[1]
+        .find("Message from user on approval:\nOnly the unit tests.")
+        .unwrap();
+    assert!(rest < message, "{}", hooks[1]);
+    assert!(held(&task).starts_with(&note));
+}
+
+/// The host's output for a built-in, given on its approval, is the call's
+/// result. One longer than a hook holds is cut in the permission answer,
+/// and its rest comes first in the next hook.
+#[tokio::test]
+async fn a_long_output_for_a_built_in_is_cut_and_its_rest_comes_next() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "cargo test"}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Tested"),
+    ]]));
+    let mut config = config(&fake, &["Grep", "Bash"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Bash".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let output = long_note().replace("long note", "test run's output");
+    let task = Task::new(config, "Test.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: Some(output.clone()),
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let answer = fake.logged("permission")[0]["answer"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        answer.len() <= 9_500 && answer.ends_with(GOES_ON),
+        "{}",
+        answer.len()
+    );
+    // The rest, longer than a hook holds itself, takes the next two.
+    let hooks = hooked(&fake);
+    assert_eq!(hooks.len(), 2);
+    let mut parts = vec![answer];
+    for hook in &hooks {
+        let rest = hook.strip_prefix("# Workflow context update\n\n").unwrap();
+        assert!(hook.len() <= 9_500 && rest.starts_with(CONTINUED));
+        parts.push(rest.to_string());
+    }
+    let rejoined = parts
+        .join("\n\n")
+        .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "");
+    assert!(
+        rejoined == output,
+        "{} of {} bytes",
+        rejoined.len(),
+        output.len()
+    );
+    assert!(task.pending_context_injections.is_empty());
 }
 
 /// A tool that returns whether its call says the task runs in Claude Code.

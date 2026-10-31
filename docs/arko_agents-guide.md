@@ -1107,23 +1107,29 @@ Besides answers to the waiting states, a running task accepts:
   don't, so they wait for the turn boundary. `TurnContext::marks` are the source's
   high-water marks of what the update gives, by name. The task keeps the highest of each
   in `Task::context_marks` once it holds the update (in its conversation, or pending in it).
-  A Claude Code agent's update given with a call's result counts once the CLI reports that
-  result, so a CLI that exits first leaves no mark. The marks are saved with the task and kept through
+  The marks are saved with the task and kept through
   handovers and compactions (a cut back clears them), so a host can tell from a saved task
   what it was given after its conversation no longer shows it. A workflow marks the newest
   note (`notes`) and recovers a run's notes from that mark. `TurnContext::user_content` is the part of
   an update the user typed themselves (a workflow's operator notes), which follows
   `content` in the same message. During a turn, a Claude Code agent gets it as a message
-  from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
-  the hook. It counts as delivered once it is written. The CLI reports each message by its
-  UUID, and one it cancels (the turn stopped before the model's next request) goes with the
-  task's next input. A hook's text is limited, since Claude Code replaces over 10,000
-  characters with a preview and a file name. The runtime asks the source for at most 9,500
-  (`TurnContextSource::context_update_within`, which by default is `context_update`), and
-  the queued `InjectContext` content that doesn't fit, whole and in order, waits for the
-  next result or input. A workflow's source holds back the notes and mail that don't fit,
-  and cuts a mail item that alone is over the limit. An injection or note that alone is
-  over it is not split. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  from the user (`ClaudeSession::send_human`) at a tool boundary, once a hook has carried
+  everything queued before it. Until then it waits in the runtime with the update's marks.
+  The CLI reports each message by its UUID, and one it cancels (the turn stopped before the
+  model's next request) goes back to its place among the pending context.
+
+  A Claude Code agent gets its pending context during a turn in its calls' PostToolUse
+  hooks. Claude Code replaces a hook's text of over 10,000 characters with a preview and a
+  file name, so the runtime keeps every text it gives the model through a hook, report
+  requests and other denials included, within 9,500 bytes, whatever the source and the host
+  give. A hook carries the pending items in order, whole while they fit. An item that would
+  fit an empty hook waits whole for the next one. An item longer than that is split, cut at
+  a line break near the end of the part where there is one, and its parts end with
+  `(This update goes on in the next one.)` and start with `(Continued from the previous update.)`.
+  What a hook carries stays in `Task::pending_context_injections` until the CLI reports the
+  call's result. Then the hook's text joins the conversation after the result and its items
+  leave the pending context, in one step, so a stop or a crash before that leaves them pending
+  for the next input, which carries everything whole. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying

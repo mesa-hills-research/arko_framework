@@ -233,7 +233,7 @@ async fn the_mail_a_claude_code_wait_leaves_comes_in_the_next_update() {
         .workflow
         .context()
         .subagents
-        .update(waiter.lead, 9_500)
+        .update(waiter.lead)
         .unwrap();
     assert_eq!(ids, ["mail:2"]);
     assert!(update.contains("[mail 2]") && update.contains("[end of mail 2]"));

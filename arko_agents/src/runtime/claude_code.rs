@@ -18,7 +18,7 @@
 //! keeps it: the runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +31,7 @@ use uuid::Uuid;
 use super::ContextImage;
 use super::command::UserCommand;
 use super::event::AgentEvent;
+use super::hook_budget::Delivery;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{AgentConfig, LLMErrorPolicy, PathSafetyPolicy, ToolErrorPolicy};
 use crate::claude_code::{HELD_FOR_COMPACTION, built_in_path_parameters};
@@ -85,12 +86,6 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
-
-/// The most characters of context a hook carries. Claude Code replaces a
-/// hook's text of over 10,000 characters with a preview of 2 KB and the name
-/// of a file, so what doesn't fit waits for the next hook (or the next
-/// input).
-const HOOK_MAX_CHARS: usize = 9_500;
 
 /// How long a stopped session waits for the CLI to say what became of a note
 /// sent just before.
@@ -752,26 +747,6 @@ struct Entry {
     messages: usize,
 }
 
-/// Context delivered with a call's result, recorded after the results once
-/// the CLI reports them.
-struct DeliveredContext {
-    /// What went in the call's hook.
-    texts: Vec<String>,
-    /// The note the user typed, sent as their message, by the message's
-    /// UUID, with the text recorded for it. A note the CLI cancels before
-    /// the results is left out.
-    note: Option<(String, String)>,
-}
-
-impl DeliveredContext {
-    /// The record's text, empty when nothing is left.
-    fn text(self) -> String {
-        let mut texts = self.texts;
-        texts.extend(self.note.map(|(_, shown)| shown));
-        texts.join("\n\n")
-    }
-}
-
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
@@ -804,11 +779,12 @@ pub(super) struct ClaudeCodeRun {
     events: mpsc::Sender<AgentEvent>,
     commands: mpsc::Receiver<UserCommand>,
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
-    /// `ContextInjected` events for context taken and not yet reported.
+    /// `ContextInjected` events of the next input's context, reported once
+    /// it is sent.
     context_receipts: Vec<AgentEvent>,
-    /// The identifiers of context taken that waits with images for the
-    /// next input (see [`take_context`](Self::take_context)).
-    held_context_ids: Vec<String>,
+    /// How the task's pending context goes out in hooks: the hooks in
+    /// flight, the user's typed notes waiting, and the rests of denials.
+    delivery: Delivery,
     pub(super) host_decisions: super::HostDecisions,
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// The host's handover threshold, in place of the configuration's.
@@ -877,21 +853,6 @@ pub(super) struct ClaudeCodeRun {
     /// result, or a user message).
     report_delivered: bool,
     approval: Option<Approval>,
-    /// Text to add after a call's result: a message given with its approval.
-    after_result: HashMap<String, String>,
-    /// Context delivered with the latest results, mirrored after them.
-    delivered_context: Vec<DeliveredContext>,
-    /// The marks of the context taken out of the task to be sent
-    /// ([`TurnContext::marks`]), kept by the task once it holds that
-    /// context: in a message it records, or pending again.
-    taken_marks: BTreeMap<String, u64>,
-    /// The marks of `delivered_context`, kept by the task once it is
-    /// mirrored after the results.
-    delivered_marks: BTreeMap<String, u64>,
-    /// The notes the user typed that were sent as messages, by the UUID of the
-    /// message, until the CLI reports what became of them, each with the
-    /// marks of its update when the note was all of it.
-    sent_notes: HashMap<String, (String, BTreeMap<String, u64>)>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -994,7 +955,7 @@ impl ClaudeCodeRun {
             commands,
             turn_context: None,
             context_receipts: Vec::new(),
-            held_context_ids: Vec::new(),
+            delivery: Delivery::default(),
             host_decisions: super::HostDecisions::default(),
             handover_hook: None,
             handover_threshold: Default::default(),
@@ -1029,11 +990,6 @@ impl ClaudeCodeRun {
             questions_numbered: 0,
             report_delivered: false,
             approval: None,
-            after_result: HashMap::new(),
-            delivered_context: Vec::new(),
-            taken_marks: BTreeMap::new(),
-            delivered_marks: BTreeMap::new(),
-            sent_notes: HashMap::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
             api_error: None,
@@ -1771,140 +1727,143 @@ impl ClaudeCodeRun {
             .is_empty()
     }
 
-    /// The context waiting for the model (taken from the channel, and the
-    /// turn context source's), as one context update, with its images.
-    /// `None` while a handover report is due, when it waits for the fresh
-    /// conversation, and during a compaction, when it waits for the agent's
-    /// next input. Where images can't go (`with_images` false: a hook's
-    /// context is text), the text goes now, saying that the update's images
-    /// come with the next input, and only the images wait. There the part
-    /// of the update the user typed ([`TurnContext::user_content`]) comes
-    /// apart from the rest, as the second text, to go as their message
-    /// (the update's text is empty when only that part is waiting). With
-    /// images, it is part of the update.
-    fn take_context(&mut self, with_images: bool) -> Option<(String, String, Vec<ContextImage>)> {
-        if self.handover_due() || self.compaction.is_some() {
-            // It waits for a later input, and arko calls that start meanwhile
-            // count newer context only.
+    /// Whether context waits for a later input: while a handover report is
+    /// due it waits for the fresh conversation, and during a compaction for
+    /// the agent's next input. Arko calls that start meanwhile count newer
+    /// context only.
+    fn context_waits(&mut self) -> bool {
+        let waits = self.handover_due() || self.compaction.is_some();
+        if waits {
             self.context_arrivals.caught_up();
-            return None;
         }
-        let mut update_ids = Vec::new();
-        let mut arrived = 0;
-        let mut typed = String::new();
-        // A hook's text is limited. The injections that don't fit, and the
-        // source's update when little room is left, wait for the next one.
-        let mut deferred = Vec::new();
-        let mut room = HOOK_MAX_CHARS;
-        if !with_images {
-            let (mut used, mut fit) = (0, 0);
-            for content in &self.task.pending_context_injections {
-                let chars = content.chars().count() + 2;
-                if fit > 0 && used + chars > HOOK_MAX_CHARS {
-                    break;
-                }
-                used += chars;
-                fit += 1;
-            }
-            deferred = self.task.pending_context_injections.split_off(fit);
-            room = HOOK_MAX_CHARS.saturating_sub(used);
-        }
-        let update = self.turn_context.as_ref().and_then(|source| {
-            if with_images {
-                source.context_update(self.task.id)
-            } else if deferred.is_empty() && room >= HOOK_MAX_CHARS / 2 {
-                source.context_update_within(self.task.id, room)
-            } else {
-                None
-            }
-        });
-        if let Some(update) = update {
-            if !update.content.trim().is_empty()
-                || !update.user_content.trim().is_empty()
-                || !update.images.is_empty()
-            {
-                update_ids = update.ids;
-            }
-            raise(&mut self.taken_marks, &update.marks);
-            arrived = update.images.len();
-            self.queue_context(update.content, false);
-            if with_images {
-                self.queue_context(update.user_content, false);
-            } else if !update.user_content.trim().is_empty() {
-                typed = update.user_content;
-            }
-            self.task.pending_context_images.extend(update.images);
-        }
-        if self.task.pending_context_injections.is_empty()
-            && self.task.pending_context_images.is_empty()
-            && typed.is_empty()
-        {
-            self.keep_taken_marks();
-            return None;
-        }
-        let hold_images = !with_images && !self.task.pending_context_images.is_empty();
-        if hold_images && self.task.pending_context_injections.is_empty() && typed.is_empty() {
-            // Only images wait, said already: nothing goes until they can.
-            self.held_context_ids.append(&mut update_ids);
-            // (They wait in the task.)
-            self.keep_taken_marks();
-            return None;
-        }
-        let mut content = self.task.pending_context_injections.join("\n\n");
-        let mut ids = self
-            .turn_context
-            .as_ref()
-            .map(|source| {
-                self.task
-                    .pending_context_injections
-                    .iter()
-                    .filter_map(|content| source.identify(content))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        ids.append(&mut self.held_context_ids);
-        ids.append(&mut update_ids);
-        self.task.pending_context_injections = deferred;
-        // Claude Code has it, so arko calls that start from now on count
-        // newer context.
-        self.context_arrivals.caught_up();
-        let images = if hold_images {
-            if arrived > 0 {
-                // With the user's notes, which the images belong to.
-                let text = if typed.is_empty() {
-                    &mut content
-                } else {
-                    &mut typed
-                };
-                text.push_str(&match arrived {
-                    1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
-                    count => format!("\n\n(The {count} images of this update can't come during a turn. They come with your next input.)"),
-                });
-            }
-            Vec::new()
-        } else {
-            if content.is_empty() && typed.is_empty() {
-                content = "The images an earlier update said would follow.".to_string();
-            }
-            std::mem::take(&mut self.task.pending_context_images)
-        };
-        self.context_receipts.push(AgentEvent::ContextInjected {
-            ids,
-            bytes: content.len() + typed.len(),
-        });
-        let content = if content.is_empty() {
-            content
-        } else {
-            format!("{CONTEXT_UPDATE}\n\n{content}")
-        };
-        Some((content, typed, images))
+        waits
     }
 
-    /// The task holds the context taken since the last call, so it keeps its
-    /// marks.
-    fn keep_taken_marks(&mut self) {
-        let marks = std::mem::take(&mut self.taken_marks);
+    /// The turn context source's update joins the task's queue, its images
+    /// the task's pending images. During a turn (`in_turn`), where a hook's
+    /// context is text, the update says that its images come with the next
+    /// input, and the part the user typed ([`TurnContext::user_content`])
+    /// waits to go as their message (see [`Delivery`]).
+    fn take_update(&mut self, in_turn: bool) {
+        let Some(update) = self
+            .turn_context
+            .as_ref()
+            .and_then(|source| source.context_update(self.task.id))
+        else {
+            return;
+        };
+        let super::TurnContext {
+            mut content,
+            mut user_content,
+            ids,
+            images,
+            marks,
+        } = update;
+        if in_turn && !images.is_empty() {
+            let said = match images.len() {
+                1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
+                count => format!("\n\n(The {count} images of this update can't come during a turn. They come with your next input.)"),
+            };
+            // With the user's notes, which the images belong to.
+            if !user_content.trim().is_empty() {
+                user_content.push_str(&said);
+            } else if !content.trim().is_empty() {
+                content.push_str(&said);
+            }
+        }
+        let holds =
+            !content.trim().is_empty() || !user_content.trim().is_empty() || !images.is_empty();
+        let ids = if holds { ids } else { Vec::new() };
+        let wakes = !content.trim().is_empty();
+        self.task.pending_context_images.extend(images);
+        let marks = self.delivery.take_update(
+            &mut self.task.pending_context_injections,
+            content,
+            user_content,
+            ids,
+            marks,
+            in_turn,
+        );
         self.task.raise_context_marks(&marks);
+        if wakes {
+            self.context_arrivals.notify();
+        }
+    }
+
+    /// Every text a hook gives the model, measured as it goes out, within the
+    /// budget of [`hook_budget`](super::hook_budget): call `call`'s denial in
+    /// a PreToolUse hook or a permission answer (`denial`), or else a
+    /// PostToolUse hook's context. A denial too long for the budget is cut,
+    /// and its rest waits for the call's result. A PostToolUse hook carries
+    /// the task's queue from the first item not in a hook already, as much
+    /// as fits, and the source is asked for its update only once nothing
+    /// waits outside a hook. `None` when a PostToolUse hook carries nothing.
+    fn hook_text(&mut self, call: Option<&str>, denial: Option<String>) -> Option<String> {
+        let text = match denial {
+            Some(denial) => Some(self.delivery.deny(
+                &mut self.task.pending_context_injections,
+                call,
+                denial,
+            )),
+            None if self.context_waits() => None,
+            None => {
+                if self
+                    .delivery
+                    .caught_up(&self.task.pending_context_injections)
+                {
+                    self.take_update(true);
+                }
+                call.and_then(|call| {
+                    self.delivery
+                        .fill(&self.task.pending_context_injections, call)
+                })
+            }
+        };
+        debug_assert!(
+            text.as_ref()
+                .is_none_or(|text| text.len() <= super::hook_budget::HOOK_MAX_BYTES)
+        );
+        text
+    }
+
+    /// The context waiting for the model, as the next input's update with
+    /// its images: the whole queue, a split item's rest included, and the
+    /// source's update. The hooks Claude Code didn't acknowledge are
+    /// dropped first, their items still queued, so they go now. `None` when
+    /// nothing waits, and while context waits for a later input (see
+    /// [`context_waits`](Self::context_waits)).
+    fn take_all_context(&mut self) -> Option<(String, Vec<ContextImage>)> {
+        if self.context_waits() {
+            return None;
+        }
+        let marks = self
+            .delivery
+            .settle(&mut self.task.pending_context_injections);
+        self.task.raise_context_marks(&marks);
+        self.take_update(false);
+        // Claude Code has it all, so arko calls that start from now on
+        // count newer context.
+        self.context_arrivals.caught_up();
+        if self.task.pending_context_injections.is_empty()
+            && self.task.pending_context_images.is_empty()
+        {
+            return None;
+        }
+        let source = self.turn_context.clone();
+        let identify = |content: &str| source.as_ref().and_then(|source| source.identify(content));
+        let ids = self
+            .delivery
+            .all_ids(&self.task.pending_context_injections, &identify);
+        let mut content = std::mem::take(&mut self.task.pending_context_injections).join("\n\n");
+        if content.is_empty() {
+            content = "The images an earlier update said would follow.".to_string();
+        }
+        let images = std::mem::take(&mut self.task.pending_context_images);
+        self.context_receipts.push(AgentEvent::ContextInjected {
+            ids,
+            bytes: content.len(),
+        });
+        Some((format!("{CONTEXT_UPDATE}\n\n{content}"), images))
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -2174,12 +2133,11 @@ impl ClaudeCodeRun {
                     .unwrap_or_default(),
             );
         }
-        if let Some((context, _, images)) = self.take_context(true) {
+        if let Some((context, images)) = self.take_all_context() {
             self.task.conversation.add_user_message_with_contents(
                 crate::task::with_context_images(context.clone(), images),
             );
             self.task.increment_user_message_count();
-            self.keep_taken_marks();
             parts.push(context);
         }
         let messages = &self.task.conversation.messages[synced..];
@@ -2435,7 +2393,7 @@ impl ClaudeCodeRun {
         }
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
-        while !self.sent_notes.is_empty()
+        while self.delivery.notes_unsettled()
             && let Ok(Some(message)) =
                 tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
         {
@@ -2443,7 +2401,12 @@ impl ClaudeCodeRun {
                 self.note_settled(&raw);
             }
         }
-        self.sent_notes.clear();
+        // The hooks Claude Code didn't acknowledge are dropped, their items
+        // still queued for the next input, and what waits joins the queue.
+        let marks = self
+            .delivery
+            .session_ended(&mut self.task.pending_context_injections);
+        self.task.raise_context_marks(&marks);
         match session.close().await {
             // Claude Code saved the session as it closed: its transcript
             // holds every call's outcome.
@@ -2570,6 +2533,15 @@ impl ClaudeCodeRun {
                 let mut answer = self
                     .gate(tool_use_id.clone(), &tool_name, judged, session)
                     .await?;
+                if let Some(reason) =
+                    answer.pointer_mut("/hookSpecificOutput/permissionDecisionReason")
+                    && let Some(denial) = reason.as_str().map(str::to_string)
+                {
+                    *reason = Value::String(
+                        self.hook_text(tool_use_id.as_deref(), Some(denial))
+                            .unwrap_or_default(),
+                    );
+                }
                 let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
                 if allowed {
                     if let Some(moved) = self.input_in_task_directory(&tool_name, &input) {
@@ -2997,9 +2969,11 @@ impl ClaudeCodeRun {
             .map(|call| (call.id, call.name.clone(), call.built_in));
         let Some((id, name, built_in)) = known else {
             // Not gated (an unexpected request): refused.
-            let _ = reply.send(cc::PermissionDecision::deny(
-                "This call did not pass the host's checks, so it was not run.",
-            ));
+            let reason = self.hook_text(
+                request.tool_use_id.as_deref(),
+                Some("This call did not pass the host's checks, so it was not run.".into()),
+            );
+            let _ = reply.send(cc::PermissionDecision::deny(reason.unwrap_or_default()));
             return Ok(());
         };
         let judged = built_in
@@ -3091,6 +3065,7 @@ impl ClaudeCodeRun {
         }
         let approval = self.approval.take().expect("checked");
         self.set_state(TaskState::InProgress).await?;
+        let call = approval.tool_use_id.clone();
         if !approve {
             let reason = reason.unwrap_or_else(|| "The user rejected this call.".into());
             self.emit(AgentEvent::ToolRejected {
@@ -3099,14 +3074,18 @@ impl ClaudeCodeRun {
                 reason: Some(reason.clone()),
             })
             .await?;
+            let reason = self
+                .hook_text(call.as_deref(), Some(reason))
+                .unwrap_or_default();
             let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
             return Ok(());
         }
-        if let (Some(tool_use_id), Some(message)) = (&approval.tool_use_id, message_to_agent) {
-            self.after_result.insert(
-                tool_use_id.clone(),
-                format!("Message from user on approval:\n{message}"),
-            );
+        // It waits in the queue, so it can't overtake what waits there, and
+        // usually goes in its call's hook.
+        if let Some(message) = message_to_agent.filter(|message| !message.trim().is_empty()) {
+            self.task
+                .pending_context_injections
+                .push(format!("Message from user on approval:\n{message}"));
         }
         let built_in = self
             .calls
@@ -3115,7 +3094,10 @@ impl ClaudeCodeRun {
             .is_some_and(|call| call.built_in);
         let decision = if built_in {
             match custom_output {
-                Some(output) => cc::PermissionDecision::deny(output),
+                Some(output) => cc::PermissionDecision::deny(
+                    self.hook_text(call.as_deref(), Some(output))
+                        .unwrap_or_default(),
+                ),
                 None => {
                     self.record_running(approval.tool_use_id.as_ref(), None)
                         .await;
@@ -3167,6 +3149,9 @@ impl ClaudeCodeRun {
             reason: Some(reason.clone()),
         })
         .await?;
+        let reason = self
+            .hook_text(approval.tool_use_id.as_deref(), Some(reason))
+            .unwrap_or_default();
         let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
         self.set_state(TaskState::InProgress).await
     }
@@ -3210,89 +3195,60 @@ impl ClaudeCodeRun {
                 ));
             }
         }
-        let mut texts = Vec::new();
-        if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
-            texts.push(message);
-        }
-        // A hook's context is text: its images wait for the next input. What
-        // the user typed goes as their own message instead.
-        let (context, typed, _) = self.take_context(false).unwrap_or_default();
-        // The task holds it once the CLI reports the results it went with
-        // (or it is pending again, cancelled), not now: a CLI that stops
-        // first leaves the task without it.
-        let marks = std::mem::take(&mut self.taken_marks);
-        raise(&mut self.delivered_marks, &marks);
-        let headed = !context.is_empty();
-        if headed {
-            texts.push(context);
-        }
-        if texts.is_empty() && typed.is_empty() {
-            return Ok(cc::Hook::proceed());
-        }
-        let mut delivered = DeliveredContext {
-            texts: texts.clone(),
-            note: None,
-        };
-        if !typed.is_empty() {
-            // A note alone has the update's heading in the record and the hook.
-            let shown = if headed {
-                typed.clone()
-            } else {
-                format!("{CONTEXT_UPDATE}\n\n{typed}")
-            };
-            // It counts as delivered once it is written, and goes with the
-            // next input if the CLI cancels it (see `note_settled`). Where
-            // the write fails, the hook has it.
+        let call = tool_use_id.as_deref();
+        let text = self.hook_text(call, None);
+        // What the user typed goes as their own message once everything
+        // queued ahead of it has gone in a hook. Its hook's record holds it
+        // once the CLI reports the call's results, and a note the CLI
+        // cancels goes back to its place (see `note_settled`).
+        if let Some(call) = call
+            && let Some(typed) = self
+                .delivery
+                .due_note(&self.task.pending_context_injections)
+        {
             match session.send_human(&typed).await {
-                Ok(uuid) => {
-                    // A note cancelled goes back to the task, which then
-                    // holds the update when the note was all of it.
-                    let marks = if headed {
-                        BTreeMap::new()
-                    } else {
-                        marks.clone()
-                    };
-                    delivered.note = Some((uuid.clone(), shown));
-                    self.sent_notes.insert(uuid, (typed, marks));
-                }
+                Ok(uuid) => self.delivery.note_sent(call, uuid),
                 Err(error) => {
                     log::warn!(
-                        "Task {}: could not send the user's notes as a message ({error}). They go in the hook.",
+                        "Task {}: could not send the user's notes as a message ({error}). They wait for the next hook.",
                         self.task.id
                     );
-                    texts.push(shown.clone());
-                    delivered.texts.push(shown);
+                    let marks = self
+                        .delivery
+                        .note_unsent(&mut self.task.pending_context_injections);
+                    self.task.raise_context_marks(&marks);
                 }
             }
         }
-        self.delivered_context.push(delivered);
-        self.emit_context_receipts().await?;
-        if texts.is_empty() {
-            return Ok(cc::Hook::proceed());
+        if self
+            .delivery
+            .caught_up(&self.task.pending_context_injections)
+        {
+            // Claude Code has it all, so arko calls that start from now on
+            // count newer context.
+            self.context_arrivals.caught_up();
         }
-        Ok(add_context(&texts.join("\n\n")))
+        Ok(text.map_or_else(cc::Hook::proceed, |text| add_context(&text)))
     }
 
     /// The CLI reports each message it is sent by its UUID, from `queued` to
     /// `completed`, or `cancelled` when the turn stopped before the model's
     /// next request. A note it cancelled never reached the model, so it goes
-    /// with the next input, and the record of the results it went with,
-    /// when they are still to come, leaves it out.
+    /// back to its place in the queue, and the record of the results it went
+    /// with, when they are still to come, leaves it out.
     fn note_settled(&mut self, raw: &Value) {
         let state = raw["state"].as_str();
-        let uuid = raw["command_uuid"].as_str();
         if raw["type"] == "command_lifecycle"
             && matches!(state, Some("completed" | "cancelled"))
-            && let Some((text, marks)) = uuid.and_then(|uuid| self.sent_notes.remove(uuid))
-            && state == Some("cancelled")
+            && let Some(uuid) = raw["command_uuid"].as_str()
+            && let Some(marks) = self.delivery.note_settled(
+                &mut self.task.pending_context_injections,
+                uuid,
+                state == Some("cancelled"),
+            )
         {
-            for delivered in &mut self.delivered_context {
-                if delivered.note.as_ref().map(|(sent, _)| sent.as_str()) == uuid {
-                    delivered.note = None;
-                }
-            }
-            self.queue_context(text, false);
             self.task.raise_context_marks(&marks);
+            self.context_arrivals.notify();
         }
     }
 
@@ -3448,6 +3404,9 @@ impl ClaudeCodeRun {
             cc::Message::User(user) if user.parent_tool_use_id.is_none() => {
                 self.flush_usage().await?;
                 let mut results = Vec::new();
+                // The calls whose results it reports, which acknowledges
+                // their hooks.
+                let mut reported = Vec::new();
                 for block in &user.content {
                     let cc::ContentBlock::ToolResult {
                         tool_use_id,
@@ -3489,6 +3448,7 @@ impl ClaudeCodeRun {
                         }
                     }
                     let (id, name, record) = (call.id, call.name.clone(), call.record.clone());
+                    reported.push(tool_use_id.clone());
                     results.push(if *is_error {
                         ai::ToolResult::error_from_tool_call(&record, &text)
                     } else {
@@ -3503,19 +3463,35 @@ impl ClaudeCodeRun {
                     self.task.conversation.add_tool_results(results);
                     self.observe_last();
                     recorded += 1;
-                    for context in std::mem::take(&mut self.delivered_context) {
-                        let context = context.text();
-                        if context.is_empty() {
-                            continue;
+                    // The hooks acknowledged follow the results in the order
+                    // they were given, and their items leave the queue in the
+                    // same step, so the task holds each either way.
+                    let source = self.turn_context.clone();
+                    let identify =
+                        |content: &str| source.as_ref().and_then(|source| source.identify(content));
+                    let mut receipts = Vec::new();
+                    for call in &reported {
+                        let delivered = self.delivery.reported(
+                            &mut self.task.pending_context_injections,
+                            call,
+                            &identify,
+                        );
+                        for delivered in delivered {
+                            self.task.conversation.add_user_message(&delivered.text);
+                            self.task.increment_user_message_count();
+                            self.observe_last();
+                            self.task.raise_context_marks(&delivered.marks);
+                            receipts.push(AgentEvent::ContextInjected {
+                                ids: delivered.ids,
+                                bytes: delivered.bytes,
+                            });
                         }
-                        self.task.conversation.add_user_message(&context);
-                        self.task.increment_user_message_count();
-                        self.observe_last();
                     }
-                    let marks = std::mem::take(&mut self.delivered_marks);
-                    self.task.raise_context_marks(&marks);
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                     self.report(false).await;
+                    for receipt in receipts {
+                        self.emit(receipt).await?;
+                    }
                 }
                 // Claude Code adds the context delivered with the results after
                 // them, so a session cut back to them leaves it out, and it is
@@ -4883,14 +4859,13 @@ impl ClaudeCodeRun {
             note = OPEN_TURN_MESSAGE_NOTE.to_string();
         }
         let mut images = Vec::new();
-        if let Some((context, _, context_images)) = self.take_context(true) {
+        if let Some((context, context_images)) = self.take_all_context() {
             note.push_str("\n\n");
             note.push_str(&context);
             images = context_images;
         }
         // The task records the message as it is sent.
         let sent = self.send_with_images(session, &note, images).await;
-        self.keep_taken_marks();
         if let Err(error) = sent {
             return self.session_failed(error.to_string()).await.map(Some);
         }
@@ -5760,11 +5735,3 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 #[path = "claude_code_tests.rs"]
 mod tests;
-
-/// Raises `marks` to `taken`'s where they are higher.
-fn raise(marks: &mut BTreeMap<String, u64>, taken: &BTreeMap<String, u64>) {
-    for (key, value) in taken {
-        let mark = marks.entry(key.clone()).or_insert(0);
-        *mark = (*mark).max(*value);
-    }
-}
