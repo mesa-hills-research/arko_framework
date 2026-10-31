@@ -1846,7 +1846,9 @@ impl ClaudeCodeRun {
     /// outside a hook. A denial too long for the budget is cut, and its rest
     /// joins the pending context, held until the call's result. The task is
     /// saved with the rest before the denial goes out, since nothing could
-    /// give it again. `None` when a PostToolUse hook carries nothing.
+    /// give it again. `None` when a PostToolUse hook carries nothing. The
+    /// caller of a PostToolUse hook checks [`context_waits`](Self::context_waits)
+    /// first.
     async fn hook_text(&mut self, call: Option<&str>, denial: Option<String>) -> Option<String> {
         let text = match denial {
             Some(denial) => {
@@ -1868,7 +1870,6 @@ impl ClaudeCodeRun {
                 }
                 Some(text)
             }
-            None if self.context_waits() => None,
             None => {
                 if self
                     .delivery
@@ -3275,6 +3276,11 @@ impl ClaudeCodeRun {
                     ErrorRecoveryCause::Middleware,
                 ));
             }
+        }
+        // While context waits for a later input, the hook carries none of it
+        // and no typed note goes either, so one decision covers both.
+        if self.context_waits() {
+            return Ok(cc::Hook::proceed());
         }
         let call = tool_use_id.as_deref();
         let text = self.hook_text(call, None).await;

@@ -3421,6 +3421,41 @@ async fn a_call_held_for_the_report_says_it_is_not_an_error() {
     );
 }
 
+/// While a handover report is due, a typed note waiting in the task is
+/// neither in a hook nor sent as the user's message. It waits whole for the
+/// fresh conversation's first input.
+#[tokio::test]
+async fn a_typed_note_waits_for_the_fresh_conversation_while_a_report_is_due() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"text": "REPORT"},
+    ], [complete("done")]]));
+    let mut task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    task.handover_requested = Some(crate::handover::HandoverRequest::new(0));
+    task.queue_context(crate::task::PendingContext::new(
+        crate::task::PendingKind::Typed,
+        TYPED_NOTE,
+        vec!["note:3".into()],
+    ));
+    let (task, _) = start(task).finish().await;
+    assert_eq!(task.handovers.len(), 1);
+    assert!(fake.logged("midturn").is_empty(), "{:?}", fake.log());
+    assert!(hooked(&fake).is_empty());
+    let users = fake.logged("user");
+    assert!(!users[0]["text"].as_str().unwrap().contains("Use tabs."));
+    assert!(
+        users[1]["text"].as_str().unwrap().contains("Use tabs."),
+        "{users:?}"
+    );
+    assert!(task.pending_context_injections.is_empty());
+    assert_eq!(task.holding("note:3"), crate::task::Holding::Recorded);
+}
+
 fn windows(five_hour: f64, seven_day: f64) -> Value {
     let later = chrono::Utc::now().timestamp() + 3600;
     json!({
