@@ -315,6 +315,43 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     ));
 }
 
+/// A subagent's end is told once its result is recorded, so the result
+/// read at the news has the run's latest request, which a host times the
+/// run's prompt cache by.
+#[tokio::test]
+async fn a_subagent_s_end_is_told_with_its_latest_request_recorded() {
+    let server = serve(vec![
+        ("lead", vec![start("Count the files."), wait()]),
+        ("r1", vec![complete("There are 3 files.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = Arc::new(
+        builder(&server, &workspace, SubagentsConfig::default())
+            .build()
+            .unwrap(),
+    );
+    let mut events = workflow.subscribe_subagents();
+    let watcher = tokio::spawn({
+        let workflow = workflow.clone();
+        async move {
+            while let Ok(event) = events.recv().await {
+                if matches!(event.kind, SubagentEventKind::Finished { .. }) {
+                    return workflow
+                        .agent_result(event.run_id)
+                        .map(|result| result.info().latest_request.clone());
+                }
+            }
+            None
+        }
+    });
+    within(workflow.run_agent("lead", "Delegate the count."))
+        .await
+        .unwrap();
+    let record = within(watcher).await.unwrap().expect("r1's result");
+    assert!(record.latest().is_some(), "{record:?}");
+}
+
 /// A report reaches a lead that is busy at its next turn boundary, in its
 /// context update, which `ContextInjected` reports with the item's id.
 #[tokio::test]

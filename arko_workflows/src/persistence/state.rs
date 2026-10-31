@@ -616,6 +616,62 @@ mod tests {
         );
     }
 
+    /// A completed run's latest request is in its record, so a resume has it
+    /// without reading the task. A record saved before it existed reads as
+    /// unrecorded, as its task does.
+    #[test]
+    fn a_run_s_latest_request_is_read_from_its_record() {
+        let workspace = crate::test_support::Workspace::new();
+        let mut task = arko_agents::Task::new(
+            crate::test_support::agent_config("Coder"),
+            "prompt".into(),
+            workspace.0.clone(),
+            None,
+        );
+        task.set_state(arko_agents::TaskState::Completed {
+            summary: "done".into(),
+        });
+        let sent_at = chrono::DateTime::from_timestamp_millis(1_790_000_000_123).unwrap();
+        task.latest_request = arko_agents::RequestRecord::Latest(arko_agents::LatestRequest::new(
+            sent_at,
+            &arko_ai::UsageInfo::new(40_000, 10).with_cached_tokens(39_000),
+        ));
+        let file = format!("agents/{}/version.json", task.id);
+        let record = AgentRunRecord::of(&AgentResult::of_task("coder".into(), task), file);
+        let checkpoint = |record: serde_json::Value| -> WorkflowState {
+            serde_json::from_value(serde_json::json!({
+                "workflow_name": "state-test",
+                "checkpoint_id": uuid::Uuid::new_v4(),
+                "timestamp": "2026-10-01T00:00:00Z",
+                "memory_snapshot": [],
+                "message_queues": {},
+                "budget_spent": 0.0,
+                "agent_runs": [record],
+            }))
+            .unwrap()
+        };
+        // There is no task file, so the record alone answers.
+        let saved = serde_json::to_value(&record).unwrap();
+        let results = checkpoint(saved.clone())
+            .agent_results_in(&workspace.0)
+            .unwrap();
+        let request = results[0].info().latest_request.latest().unwrap().clone();
+        assert_eq!(
+            (request.sent_at, request.input_tokens, request.cached_tokens),
+            (sent_at, 40_000, 39_000)
+        );
+        let mut older = saved;
+        older["info"]
+            .as_object_mut()
+            .unwrap()
+            .remove("latest_request");
+        let results = checkpoint(older).agent_results_in(&workspace.0).unwrap();
+        assert_eq!(
+            results[0].info().latest_request,
+            arko_agents::RequestRecord::Unrecorded
+        );
+    }
+
     /// Set for [`the_child_of_the_directory_test`].
     const DIRECTORY_CHILD: &str = "ARKO_TEST_DIRECTORY_CHILD";
 

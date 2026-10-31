@@ -1041,7 +1041,9 @@ impl Drop for ReportCommit {
 /// its next turn. The report run held that context back (its end recorded
 /// the messages among it as held by the run), so all of it is still to be
 /// given, with the marks of what it took. A Claude Code session is the one
-/// the run had, since the report was written in a copy of it.
+/// the run had, since the report was written in a copy of it. Its latest
+/// request (`Task::latest_request`) is the one before too, as its
+/// conversation is.
 pub(crate) fn report_rollback(before: Task, attempt: &Task) -> Task {
     let mut task = before;
     let calls = task.usage_history.len();

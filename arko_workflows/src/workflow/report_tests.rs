@@ -77,8 +77,16 @@ async fn a_report_is_written_on_request_in_the_same_conversation() {
         .build()
         .unwrap();
     let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let asked = chrono::Utc::now();
     let result = workflow.request_report(&first, None).await.unwrap();
     assert_eq!(result.agent_run_id, first.agent_run_id);
+    // The report's request is the run's latest now.
+    let sent = |result: &AgentResult| result.info().latest_request.latest().unwrap().sent_at;
+    assert!(sent(&first) < asked && asked <= sent(&result));
+    assert_eq!(
+        result.info().latest_request,
+        result.task().unwrap().latest_request
+    );
     assert_eq!(result.status, AgentRunStatus::Completed);
     assert_eq!(result.summary, "REPORT: said hello.");
     let task = result.task().unwrap();
@@ -1040,6 +1048,9 @@ async fn a_report_run_aborted_after_a_turn_gives_back_what_it_took() {
         was.conversation.messages.len()
     );
     assert_eq!(now.usage_history.len(), was.usage_history.len() + 1);
+    // Its latest request is the one before the report's, as its conversation is.
+    assert!(was.latest_request.latest().is_some());
+    assert_eq!(now.latest_request, was.latest_request);
     assert!(
         now.pending_context_injections
             .iter()
@@ -1402,6 +1413,8 @@ async fn a_report_run_aborted_after_the_grace_period_gives_back_what_it_took() {
         was.conversation.messages.len()
     );
     assert!(now.usage_history.len() > was.usage_history.len());
+    assert!(was.latest_request.latest().is_some());
+    assert_eq!(now.latest_request, was.latest_request);
     assert!(
         now.pending_context_injections
             .iter()
