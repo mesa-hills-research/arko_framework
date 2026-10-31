@@ -69,7 +69,7 @@ fn failed_ack_and_reconciliation_leave_memory_and_journal_unchanged() {
     assert_eq!(snapshot, w.snapshot().unwrap());
     assert_eq!(journal, fs::read(state.path().join("watch.json")).unwrap());
     fs::remove_dir(&blocked).unwrap();
-    // Failed observation wasn't consumed; it produces exactly the next sequence.
+    // Failed observation wasn't consumed, and it produces exactly the next sequence.
     let next = w.next_change(Duration::from_secs(1)).unwrap().unwrap();
     assert_eq!(next.sequence, first.sequence + 1);
     assert_eq!(next.added.len(), 1);

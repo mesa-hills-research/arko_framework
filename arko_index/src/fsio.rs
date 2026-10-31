@@ -53,7 +53,7 @@ pub(crate) fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> std:
     Ok(())
 }
 
-/// Replaces `dir/name` with `data`: a temporary file, fsynced, renamed over it, and
+/// Replaces `dir/name` with `data` through a temporary file, fsynced, renamed over it, and
 /// the directory fsynced (on Unix).
 pub(crate) fn atomic_write(dir: &Path, name: &str, data: &[u8]) -> Result<(), Error> {
     let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));

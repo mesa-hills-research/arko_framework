@@ -3,16 +3,16 @@
 //! Both sides of a product are first rotated by a block Hadamard matrix ([`hadamard`]),
 //! which leaves the product unchanged and spreads a few large activations or weights
 //! over their block, so they no longer set the quantization step of everything else.
-//! Each weight matrix is then quantized at load, per output channel and symmetrically:
-//! the channel's largest magnitude maps to [`W_MAX`]. At run time each input row (one
+//! Each weight matrix is then quantized at load, per output channel and symmetrically.
+//! The channel's largest magnitude maps to [`W_MAX`]. At run time each input row (one
 //! token) is quantized the same way, with its own scale, to [`A_MAX`] levels. The
 //! kernels sum the products of the levels exactly in `i32`, so every kernel computes
 //! the same sums and the same outputs. The epilogue scales the sums back to `f32` and
 //! adds the bias.
 //!
 //! Weights take 7 bits so the AVX2 kernel can use `vpmaddubsw`, which multiplies
-//! unsigned by signed bytes and adds pairs of products into 16 bits with saturation:
-//! activations stored as unsigned bytes (the level plus 128, at most 255) times weights
+//! unsigned by signed bytes and adds pairs of products into 16 bits with saturation.
+//! Activations stored as unsigned bytes (the level plus 128, at most 255) times weights
 //! within ±63 give pairs within 32,130, which never saturate.
 use rayon::prelude::*;
 
@@ -20,16 +20,16 @@ use rayon::prelude::*;
 pub(crate) const NR: usize = 16;
 /// Input rows per kernel call.
 pub(crate) const MR: usize = 4;
-/// Inputs per packed group: four bytes, one 32-bit lane.
+/// Inputs per packed group, four bytes, one 32-bit lane.
 const GROUP: usize = 4;
-/// Largest weight level: 7 bits.
+/// Largest weight level, 7 bits.
 pub(crate) const W_MAX: i32 = 63;
-/// Largest activation level: 8 bits.
+/// Largest activation level, 8 bits.
 pub(crate) const A_MAX: i32 = 127;
 /// The largest rotation block. Larger blocks spread outliers over more values but
 /// cost more to rotate, and 256 already gives the full gain on the local models.
 const MAX_ROTATION: usize = 256;
-/// Rows per parallel task at most: a task's activations stay in the core's cache.
+/// Rows per parallel task at most, so a task's activations stay in the core's cache.
 const MAX_BLOCK_ROWS: usize = 128;
 
 /// `y = x Wᵀ + b` with `W` quantized per output channel.
@@ -43,18 +43,18 @@ pub(crate) struct Int8Linear {
     /// The weight levels in the kernel's layout ([`Kernel::pack`]), in panels of
     /// [`NR`] output channels (the last one padded with zeros).
     weights: Vec<i8>,
-    /// Per output channel (padded to a multiple of `NR`): the weight scale.
+    /// Per output channel (padded to a multiple of `NR`), the weight scale.
     scales: Vec<f32>,
-    /// Per output channel: the share of the activations' zero point in a sum, the
+    /// Per output channel, the share of the activations' zero point in a sum, the
     /// zero point times the sum of the channel's levels.
     offsets: Vec<i32>,
-    /// Per output channel: the bias (zero when the layer has none).
+    /// Per output channel, the bias (zero when the layer has none).
     bias: Vec<f32>,
-    /// The size of the Hadamard blocks both sides are rotated by (1: none).
+    /// The size of the Hadamard blocks both sides are rotated by (1 for none).
     rotation: usize,
 }
 
-/// The rotation block for `inp` inputs: the largest power of two dividing it, at most
+/// The rotation block for `inp` inputs is the largest power of two dividing it, at most
 /// [`MAX_ROTATION`].
 fn rotation_block(inp: usize) -> usize {
     let mut b = 1;
@@ -75,7 +75,7 @@ pub(crate) fn hadamard(x: &mut [f32], block: usize) {
     for b in x.chunks_exact_mut(block) {
         let mut h = 1;
         if block >= 8 {
-            // The first three stages within each run of eight, written out: the same
+            // The first three stages within each run of eight, written out, giving the same
             // sums as the loop below, about twice as fast.
             for c in b.as_chunks_mut::<8>().0 {
                 let a = [
@@ -145,7 +145,7 @@ fn abs_max(x: &[f32]) -> f32 {
         .fold(0f32, |m, a| if a > m { a } else { m })
 }
 
-/// Quantizes `x` symmetrically to `-max..=max`: returns the scale and writes each
+/// Quantizes `x` symmetrically to `-max..=max`. Returns the scale and writes each
 /// value's level, rounded to nearest, ties to even. A row of zeros has scale zero.
 pub(crate) fn quantize(x: &[f32], max: i32, levels: &mut [i32]) -> f32 {
     let amax = abs_max(x);
@@ -155,7 +155,7 @@ pub(crate) fn quantize(x: &[f32], max: i32, levels: &mut [i32]) -> f32 {
     }
     let (inv, bound) = (max as f32 / amax, max as f32);
     // Adding 1.5 × 2^23 to a float of magnitude below 2^22 rounds it to an integer,
-    // ties to even, held in the low bits of the sum: plain arithmetic that vectorizes
+    // ties to even, held in the low bits of the sum, which is plain arithmetic that vectorizes
     // on every target (`round_ties_even` and saturating casts do not without SSE4.1).
     const ROUND: f32 = 12_582_912.0;
     let base = ROUND.to_bits() as i32;
@@ -294,11 +294,11 @@ impl Int8Linear {
 /// output channels of a panel.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Kernel {
-    /// Plain Rust that the compiler vectorizes for the target: dot products of signed
+    /// Plain Rust that the compiler vectorizes for the target, using dot products of signed
     /// bytes, which become `sdot` instructions on ARM CPUs with the dot product
     /// extension (Apple Silicon among them) and widening multiply-adds elsewhere.
     Portable,
-    /// AVX2: `vpmaddubsw`, `vpmaddwd` and `vpaddd` on 256-bit vectors.
+    /// AVX2 uses `vpmaddubsw`, `vpmaddwd` and `vpaddd` on 256-bit vectors.
     #[cfg(target_arch = "x86_64")]
     Avx2(pulp::x86::V3),
 }
@@ -321,7 +321,7 @@ impl Kernel {
         kernels
     }
 
-    /// The activations' zero point: a stored byte is the level plus this. AVX2
+    /// The activations' zero point. A stored byte is the level plus this. AVX2
     /// multiplies unsigned activation bytes, the portable kernel signed ones.
     fn zero(self) -> i32 {
         match self {
@@ -332,8 +332,8 @@ impl Kernel {
     }
 
     /// Packs row-major levels (`[channels, k]`, channels a multiple of `NR`) into the
-    /// kernel's layout. Portable: unchanged, so a panel is `NR` rows of `k` levels.
-    /// AVX2: panel `p`, group `g` holds 64 bytes, channel `c`'s four levels at
+    /// kernel's layout. For portable, unchanged, so a panel is `NR` rows of `k` levels.
+    /// For AVX2, panel `p`, group `g` holds 64 bytes, channel `c`'s four levels at
     /// `4c..4c + 4`.
     fn pack(self, levels: Vec<i8>, k: usize) -> Vec<i8> {
         match self {
@@ -422,7 +422,7 @@ mod avx2 {
                 let high: __m256i = pulp::cast(<[i8; 32]>::try_from(high).unwrap());
                 for (acc, row) in acc.iter_mut().zip(rows) {
                     // The row's four bytes in every lane, against four weights per
-                    // channel: pairs of products in 16 bits, then lanes of 32 bits.
+                    // channel, giving pairs of products in 16 bits, then lanes of 32 bits.
                     let x = avx._mm256_set1_epi32(i32::from_le_bytes(row[g]));
                     let sum = |w| avx2._mm256_madd_epi16(avx2._mm256_maddubs_epi16(x, w), ones);
                     acc[0] = avx2._mm256_add_epi32(acc[0], sum(low));
@@ -497,7 +497,7 @@ mod tests {
                     let bytes: Vec<u8> = acts.iter().flatten().map(|&l| (l + zero) as u8).collect();
                     let mut got = [[0i32; NR]; MR];
                     kernel.tile(&bytes, k, &kernel.pack(levels.clone(), k), &mut got);
-                    // The sums hold the zero point's share: zero × the levels' sum.
+                    // The sums hold the zero point's share, zero × the levels' sum.
                     for (c, column) in levels.chunks_exact(k).enumerate() {
                         let offset = zero * column.iter().map(|&l| l as i32).sum::<i32>();
                         for row in got.iter_mut() {

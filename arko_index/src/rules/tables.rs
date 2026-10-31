@@ -76,7 +76,7 @@ fn classic_index(parser: &str) -> usize {
     CLASSIC_KEYS.iter().position(|k| *k == parser).unwrap_or(0)
 }
 
-/// The classic tables: the shared rules, plus each language's fields for the next
+/// The classic tables hold the shared rules, plus each language's fields for the next
 /// chunker steps (breadcrumbs, member groups, seams), which the engine does not read
 /// yet and so leave the output unchanged.
 const CLASSIC_TABLES: [Table; 9] = [
@@ -352,7 +352,7 @@ const CLASSIC_TABLES: [Table; 9] = [
 ];
 
 /// The original rules of the nine classic languages, one list for all of them (the
-/// engine matched kind names before it had tables). Frozen: their chunk output must
+/// engine matched kind names before it had tables). Frozen, so their chunk output must
 /// not change.
 pub(crate) const CLASSIC: Table = Table {
     key: "",
@@ -442,7 +442,7 @@ pub(crate) const CLASSIC: Table = Table {
     ..D
 };
 
-/// CUDA and GLSL extend C and C++: they use the classic C++ rules and labels.
+/// CUDA and GLSL extend C and C++, so they use the classic C++ rules and labels.
 const CUDA: Table = Table {
     key: "cuda",
     breadcrumbs: &[
@@ -496,7 +496,7 @@ const GLSL: Table = Table {
     ..CLASSIC
 };
 
-/// Astro components: the `---` frontmatter script, then markup like Svelte's.
+/// Astro components have the `---` frontmatter script, then markup like Svelte's.
 const ASTRO: Table = Table {
     key: "astro",
     name_fields: &[],
@@ -773,7 +773,7 @@ const DTD: Table = Table {
     ..D
 };
 
-/// Elixir's definitions are calls (`def`, `defmodule`): keyed on the call's target.
+/// Elixir's definitions are calls (`def`, `defmodule`), keyed on the call's target.
 const ELIXIR_DEFINITIONS: &[&str] = &[
     "def",
     "defp",
@@ -967,7 +967,7 @@ const FSHARP: Table = Table {
 };
 
 const GRAPHQL_OPERATIONS: &[&str] = &["query", "mutation", "subscription"];
-/// GraphQL: schema and type definitions, their extensions, directives, fragments and
+/// GraphQL has schema and type definitions, their extensions, directives, fragments and
 /// named operations.
 const GRAPHQL: Table = Table {
     key: "graphql",
@@ -1149,7 +1149,7 @@ const JULIA: Table = Table {
     ],
     containers: &["module_definition"],
     attach: &["string_literal"],
-    // `f(x) = x + 1` defines a function: an assignment whose left side is a call.
+    // `f(x) = x + 1` defines a function, an assignment whose left side is a call.
     bindings: &[("assignment", "*")],
     callables: &["call_expression"],
     names: &[
@@ -1304,7 +1304,7 @@ const MARKDOWN: Table = Table {
     ],
     content: Content::Prose,
     definitions: &["section"],
-    // A heading stays with the content after it; the front matter (when it is not
+    // A heading stays with the content after it, and the front matter (when it is not
     // the file's metadata region) with the first section.
     attach: &[
         "atx_heading",
@@ -1784,7 +1784,7 @@ const SOLIDITY: Table = Table {
 const SQL: Table = Table {
     key: "sql",
     // A statement that creates something (`CREATE TABLE`, `CREATE FUNCTION`) is a
-    // definition; the others pack together.
+    // definition, and the others pack together.
     bindings: &[("statement", "*")],
     callables: &[
         "create_table",

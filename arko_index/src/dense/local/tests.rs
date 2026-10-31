@@ -1,4 +1,4 @@
-//! Offline tests on tiny random models of both architectures: the packed, threaded
+//! Offline tests on tiny random models of both architectures, covering the packed, threaded
 //! forward pass against a direct transcription of the PyTorch models, batching and
 //! thread invariance, prefixes, truncation and file checks. The real models are
 //! checked against PyTorch by the ignored test in `tests/local_embed.rs`.
@@ -7,7 +7,7 @@ use super::*;
 use std::collections::HashMap;
 
 pub(crate) type Weights = HashMap<String, Vec<f32>>;
-/// A tensor to write: name, shape, values.
+/// A tensor to write (name, shape, values).
 type Tensor = (String, Vec<usize>, Vec<f32>);
 
 pub(crate) struct Tiny {
@@ -36,7 +36,7 @@ pub(crate) const NOMIC: Tiny = Tiny {
     vocab: 64,
 };
 
-/// Deterministic values that half precision stores exactly: k / 1024, |k| ≤ 512.
+/// Deterministic values that half precision stores exactly (k / 1024, |k| ≤ 512).
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> f32 {
@@ -159,7 +159,7 @@ fn config(t: &Tiny) -> String {
     .to_string()
 }
 
-/// A word-level tokenizer: `[CLS] words [SEP]`, unknown words as `[UNK]`.
+/// A word-level tokenizer producing `[CLS] words [SEP]`, with unknown words as `[UNK]`.
 fn tokenizer(vocab: usize) -> String {
     let mut words: Vec<String> = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "search", "for", ":"]
         .iter()
@@ -449,7 +449,7 @@ pub(crate) fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() <= tol)
 }
 
-/// Texts of 1 to 150 words: longer than one attention block of 64 query rows.
+/// Texts of 1 to 150 words, longer than one attention block of 64 query rows.
 pub(crate) fn texts() -> Vec<String> {
     let mut texts = vec![
         "w10".to_string(),
@@ -540,7 +540,7 @@ fn batching_threads_and_order_leave_vectors_unchanged() {
             .unwrap();
         let all = one.embed(&refs, InputKind::Document).unwrap().vectors;
         for threads in [2, 5] {
-            // Small batches: forward passes of at most 40 tokens.
+            // Small batches, with forward passes of at most 40 tokens.
             let e = LocalEmbedder::load_with_precision(model, dir.path(), precision)
                 .unwrap()
                 .with_threads(threads)
@@ -561,7 +561,7 @@ fn batching_threads_and_order_leave_vectors_unchanged() {
     }
 }
 
-/// The vector of a text the model takes in windows: their reference vectors' mean
+/// The vector of a text the model takes in windows is their reference vectors' mean
 /// weighted by the text tokens each holds, at unit length.
 fn windowed(t: &Tiny, w: &Weights, windows: &[(Vec<u32>, usize)]) -> Vec<f32> {
     let mut v = vec![0f32; t.hidden];
@@ -590,7 +590,7 @@ fn queries_take_the_prefix_and_long_texts_are_embedded_whole() {
         &reference(&NOMIC, &w, &[2, 4, 5, 6, 20, 21, 3]),
         2e-5
     ));
-    // 100 words, over the model's 32 tokens: counted whole, embedded in windows of 30
+    // 100 words, over the model's 32 tokens, counted whole, embedded in windows of 30
     // words between [CLS] and [SEP].
     let words: Vec<u32> = (0..100).map(|k| 10 + k % 50).collect();
     let long = words
@@ -626,7 +626,7 @@ fn queries_take_the_prefix_and_long_texts_are_embedded_whole() {
         .join(" ");
     let o = e.embed(&[&other], InputKind::Document).unwrap();
     assert!(cosine(&v.vectors[0], &o.vectors[0]) < 0.9999);
-    // A long query repeats the prefix in every window: 27 words each.
+    // A long query repeats the prefix in every window, 27 words each.
     let q = e.embed(&[&long], InputKind::Query).unwrap();
     let queries: Vec<(Vec<u32>, usize)> = words
         .chunks(27)
@@ -685,7 +685,7 @@ fn the_catalog_names_pinned_models() {
     assert!(d.input_types);
     assert!(!JINA_CODE_V2.descriptor(Precision::Int8).input_types);
     assert!(LocalModel::for_descriptor(&d.clone().with_revision("other")).is_err());
-    // The precision is part of the vectors' identity: f32 keeps the bare commit.
+    // The precision is part of the vectors' identity, and f32 keeps the bare commit.
     let int8 = CODE_RANK_EMBED.descriptor(Precision::Int8);
     assert_eq!(d.revision.as_deref(), Some(CODE_RANK_EMBED.revision));
     assert_eq!(

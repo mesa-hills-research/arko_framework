@@ -43,7 +43,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use support::voyage::VoyageEmbedder;
 
-/// The embedder of `--model`: Voyage (needs the key), a local model, or the offline
+/// The embedder of `--model` is Voyage (needs the key), a local model, or the offline
 /// hash embedder.
 fn embedder(args: &Args) -> Result<Box<dyn Embedder>, Error> {
     if args.model == "hash" || args.model.starts_with("local") {
@@ -88,7 +88,7 @@ struct Behaviour {
     expect: Vec<Target>,
 }
 
-/// One question: what counts as found, and for breadth the callers.
+/// One question, covering what counts as found and, for breadth, the callers.
 struct Case {
     kind: &'static str,
     id: String,
@@ -255,7 +255,7 @@ fn main() -> Result<(), Error> {
     };
 
     if args.dry_run {
-        // No key needed: the cap of 0 sends nothing; the tokenizer counts.
+        // No key needed, because the cap of 0 sends nothing and the tokenizer counts.
         let embedder =
             VoyageEmbedder::new(EmbeddingClient::new(), &args.model, args.dimensions, true)?;
         let name = state.file_name().unwrap_or_default().to_string_lossy();
@@ -322,7 +322,7 @@ fn main() -> Result<(), Error> {
         queries.len(),
         started.elapsed().as_secs_f64()
     );
-    // `--top`: one JSON line per question and mode, written at the end.
+    // `--top` writes one JSON line per question and mode at the end.
     let mut top = Vec::new();
 
     let modes = [Mode::Lexical, Mode::Dense, Mode::Hybrid];

@@ -1,5 +1,5 @@
 //! The GPU encoder against the CPU encoder on tiny random models of both
-//! architectures: on burn's ndarray backend (no GPU needed) and, when wgpu finds an
+//! architectures, on burn's ndarray backend (no GPU needed) and, when wgpu finds an
 //! adapter, on wgpu. Also the batch plan and the device choice.
 use super::super::tests::{JINA, NOMIC, close, cosine, texts, tiny_model};
 use super::encoder::{SCORE_LIMIT, query_block};
@@ -106,13 +106,13 @@ fn long_texts_run_in_the_cpus_windows() {
         gpu.count_tokens(&texts).unwrap(),
         cpu.count_tokens(&texts).unwrap()
     );
-    // Four windows of the long text (twice) and the short text: nine sequences.
+    // Four windows of the long text (twice) and the short text make nine sequences.
     assert_eq!(gpu.batch_stats().texts, 2 * 9);
 }
 
 #[test]
 fn attention_in_blocks_matches_one_block() {
-    // 16 query rows per block: the 400-token texts take 25 blocks.
+    // 16 query rows per block, so the 400-token texts take 25 blocks.
     SCORE_LIMIT.store(16 * 400 * 4, Ordering::Relaxed);
     let result = std::panic::catch_unwind(|| matches_cpu(ndarray, Precision::F32, 2e-5, 0.99999));
     SCORE_LIMIT.store(0, Ordering::Relaxed);
@@ -124,7 +124,7 @@ fn attention_in_blocks_matches_one_block() {
 /// a few query rows, and the same vectors.
 #[test]
 fn small_buffers_split_the_work_alike() {
-    // 8,192 f32 values (the tiny Nomic model's largest weight): 512 tokens of hidden
+    // 8,192 f32 values (the tiny Nomic model's largest weight), which is 512 tokens of hidden
     // states per pass, blocks of 16 to 170 tokens for the projections, and 5 to 10
     // query rows per attention block of the longest texts.
     matches_cpu(
@@ -198,9 +198,9 @@ fn plans_sort_by_length_within_the_budget() {
 #[test]
 fn query_blocks_bound_the_scores() {
     assert_eq!(query_block(12, 512, 1 << 26), 512);
-    // 8,192 tokens and 12 heads: 682 rows fit, 672 in multiples of 16.
+    // 8,192 tokens and 12 heads, so 682 rows fit, 672 in multiples of 16.
     assert_eq!(query_block(12, 8192, 1 << 26), 672);
-    // Fewer than 16 rows fit: as many as fit, at least one.
+    // Fewer than 16 rows fit, so as many as fit, at least one.
     assert_eq!(query_block(12, 8192, 12 * 8192 * 5), 5);
     assert_eq!(query_block(1000, 8192, 1 << 20), 1);
     assert_eq!(query_block(1, 8, 1), 1);
@@ -283,7 +283,7 @@ fn wgpu_scores_over_the_largest_buffer_run_in_blocks() {
     let Some(choice) = wgpu_adapter() else {
         return;
     };
-    // Jina's 4 heads: one 3,202-token text has 41M scores per layer, 164 MB in f32.
+    // Jina's 4 heads, so one 3,202-token text has 41M scores per layer, 164 MB in f32.
     let tokens = 3202u64;
     if choice.max_buffer() >= 4 * 4 * tokens * tokens {
         eprintln!("skipped: the adapter's buffers hold the scores whole");

@@ -1,5 +1,5 @@
 //! Local models on a GPU (features `local-embed-gpu` and `local-embed-cuda`), on burn's
-//! tensors: CUDA through cubecl, which compiles its kernels with NVRTC at run time and
+//! tensors, with CUDA through cubecl, which compiles its kernels with NVRTC at run time and
 //! loads the driver and NVRTC when it starts, or wgpu (Vulkan, Metal, DirectX 12). The
 //! same encoder runs on burn's ndarray backend in the offline tests.
 //!
@@ -8,7 +8,7 @@
 //! alone may exceed it), so padding stays small. Every batch is queued before the
 //! first is read back, and the vectors return in input order.
 //!
-//! Every tensor stays within the device's largest buffer ([`Choice::max_buffer`]): a
+//! Every tensor stays within the device's largest buffer ([`Choice::max_buffer`]), so a
 //! batch holds at most as many tokens as one hidden state of that size, and the encoder
 //! splits its widest work (the feed-forward layer, the query, key and value projection
 //! and attention's scores) into pieces that fit. cubecl panics on its device thread
@@ -34,9 +34,9 @@ pub(crate) enum Choice {
     #[cfg(feature = "local-embed-cuda")]
     Cuda {
         name: String,
-        /// A quarter of the GPU's memory: cubecl's largest allocation on CUDA.
+        /// A quarter of the GPU's memory, cubecl's largest allocation on CUDA.
         max_buffer: u64,
-        /// What the compiled kernels depend on, such as `sm89-nvrtc12.4`: the GPU's
+        /// What the compiled kernels depend on, such as `sm89-nvrtc12.4`, the GPU's
         /// architecture and the NVRTC version. Names their cache directory.
         target: String,
     },
@@ -55,7 +55,7 @@ pub(crate) enum Choice {
 }
 
 impl Choice {
-    /// The device, for messages: `CUDA: NAME` or `wgpu: NAME (API, type)`.
+    /// The device, for messages, as `CUDA: NAME` or `wgpu: NAME (API, type)`.
     pub(crate) fn name(&self) -> String {
         match self {
             #[cfg(feature = "local-embed-cuda")]
@@ -68,7 +68,7 @@ impl Choice {
     }
 
     /// What the device's compiled kernels depend on, when cubecl can keep them on disk
-    /// (CUDA: `sm89-nvrtc12.4`, the GPU's architecture and the NVRTC version).
+    /// (for CUDA, `sm89-nvrtc12.4`, the GPU's architecture and the NVRTC version).
     fn kernel_target(&self) -> Option<&str> {
         match self {
             #[cfg(feature = "local-embed-cuda")]
@@ -78,7 +78,7 @@ impl Choice {
         }
     }
 
-    /// The largest buffer, in bytes, the device allocates: the bound of every tensor.
+    /// The largest buffer, in bytes, the device allocates, the bound of every tensor.
     pub(crate) fn max_buffer(&self) -> u64 {
         match self {
             #[cfg(feature = "local-embed-cuda")]
@@ -91,11 +91,11 @@ impl Choice {
     }
 }
 
-/// The GPU `device` stands for with `precision`: `Ok(None)` when [`Device::Auto`]
+/// The GPU `device` stands for with `precision`, or `Ok(None)` when [`Device::Auto`]
 /// finds none (the CPU runs it). Errors say why a named device can't.
 pub(crate) fn choose(device: Device, precision: Precision) -> Result<Option<Choice>, Error> {
     let auto_f32 = device == Device::Auto && precision == Precision::F32;
-    // The adapters wgpu may take: discrete GPUs only for Auto with f32 (where the CPU
+    // The adapters wgpu may take are discrete GPUs only for Auto with f32 (where the CPU
     // is the alternative), any GPU for Gpu and Auto, anything when wgpu is named.
     let adapters = match device {
         _ if auto_f32 => Adapters::Discrete,
@@ -172,7 +172,7 @@ fn cuda() -> Result<Choice, String> {
     Err("CUDA needs arko_index built with the local-embed-cuda feature".into())
 }
 
-/// Where cubecl looks for the CUDA toolkit's headers, which NVRTC includes: `CUDA_PATH`,
+/// Where cubecl looks for the CUDA toolkit's headers, which NVRTC includes, namely `CUDA_PATH`,
 /// else `/usr/local/cuda`, `/opt/cuda` or `/usr` (with `nvcc`) on Linux.
 #[cfg(feature = "local-embed-cuda")]
 fn cuda_path() -> Option<std::path::PathBuf> {
@@ -203,7 +203,7 @@ enum Adapters {
     Any,
 }
 
-/// The first wgpu adapter of the platform's graphics API that `adapters` allows:
+/// The first wgpu adapter of the platform's graphics API that `adapters` allows,
 /// discrete GPUs first, then integrated and virtual GPUs, then a CPU adapter.
 #[cfg(feature = "local-embed-gpu")]
 fn wgpu(adapters: Adapters) -> Result<Choice, String> {
@@ -276,7 +276,7 @@ pub(crate) struct Gpu {
     run: Box<dyn Run>,
     name: String,
     hidden: usize,
-    /// The most tokens one forward pass may hold on this device: one hidden state of
+    /// The most tokens one forward pass may hold on this device, since one hidden state of
     /// them fills the largest buffer.
     max_pass_tokens: usize,
     /// Why the device failed, after a panic in its runtime, which leaves it unusable.
@@ -385,7 +385,7 @@ fn configure_cubecl(choice: &Choice) {
     });
 }
 
-/// The user's cache directory: `$XDG_CACHE_HOME` or `~/.cache` on Linux and other Unix
+/// The user's cache directory is `$XDG_CACHE_HOME` or `~/.cache` on Linux and other Unix
 /// systems, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows.
 fn user_cache_dir() -> Option<std::path::PathBuf> {
     let env = |k: &str| {
@@ -463,7 +463,7 @@ impl Gpu {
         self.hidden
     }
 
-    /// The device, for messages: `CUDA: NAME` or `wgpu: NAME (API, type)`.
+    /// The device, for messages, as `CUDA: NAME` or `wgpu: NAME (API, type)`.
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -499,7 +499,7 @@ impl Gpu {
         if pooled.len() != seqs.len() {
             return Err("the GPU returned the wrong number of vectors".into());
         }
-        // A wrong kernel or an overflow in f16 can leave NaN or infinity: an error
+        // A wrong kernel or an overflow in f16 can leave NaN or infinity, which is an error
         // rather than a vector that spoils every score it enters.
         if pooled.iter().flatten().any(|x| !x.is_finite()) {
             return Err(format!(
@@ -528,7 +528,7 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Texts by token count (`lens`), longest first (ties in input order), in batches
-    /// of at most `budget` padded tokens: a batch of rows padded to its first text's
+    /// of at most `budget` padded tokens, where a batch of rows padded to its first text's
     /// length, rounded up to a multiple of [`PAD`].
     pub(crate) fn new(lens: &[usize], budget: usize) -> Self {
         let mut order: Vec<usize> = (0..lens.len()).collect();

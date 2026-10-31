@@ -1,6 +1,6 @@
 //! The transformer encoders of the local models, on `f32` matrices in row-major order.
 //!
-//! A batch is packed: every text's tokens follow the previous text's, with no padding,
+//! A batch is packed. Every text's tokens follow the previous text's, with no padding,
 //! so the linear layers run once over all tokens of the batch and attention runs per
 //! text, head and block of query rows. The linear layers run in int8
 //! ([`int8`](super::int8)) or in `f32` with `gemm`, attention in `f32` with `gemm`.
@@ -16,10 +16,10 @@ use rayon::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Architecture {
-    /// Jina BERT v2 with layer norms on queries and keys (`jina-bert-v2-qk-post-norm`):
+    /// Jina BERT v2 with layer norms on queries and keys (`jina-bert-v2-qk-post-norm`), with
     /// ALiBi positions, GEGLU feed-forward, post-norm layers.
     JinaBert,
-    /// Nomic BERT: rotary positions, SwiGLU feed-forward, post-norm layers.
+    /// Nomic BERT with rotary positions, SwiGLU feed-forward, post-norm layers.
     NomicBert,
 }
 
@@ -238,7 +238,7 @@ impl F32Linear {
                 x.as_ptr(),
                 1,
                 self.inp as isize,
-                // Wᵀ: element (k, j) is w[j × inp + k].
+                // For Wᵀ, element (k, j) is w[j × inp + k].
                 self.w.as_ptr(),
                 self.inp as isize,
                 1,
@@ -261,15 +261,15 @@ impl F32Linear {
 }
 
 struct Layer {
-    /// Queries, keys and values, stacked: `[3 × hidden, hidden]`.
+    /// Queries, keys and values, stacked, shaped `[3 × hidden, hidden]`.
     qkv: Linear,
     q_norm: Option<Norm>,
     k_norm: Option<Norm>,
     out: Linear,
-    /// Jina: the attention block's own `LayerNorm(out + input)`.
+    /// For Jina, the attention block's own `LayerNorm(out + input)`.
     attn_norm: Option<Norm>,
     norm1: Norm,
-    /// The value half then the gate half: `[2 × intermediate, hidden]`.
+    /// The value half then the gate half, shaped `[2 × intermediate, hidden]`.
     up: Linear,
     down: Linear,
     norm2: Norm,
@@ -299,7 +299,7 @@ pub(crate) struct EmbeddingWeights {
     pub(crate) norm: Norm,
 }
 
-/// Reads an encoder's weights from the model file: the embeddings, and each layer
+/// Reads an encoder's weights from the model file, namely the embeddings, and each layer
 /// converted by `layer` before the next is read.
 pub(crate) fn read_weights<L>(
     cfg: &Config,
@@ -372,7 +372,7 @@ pub(crate) fn read_weights<L>(
                     out: Weights::load(t, &names(&p, &["attn.out_proj"]), h, h, cfg.qkv_bias)?,
                     attn_norm: None,
                     norm1: Norm::load(t, &format!("{p}norm1"), h)?,
-                    // fc11 is the value, fc12 the gate: fc11(x) · silu(fc12(x)).
+                    // fc11 is the value, fc12 the gate, giving fc11(x) · silu(fc12(x)).
                     up: Weights::load(
                         t,
                         &names(&p, &["mlp.fc11", "mlp.fc12"]),
@@ -406,9 +406,9 @@ pub(crate) struct Encoder {
     token_type: Vec<f32>,
     emb_norm: Norm,
     layers: Vec<Layer>,
-    /// ALiBi: each head's slope.
+    /// For ALiBi, each head's slope.
     slopes: Vec<f32>,
-    /// Rotary: the inverse frequency of each pair of a head's dimensions.
+    /// For rotary, the inverse frequency of each pair of a head's dimensions.
     inv_freq: Vec<f32>,
 }
 
@@ -424,7 +424,7 @@ const QUERY_BLOCK: usize = 128;
 
 impl Encoder {
     /// Loads the weights, with the linear layers after attention in `precision`. The
-    /// query, key and value projection always runs in `f32`: the softmax magnifies
+    /// query, key and value projection always runs in `f32`, because the softmax magnifies
     /// errors in queries and keys, and in int8 it alone would take CodeRankEmbed's
     /// vectors to a cosine similarity of about 0.987 with the `f32` ones, where the
     /// other three layers together stay above 0.998.
@@ -463,7 +463,7 @@ impl Encoder {
         self.cfg.hidden
     }
 
-    /// The final hidden states, `[tokens, hidden]`, of the packed texts: `ids` holds
+    /// The final hidden states, `[tokens, hidden]`, of the packed texts. `ids` holds
     /// every text's tokens back to back and `lens` their counts. Runs on the current
     /// rayon pool.
     pub(crate) fn forward(&self, ids: &[u32], lens: &[usize]) -> Result<Vec<f32>, Error> {
@@ -570,7 +570,7 @@ impl Encoder {
             });
     }
 
-    /// Scaled dot-product attention within each text: `ctx[tokens, hidden]` from the
+    /// Scaled dot-product attention within each text, giving `ctx[tokens, hidden]` from the
     /// packed `qkv[tokens, 3 × hidden]`. One task per text, head and block of query rows.
     fn attention(&self, qkv: &[f32], starts: &[usize], lens: &[usize], ctx: &mut [f32]) {
         let h = self.cfg.hidden;
@@ -590,7 +590,7 @@ impl Encoder {
         tasks
             .par_iter()
             .for_each_init(Vec::<f32>::new, |scores, &(s, head, r0)| {
-                // Captures the whole wrapper: a closure using only `out.0` would
+                // Captures the whole wrapper, because a closure using only `out.0` would
                 // capture the bare pointer, which is not Sync.
                 #[allow(clippy::redundant_locals)]
                 let out = out;
@@ -599,7 +599,7 @@ impl Encoder {
                 scores.clear();
                 scores.resize(rows * len, 0.0);
                 // SAFETY: the query, key and value columns of this head and text lie
-                // inside `qkv`; this task alone writes rows `start + r0..+rows`,
+                // inside `qkv`, and this task alone writes rows `start + r0..+rows`,
                 // columns `head × dh..+dh` of `ctx`.
                 unsafe {
                     // scores = scale · Q_block Kᵀ
@@ -614,7 +614,7 @@ impl Encoder {
                         qkv.as_ptr().add((start + r0) * stride + head * dh),
                         1,
                         stride as isize,
-                        // Kᵀ: element (k, j) is key j's component k.
+                        // For Kᵀ, element (k, j) is key j's component k.
                         qkv.as_ptr().add(start * stride + h + head * dh),
                         stride as isize,
                         1,
@@ -717,7 +717,7 @@ fn silu(x: f32) -> f32 {
     x / (1.0 + exp(-x))
 }
 
-/// Rotary positions: the inverse frequency of each pair of a head's dimensions (none
+/// Rotary positions are the inverse frequency of each pair of a head's dimensions (none
 /// for ALiBi models).
 pub(crate) fn inv_freq(cfg: &Config) -> Vec<f32> {
     match cfg.arch {
@@ -748,7 +748,7 @@ pub(crate) fn rotary_table(inv_freq: &[f32], len: usize) -> (Vec<f32>, Vec<f32>)
     (cos, sin)
 }
 
-/// ALiBi head slopes (Press et al.), as Jina computes them: a geometric sequence for
+/// ALiBi head slopes (Press et al.), as Jina computes them, a geometric sequence for
 /// the largest power of two at most `heads`, then every other slope of the next power
 /// of two.
 pub(crate) fn alibi_slopes(heads: usize) -> Vec<f32> {

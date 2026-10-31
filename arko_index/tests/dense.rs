@@ -1,7 +1,7 @@
-//! Dense and hybrid search with a deterministic mock embedder (no network): the
+//! Dense and hybrid search with a deterministic mock embedder (no network), covering the
 //! embedding cache, the token cap, persistence and the atomic switch, the vector
 //! store's incremental updates and recovery, watcher-driven rebuilds, filters, headers,
-//! and chunk identities. Builds here embed before they return; embedding while the
+//! and chunk identities. Builds here embed before they return, and embedding while the
 //! index is in use is in `background_embedding.rs`.
 use arko_index::{
     bench_v1::{Chunk, Error, Options, chunk_dir, chunk_str},
@@ -86,7 +86,7 @@ fn write(root: &Path, path: &str, text: &str) {
     fs::write(p, text).unwrap();
 }
 
-/// A small tree: Rust, Python and Markdown, with distinctive vocabulary per file.
+/// A small tree of Rust, Python and Markdown, with distinctive vocabulary per file.
 fn corpus(root: &Path) {
     write(
         root,
@@ -196,7 +196,7 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
     let all = rendered(root.path());
     let a = TestEmbedder::new("model-a", 32);
 
-    // First build: every distinct text once, in requests within the limits.
+    // First build, with every distinct text once, in requests within the limits.
     let s = build_with(root.path(), state.path(), Some(&a), None, 1).unwrap();
     let d = s.dense.unwrap();
     assert_eq!(d.docs, s.docs);
@@ -223,8 +223,8 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
     assert_eq!(config.quantization, Quantization::Int8);
     assert_eq!(config.max_tokens_per_run, None);
 
-    // Unchanged tree, other thread count: nothing embedded, the store unchanged,
-    // identical vector ids.
+    // Unchanged tree, other thread count, so nothing is embedded, the store is unchanged,
+    // and the vector ids are identical.
     a.reset();
     let d = build_with(root.path(), state.path(), Some(&a), None, 4)
         .unwrap()
@@ -238,8 +238,8 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
     assert_eq!(dense_files(state.path()), first);
     assert_eq!(stores(state.path()), store_a);
 
-    // Lines shift above every chunk of a file (blank lines on top): the rendered texts
-    // (path, scope, trimmed source) are unchanged, so nothing is embedded.
+    // Lines shift above every chunk of a file (blank lines on top), so the rendered texts
+    // (path, scope, trimmed source) are unchanged and nothing is embedded.
     let retry = fs::read_to_string(root.path().join("src/net/retry.rs")).unwrap();
     write(root.path(), "src/net/retry.rs", &format!("\n\n\n{retry}"));
     a.reset();
@@ -249,7 +249,7 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         .unwrap();
     assert_eq!(d.new, 0, "{:?}", a.embedded());
 
-    // One function edited: exactly the texts that changed are embedded.
+    // One function edited, so exactly the texts that changed are embedded.
     write(
         root.path(),
         "src/store/journal.rs",
@@ -270,11 +270,11 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         .unwrap();
     assert_eq!(a.embedded().into_iter().collect::<BTreeSet<_>>(), changed);
     assert_eq!((d.new, d.cached), (1, now.len() as u64 - 1));
-    // The store is updated in place: the edited chunk's vector replaced.
+    // The store is updated in place, with the edited chunk's vector replaced.
     assert_eq!((d.vectors_added, d.vectors_removed), (1, 1));
     assert_eq!(stores(state.path()), store_a);
 
-    // Another model: everything again, with that model; its config replaces the old.
+    // Another model, so everything again with that model, and its config replaces the old.
     let b = TestEmbedder::new("model-b", 32);
     let d = build_with(root.path(), state.path(), Some(&b), None, 1)
         .unwrap()
@@ -285,7 +285,7 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         DenseConfig::load(state.path()).unwrap().unwrap().embedder,
         b.descriptor()
     );
-    // Its own vector store; the other model's is removed.
+    // Its own vector store, and the other model's is removed.
     assert!(d.store_created);
     let store_b = stores(state.path());
     assert!(store_b.len() == 1 && store_b != store_a);
@@ -296,7 +296,7 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         .dense
         .unwrap();
     assert_eq!(d.new, now.len() as u64);
-    // Back to the first model: its cache is still there.
+    // Back to the first model, so its cache is still there.
     a.reset();
     let d = build_with(root.path(), state.path(), Some(&a), None, 1)
         .unwrap()
@@ -328,7 +328,7 @@ fn token_cap_stops_cleanly_and_a_rerun_finishes() {
         .unwrap();
     let total: u64 = counts.iter().sum();
 
-    // A cap of 0: nothing sent; the report says what embedding would take.
+    // A cap of 0, so nothing is sent, and the report says what embedding would take.
     let d = build_with(root.path(), state.path(), Some(&e), Some(0), 1)
         .unwrap()
         .dense
@@ -340,7 +340,7 @@ fn token_cap_stops_cleanly_and_a_rerun_finishes() {
         (all.len() as u64, total)
     );
     assert!(e.embedded().is_empty());
-    // Lexical search still works on that generation; dense finds nothing.
+    // Lexical search still works on that generation, and dense finds nothing.
     assert!(!index2::search(state.path(), "backoff").unwrap().is_empty());
     let r = hybrid::search(
         state.path(),
@@ -350,7 +350,7 @@ fn token_cap_stops_cleanly_and_a_rerun_finishes() {
     .unwrap();
     assert!(r.hits.is_empty());
 
-    // A cap of about half: stops before the request that would pass it.
+    // A cap of about half, so it stops before the request that would pass it.
     let cap = total / 2;
     let d = build_with(root.path(), state.path(), Some(&e), Some(cap), 1)
         .unwrap()
@@ -374,7 +374,7 @@ fn token_cap_stops_cleanly_and_a_rerun_finishes() {
     );
     let first_part = d.new;
 
-    // Without a cap, the rest: what the capped run embedded comes from the cache.
+    // Without a cap, the rest, and what the capped run embedded comes from the cache.
     e.reset();
     let d = build_with(root.path(), state.path(), Some(&e), None, 1)
         .unwrap()
@@ -400,7 +400,7 @@ fn generations(state: &Path) -> Vec<String> {
 
 /// A build publishes its generation before it embeds. When embedding then fails (here
 /// the provider, from its third request on), the build returns the error, and the
-/// generation stays: lexical search works, dense search finds the chunks embedded before
+/// generation stays. Lexical search works, dense search finds the chunks embedded before
 /// the failure, and the vectors paid for are kept. The next run embeds only the rest.
 #[test]
 fn a_failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
@@ -472,7 +472,7 @@ fn searches_by_mode_with_filters_headers_and_token_counts() {
     corpus(root.path());
     let e = TestEmbedder::new("model-a", 64);
 
-    // A lexical-only index: dense and hybrid modes explain what is missing.
+    // A lexical-only index, so dense and hybrid modes explain what is missing.
     build_with(root.path(), state.path(), None, None, 1).unwrap();
     let err = hybrid::search(
         state.path(),
@@ -483,7 +483,7 @@ fn searches_by_mode_with_filters_headers_and_token_counts() {
     assert!(err.to_string().contains("no embeddings"), "{err}");
 
     build_with(root.path(), state.path(), Some(&e), None, 1).unwrap();
-    // Lexical: the same ten results as index2::search, with headers and ranks.
+    // Lexical gives the same ten results as index2::search, with headers and ranks.
     let lexical = hybrid::search(state.path(), &SearchRequest::new("backoff retry"), None).unwrap();
     assert_eq!(lexical.query_tokens, 0);
     assert_eq!(
@@ -511,7 +511,7 @@ fn searches_by_mode_with_filters_headers_and_token_counts() {
         )
     );
 
-    // Dense: a query that is exactly a chunk's rendered text finds that chunk first,
+    // Dense, where a query that is exactly a chunk's rendered text finds that chunk first,
     // with similarity 1, and the query's tokens are reported.
     let chunks: Vec<Chunk> = chunk_dir(root.path(), &Options::default()).unwrap();
     let target = chunks
@@ -548,7 +548,7 @@ fn searches_by_mode_with_filters_headers_and_token_counts() {
         dense.hits.iter().map(|h| &h.chunk).collect::<Vec<_>>()
     );
 
-    // Hybrid: RRF of both lists; a chunk both rank first is first, with both ranks.
+    // Hybrid is RRF of both lists, and a chunk both rank first is first, with both ranks.
     let hybrid_results = hybrid::search(
         state.path(),
         &SearchRequest::new(text.clone()).with_mode(Mode::Hybrid),
@@ -703,7 +703,7 @@ fn int8_vectors_rescore_to_the_exact_ranking() {
                 .collect::<Vec<_>>(),
         );
     }
-    // Few vectors: every one is a rescoring candidate, so the results are exact.
+    // Few vectors, so every one is a rescoring candidate and the results are exact.
     assert_eq!(results[0], results[1]);
 }
 
@@ -723,7 +723,7 @@ fn a_watcher_delta_reembeds_only_its_new_chunks() {
     let initial = watcher.next_change(Duration::ZERO).unwrap().unwrap();
     watcher.ack(initial.sequence).unwrap();
 
-    // Edit one method's body; the methods after it move.
+    // Edit one method's body, and the methods after it move.
     let path = root.path().join("src/net/retry.rs");
     let text = fs::read_to_string(&path).unwrap();
     fs::write(
@@ -745,7 +745,7 @@ fn a_watcher_delta_reembeds_only_its_new_chunks() {
         "moved chunks are reported as changed"
     );
 
-    // The rebuild the delta triggers embeds the added chunk only: moved chunks keep
+    // The rebuild the delta triggers embeds the added chunk only, because moved chunks keep
     // their rendered text.
     e.reset();
     let d = build_with(root.path(), state.path(), Some(&e), None, 1)
@@ -763,7 +763,7 @@ fn a_watcher_delta_reembeds_only_its_new_chunks() {
 
 /// A build adds the vectors of new texts before it publishes its generation and
 /// removes those of texts that are gone after, so a build interrupted between the two
-/// leaves vectors the current generation lacks: searches skip them, and the next build
+/// leaves vectors the current generation lacks, so searches skip them, and the next build
 /// removes them.
 #[test]
 fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
@@ -783,7 +783,7 @@ fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
     let before = (search(Mode::Dense), search(Mode::Hybrid));
     assert_eq!(before.0.len(), 5);
 
-    // What an interrupted build's upserts leave: vectors under ids this generation
+    // What an interrupted build's upserts leave, namely vectors under ids this generation
     // lacks, at least as similar to the query as its own.
     let dir = state.path().join(&info.store);
     let mut store = CaprockStore::open_for(&dir, &info.store_config()).unwrap();
@@ -836,7 +836,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     let dense = SearchRequest::new("journal entry").with_mode(Mode::Dense);
     let good = ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap());
 
-    // A generation written by the earlier format: its own vectors in `dense/`.
+    // A generation written by the earlier format, with its own vectors in `dense/`.
     let g = generation(state.path());
     let mut old: serde_json::Value =
         serde_json::from_slice(&fs::read(g.join("dense.json")).unwrap()).unwrap();
@@ -878,7 +878,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
         good
     );
 
-    // A store written in an earlier store format (Caprock refuses the format version):
+    // A store written in an earlier store format (Caprock refuses the format version), so
     // a rebuild, never a misread.
     let store = state.path().join(&info.store);
     let manifest = store.join(fs::read_to_string(store.join("CURRENT")).unwrap().trim());
@@ -920,7 +920,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     );
 
     // An empty replacement under the same name (a build replacing the store stopped
-    // before filling it): an error, not a search that finds nothing.
+    // before filling it), giving an error, not a search that finds nothing.
     fs::remove_dir_all(&store).unwrap();
     CaprockStore::create(&store, &info.store_config())
         .unwrap()
@@ -981,7 +981,7 @@ fn scopes_are_metadata_and_identities_are_unchanged() {
             .unwrap()
             .scope
     };
-    // Rust: modules, inherent and trait impls, traits, macros.
+    // Rust has modules, inherent and trait impls, traits, macros.
     assert_eq!(
         scope_of("sample.rs", 17),
         "mod geometry › mod shapes › impl Point › fn distance"
@@ -999,14 +999,14 @@ fn scopes_are_metadata_and_identities_are_unchanged() {
     assert_eq!(scope_of("sample.rs", 50), "macro_rules! square");
     assert_eq!(scope_of("sample.rs", 55), "fn exponential_backoff");
     assert_eq!(scope_of("sample.rs", 2), "");
-    // Python: methods of a class, async methods, decorated functions.
+    // Python has methods of a class, async methods, decorated functions.
     assert_eq!(scope_of("sample.py", 16), "class RetryPolicy › def delay");
     assert_eq!(
         scope_of("sample.py", 25),
         "class RetryPolicy › async def run"
     );
     assert_eq!(scope_of("sample.py", 42), "def fibonacci");
-    // TypeScript: namespaces, exported classes and functions, bound arrow functions.
+    // TypeScript has namespaces, exported classes and functions, bound arrow functions.
     assert_eq!(scope_of("sample.ts", 10), "namespace Storage");
     assert_eq!(scope_of("sample.ts", 30), "class ConnectionPool");
     assert_eq!(scope_of("sample.ts", 56), "function retryDelay");
@@ -1018,7 +1018,7 @@ fn scopes_are_metadata_and_identities_are_unchanged() {
         scope_of("sample.cpp", 20),
         "namespace net › namespace http › class Router › function find"
     );
-    // Markdown: the whole small file (without its front matter) is one chunk, under the
+    // Markdown, where the whole small file (without its front matter) is one chunk, under the
     // front matter's title.
     assert_eq!(
         scope_of("guide.md", 10),
@@ -1174,7 +1174,7 @@ fn embedded_text_choices_render_and_are_saved() {
     let config = DenseConfig::load(state.path()).unwrap().unwrap();
     assert_eq!(config.embed_text, EmbedText::PathScopeSource);
 
-    // The default text is another text for every chunk with a path: all embedded anew.
+    // The default text is another text for every chunk with a path, so all are embedded anew.
     e.reset();
     let s = build_with(root.path(), state.path(), Some(&e), None, 1).unwrap();
     assert_eq!(s.dense.unwrap().embed_text, EmbedText::PathScopeSource);
@@ -1208,7 +1208,7 @@ fn lexical_scope_indexes_the_scope_words() {
         index2::build(root.path(), state.path(), options, &settings).unwrap();
         state
     };
-    // The title is the front matter's, outside every chunk: only the scope holds it.
+    // The title is the front matter's, outside every chunk, so only the scope holds it.
     let plain = build(false, &Options::default());
     assert!(paths(plain.path(), "zanzibar").is_empty());
     let scoped = build(true, &Options::default());

@@ -1,7 +1,7 @@
-//! Command-line interface to arko_index: `chunk`, `outline`, `index`/`search`,
+//! Command-line interface to arko_index with `chunk`, `outline`, `index`/`search`,
 //! `index2`/`search2` (lexical, dense or hybrid), `embed` and `status`, `watch`,
 //! `watch2` (Linux) and `bench-scan` (Unix). Run
-//! `cargo run --release -p arko_index --example arko_index_cli -- --help`; the
+//! `cargo run --release -p arko_index --example arko_index_cli -- --help`, and the
 //! `docs/arko_index-reference.md` describes the commands, the file selection flags and
 //! the protocol.
 //! Embedding with Voyage goes through arko_ai (`support/voyage.rs`) and needs
@@ -37,7 +37,7 @@ fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
 struct Walk {
     rules: FileRules,
     report: Option<PathBuf>,
-    /// `--front-matter-description`: Markdown scopes start with title and description.
+    /// `--front-matter-description` makes Markdown scopes start with title and description.
     front_matter_description: bool,
 }
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
@@ -46,10 +46,10 @@ const RUN_FLAGS: &str = "[--max-embed-tokens N|none] [--owner-pid PID]";
 const WATCH_FLAGS: &str = "[--index INDEX_STATE_DIR] [--lexical-scope]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
-/// Every command's flags; a command accepts the groups it passes to `parse_flags`.
+/// Every command's flags, and a command accepts the groups it passes to `parse_flags`.
 struct Flags {
     walk: Walk,
-    /// `--lexical-scope`: index2 also indexes each chunk's scope for lexical search.
+    /// `--lexical-scope` makes index2 also index each chunk's scope for lexical search.
     lexical_scope: bool,
     embed: Option<String>,
     embed_text: Option<EmbedText>,
@@ -57,14 +57,14 @@ struct Flags {
     embed_config: Option<PathBuf>,
     quantize: Option<Quantization>,
     vector_index: Option<VectorIndex>,
-    /// `Some(None)`: `--max-embed-tokens none`.
+    /// `Some(None)` is `--max-embed-tokens none`.
     max_embed_tokens: Option<Option<u64>>,
     no_embed: bool,
-    /// `index2 --wait-embeddings`: embed in this process before returning.
+    /// `index2 --wait-embeddings` embeds in this process before returning.
     wait_embeddings: bool,
-    /// `watch`/`watch2 --index DIR`: keep that index2 state current.
+    /// `watch`/`watch2 --index DIR` keeps that index2 state current.
     index: Option<PathBuf>,
-    /// `--owner-pid PID`: the process an embedding run belongs to (0: none).
+    /// `--owner-pid PID` is the process an embedding run belongs to (0 for none).
     owner_pid: Option<u32>,
     mode: Option<Mode>,
     limit: Option<usize>,
@@ -81,9 +81,9 @@ struct Accepts {
     walk: bool,
     embed: bool,
     search: bool,
-    /// `embed`: the run's cap.
+    /// `embed` accepts the run's cap.
     run: bool,
-    /// `watch`, `watch2`: `--index`.
+    /// `watch` and `watch2` accept `--index`.
     watch: bool,
 }
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Error> {
@@ -269,7 +269,7 @@ fn write_report_file(walk: &Walk, report: &Report) -> Result<(), Error> {
     }
     Ok(())
 }
-/// SIGINT and SIGTERM: the first stops the returned signal (a watcher stops after its
+/// On SIGINT and SIGTERM, the first stops the returned signal (a watcher stops after its
 /// current batch, an embedding run after its current request), a second exits at once
 /// (status 130).
 fn stop_on_signal() -> Result<Arc<StopSignal>, Error> {
@@ -285,7 +285,7 @@ fn stop_on_signal() -> Result<Arc<StopSignal>, Error> {
 }
 
 /// The owner an embedding run in this process gets from `--owner-pid` or
-/// `ARKO_INDEX_OWNER_PID`, when one is given (0: none).
+/// `ARKO_INDEX_OWNER_PID`, when one is given (0 for none).
 fn explicit_owner(f: &Flags) -> Result<Option<u32>, Error> {
     if let Some(pid) = f.owner_pid {
         return Ok(Some(pid));
@@ -300,7 +300,7 @@ fn explicit_owner(f: &Flags) -> Result<Option<u32>, Error> {
 /// leaves it. Everything committed before it is kept.
 const OWNER_GRACE: Duration = Duration::from_secs(30);
 
-/// Stops `stop` when the owner process `pid` ends (0: no owner), checking every second,
+/// Stops `stop` when the owner process `pid` ends (0 for no owner), checking every second,
 /// and leaves the process if the run hasn't stopped after `OWNER_GRACE`.
 fn stop_with_owner(pid: u32, stop: &Arc<StopSignal>) {
     if pid == 0 {
@@ -340,9 +340,9 @@ fn rules_changed_note() {
     );
 }
 
-/// The embedding settings of an `index2` run: `--no-embed` (lexical, and forget the
+/// The embedding settings of an `index2` run come from `--no-embed` (lexical, and forget the
 /// saved settings), or one of `--embed-config FILE` and `--embed MODEL`, else the
-/// index's saved `dense.json`; then `--dimensions`, `--embed-text`, `--quantize`,
+/// index's saved `dense.json`, then `--dimensions`, `--embed-text`, `--quantize`,
 /// `--vector-index` and `--max-embed-tokens`.
 fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     if f.no_embed {
@@ -361,7 +361,7 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     let mut config = if let Some(path) = &f.embed_config {
         let mut config = DenseConfig::read(path)?;
         if let Some(dims) = f.dimensions {
-            // Checked against the model; the file's other model settings stay.
+            // Checked against the model, and the file's other model settings stay.
             let spec = format!("{}:{}", config.embedder.provider, config.embedder.model);
             support::descriptor_for(&spec, Some(dims))?;
             config.embedder.dimensions = dims;
@@ -459,7 +459,7 @@ fn print_embed_stats(s: &EmbedStats) {
     );
 }
 
-/// One stderr line on the embedding progress of a run: after each request, and in
+/// One stderr line on the embedding progress of a run, after each request, and in
 /// `status`.
 fn progress_line(p: &EmbedProgress) -> String {
     format!(
@@ -489,7 +489,7 @@ fn coverage_note(state: EmbedState, status: &IndexStatus) -> String {
 
 /// Embeds what the current generation lacks, in this process, printing progress. The
 /// first SIGINT or SIGTERM stops it after its current request, and so does the end of
-/// the owner process `owner` (0: none).
+/// the owner process `owner` (0 for none).
 fn embed_now(state: &Path, max_tokens: Option<Option<u64>>, owner: u32) -> Result<(), Error> {
     let info = arko_index::index2::dense_info(state)?
         .ok_or("this index has no embeddings. Build it with them (index2 --embed MODEL)")?;
@@ -516,11 +516,11 @@ fn embed_now(state: &Path, max_tokens: Option<Option<u64>>, owner: u32) -> Resul
 }
 
 /// Starts `embed STATE_DIR` as a detached process of this executable, its output in
-/// `STATE_DIR/embed.log`, belonging to the owner process `owner` (0: none). Returns its
+/// `STATE_DIR/embed.log`, belonging to the owner process `owner` (0 for none). Returns its
 /// process id.
 fn embed_in_background(state: &Path, owner: u32) -> Result<u32, Error> {
     let state = state.canonicalize()?;
-    // A new file: a run still writing the previous one keeps its own (where the file
+    // A new file, so a run still writing the previous one keeps its own (where the file
     // can't be removed, it is truncated).
     let log = state.join(EMBED_LOG);
     let _ = std::fs::remove_file(&log);
@@ -547,7 +547,7 @@ fn embed_in_background(state: &Path, owner: u32) -> Result<u32, Error> {
 /// The log of the background embedding run that `index2` starts.
 const EMBED_LOG: &str = "embed.log";
 
-/// `status`: one JSON line on stdout, a summary on stderr.
+/// `status` prints one JSON line on stdout and a summary on stderr.
 fn print_status(status: &IndexStatus) -> Result<(), Error> {
     write_json(status)?;
     match &status.dense {
@@ -581,7 +581,7 @@ fn print_status(status: &IndexStatus) -> Result<(), Error> {
     Ok(())
 }
 
-/// `search2`: the request from the flags; the default mode is hybrid when the index
+/// `search2` builds the request from the flags, and the default mode is hybrid when the index
 /// has embeddings, else lexical.
 fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
     let info = arko_index::index2::dense_info(state)?;
@@ -682,7 +682,7 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
     Ok(())
 }
 
-/// `index2`'s postings memory budget: `ARKO_INDEX_INDEX_MEM_MB`, else 256 MB.
+/// `index2`'s postings memory budget is `ARKO_INDEX_INDEX_MEM_MB`, else 256 MB.
 fn index_mem_budget() -> usize {
     std::env::var("ARKO_INDEX_INDEX_MEM_MB")
         .ok()
@@ -691,7 +691,7 @@ fn index_mem_budget() -> usize {
         << 20
 }
 
-/// The watchers' `--index INDEX_STATE_DIR`: that index2 state is rebuilt when the tree
+/// The watchers' `--index INDEX_STATE_DIR` means that index2 state is rebuilt when the tree
 /// is quiet after deltas (with the embedding model saved there, if any), and a thread
 /// of this process embeds what each generation lacks.
 struct Keeper<'a> {
@@ -707,7 +707,7 @@ impl Keeper<'_> {
     fn changed(&mut self) {
         self.dirty = self.index.is_some();
     }
-    /// A poll found the tree quiet: rebuild the index if it changed. A failed rebuild is
+    /// A poll found the tree quiet, so rebuild the index if it changed. A failed rebuild is
     /// reported, and the next delta tries again.
     fn quiet(&mut self) {
         if let Err(e) = self.rebuild() {
@@ -752,7 +752,7 @@ impl Keeper<'_> {
     }
 }
 
-/// Runs a watcher loop with `--index`, when given: the embedding thread runs beside it,
+/// Runs a watcher loop with `--index`, when given. The embedding thread runs beside it,
 /// and stops after its current request when the watcher stops.
 fn keep_index(
     root: &Path,
@@ -773,7 +773,7 @@ fn keep_index(
         };
         if let Some(index) = index {
             let (wake, woken) = std::sync::mpsc::channel::<()>();
-            // An index that exists resumes its embedding now; a new one is built when
+            // An index that exists resumes its embedding now, and a new one is built when
             // the tree is first quiet.
             if arko_index::index2::status(index).is_ok() {
                 let _ = wake.send(());
@@ -786,7 +786,7 @@ fn keep_index(
                     while woken.try_recv().is_ok() {}
                     while !stop.is_stopped() {
                         match embed_for_watcher(index, stop) {
-                            // A newer generation: embed it too.
+                            // A newer generation, so embed it too.
                             Ok(true) => {}
                             Ok(false) => break,
                             Err(e) => {
@@ -803,7 +803,7 @@ fn keep_index(
             // The run in progress stops after its current request.
             stop.stop(format!("the watcher stopped on an error: {e}"));
         }
-        // Closes the channel: the embedding thread ends once its run stops or ends.
+        // Closes the channel, so the embedding thread ends once its run stops or ends.
         drop(keeper);
         result
     })
@@ -869,11 +869,11 @@ fn run() -> Result<(), Error> {
     match args.first().map(String::as_str) {
         Some("chunk") | Some("outline") if args.len() == 2 => {
             let root = Path::new(&args[1]);
-            // Scaling prototype: workers chunk and render each file; the main thread
+            // Scaling prototype. Workers chunk and render each file, and the main thread
             // writes the rendered bytes in sequential file order through one buffer.
             let outline = args[0] == "outline";
             let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
-            // A file's metadata region (Markdown front matter) comes before its chunks:
+            // A file's metadata region (Markdown front matter) comes before its chunks,
             // in the outline as `path:start-end\tmetadata\ttitle`, in JSON as a line
             // with a `file` key.
             let render = |file: FileChunks| -> Result<Vec<u8>, Error> {
@@ -922,7 +922,7 @@ fn run() -> Result<(), Error> {
                 )?;
                 out.flush()?;
                 // Quiet when only the built-in exclusions (.git, CACHEDIR.TAG, state
-                // directories) or the user's own rules removed anything; the full
+                // directories) or the user's own rules removed anything, and the full
                 // report still goes to --report FILE.
                 if r.worth_printing() {
                     report(walk, &r)?;
@@ -984,7 +984,7 @@ fn run() -> Result<(), Error> {
                         None => String::new(),
                     }
                 );
-                // The generation is published for lexical search first; the embedding
+                // The generation is published for lexical search first, and the embedding
                 // follows, in this process or in the background.
                 settings = settings.with_dense(
                     DenseBuild::from_config(embedder.as_ref(), config).with_embed_later(true),
@@ -1077,7 +1077,7 @@ fn run() -> Result<(), Error> {
                     } else {
                         keeper.quiet();
                     }
-                    // Skipped entries changed: one summary line (the list is in report.json).
+                    // Skipped entries changed, giving one summary line (the list is in report.json).
                     if watcher.report().counts != shown.counts {
                         shown = watcher.report().clone();
                         eprintln!("arko_index: {}", shown.summary());
@@ -1117,7 +1117,7 @@ fn run() -> Result<(), Error> {
                     } else {
                         keeper.quiet();
                     }
-                    // Skipped entries changed: one summary line (the list is in report.json).
+                    // Skipped entries changed, giving one summary line (the list is in report.json).
                     if watcher.report().counts != shown.counts {
                         shown = watcher.report().clone();
                         eprintln!("arko_index: {}", shown.summary());
@@ -1138,7 +1138,7 @@ fn run() -> Result<(), Error> {
 }
 /// glibc raises its mmap threshold (up to 32 MB) after large blocks are freed, so the
 /// per-thread arenas then keep up to ~64 MB each of freed file text and parse trees
-/// resident. A fixed 1 MB threshold returns large blocks to the OS on free: measured
+/// resident. A fixed 1 MB threshold returns large blocks to the OS on free. Measured
 /// on Linux, peak RSS of chunk at 12 threads 659 -> 512 MB and index2 1293 -> 869 MB
 /// for about 1 percent more wall time. Allocation results are unaffected.
 fn tune_allocator() {

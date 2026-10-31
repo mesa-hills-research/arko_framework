@@ -1,4 +1,4 @@
-//! The embedding cache of a state directory: vectors by (model descriptor, SHA-256 of
+//! The embedding cache of a state directory, holding vectors by (model descriptor, SHA-256 of
 //! the rendered text), kept across index generations so a rebuild embeds only new or
 //! changed texts, and a model change embeds everything with the new model (each
 //! descriptor has its own directory, so switching back is free).
@@ -53,7 +53,7 @@ pub(crate) struct Cache {
 }
 
 /// The text hashes the cache of `descriptor` holds, read without writing anything (a
-/// run may be appending meanwhile: the records both files hold so far). Empty when
+/// run may be appending meanwhile, and the records both files hold so far are read). Empty when
 /// there is no cache for the model.
 pub(crate) fn cached_hashes(
     state_dir: &Path,
@@ -135,7 +135,7 @@ impl Cache {
             }
             Err(e) => return Err(e.into()),
         };
-        // Files of other epochs: an interrupted compaction's output, or the input of
+        // Files of other epochs, such as an interrupted compaction's output, or the input of
         // a finished one.
         for entry in std::fs::read_dir(&dir)? {
             let name = entry?.file_name();
@@ -192,7 +192,7 @@ impl Cache {
         Ok(true)
     }
 
-    /// Appends records durably: vectors, fsync, keys, fsync.
+    /// Appends records durably (vectors, fsync, keys, fsync).
     pub(crate) fn append(&mut self, items: &[([u8; 32], Vec<f32>)]) -> Result<(), Error> {
         let row = self.dims * 4;
         let mut vbytes = Vec::with_capacity(items.len() * row);
@@ -303,7 +303,7 @@ mod tests {
         c.append(&[(h(1), vec![1.0, 2.0, 3.0]), (h(2), vec![4.0, 5.0, 6.0])])
             .unwrap();
         drop(c);
-        // A torn tail: half a vector record and no key.
+        // A torn tail, half a vector record and no key.
         let dir = state.path().join(CACHE_DIR).join(d.key());
         let mut f = OpenOptions::new()
             .append(true)
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(v, [4.0, 5.0, 6.0]);
         assert!(!c.get(&h(3), &mut v).unwrap());
         assert!(c.append(&[(h(3), vec![1.0])]).is_err());
-        // Another model has its own directory; a foreign cache.json is refused.
+        // Another model has its own directory, and a foreign cache.json is refused.
         let other = ModelDescriptor::new("hash", "hash-v1", 4);
         assert_ne!(other.key(), d.key());
         drop(Cache::open(state.path(), &other).unwrap());

@@ -1,4 +1,4 @@
-//! Embedders for the examples: Voyage through arko_ai, local models (with
+//! Embedders for the examples are Voyage through arko_ai, local models (with
 //! `--features local-embed`), and arko_index's offline `HashEmbedder`, and the
 //! processes of the CLI's background embedding (`process`). Shared by
 //! `arko_index_cli`, `dense_live_check` and `local_embed_bench`.
@@ -17,12 +17,12 @@ use arko_index::{
 /// The default dimensions of the offline hash embedder.
 pub const HASH_DIMENSIONS: usize = 256;
 
-/// The model an `--embed` value names: `voyage-code-4` (a bare Voyage model name),
-/// `voyage:MODEL`, `local[:MODEL][:PRECISION][:DEVICE]` (a model run on this machine;
-/// needs `--features local-embed`: in `int8` by default or `f32` on the CPU, and in
+/// The model an `--embed` value names, namely `voyage-code-4` (a bare Voyage model name),
+/// `voyage:MODEL`, `local[:MODEL][:PRECISION][:DEVICE]` (a model run on this machine,
+/// needs `--features local-embed`, in `int8` by default or `f32` on the CPU, and in
 /// `f32` by default, `f16` or `bf16` on a GPU with `local-embed-gpu` or
-/// `local-embed-cuda`; the device `auto`, `cpu`, `gpu`, `cuda` or `wgpu` is
-/// [`set_device`] for this process), or `hash` / `hash:hash-v1` (offline; for
+/// `local-embed-cuda`, and the device `auto`, `cpu`, `gpu`, `cuda` or `wgpu` is
+/// [`set_device`] for this process), or `hash` / `hash:hash-v1` (offline, for
 /// trying things out without a key). `dimensions` overrides the model's default.
 pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
     let (provider, model) = match spec.split_once(':') {
@@ -60,7 +60,7 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
     }
 }
 
-/// A local model by name or repository (`""`: the default model), a precision and a
+/// A local model by name or repository (`""` is the default model), a precision and a
 /// device, each optional, separated by `:`.
 #[cfg(feature = "local-embed")]
 fn local_descriptor(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
@@ -105,12 +105,12 @@ fn local_descriptor(_: &str, _: Option<usize>) -> Result<ModelDescriptor, Error>
 
 const NO_LOCAL: &str = "local models need arko_index built with --features local-embed";
 
-/// The device a local model runs on in this process: one an `--embed` value named
+/// The device a local model runs on in this process is one an `--embed` value named
 /// ([`set_device`]), else `ARKO_INDEX_EMBED_DEVICE`, else `auto`.
 static DEVICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Sets the device of local models for this process (and the background embedding
-/// it starts: [`named_device`]).
+/// it starts, per [`named_device`]).
 pub fn set_device(device: &str) {
     *DEVICE.lock().unwrap() = Some(device.to_owned());
 }
@@ -128,7 +128,7 @@ fn local_device() -> Result<arko_index::dense::local::Device, Error> {
     }
 }
 
-/// [`embedder_for`] a search's queries: a local model runs on the CPU when the CPU
+/// [`embedder_for`] a search's queries, where a local model runs on the CPU when the CPU
 /// runs its precision, since one query takes milliseconds there and a GPU takes
 /// seconds to start. The model loads on first use, as with [`embedder_for`].
 pub fn query_embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
@@ -146,7 +146,7 @@ pub fn query_embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedd
 }
 
 /// An embedder that produces the vectors `descriptor` names (Voyage needs
-/// `VOYAGE_API_KEY`; a local model loads on first use, downloaded if need be, on the
+/// `VOYAGE_API_KEY`, and a local model loads on first use, downloaded if need be, on the
 /// device [`local_device`] names).
 pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
     let embedder: Box<dyn Embedder> = match descriptor.provider.as_str() {
@@ -173,7 +173,7 @@ pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, E
 }
 
 /// The offline hash embedder, waiting `ARKO_INDEX_HASH_DELAY_MS` per document request
-/// when that is set: background embedding at the pace of a real model, offline.
+/// when that is set, giving background embedding at the pace of a real model, offline.
 struct PacedHash {
     inner: HashEmbedder,
     delay: std::time::Duration,

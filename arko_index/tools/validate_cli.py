@@ -15,14 +15,14 @@ with tempfile.TemporaryDirectory() as t:
     for _ in range(2):run('index',r,s)
     chunks=[json.loads(s) for s in run('chunk',r).stdout.splitlines()]
     assert '.hidden' in {c['path'] for c in chunks};assert not any('state/' in c['path'] for c in chunks)
-    # Gitignored files are indexed by default; --respect-ignore honours .gitignore.
+    # Gitignored files are indexed by default, and --respect-ignore honours .gitignore.
     assert 'ignored/bad.rs' in {c['path'] for c in chunks}
     honoured=[json.loads(s) for s in run('chunk','--respect-ignore',r).stdout.splitlines()]
     assert not any('ignored/' in c['path'] for c in honoured) and len(honoured)==len(chunks)-1
     hits=[json.loads(s) for s in run('search',s,'alpha').stdout.splitlines()];assert len(hits)==10
     one=[json.loads(s) for s in run('search',s,'durable_replay').stdout.splitlines()];assert one[0]['path']=='path.rs'
     p=start(r,s);d=read_event(p);seq=d['sequence'];assert len(d['added'])==len(chunks)
-    # SIGKILL after initial delivery; ack may or may not have committed. Either is legal.
+    # SIGKILL after initial delivery, and ack may or may not have committed. Either is legal.
     p.kill();p.wait(timeout=3)
     (r/'path.rs').write_text('fn inserted() {}\nfn durable_replay() {}\nfn alpha() {}\n')
     p=start(r,s);d=read_event(p)

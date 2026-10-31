@@ -114,12 +114,12 @@ impl std::str::FromStr for EmbedText {
     }
 }
 
-/// The cache key of a rendered text: its SHA-256.
+/// The cache key of a rendered text is its SHA-256.
 pub(crate) fn text_hash(text: &str) -> [u8; 32] {
     Sha256::digest(text.as_bytes()).into()
 }
 
-/// Names how chunks were rendered for embedding (part of a vector store's model):
+/// Names how chunks were rendered for embedding (part of a vector store's model), for example
 /// `arko_index/render-1/path-scope-source`.
 pub(crate) fn text_format(render_version: u32, embed_text: EmbedText) -> String {
     format!("arko_index/render-{render_version}/{}", embed_text.as_str())

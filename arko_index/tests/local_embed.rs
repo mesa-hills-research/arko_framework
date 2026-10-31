@@ -1,14 +1,14 @@
 //! The local models against their own PyTorch code (`--features local-embed`), and
 //! the CLI's lazy loading of them.
 //!
-//! The model tests are ignored by default: they download both models (about 870 MB)
+//! The model tests are ignored by default, because they download both models (about 870 MB)
 //! into the Hugging Face cache. Run them with
 //! `cargo test -p arko_index --features local-embed --test local_embed -- --ignored`.
 //!
 //! `tests/data/local-embed/*.json` hold, for eight texts (a model-card example, code,
 //! Unicode, a 2,400-token text), the token ids and reference vectors computed with each
-//! model's `trust_remote_code` PyTorch implementation by `scripts/local_embed_reference.py`:
-//! the first 16 components, a projection over all 768 and every pairwise similarity.
+//! model's `trust_remote_code` PyTorch implementation by `scripts/local_embed_reference.py`,
+//! covering the first 16 components, a projection over all 768 and every pairwise similarity.
 //! Those checks run in f32. The int8 vectors are checked against the f32 ones and
 //! PyTorch's similarities, within the quantization's error.
 #[allow(dead_code)]
@@ -50,7 +50,7 @@ fn the_lazy_embedder_loads_on_first_use() {
     assert!(e.embed(&["x"], InputKind::Query).is_err());
     assert!(e.is_loaded());
     assert_eq!(loads.load(Ordering::SeqCst), 1);
-    // A placed one finds its device and limits without loading: int8 on Auto and
+    // A placed one finds its device and limits without loading, since int8 on Auto and
     // anything on the CPU never look for a GPU.
     for (precision, device) in [
         (Precision::Int8, Device::Auto),
@@ -85,7 +85,7 @@ fn cli() -> PathBuf {
 }
 
 /// `index2 --embed local` returns once lexical search is ready without loading the
-/// model: here there is none to load, in an empty Hugging Face cache with no server.
+/// model. Here there is none to load, in an empty Hugging Face cache with no server.
 /// The background run is the one that loads it, in the precision the index records.
 #[test]
 fn index2_hands_the_local_model_to_the_background_run_unloaded() {
@@ -152,7 +152,7 @@ fn check(model: &'static LocalModel, reference: &str) {
         (model.repo, model.revision)
     );
     let e = local::embedder(model, Precision::F32).unwrap();
-    // Every text in one batch: the packed forward pass with the real weights.
+    // Every text in one batch, using the packed forward pass with the real weights.
     let (mut texts, mut kinds) = (Vec::new(), Vec::new());
     for (kind, text) in &r.texts {
         texts.push(text.as_str());
@@ -212,7 +212,7 @@ fn check(model: &'static LocalModel, reference: &str) {
             );
         }
     }
-    // The tokenizer: ids identical to the Python tokenizers library's.
+    // The tokenizer gives ids identical to the Python tokenizers library's.
     let documents: Vec<&str> = r
         .texts
         .iter()
@@ -275,7 +275,7 @@ const INT8_MIN_COSINE: f32 = 0.997;
 /// How far an int8 similarity of two texts may be from PyTorch's.
 const INT8_SIMILARITY_TOLERANCE: f32 = 0.015;
 
-/// A text over the model's 8,192 tokens is embedded whole: its tail moves its vector.
+/// A text over the model's 8,192 tokens is embedded whole, so its tail moves its vector.
 #[test]
 #[ignore = "downloads both models (about 870 MB) from Hugging Face"]
 fn long_texts_are_embedded_whole() {
@@ -321,7 +321,7 @@ fn code_rank_embed_matches_pytorch() {
 #[ignore = "downloads both models (about 870 MB) from Hugging Face"]
 fn jina_code_matches_pytorch_and_its_model_card() {
     check(&JINA_CODE_V2, include_str!("data/local-embed/jina.json"));
-    // The model card: cos_sim of its query and code example is 0.7282.
+    // The model card gives a cos_sim of 0.7282 for its query and code example.
     let e = local::embedder(&JINA_CODE_V2, Precision::F32).unwrap();
     let v = e
         .embed(

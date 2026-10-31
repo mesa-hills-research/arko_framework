@@ -150,7 +150,7 @@ fn ignore_and_binary_rules() {
     std::fs::write(root.path().join("invalid"), [255u8, 254]).unwrap();
     std::fs::write(root.path().join("unicode.txt"), "🦀\n").unwrap();
     std::fs::write(root.path().join(".visible"), "yes\n").unwrap();
-    // Defaults: ignore files are not read and `target` is an ordinary name; only `.git`
+    // Defaults mean ignore files are not read and `target` is an ordinary name, and only `.git`
     // is excluded. Binary and invalid UTF-8 files are skipped and reported.
     let chunks = chunk_dir(root.path(), &Options::default()).unwrap();
     let paths: HashSet<_> = chunks.iter().map(|c| c.path.as_str()).collect();
@@ -181,7 +181,7 @@ fn ignore_and_binary_rules() {
         ]
     );
     assert_eq!(report.files, 6);
-    // Opt-in: the root .gitignore applies.
+    // Opt-in, so the root .gitignore applies.
     let mut rules = FileRules::default();
     rules.respect_ignore = true;
     let (chunks, _) = chunk_dir_with(root.path(), &Options::default(), &rules).unwrap();
@@ -392,7 +392,7 @@ fn generated_tiny_siblings_merge_and_resynchronize() {
 
 #[test]
 fn deeply_nested_ast_descent_is_stack_bounded() {
-    // Long-line detection cannot handle this: every parenthesis is on its own line.
+    // Long-line detection cannot handle this, because every parenthesis is on its own line.
     let text = format!(
         "fn main() {{ let value = {}1{}; }}\n",
         "(\n".repeat(100000),

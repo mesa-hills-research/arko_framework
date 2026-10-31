@@ -1,9 +1,9 @@
-//! Which grammar parses a file: by extension and well-known file names, with a content
+//! Which grammar parses a file, by extension and well-known file names, with a content
 //! check for the ambiguous `.pl` and `.t`. See `docs/arko_index-languages.md`.
 use std::path::Path;
 use tree_sitter::Language;
 
-/// A file's language: `name` is the chunks' `language` field, `parser` the grammar key
+/// A file's language, where `name` is the chunks' `language` field, `parser` the grammar key
 /// (`tsx` for TypeScript's `.tsx`, `cpp` for C's `.h`, `ocaml_interface` for `.mli`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Detected {
@@ -118,7 +118,7 @@ fn by_name(name: &str) -> Option<Detected> {
     })
 }
 
-/// The language of `path` from its name alone: the classic extensions first (so their
+/// The language of `path` from its name alone, with the classic extensions first (so their
 /// detection is unchanged), then the other grammars' file names and extensions. `.pl`
 /// and `.t` are Perl here. [`detect`] also checks their content.
 pub(crate) fn detect_path(path: &Path) -> Detected {
@@ -128,7 +128,7 @@ pub(crate) fn detect_path(path: &Path) -> Detected {
         .unwrap_or("")
         .to_ascii_lowercase();
     if let Some(name) = classic(&extension) {
-        // Unchanged: `.tsx` (exact case) parses as TSX and `.h` (exact case) as C++,
+        // Unchanged, since `.tsx` (exact case) parses as TSX and `.h` (exact case) as C++,
         // and both keep their language's name.
         let parser = if path.extension().is_some_and(|x| x == "tsx") {
             "tsx"
@@ -149,7 +149,7 @@ pub(crate) fn detect_path(path: &Path) -> Detected {
 }
 
 /// [`detect_path`], except that `.pl` and `.t` files are Perl only when their start
-/// looks like Perl: Prolog also uses `.pl`, and other test frameworks use `.t`.
+/// looks like Perl, because Prolog also uses `.pl`, and other test frameworks use `.t`.
 pub(crate) fn detect(path: &Path, text: &str) -> Detected {
     let found = detect_path(path);
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");

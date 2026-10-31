@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes arko_index/src/rules/tags.rs: what each grammar's `queries/tags.scm` marks as a
+"""Writes arko_index/src/rules/tags.rs with what each grammar's `queries/tags.scm` marks as a
 definition, for the chunking rules in arko_index/src/rules/mod.rs.
 
 Usage: gen_language_rules.py GRAMMAR_META [OUT]
@@ -40,7 +40,7 @@ def tokens(text):
 
 
 def parse(text):
-    """Nested lists: `(` and `[` open a list (its first element is "(" or "["), and a
+    """Nested lists. `(` and `[` open a list (its first element is "(" or "["), and a
     capture following an element is attached to it as ("capture", element, name)."""
     stack = [[]]
     for t in tokens(text):
@@ -59,7 +59,7 @@ def parse(text):
 
 
 def kinds_of(pattern):
-    """The node kinds a pattern element matches: `(kind ...)` gives kind, `[a b]` the
+    """The node kinds a pattern element matches. `(kind ...)` gives kind, `[a b]` the
     kinds of its alternatives, a captured element the kinds of the element."""
     if isinstance(pattern, tuple):
         return kinds_of(pattern[1])
@@ -107,9 +107,9 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, "..", "src", "rules", "tags.rs")
     lines = [
-        "//! What each grammar's `queries/tags.scm` marks as a definition: `(kind, category)` for",
+        "//! What each grammar's `queries/tags.scm` marks as a definition, given as `(kind, category)` for",
         "//! every `@definition.<category>` capture. Written by `tools/gen_language_rules.py`",
-        "//! from the grammars' `tags.scm` and `node-types.json`: do not edit by hand. The",
+        "//! from the grammars' `tags.scm` and `node-types.json`. Do not edit by hand. The",
         "//! curated rules in `mod.rs` start from these lists.",
         "",
     ]
@@ -123,7 +123,7 @@ def main():
             found = set()
             definitions(parse(f.read()), found)
         pairs = sorted((k, c) for k, c in found if k in named)
-        lines.append(f"/// `{key}`: tags.scm definitions.")
+        lines.append(f"/// `{key}` tags.scm definitions.")
         lines.append(f"pub(super) const {key.upper()}: &[(&str, &str)] = &[")
         for kind, category in pairs:
             lines.append(f'    ("{kind}", "{category}"),')

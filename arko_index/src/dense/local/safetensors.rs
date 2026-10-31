@@ -1,4 +1,4 @@
-//! A reader for the safetensors format: an 8-byte little-endian header length, a JSON
+//! A reader for the safetensors format, which is an 8-byte little-endian header length, a JSON
 //! header naming each tensor's dtype, shape and byte range, then the raw data. Tensors
 //! are converted to `f32` on reading (F32, F16 and BF16 are accepted).
 use crate::bench_v1::Error;
@@ -132,7 +132,7 @@ pub(crate) fn f16_to_f32(h: u16) -> f32 {
     let bits = match (exp, man) {
         (0, 0) => sign,
         (0, _) => {
-            // Subnormal: shift the mantissa up to an implicit leading one.
+            // Subnormal, so shift the mantissa up to an implicit leading one.
             let (mut e, mut m) = (127 - 15 + 1, man);
             while m & 0x400 == 0 {
                 m <<= 1;

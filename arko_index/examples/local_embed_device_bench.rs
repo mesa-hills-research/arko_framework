@@ -11,9 +11,9 @@
 //! ```
 //!
 //! `run` embeds the corpus on one device in one precision, at each `--batch-tokens`
-//! budget: a first pass (kernel compilation and tuning included, reported apart), then
+//! budget, with a first pass (kernel compilation and tuning included, reported apart), then
 //! timed passes in requests packed as a build packs them. It prints and appends to
-//! `--out` one JSON line per budget: texts and tokens per second (median, lowest and
+//! `--out` one JSON line per budget, with texts and tokens per second (median, lowest and
 //! highest of the timed passes), the forward passes and their padding, the process's
 //! peak memory and, with `nvidia-smi`, the GPU memory in use.
 //!
@@ -25,7 +25,7 @@
 //! ```
 //!
 //! The sample (`--sample N`, every k-th text, and `--long N` texts of corpus chunks
-//! joined to near the model's token limit) is what precisions are compared on:
+//! joined to near the model's token limit) is what precisions are compared on.
 //! `--save-sample FILE` writes its vectors, `--reference FILE` compares them with a
 //! saved run's (cosine similarity per text). `--only-sample` embeds just the sample, for
 //! a slow reference such as the CPU in `f32`. `--limit N` runs an even subset of the
@@ -204,7 +204,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
         memory()
     );
 
-    // The long texts: corpus texts joined until the next would pass the token limit.
+    // The long texts are corpus texts joined until the next would pass the token limit.
     let mut long = Vec::new();
     let limit = model.max_tokens as u64 - 16;
     let mut k = 0;
@@ -283,12 +283,12 @@ fn run(args: Vec<String>) -> Result<(), Error> {
             vectors = embed_all(&embedder, &corpus, &counts)?;
             seconds.push(started.elapsed().as_secs_f64());
         }
-        // `--repeats 0`: the first pass is the measurement (the CPU compiles nothing).
+        // With `--repeats 0`, the first pass is the measurement (the CPU compiles nothing).
         if seconds.is_empty() {
             seconds.push(first_seconds);
         }
         let (gpu_process_mib, gpu_device_mib) = watch.map(GpuWatch::stop).unwrap_or_default();
-        // The sample's vectors: from the corpus pass, or one more call for the long
+        // The sample's vectors come from the corpus pass, or one more call for the long
         // texts (not part of the corpus).
         let sample_vectors: Vec<Vec<f32>> = if only_sample {
             vectors.clone()
@@ -393,7 +393,7 @@ fn embed_all(e: &LocalEmbedder, texts: &[&str], counts: &[u64]) -> Result<Vec<Ve
     Ok(vectors)
 }
 
-/// Cosine similarity of each sample text's vectors (unit length): the corpus sample
+/// Cosine similarity of each sample text's vectors (unit length), over the corpus sample
 /// (`real` texts) and the long texts after it, each lowest, 1st percentile, median, mean.
 fn cosine_stats(reference: &[Vec<f32>], got: &[Vec<f32>], real: usize) -> Value {
     let sims: Vec<f64> = reference
@@ -453,7 +453,7 @@ fn gpu_memory_now() -> Option<u64> {
         .ok()
 }
 
-/// `nvidia-smi` polled every 100 ms while passes run: the most memory this process held
+/// `nvidia-smi` polled every 100 ms while passes run, giving the most memory this process held
 /// on the GPU, and the most in use on the first GPU.
 struct GpuWatch {
     children: Vec<Child>,

@@ -1,5 +1,5 @@
-//! The processes around the CLI's background embedding (`examples/support/process.rs`):
-//! the owner a run watches, with its guard against a reused process id, the default
+//! The processes around the CLI's background embedding (`examples/support/process.rs`),
+//! covering the owner a run watches, with its guard against a reused process id, the default
 //! owner, and starting a process detached from the caller's descriptors.
 #![cfg(unix)]
 #[path = "../examples/support/process.rs"]
@@ -38,7 +38,7 @@ fn an_owner_is_alive_until_it_ends() {
 fn a_reused_process_id_is_not_the_owner() {
     let pid = std::process::id();
     assert!(Owner::watch(pid).unwrap().alive());
-    // The same id with another start time: a process that got the id of an owner that
+    // The same id with another start time, meaning a process that got the id of an owner that
     // ended.
     assert!(!Owner::with_start(pid, u64::MAX).alive());
 }

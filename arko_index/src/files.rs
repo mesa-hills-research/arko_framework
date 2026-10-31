@@ -17,7 +17,7 @@ use std::{
 pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-/// Makes a rename into `dir` durable: fsyncs the directory on Unix. Windows cannot
+/// Makes a rename into `dir` durable by fsyncing the directory on Unix. Windows cannot
 /// open a directory with `File::open`. There this does nothing.
 pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -295,7 +295,7 @@ impl Report {
     }
 }
 
-/// Writes `report.json` into a state directory (replaced atomically, not fsynced: it
+/// Writes `report.json` into a state directory (replaced atomically, not fsynced, since it
 /// is rebuilt by every index build and every watcher start).
 pub(crate) fn write_report(dir: &Path, report: &Report) -> Result<(), Error> {
     let tmp = dir.join(format!(".report.json.{}.tmp", std::process::id()));
@@ -306,7 +306,7 @@ pub(crate) fn write_report(dir: &Path, report: &Report) -> Result<(), Error> {
     Ok(())
 }
 
-/// A relative path for the report: slash-joined, invalid UTF-8 bytes as `\xHH`.
+/// A relative path for the report, slash-joined, invalid UTF-8 bytes as `\xHH`.
 fn display(rel: &[u8], dir: bool) -> String {
     let mut s = String::with_capacity(rel.len() + 1);
     for chunk in rel.utf8_chunks() {
@@ -334,7 +334,7 @@ pub(crate) struct FileData {
     pub hash: String,
 }
 
-/// A walked regular file: its relative path as slash-joined raw bytes (the sort key,
+/// A walked regular file, with its relative path as slash-joined raw bytes (the sort key,
 /// for UTF-8 names it orders exactly like a `BTreeMap<String, _>`) and its absolute
 /// path. Nothing is read yet. The walker only lists files with UTF-8 names.
 pub(crate) struct Listed {
@@ -395,7 +395,7 @@ struct Tally {
 /// The ignore files of one directory, and its parent's (with `respect_ignore`).
 /// The `ignore` crate's own handling is not used, because it hides what it removes.
 /// This follows its precedence (ignore-0.4.33 dir.rs `matched_ignore`, with
-/// `require_git(false)` and no parents): over the directories from the entry's parent
+/// `require_git(false)` and no parents). Over the directories from the entry's parent
 /// up to the root, the nearest `.ignore` match wins, then the nearest `.gitignore`
 /// match, then the nearest `.git/info/exclude` match. A `!` whitelist ends the search.
 struct DirIgnore {
@@ -427,7 +427,7 @@ impl DirIgnore {
             ignore: load_ignore_file(dir, &dir.join(".ignore"), warnings),
             gitignore: load_ignore_file(dir, &dir.join(".gitignore"), warnings),
             // Only a `.git` directory at or below the root (like the crate without
-            // require_git); a `.git` file's real git directory lies elsewhere.
+            // require_git), and a `.git` file's real git directory lies elsewhere.
             git_exclude: load_ignore_file(dir, &dir.join(".git/info/exclude"), warnings),
             parent,
         }
@@ -464,8 +464,8 @@ impl DirIgnore {
     }
 }
 
-/// Whether a scoped walk (watcher re-listing `scope` directories) needs this entry:
-/// directories on the way to a scope directory, and entries directly inside one.
+/// Whether a scoped walk (watcher re-listing `scope` directories) needs this entry,
+/// namely directories on the way to a scope directory, and entries directly inside one.
 fn in_scope(scope: &BTreeSet<String>, rel: &[u8], is_dir: bool) -> bool {
     let Ok(rel) = std::str::from_utf8(rel) else {
         return false;
@@ -709,7 +709,7 @@ pub(crate) fn walk_files(
         report.ignored_by_git_info_exclude,
     ] = tally.ignored_counts;
     report.ignored = tally.ignored;
-    // Ignore-file problems (an invalid line, an unreadable file): the valid lines apply.
+    // Ignore-file problems (an invalid line, an unreadable file), so the valid lines apply.
     report.warnings = tally.warnings;
     report.warnings.extend(warnings);
     report.finish();
@@ -735,7 +735,7 @@ pub(crate) enum Read {
     Gone,
 }
 
-/// Reads one listed file: NUL-containing files are binary, other invalid UTF-8 is
+/// Reads one listed file. NUL-containing files are binary, other invalid UTF-8 is
 /// `not-utf8`, read errors are `unreadable`. A vanished file is `Gone`.
 pub(crate) fn read_listed(item: &Listed, with_hash: bool) -> Read {
     let bytes = match std::fs::read(&item.path) {
@@ -759,7 +759,7 @@ pub(crate) fn read_listed(item: &Listed, with_hash: bool) -> Read {
     let Ok(name) = String::from_utf8(item.key.clone()) else {
         return Read::Skip(skipped(&item.key, false, SkipReason::NameNotUtf8, None));
     };
-    // `chunk`/`index` never use the file hash; only the watcher needs it.
+    // `chunk`/`index` never use the file hash, and only the watcher needs it.
     let hash = if with_hash {
         hash(text.as_bytes())
     } else {
@@ -768,7 +768,7 @@ pub(crate) fn read_listed(item: &Listed, with_hash: bool) -> Read {
     Read::Text(name, FileData { text, hash })
 }
 
-/// Walks and reads the whole tree sequentially: path -> text and hash, plus the report.
+/// Walks and reads the whole tree sequentially, giving path -> text and hash, plus the report.
 pub(crate) fn read_dir(
     root: &Path,
     state: Option<&Path>,
