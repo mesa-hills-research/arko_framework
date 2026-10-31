@@ -28,7 +28,7 @@ pub struct PendingContext {
     /// [`TurnContextSource::identify`](crate::runtime::TurnContextSource::identify)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_ids: Vec<String>,
-    /// Saved as bare text, before items carried their host's ids: only its
+    /// Saved as bare text, before items carried their host's ids, so only its
     /// text says what it holds (see [`Task::unidentified_context`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unidentified: bool,
@@ -84,7 +84,7 @@ impl PendingContext {
     }
 }
 
-/// Bare text, as tasks saved it before items had ids: what it holds is
+/// Bare text, as tasks saved it before items had ids, so what it holds is
 /// known from its text only.
 impl From<String> for PendingContext {
     fn from(text: String) -> Self {
@@ -178,7 +178,7 @@ pub struct RecordedPart {
     /// Of an item saved as bare text (see [`PendingContext::unidentified`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unidentified: bool,
-    /// It holds the item's end: the whole item, or its last part.
+    /// It holds the item's end, either the whole item, or its last part.
     pub last: bool,
 }
 
@@ -216,12 +216,12 @@ pub enum Holding {
     Pending,
     /// Neither. A first part whose rest a cut back removed counts so too.
     NotHeld,
-    /// Only text could say: the task has context without ids (see
+    /// Only text could say, since the task has context without ids (see
     /// [`Task::unidentified_context`]).
     Unknown,
 }
 
-/// What only text can say of what a task holds: context saved without ids,
+/// What only text can say of what a task holds, namely context saved without ids,
 /// and the messages from before the task kept records.
 #[derive(Debug, Default)]
 pub struct UnidentifiedContext<'a> {
@@ -258,7 +258,7 @@ impl Task {
         Some(self.next_context_item)
     }
 
-    /// As a run starts: the items saved as bare text get numbers, and a task
+    /// As a run starts, the items saved as bare text get numbers, and a task
     /// saved before it kept records starts them from its conversation's end.
     pub(crate) fn number_context(&mut self) {
         for index in 0..self.pending_context_injections.len() {
@@ -355,7 +355,7 @@ impl Task {
     }
 
     /// What only text can say of what the task holds, for a host to search
-    /// as it did before tasks kept ids: the pending items saved as bare
+    /// as it did before tasks kept ids, namely the pending items saved as bare
     /// text, the messages that hold such items, and the messages from before
     /// [`context_records_from`](Self::context_records_from) (all of them for
     /// a task saved before records existed).
@@ -387,7 +387,7 @@ impl Task {
         }
     }
 
-    /// The conversation keeps its first `at` messages (a cut back): the
+    /// The conversation keeps its first `at` messages (a cut back). The
     /// records of the others go, and those from before records began stay
     /// within the conversation.
     pub(crate) fn cut_context_records(&mut self, at: usize) {
@@ -397,7 +397,7 @@ impl Task {
         }
     }
 
-    /// The conversation's messages moved: `moved(index)` is where message
+    /// The conversation's messages moved. `moved(index)` is where message
     /// `index` is now, or `None` for one that is gone. The records follow
     /// their messages, and those of messages that are gone go with them.
     pub(crate) fn move_context_records(&mut self, moved: impl Fn(usize) -> Option<usize>) {
@@ -416,7 +416,7 @@ impl Task {
         }
     }
 
-    /// A fresh conversation replaced the conversation: it holds nothing of
+    /// A fresh conversation replaced the conversation. It holds nothing of
     /// the context yet, so every pending item goes whole again.
     pub(crate) fn reset_context_records(&mut self) {
         self.context_records.clear();
@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(task.unidentified_context().pending, ["A bare text."]);
     }
 
-    /// What a report covers: the ids the conversation holds whole, once
+    /// What a report covers, the ids the conversation holds whole, once
     /// each, without a first part alone or what still waits.
     #[test]
     fn the_recorded_ids_are_those_held_whole() {
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(task.context_records_from, Some(1));
         task.cut_context_records(0);
         assert_eq!(task.context_records_from, Some(0));
-        // A fresh conversation holds none of the context: every item goes
+        // A fresh conversation holds none of the context, so every item goes
         // whole again.
         task.record_context(0, vec![part(9, "mail:9", true)]);
         assert_eq!(task.start_fresh_conversation(), 6);

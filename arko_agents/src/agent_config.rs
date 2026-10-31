@@ -380,7 +380,7 @@ thread_local! {
     static LOADING_TASK_SNAPSHOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The tool calling mode of a configuration loaded without one: `Native`,
+/// The tool calling mode of a configuration loaded without one, `Native`,
 /// or `OutputBased` in a saved task's snapshot, which older versions (whose
 /// default it was) wrote without the mode.
 fn loaded_tool_calling_mode() -> ToolCallingMode {
@@ -400,7 +400,7 @@ fn loaded_tool_config() -> AgentToolConfig {
     }
 }
 
-/// Deserializes [`Task::agent_config`]: a snapshot without a tool calling
+/// Deserializes [`Task::agent_config`]. A snapshot without a tool calling
 /// mode ran in output-based mode, the default when it was saved, and keeps
 /// it.
 pub(crate) fn deserialize_task_agent_config<'de, D>(
@@ -648,7 +648,7 @@ struct AgentToolConfigRepr {
     chat: bool,
     #[serde(default)]
     async_questions: bool,
-    /// Removed: every call of a response runs now. Read only to warn when a
+    /// Removed. Every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
     allow_batched_tool_calls: Option<bool>,
@@ -907,7 +907,7 @@ impl<'de> Deserialize<'de> for AgentLLMConfig {
         ) {
             (Ok(model), _) => model,
             (Err(_), Some(snapshot)) => snapshot,
-            // OpenRouter slugs are dynamic: a hand-written config without a
+            // OpenRouter slugs are dynamic, so a hand-written config without a
             // snapshot gets a model without catalog metadata.
             (Err(_), None) if helper.provider == LLMProvider::OpenRouter => {
                 LLMModel::openrouter(helper.model_id.clone())
@@ -1707,7 +1707,7 @@ impl AgentConfig {
         self.llm_config.model.provider == arko_ai::Provider::ClaudeCode
     }
 
-    /// The Claude Code rules of [`validate`](Self::validate): built-in tools
+    /// The Claude Code rules of [`validate`](Self::validate), namely built-in tools
     /// only for Claude Code models, and for those, only the settings the
     /// Claude Code runtime applies.
     fn validate_claude_code(&self) -> Result<(), ArkoAgentsError> {
@@ -2067,9 +2067,9 @@ mod validation_tests {
         )
     }
 
-    /// The tool-result limits: a configuration saved without them loads
+    /// The tool-result limits. A configuration saved without them loads
     /// with the guard on and no caps, and they are written only when set.
-    /// A tool's own cap wins (`null`: none), and a zero cap is rejected.
+    /// A tool's own cap wins (`null` means none), and a zero cap is rejected.
     #[test]
     fn tool_result_limits_load_by_default_and_tools_override_the_cap() {
         let saved = serde_json::to_value(luna()).unwrap();
@@ -2203,7 +2203,7 @@ mod validation_tests {
     }
 
     /// `text_reply_ends_task` and `text_reply_as_message` give a reply in
-    /// text two meanings: they are refused together.
+    /// text two meanings, so they are refused together.
     #[test]
     fn text_reply_ends_task_is_refused_with_text_reply_as_message() {
         let mut config = luna();

@@ -162,7 +162,7 @@ fn rephrase(message: &mut Message, text: &str, reminder: Option<&str>) {
 }
 
 fn remove_images(message: &mut Message) {
-    // The descriptions first: they are recognized by the image after them.
+    // The descriptions first, because they are recognized by the image after them.
     let content = std::mem::take(&mut message.content);
     message.content = content
         .iter()
@@ -174,7 +174,7 @@ fn remove_images(message: &mut Message) {
 }
 
 impl Task {
-    /// The user messages after the last assistant turn: the input the next
+    /// The user messages after the last assistant turn, the input the next
     /// turn answers.
     pub(crate) fn current_input(&self) -> Option<RefusedInput> {
         self.input_of(&self.conversation.messages)
@@ -331,7 +331,7 @@ impl Task {
         if !removed.is_disjoint(&changed) {
             return Err(invalid("A removed message can't also be changed.".into()));
         }
-        // The runtime's own messages don't count: without a message from
+        // The runtime's own messages don't count, because without a message from
         // the host the model has nothing to work on.
         let users_left = self.conversation.messages[..=last]
             .iter()
@@ -438,7 +438,7 @@ impl Task {
         Ok(())
     }
 
-    /// The conversation's current input, if it still is the refused input:
+    /// The conversation's current input, if it still is the refused input, meaning it is
     /// followed by nothing, or by one assistant turn without tool calls (the
     /// kept refusal).
     fn current_refused_input(&self) -> Option<RefusedInput> {
@@ -610,7 +610,7 @@ mod tests {
             content[1].as_text(),
             Some("Answer: no\n\n# Current Environment Information (updated this turn)\ncwd: /work")
         );
-        // The refused turn is gone; the runtime note stays.
+        // The refused turn is gone, and the runtime note stays.
         assert_eq!(task.conversation.messages.len(), 4);
         assert!(task.runtime_messages.contains(&3));
         assert!(task.refused_input.is_none());

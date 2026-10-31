@@ -454,7 +454,7 @@ pub struct Task {
     /// and once completed (the model has not read it). Saved so a task that
     /// runs again still gets it. Everything that waits for the model is an
     /// item here, in order, until the conversation records its last part
-    /// (see [`context_records`](Self::context_records)): a host's
+    /// (see [`context_records`](Self::context_records)), namely a host's
     /// injection, the turn context source's update, the user's typed notes,
     /// an approval's message and the rest of a denial too long for its
     /// answer. Items saved as bare text by older versions still load.
@@ -469,7 +469,7 @@ pub struct Task {
     /// holds without reading its text ([`holding`](Self::holding)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_records: Vec<ContextRecord>,
-    /// The first message [`context_records`](Self::context_records) cover:
+    /// The first message [`context_records`](Self::context_records) cover,
     /// 0 for a task that kept them from its start, the conversation's
     /// length when a task saved before they existed first ran again, and
     /// `None` until then. Only text says what the messages before it hold
@@ -592,7 +592,7 @@ pub struct Task {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<TaskParent>,
-    /// The questions the agent asked with `ask_user`: how many, and those
+    /// The questions the agent asked with `ask_user`, namely how many, and those
     /// still open as far as the runtime knows. See [`crate::questions`].
     #[serde(
         default,
@@ -658,9 +658,9 @@ pub(crate) fn with_images(
         .collect()
 }
 
-/// A context update's content: `text`, then each image after its label.
+/// A context update's content, `text`, then each image after its label.
 /// `images` of a context update, as `model` can be sent them in a
-/// conversation holding `held`: each fitted ([`arko_ai::Model::sendable_image`]),
+/// conversation holding `held`, each fitted ([`arko_ai::Model::sendable_image`]),
 /// within the images and image data a request takes
 /// ([`ImageRoom`](crate::tool::ImageRoom)). Those it can't take are left out,
 /// with a line each saying why.
@@ -965,7 +965,7 @@ impl Task {
         self.agent_config = config;
         self.conversation.system_message = None;
         self.reconfigured = true;
-        // The new prompt prefix is written to the cache afresh: the cache
+        // The new prompt prefix is written to the cache afresh, so the cache
         // monitor judges the calls from here.
         self.cache_window_start = self.usage_history.len();
         if self.claude_code_session.is_some() {
@@ -1257,7 +1257,7 @@ impl Task {
     }
 
     /// Adds the tool results waiting for this turn to the conversation as
-    /// one user message: the native results, then `text`, then the tool
+    /// one user message, with the native results, then `text`, then the tool
     /// images, each after its description. Adds nothing when there is
     /// nothing to add. Returns whether a message was added.
     pub(crate) fn add_pending_tool_results(&mut self, text: Option<&str>) -> bool {
@@ -1442,7 +1442,7 @@ mod tests {
             }
         );
         // Without a kind, nothing is written for it, so older versions read
-        // the state as before; with one, it is kept.
+        // the state as before, and with one, it is kept.
         let paused = TaskState::AwaitingErrorRecoveryApproval {
             error_message: "too long".into(),
             cause: ErrorRecoveryCause::NonRetryable,
@@ -1483,7 +1483,7 @@ mod tests {
             }
         );
         // A failure without a cause is saved as before, so older versions
-        // read it; one with a cause keeps it.
+        // read it, and one with a cause keeps it.
         let failed = |cause| TaskState::Failed {
             reason: "x".into(),
             cause,

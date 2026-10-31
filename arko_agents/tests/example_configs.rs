@@ -22,7 +22,7 @@ fn every_example_agent_configuration_loads_validates_and_builds_its_prompt() {
         let model = &config.llm_config.model;
         arko_ai::Model::get(model.provider.clone(), &model.id)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        // Settings the model accepts: Claude models that always think
+        // Settings the model accepts. Claude models that always think
         // adaptively reject sampling settings, manual thinking budgets and
         // disabled thinking.
         let generation = &config.llm_config.generation_config;

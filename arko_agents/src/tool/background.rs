@@ -73,7 +73,7 @@ impl MoveSignal {
             return std::future::pending().await;
         };
         let mut source = source.clone();
-        // Dropped without firing: this signal never fires.
+        // Dropped without firing, so this signal never fires.
         if source.wait_for(|moved| *moved).await.is_err() {
             std::future::pending::<()>().await;
         }

@@ -61,7 +61,7 @@ fn text_param<'a>(params: &'a HashMap<String, Value>, name: &str) -> Result<&'a 
         })
 }
 
-/// `replace_all`: a boolean, or the text `true` or `false`. Absent or null
+/// `replace_all` is a boolean, or the text `true` or `false`. Absent or null
 /// is `false`.
 fn replace_all_param(params: &HashMap<String, Value>) -> Result<bool, ToolError> {
     match params.get(REPLACE_ALL_PARAM_NAME) {
@@ -174,7 +174,7 @@ fn match_apart_from_indentation(text: &str, old: &str) -> Option<(usize, usize)>
 }
 
 /// What a call that changed `text` (the file's content without its
-/// byte-order mark) at lines `first` to `last` returns: those lines, and
+/// byte-order mark) at lines `first` to `last` returns, those lines, and
 /// [`CONTEXT_LINES`] either side, numbered as `read_file` numbers them, at
 /// most [`SHOWN_LINES`] of them.
 fn shown_lines(text: &str, first: usize, last: usize) -> String {
@@ -519,7 +519,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ws.read("b.txt"), b"1\n0\ntwo\n");
-        // No other adjustment: trailing spaces must match.
+        // No other adjustment, so trailing spaces must match.
         ws.write("c.txt", b"one  \r\ntwo\r\n");
         let error = ws
             .refused(
@@ -637,7 +637,7 @@ mod tests {
             .await;
         assert!(error.contains("starts with a line number"), "{error}");
         assert!(!error.contains("Read the lines again"), "{error}");
-        // Right apart from indentation: the lines are named.
+        // Right apart from indentation, so the lines are named.
         let error = ws
             .refused("a.rs", json!({"path": "a.rs", "old_string": "  let x = 1;\n  let y = 2;", "new_string": "x"}))
             .await;

@@ -138,7 +138,7 @@ FORK = "--fork-session" in ARGS
 PARENT = flag("--resume=")
 # Kept in this process only, not saved for a later resume.
 UNSAVED = "--no-session-persistence" in ARGS
-# A fork takes the ID --session-id gives it (else a new one); a resume goes
+# A fork takes the ID --session-id gives it (else a new one), and a resume goes
 # on in the conversation it names.
 SESSION = (flag("--session-id=") or str(uuid.uuid4()) if FORK else None) \
     or flag("--session-id=", "--resume=") or "fake-session"
@@ -295,7 +295,7 @@ def compact(spec):
 
 
 def usage(step, output):
-    # Anthropic's input counts are exclusive: these add up to input_tokens.
+    # Anthropic's input counts are exclusive, so these add up to input_tokens.
     tokens = step.get("input_tokens", 10)
     cached = step.get("cached", tokens - 2)
     written_1h = step.get("written_1h", 0)
@@ -322,11 +322,11 @@ def delta(step):
 
 
 def assistant(content, step):
-    # "continues": part of the previous message's response (the same id),
+    # "continues" marks part of the previous message's response (the same id),
     # as Claude Code sends a response's text and its call. Like Claude
     # Code, the assistant messages carry the output count as it stood when
-    # the stream started; the request's message_delta has the final one.
-    # "unstreamed": a response got without streaming has no stream events.
+    # the stream started, and the request's message_delta has the final one.
+    # "unstreamed" marks a response got without streaming, which has no stream events.
     streamed = not step.get("unstreamed")
     if not step.get("continues"):
         state["message"] += 1
@@ -518,7 +518,7 @@ def turn(text, message_uuid=None):
                           "delta": {"type": "text_delta", "text": step["stream_fail"]}})
             continue
         if "stream_abandoned" in step:
-            # As Claude Code 2.1 ends a stream it gives up on: the open
+            # As Claude Code 2.1 ends a stream it gives up on, with the open
             # block and the message stop, and no message_delta says why.
             state["message"] += 1
             stream_event({"type": "message_start", "message": {
@@ -572,7 +572,7 @@ def turn(text, message_uuid=None):
         if "tool" in step:
             call_tool(step, index)
         if "parallel" in step:
-            # Calls that run side by side: each runs with its hooks, then
+            # Calls that run side by side. Each runs with its hooks, then
             # their results are reported in the order "report" gives.
             results = [call_tool(dict(call, id=call.get("id", "toolu_p%d_%d" % (index, number))),
                                  index, report=False)
@@ -625,7 +625,7 @@ def handle(message):
         finally:
             state["working"] = False
             # What became of the messages sent during the turn, as the CLI
-            # reports it: completed, or cancelled when the turn was interrupted.
+            # reports it, completed, or cancelled when the turn was interrupted.
             for note in state.pop("notes", []):
                 send({"type": "command_lifecycle", "command_uuid": note, "session_id": SESSION,
                       "state": "cancelled" if state["interrupted"] else "completed",

@@ -247,7 +247,7 @@ pub fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The save replaces the file rather than rewriting it in place: a
+    /// The save replaces the file rather than rewriting it in place. A
     /// reader of the old file (here a hard link to it) keeps the old
     /// content whole, and no temporary file is left behind.
     #[test]
@@ -440,7 +440,7 @@ mod tests {
             // Another drive, absolute or drive-relative.
             (r"D:\Work\Project\x", false),
             ("D:x", false),
-            // Win32 leaves a verbatim path as written; its `..` is resolved
+            // Win32 leaves a verbatim path as written, and its `..` is resolved
             // lexically and still leaves.
             (r"\\?\C:\Work\Project\..\x", false),
         ] {
@@ -499,7 +499,7 @@ mod tests {
         let canonical = Path::new("/private/var/folders");
         assert!(is_path_in_workspace("x", written).unwrap());
         assert!(is_path_in_workspace("/var/folders/x", written).unwrap());
-        // Symlinks are not followed: the other spelling is outside.
+        // Symlinks are not followed, so the other spelling is outside.
         assert!(!is_path_in_workspace("/private/var/folders/x", written).unwrap());
         assert!(!is_path_in_workspace("/var/folders/x", canonical).unwrap());
         assert!(is_path_in_workspace("/private/var/folders/x", canonical).unwrap());
@@ -520,7 +520,7 @@ mod tests {
             assert!(is_path_in_workspace("./sub/../a.txt", workspace).unwrap());
             assert!(!is_path_in_workspace("../a.txt", workspace).unwrap());
             // Lexically, `ws/../../ws/x` would drop the leading `..` and stay
-            // in `ws`; it names `../ws/x`, outside.
+            // in `ws`, but it names `../ws/x`, outside.
             assert!(!is_path_in_workspace("../../ws/x", workspace).unwrap());
         }
     }

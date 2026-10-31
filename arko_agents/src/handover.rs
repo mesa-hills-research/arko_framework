@@ -327,7 +327,7 @@ pub struct HandoverThreshold {
     most: Option<HandoverCap>,
 }
 
-/// The largest threshold a run of a configuration goes by, if any: see
+/// The largest threshold a run of a configuration goes by, if any. See
 /// [`HandoverThreshold::with_most`].
 type HandoverCap = Arc<dyn Fn(&AgentConfig) -> Option<usize> + Send + Sync>;
 
@@ -375,7 +375,7 @@ impl HandoverThreshold {
         Some(self.tokens.load(Ordering::Acquire)).filter(|tokens| *tokens > 0)
     }
 
-    /// The threshold a run of `config` goes by: the host's, else the
+    /// The threshold a run of `config` goes by, the host's, else the
     /// configuration's, up to the cap for `config` (see
     /// [`with_most`](Self::with_most)).
     pub(crate) fn of(&self, config: &AgentConfig) -> Option<usize> {
@@ -601,7 +601,7 @@ pub(crate) fn unanswered_images(task: &Task) -> Vec<arko_ai::Content> {
         .collect()
 }
 
-/// The images of a fresh conversation's first message: a chat's
+/// The images of a fresh conversation's first message, a chat's
 /// [`unanswered_images`], or the task's initial images, which go with the
 /// task it restates.
 pub(crate) fn seed_images(task: &Task, chat: bool) -> Vec<arko_ai::Content> {
@@ -695,7 +695,7 @@ pub trait HandoverHook: Send + Sync {
         None
     }
 
-    /// `task`'s agent asked `asked` (`wait`: it waits for the answer). The
+    /// `task`'s agent asked `asked` (`wait` means it waits for the answer). The
     /// runtime calls it as it records them, before the agent goes on, so a
     /// host's [`open_questions`](Self::open_questions) has them for a
     /// handover or compaction that comes right after.
@@ -824,7 +824,7 @@ pub(crate) fn last_question_number(
     }
 }
 
-/// The answer to the questions `task`'s agent waited for came: they are
+/// The answer to the questions `task`'s agent waited for came. They are
 /// settled, except those `hook` says are still open.
 pub(crate) fn settle_waited(hook: Option<&dyn HandoverHook>, task: &mut Task) {
     let open = hook
@@ -837,7 +837,7 @@ pub(crate) fn settle_waited(hook: Option<&dyn HandoverHook>, task: &mut Task) {
     task.questions.settle(&answered);
 }
 
-/// Of `asked`, questions `task`'s agent waits for, those still open: in the
+/// Of `asked`, questions `task`'s agent waits for, those still open, meaning in the
 /// task's log (the agent didn't close them) and as `hook` says. The others
 /// were settled since they were asked (answered, dismissed or closed), and
 /// the log settles them too.

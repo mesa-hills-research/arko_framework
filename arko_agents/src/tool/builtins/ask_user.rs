@@ -139,7 +139,7 @@ pub fn offered_definition(
     definition
 }
 
-/// What an `ask_user` call asks, read from its result: the questions and
+/// What an `ask_user` call asks, read from its result, namely the questions and
 /// whether the agent waits (true unless it passed `wait: false`). The
 /// built-in tool's result holds them as JSON. Any other text (a host's own
 /// `ask_user`, or a result the host supplied on approval) is one question,
@@ -161,7 +161,7 @@ pub fn read_call(result: &str) -> (Vec<Question>, bool) {
     (vec![question], true)
 }
 
-/// The result an `ask_user` call that asked `asked` returns to the agent:
+/// The result an `ask_user` call that asked `asked` returns to the agent,
 /// the questions as text when the agent waits for the answer, else
 /// [`questions::asked_reply`].
 pub fn call_result(asked: &[AskedQuestion], wait: bool) -> String {

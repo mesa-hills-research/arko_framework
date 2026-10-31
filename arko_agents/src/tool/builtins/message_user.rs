@@ -37,7 +37,7 @@ impl Default for MessageUserTool {
 }
 
 /// The message a finished call of `tool`, registered under `name`, sends
-/// the user, given the call's `message` argument: the argument's text when
+/// the user, given the call's `message` argument. It is the argument's text when
 /// the tool is the built-in `message_user` (the name is `message_user` and
 /// the tool's type is [`ToolTypeDetails::BuiltIn`]), and `None` for any
 /// other tool, a host's tool registered under the name included.

@@ -1,4 +1,4 @@
-//! MCP servers started by `McpManager`: handshake, tool discovery, calls,
+//! MCP servers started by `McpManager`, covering handshake, tool discovery, calls,
 //! and a server that exits. Uses the Python stub in `tests/fixtures`
 //! (`ARKO_TEST_PYTHON` selects the interpreter).
 
@@ -51,7 +51,7 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
         "echo: hello"
     );
 
-    // The server exits during a call: that call and later ones fail cleanly.
+    // The server exits during a call. That call and later ones fail cleanly.
     assert!(echo.execute(&context, call("exit")).await.is_err());
     let error = echo.execute(&context, call("again")).await.unwrap_err();
     assert!(error.to_string().contains("stub"), "{error}");

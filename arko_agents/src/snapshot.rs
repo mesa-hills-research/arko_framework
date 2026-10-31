@@ -87,12 +87,12 @@ impl TaskSnapshots {
     }
 }
 
-/// A hash of the task's serialized form: equal for a task that did not
+/// A hash of the task's serialized form, equal for a task that did not
 /// change. `None` if it can't be serialized (the sink will say why). Each
 /// image counts by its identity (where its data is, its length and a sample
-/// of it), not by all its data: hashing the screenshots of a conversation
+/// of it), not by all its data, because hashing the screenshots of a conversation
 /// at every safe point would cost more than the rest of the task. An image
-/// isn't changed in place: one replaced by another is in another place.
+/// isn't changed in place. One replaced by another is in another place.
 fn fingerprint(task: &Task) -> Option<u64> {
     /// Names each image by its identity.
     struct Identities;
@@ -171,7 +171,7 @@ mod tests {
         last.content.push(Content::Image(image(2)));
         assert_ne!(fingerprint(&task).unwrap(), second);
         // A copy of the task shares its images, so it counts as the same. A
-        // task whose images are the same bytes elsewhere counts as changed: at
+        // task whose images are the same bytes elsewhere counts as changed, and at
         // worst it is reported once more.
         let mut copy = task.clone();
         assert_eq!(fingerprint(&copy), fingerprint(&task));
