@@ -205,7 +205,7 @@ async fn a_native_tools_images_go_inside_its_own_result() {
 
 /// A task saved mid-turn by an earlier version, with tool images waiting
 /// beside the results (`pending_tool_images`), still loads and sends them as
-/// it did: after the results and their text, each after its description.
+/// it did, after the results and their text, each after its description.
 #[tokio::test]
 async fn an_older_task_with_images_beside_its_results_still_sends_them() {
     let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
@@ -444,7 +444,7 @@ fn tool_images_past_the_request_count_are_left_out() {
         output.text
     );
 
-    // And past the image data a request takes: the bytes count too.
+    // And past the image data a request takes, as the bytes count too.
     let mut output = ToolOutput {
         text: "Two screenshots".into(),
         images: vec![
@@ -642,7 +642,7 @@ fn google_gif_results_are_described_without_blocking_other_images() {
     );
 }
 
-/// A sink's report: the task, the call, the tool and the images.
+/// A sink's report, namely the task, the call, the tool and the images.
 type Reported = (Uuid, Uuid, String, Vec<ToolImage>);
 
 /// Records what a tool image sink is given.
@@ -667,7 +667,7 @@ impl crate::tool::ToolImageSink for ImageRecorder {
 }
 
 /// The host's sink gets a call's images keyed by the call's runtime ID, as
-/// the tool returned them: also when the model can't take them and its
+/// the tool returned them, also when the model can't take them and its
 /// result leaves them out. A call without images isn't reported.
 #[tokio::test]
 async fn the_host_s_sink_gets_each_call_s_images() {

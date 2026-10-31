@@ -17,7 +17,7 @@ const WHY_DESCRIPTION: &str = "Optional: why, in a few words the user sees (\"Fo
     README\", \"No longer needed\").";
 
 /// Closes questions the agent asked with `ask_user` that no longer need an
-/// answer: it found the answer, or they no longer matter. The runtime
+/// answer, because it found the answer, or they no longer matter. The runtime
 /// settles them in the task's [`QuestionLog`](crate::questions::QuestionLog)
 /// and reports them with
 /// [`AgentEvent::QuestionsClosed`](crate::AgentEvent::QuestionsClosed), so
@@ -31,7 +31,7 @@ impl CloseQuestionsTool {
     }
 }
 
-/// What a `close_questions` call closes, read from its result: the ids and
+/// What a `close_questions` call closes, read from its result, namely the ids and
 /// why. `None` for a result the built-in tool didn't write.
 pub fn read_call(result: &str) -> Option<(Vec<String>, Option<String>)> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(result.trim()) else {
@@ -47,7 +47,7 @@ pub fn read_call(result: &str) -> Option<(Vec<String>, Option<String>)> {
     Some((ids, why))
 }
 
-/// The result a `close_questions` call returns: the questions it closed,
+/// The result a `close_questions` call returns, namely the questions it closed,
 /// and the ids the task never asked.
 pub fn call_result(closed: &[String], unknown: &[String]) -> String {
     let mut parts = Vec::new();

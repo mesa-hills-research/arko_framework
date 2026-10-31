@@ -160,7 +160,7 @@ async fn exact_results_bypass_distillation_and_are_observed_only_after_delivery_
         agent.task.conversation.messages.clear();
         agent.observe_committed_tool_context();
         assert_eq!(tool.resets.load(Ordering::SeqCst), 1);
-        // Ordinary tools still use the configured interceptor; tools that
+        // Ordinary tools still use the configured interceptor, and tools that
         // opt out don't.
         let registry = ToolRegistry::new();
         let read_file = registry.get("read_file").unwrap();
@@ -449,8 +449,8 @@ async fn a_dynamic_detail_without_its_provider_fails_the_task_at_start() {
     assert!(agent.run().await.is_err());
 }
 
-/// The date and time in the system prompt is labelled as the task's start;
-/// elsewhere it is the current one.
+/// The date and time in the system prompt is labelled as the task's start.
+/// Elsewhere it is the current one.
 #[test]
 fn the_system_prompt_datetime_is_labelled_as_the_task_start() {
     for (placement, label) in [
@@ -564,7 +564,7 @@ async fn native_tool_results_carry_the_details_and_reminder_due() {
                 }
             }
             Some(_) => {
-                // The task prompt is user message 1: the first results are
+                // The task prompt is user message 1, and the first results are
                 // message 2, the second message 3, when every second one
                 // after the prompt gets the reminder.
                 assert_eq!(beside[0], [details]);
@@ -620,7 +620,7 @@ impl crate::tool::ToolResultInterceptor for Fails {
 
 /// `load_skill` results are sent as written unless the skills
 /// configuration opts in to interception, which then uses its own failure
-/// policy; `InformAgent` gives the full result with a note.
+/// policy, and `InformAgent` gives the full result with a note.
 #[tokio::test]
 async fn load_skill_results_are_intercepted_only_when_opted_in() {
     use crate::tool::InterceptionFailurePolicy;
@@ -792,7 +792,7 @@ async fn a_context_update_after_a_continuation_prompt_carries_the_details() {
 }
 
 /// A saved task holding a reminder every zero messages (never injected,
-/// before validation rejected it) still loads; running it fails at start
+/// before validation rejected it) still loads, and running it fails at start
 /// with the validation error, until the reminder is changed or unset.
 #[tokio::test(start_paused = true)]
 async fn a_saved_task_with_a_reminder_every_zero_messages_does_not_start() {

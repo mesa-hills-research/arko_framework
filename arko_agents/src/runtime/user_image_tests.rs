@@ -1,4 +1,4 @@
-//! A user's images: with the task's prompt in its first message, and with a
+//! A user's images, with the task's prompt in its first message, and with a
 //! context update, each after its label.
 
 use super::tool_less_tests::{chat_agent, push, run};
@@ -18,7 +18,7 @@ fn images(message: &ai::Message) -> Vec<&ai::Image> {
 }
 
 /// The task's images follow its prompt in its first message, and the
-/// request is made with them. They move there: the task holds them once,
+/// request is made with them. They move there, so the task holds them once,
 /// and `initial_images` still gives them.
 #[tokio::test]
 async fn the_first_message_holds_the_task_s_images_after_its_prompt() {
@@ -174,7 +174,7 @@ async fn a_context_update_s_image_past_the_request_s_room_is_left_out() {
     );
 }
 
-/// Images gone from where they were saved become lines saying so: in a
+/// Images gone from where they were saved become lines saying so, in a
 /// message in the image's place, in a tool result after its output, and
 /// those still to be sent are dropped. The reasons wait for the run to
 /// report them.

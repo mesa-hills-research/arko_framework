@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &context,
         &command,
         StartOptions {
-            // Generous: this runs as a CI smoke test, and loaded Windows runners
+            // Generous, because this runs as a CI smoke test, and loaded Windows runners
             // can take several seconds just to start Python under ConPTY.
             timeout: Some(Duration::from_secs(60)),
             ..Default::default()

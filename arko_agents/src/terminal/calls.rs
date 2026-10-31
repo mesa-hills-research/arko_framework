@@ -1,4 +1,4 @@
-//! Tool calls the host can move to the background: the calls running in the
+//! Tool calls the host can move to the background, namely the calls running in the
 //! foreground that can move, and the jobs that run the calls that moved.
 
 use super::*;
@@ -902,7 +902,7 @@ fn call_note(
     format!("{heading}\n\n{body}")
 }
 
-/// `body` as a note carries it: all of it, or its first and last parts with
+/// `body` as a note carries it, all of it, or its first and last parts with
 /// a line saying how much was left out and where all of it is.
 fn cut(body: &str, log_path: &Path, log_truncated: bool) -> String {
     let count = body.chars().count();

@@ -1,4 +1,4 @@
-//! The pass's model request: its conversation and settings (to the refusal
+//! The pass's model request, with its conversation and settings (to the refusal
 //! fallback's model while one is pending), and the attempt that makes it.
 
 use super::*;
@@ -10,11 +10,11 @@ pub(super) type ScriptedStreamResult =
     Result<futures::stream::BoxStream<'static, Result<ai::StreamEvent, ai::Error>>, ai::Error>;
 
 impl AgentLoop {
-    /// The tools of a native request: the agent's offered tools, then
+    /// The tools of a native request, namely the agent's offered tools, then
     /// `handover_report` for an agent with `handover` set (from the first
     /// request, so the list doesn't change when the report is asked for),
     /// with the configured tool choice (none, the provider's `auto`, by
-    /// default: tool use is optional) and parallel-call setting. One call
+    /// default, so tool use is optional) and parallel-call setting. One call
     /// per turn ([`AgentConfig::asks_one_tool_call_per_turn`]) disables
     /// parallel calls where the provider can.
     pub(super) fn build_native_tool_config(
@@ -53,7 +53,7 @@ impl AgentLoop {
             config.parallel_tool_calls = configured.parallel_tool_calls;
         }
         if agent_config.asks_one_tool_call_per_turn() {
-            // Gemini can't turn parallel calls off; its calls run one at a
+            // Gemini can't turn parallel calls off, so its calls run one at a
             // time instead.
             config.parallel_tool_calls = model
                 .supports_disabling_parallel_tool_calls()
@@ -69,7 +69,7 @@ impl AgentLoop {
         )
     }
 
-    /// The request settings for `model`: `generation_config` with, in native
+    /// The request settings for `model`. They are `generation_config` with, in native
     /// mode, the agent's tools. An agent offered no tool at all sends no tool
     /// configuration (see [`offers_tools`](Self::offers_tools)).
     fn generation_config_for(
@@ -86,7 +86,7 @@ impl AgentLoop {
         config
     }
 
-    /// Whether the agent is offered any tool: one of its tools the registry
+    /// Whether the agent is offered any tool, meaning one of its tools the registry
     /// holds, or `complete_task`. An agent offered none (no tools, and a reply
     /// in text ends its task) makes requests without tools, and its system
     /// prompt says nothing about tools.
@@ -100,7 +100,7 @@ impl AgentLoop {
             || self.tool_registry.get(COMPLETE_TASK_TOOL_NAME).is_some()
     }
 
-    /// The conversation and settings of the next request: the task's, or
+    /// The conversation and settings of the next request, the task's, or
     /// after a refusal with [`AgentConfig::refusal_fallback`] set, the same
     /// conversation sent to the fallback model.
     pub(super) fn next_request(&mut self) -> (ai::Conversation, ai::GenerationConfig) {
@@ -134,7 +134,7 @@ impl AgentLoop {
                 }
                 conversation.model = fallback.model;
                 // The ChatGPT backend's turn-state token routes the configured
-                // model's turn; the fallback request starts its own.
+                // model's turn, and the fallback request starts its own.
                 conversation.openai_turn_state = None;
                 (as_sent(conversation, &config), config)
             }
@@ -167,7 +167,7 @@ impl AgentLoop {
     /// or the request and its stream's start) under the error policy's
     /// recovery. `None` once a failure or a command ended the attempt. A
     /// request once sent runs until it completes or fails, or the host
-    /// cancels or suspends the task: the elapsed recovery budget never cuts
+    /// cancels or suspends the task. The elapsed recovery budget never cuts
     /// it off.
     pub(super) async fn run_llm_step<T>(
         &mut self,
@@ -250,7 +250,7 @@ impl AgentLoop {
             return Ok(ModelTurn::Ended(Flow::NextPass));
         };
         self.request_sent_at = (!self.current_request_is_fallback).then_some(sent_at);
-        // The provider accepted the request: the elapsed budget stops
+        // The provider accepted the request. The elapsed budget stops
         // counting while the response runs, however long that is, and
         // resumes if it fails (the waits between attempts still count,
         // so failures that keep coming stay bounded).
@@ -259,13 +259,13 @@ impl AgentLoop {
     }
 }
 
-/// `conversation` as a request with `config` sends it: a request that
+/// `conversation` as a request with `config` sends it. A request that
 /// offers no tools (an agent switched to a chat, say) sends its earlier
 /// tool calls and results as text (`arko_ai::Conversation::tool_history_as_text`).
 fn as_sent(conversation: ai::Conversation, config: &ai::GenerationConfig) -> ai::Conversation {
     if config.offered_tools().is_some() {
         return conversation;
     }
-    // In place: the conversation is already the request's own copy.
+    // In place, as the conversation is already the request's own copy.
     conversation.into_tool_history_as_text()
 }

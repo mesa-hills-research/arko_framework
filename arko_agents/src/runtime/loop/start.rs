@@ -1,4 +1,4 @@
-//! The run's start: the configuration checked, the task in progress, what a
+//! The run's start, with the configuration checked, the task in progress, what a
 //! stopped run left settled, and the prompts written.
 
 use super::*;
@@ -25,8 +25,8 @@ impl AgentLoop {
                 self.task.id
             );
         }
-        // Every developer environment detail the run can show needs content:
-        // details placed in every user message on every turn, and the others
+        // Every developer environment detail the run can show needs content.
+        // That holds for details placed in every user message on every turn, and for the others
         // while the system prompt and task prompt are still to be written.
         let writing_prompts = self.task.conversation.system_message.is_none();
         if let Some(error) = self
@@ -51,7 +51,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// The run's start: the task in progress (reported), what a stopped
+    /// The run's start, with the task in progress (reported), what a stopped
     /// run left settled, and the prompts written.
     pub(super) async fn start(&mut self) -> Result<(), ArkoAgentsError> {
         let interrupted = self.start_state().await?;
@@ -88,7 +88,7 @@ impl AgentLoop {
             self.task.set_state(TaskState::InProgress);
             self.task.monitor_pause = false;
         }
-        // Calls run only once their approval is decided: a task saved while
+        // Calls run only once their approval is decided, so a task saved while
         // they ran no longer waits for it.
         if !self.task.running_tool_calls.is_empty()
             && matches!(
@@ -130,7 +130,7 @@ impl AgentLoop {
             {
                 let initial_user_prompt = prompt_builder
                     .format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
-                // Moved: the first message holds them from now on.
+                // Moved. The first message holds them from now on.
                 let content = crate::task::with_images(
                     initial_user_prompt,
                     std::mem::take(&mut self.task.initial_task_images),
@@ -163,7 +163,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// The definitions of the tools the system prompt lists: those the
+    /// The definitions of the tools the system prompt lists, namely those the
     /// configuration lists that the registry has, and `complete_task`.
     fn prompt_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();

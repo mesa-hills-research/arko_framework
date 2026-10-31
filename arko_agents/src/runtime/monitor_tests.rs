@@ -143,13 +143,13 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
     script(
         &mut agent,
         vec![
-            // Warm-up: not judged.
+            // Warm-up, not judged.
             turn(cached(1000, 0), call("m")),
-            // 900 of 1000 possible: fine.
+            // 900 of 1000 possible, fine.
             turn(cached(2000, 900), call("m")),
-            // 200 of 2000: the two-call window is 1100 / 3000.
+            // 200 of 2000, so the two-call window is 1100 / 3000.
             turn(cached(3000, 200), call("m")),
-            // Still low: no second warning or pause.
+            // Still low, so no second warning or pause.
             turn(cached(4000, 300), call("m")),
             complete_response(),
         ],
@@ -216,7 +216,7 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
         })
         .count();
     assert_eq!(pauses, 1);
-    // Not a model error: approving adds no error note to the conversation.
+    // Not a model error, so approving adds no error note to the conversation.
     assert!(!task.conversation.messages.iter().any(|message| {
         message
             .content
@@ -253,7 +253,7 @@ fn cache_monitor_settings_load_with_defaults_and_are_validated() {
     }
 }
 
-/// Calls to the refusal fallback model use another prompt cache: they are
+/// Calls to the refusal fallback model use another prompt cache, so they are
 /// not judged, and the next configured call is compared with the configured
 /// model's previous call.
 #[tokio::test(start_paused = true)]

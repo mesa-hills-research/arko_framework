@@ -96,7 +96,7 @@ mod tests {
             pattern: "Pick a region: $".into(),
         };
         let detector = Detector::new(&[rule]).unwrap();
-        // Captured from a Windows CI run: the prompt's trailing space arrives as CSI 1 C.
+        // Captured from a Windows CI run, where the prompt's trailing space arrives as CSI 1 C.
         let output = b"\x1b[?25l\x1b[2J\x1b[m\x1b[HPick a region:\x1b[1C\x1b]0;C:\\Windows\\SYSTEM32\\cmd.exe\x07\x1b[?25h";
         assert_eq!(
             detector.detect(output),

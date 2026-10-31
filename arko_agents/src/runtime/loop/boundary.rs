@@ -1,5 +1,5 @@
 //! The turn boundary before a model request, and what it adds to the
-//! conversation: context taken from the host, the file tree's changes, a user
+//! conversation, namely context taken from the host, the file tree's changes, a user
 //! turn to answer, and the runtime's own messages.
 
 use super::*;
@@ -107,7 +107,7 @@ impl AgentLoop {
         }
     }
 
-    /// At a safe turn boundary before a model request: the turn context
+    /// At a safe turn boundary before a model request. The turn context
     /// source's context joins the context taken from the channel, and all of
     /// it goes into the conversation.
     pub(super) fn flush_context_injections(&mut self) -> Result<(), ArkoAgentsError> {
@@ -123,7 +123,7 @@ impl AgentLoop {
                 && update.user_content.trim().is_empty()
                 && !update.images.is_empty()
             {
-                // Images alone: their ids go with them.
+                // Images alone, so their ids go with them.
                 self.context_ids.extend(update.ids.iter().cloned());
             }
             self.task.raise_context_marks(&update.marks);
@@ -159,7 +159,7 @@ impl AgentLoop {
     /// [`context_can_be_added_now`](Self::context_can_be_added_now)).
     pub(super) fn add_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
         // While the handover report is due, context waits for the fresh
-        // conversation: added now, it would be read only through the report
+        // conversation. Added now, it would be read only through the report
         // and could be lost from it (a message that needs a reply, say).
         if (self.task.pending_context_injections.is_empty()
             && self.task.pending_context_images.is_empty())
@@ -175,7 +175,7 @@ impl AgentLoop {
             .collect::<Vec<_>>()
             .join("\n\n");
         // Its images as the model can be sent them, within what a request
-        // takes: the others are left out, with a line saying why.
+        // takes. The others are left out, with a line saying why.
         let images = std::mem::take(&mut self.task.pending_context_images);
         let (images, left_out) = crate::task::admit_context_images(
             &self.task.conversation.model,
@@ -203,7 +203,7 @@ impl AgentLoop {
             .add_user_message_with_contents(crate::task::with_context_images(message, images));
         self.task.increment_user_message_count();
         // The host's identifiers of what it holds, for its receipt and its
-        // record: each item's, in order, then those of images alone.
+        // record. Each item's, in order, then those of images alone.
         let items = std::mem::take(&mut self.task.pending_context_injections);
         let mut ids = Vec::new();
         let mut parts = Vec::new();
@@ -228,18 +228,18 @@ impl AgentLoop {
     }
 
     /// Whether continuing after an error-recovery pause sends the pending
-    /// refusal fallback's request again, unchanged: a fallback is pending
+    /// refusal fallback's request again, unchanged, when a fallback is pending
     /// and no output-based results wait to be sent first.
     pub(super) fn fallback_resend(&self) -> bool {
         self.task.fallback_for.is_some()
             && (self.is_native_mode() || self.task.pending_text_tool_results.is_empty())
     }
 
-    /// Whether a user message can join the conversation as the loop stops:
+    /// Whether a user message can join the conversation as the loop stops when
     /// no native call waits for its result (a user message between a call
     /// and its result breaks the next request for every provider), no
     /// command is awaited (whose answer, such as tool results, comes first),
-    /// and no refusal is pending: a refusal fallback answers exactly the
+    /// and no refusal is pending, because a refusal fallback answers exactly the
     /// refused input, and [`Task::resolve_refusal`] needs the refused input
     /// to be the conversation's last input.
     pub(super) fn context_can_be_added_now(&self) -> bool {
@@ -248,7 +248,7 @@ impl AgentLoop {
             && self.task.refused_input.is_none()
     }
 
-    /// Whether the last turn's results are not all in the conversation yet:
+    /// Whether the last turn's results are not all in the conversation yet, which holds when
     /// the task awaits a command (an approval, an answer, or a recovery
     /// decision), results wait with it, or the conversation ends on a native
     /// turn whose calls have none.
@@ -268,13 +268,13 @@ impl AgentLoop {
             || !self.task.pending_text_tool_results.is_empty()
     }
 
-    /// As the loop stops, for any reason: context taken from the command
+    /// As the loop stops, for any reason, context taken from the command
     /// channel goes into the conversation where it can
     /// ([`context_can_be_added_now`](Self::context_can_be_added_now)), so the
     /// saved transcript holds everything the host sent. Otherwise it stays in
     /// [`Task::pending_context_injections`], saved with the task, and is
     /// added at the first safe boundary after the task runs again. A
-    /// completed task keeps it there too: no request followed it, and hosts
+    /// completed task keeps it there too. No request followed it, and hosts
     /// such as arko_workflows take context in a completed task's
     /// conversation as read.
     pub(super) fn keep_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
@@ -292,7 +292,7 @@ impl AgentLoop {
         self.details_sent_with = self.task.conversation.messages.len().checked_sub(1);
     }
 
-    /// The turn boundary before a model request: a stop or the end of the
+    /// The turn boundary before a model request, covering a stop or the end of the
     /// task, the commands queued meanwhile, then the handover, context and
     /// file tree, a user turn to answer, and the monitors and the host's
     /// hold, any of which can end the pass instead of the request.
@@ -304,14 +304,14 @@ impl AgentLoop {
         // Every command queued by now, also after an approved call ran,
         // so all context sent before this boundary (for example while a
         // tool call ran) reaches the next request together. The task is
-        // not terminal here: a command or call that ended it broke out
+        // not terminal here, since a command or call that ended it broke out
         // of the loop above.
         if self.take_queued_commands().await? {
             return Ok(Flow::Exit);
         }
 
         // No path brings the task here in another state (a task that ended
-        // or waits leaves the pass before): the check below is a guard.
+        // or waits leaves the pass before), so the check below is a guard.
         debug_assert!(
             matches!(self.task.current_state, TaskState::InProgress),
             "a turn boundary in state {:?}",
@@ -325,10 +325,10 @@ impl AgentLoop {
             return Ok(Flow::NextPass);
         }
 
-        // The fallback answers exactly the refused input: context updates
+        // The fallback answers exactly the refused input, so context updates
         // and file-tree changes wait for the next request.
         if self.task.fallback_for.is_none() {
-            // First: context that arrives as a handover starts waits for
+            // First, context that arrives as a handover starts waits for
             // the fresh conversation.
             self.start_handover_if_due().await?;
             // A report asked for alone ends the task once it is in.
@@ -380,7 +380,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Before a model request: a conversation that ends on an assistant
+    /// Before a model request, a conversation that ends on an assistant
     /// turn (output kept from an interrupted stream, or a kept refusal, in a
     /// task resumed without a new message) gets a user message asking to
     /// continue, since several providers reject a request that ends on an

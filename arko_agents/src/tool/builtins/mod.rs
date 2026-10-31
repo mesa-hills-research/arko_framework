@@ -37,7 +37,7 @@ pub use close_questions::CloseQuestionsTool;
 pub use message_user::MESSAGE_USER_TOOL_NAME;
 pub use message_user::MessageUserTool;
 
-/// The path a file tool opens for its `param_name` parameter: resolved with
+/// The path a file tool opens for its `param_name` parameter, resolved with
 /// [`crate::utils::resolve_path`], which the runtime's workspace check also
 /// uses, so the check judges exactly this path.
 fn resolve_path_parameter(

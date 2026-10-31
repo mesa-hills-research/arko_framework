@@ -80,7 +80,7 @@ impl StopSignal {
         let waits = self.sources.iter().map(|source| {
             let mut source = source.clone();
             Box::pin(async move {
-                // Dropped without firing: this source never fires.
+                // Dropped without firing, so this source never fires.
                 if source.wait_for(Option::is_some).await.is_err() {
                     std::future::pending::<()>().await;
                 }
@@ -366,7 +366,7 @@ impl StopAwareCommand {
             if read.is_none() {
                 read = match ended {
                     // After a stop, a process the child started may hold its
-                    // output open: read what comes for a bounded time.
+                    // output open. Read what comes for a bounded time.
                     Ok((_, Some(_))) => tokio::time::timeout(self.terminate_grace, &mut reads)
                         .await
                         .ok(),
@@ -406,7 +406,7 @@ async fn wait_with_stop(
     tokio::select! {
         biased;
         () = exited(child) => {
-            // Ended without a stop: what it started is its own business, as
+            // Ended without a stop. What it started is its own business, as
             // with a plain command.
             group.disarm();
             return Ok((child.wait().await?, None));
@@ -434,7 +434,7 @@ async fn wait_with_stop(
     if !ended {
         how = ChildStop::Killed;
         group.kill();
-        // Already gone: the wait below reports how it ended.
+        // Already gone, so the wait below reports how it ended.
         let _ = child.start_kill();
     }
     // What the child started ends with it.
@@ -475,7 +475,7 @@ fn armed_groups() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<i
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A child's process group (Unix), killed when dropped while armed: a call
+/// A child's process group (Unix), killed when dropped while armed. A call
 /// dropped mid-run leaves nothing running. Armed groups are recorded
 /// process-wide, for [`kill_stop_aware_commands`].
 struct ProcessGroup {
@@ -553,7 +553,7 @@ mod tests {
         assert!(joined.is_stopping());
         assert_eq!(joined.reason().as_deref(), Some("Task cancelled."));
         assert!(!first.is_stopped());
-        // Already fired: resolves at once.
+        // Already fired, so it resolves at once.
         tokio::time::timeout(Duration::from_secs(5), joined.stopping())
             .await
             .unwrap();
@@ -740,7 +740,7 @@ mod tests {
     }
 
     /// A child that exits within the grace leaves a process it started in
-    /// its group: that process is killed once the child has ended.
+    /// its group. That process is killed once the child has ended.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_process_left_by_a_child_that_exits_in_the_grace_is_killed() {
@@ -768,7 +768,7 @@ mod tests {
         let _ = std::fs::remove_file(pid_file);
     }
 
-    /// Set for [`exits_after_killing_stop_aware_commands`]: the file its
+    /// Set for [`exits_after_killing_stop_aware_commands`], the file its
     /// child's child writes its process ID to.
     #[cfg(unix)]
     const KILL_PID_FILE_ENV: &str = "ARKO_TEST_KILL_PID_FILE";
@@ -810,7 +810,7 @@ mod tests {
     }
 
     /// The child process of
-    /// [`kill_stop_aware_commands_kills_the_children_before_an_exit`]: runs
+    /// [`kill_stop_aware_commands_kills_the_children_before_an_exit`]. It runs
     /// a command that starts a long process, kills the commands and exits
     /// at once (with status 7). Does nothing in a normal test run.
     #[cfg(unix)]

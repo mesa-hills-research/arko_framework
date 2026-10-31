@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(image_addresses(&copy).len(), 5);
     }
 
-    /// Whatever changes in the old messages shows in the copy: an edit in
+    /// Whatever changes in the old messages shows in the copy, such as an edit in
     /// the text, an image replaced by another of the same size, one added
     /// and one removed.
     #[test]
@@ -311,7 +311,7 @@ mod tests {
         step(&mut task, 8);
         refresh(&mut copy, &task);
 
-        // A handover: a conversation of its own, with the report kept.
+        // A handover, a conversation of its own, with the report kept.
         task.handovers.push(HandoverRecord {
             at: chrono::Utc::now(),
             input_tokens: 1000,

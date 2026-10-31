@@ -191,7 +191,7 @@ async fn the_hub_starts_stops_adds_and_removes_servers_and_reports_failures() {
     assert_eq!(output.text, "echo: hi");
     assert_eq!(hub.servers()[0].state, ServerState::Running);
 
-    // Adding starts the server; a name taken is replaced.
+    // Adding starts the server, and a name taken is replaced.
     let added = hub.add(stub("more", &[])).await.unwrap();
     assert_eq!(added.state, ServerState::Running);
     let mut replacement = stub("more", &[]);
@@ -272,7 +272,7 @@ fn assert_clean(text: &str) {
 }
 
 /// A failure's reason is the server's name and fixed words, wherever an
-/// agent reads it: `servers`, `start` and `call`. What the server wrote, and
+/// agent reads it, in `servers`, `start` and `call`. What the server wrote, and
 /// the program the host expanded, go to the log, with the values of its
 /// environment replaced by their names.
 #[tokio::test]
@@ -994,7 +994,7 @@ async fn direct_tools_keep_their_names_and_call_through_the_hub() {
 }
 
 /// A direct tool reaches only the servers its run may reach, as the bridge
-/// does, when it's called: the access's servers, and for a worker never one
+/// does, when it's called, the access's servers, and for a worker never one
 /// kept to the main agent. The definitions stay those the conversation was
 /// saved with.
 #[tokio::test]
@@ -1190,7 +1190,7 @@ async fn a_shared_server_runs_once_for_every_hub_and_stops_with_the_last() {
     second.start("same-files").await.unwrap();
     assert_eq!(pids(&pid_file).len(), 1);
 
-    // Dropping one hub keeps it; dropping both stops it.
+    // Dropping one hub keeps it, and dropping both stops it.
     drop(first);
     let output = second
         .call(&context, "same-files", "echo", echo("kept"))

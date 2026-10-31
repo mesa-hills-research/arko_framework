@@ -167,7 +167,7 @@ fn sources<'a>(
 struct Found {
     /// Empty for an embedded skill.
     path: PathBuf,
-    /// Its name when it can't be read: its folder's, or its file's without
+    /// Its name when it can't be read, which is its folder's, or its file's without
     /// the extension, or an embedded skill's given name.
     fallback_name: String,
     skill: Result<LoadedSkill, Problem>,
@@ -183,7 +183,7 @@ pub(super) enum Problem {
     Unreadable(ArkoAgentsError),
 }
 
-/// A skill file or folder, settled: what loading makes of it.
+/// A skill file or folder, settled, with what loading makes of it.
 struct Settled {
     path: PathBuf,
     fallback_name: String,
@@ -195,7 +195,7 @@ enum Outcome {
     Loaded(LoadedSkill),
     Invalid(SkillLoadError),
     Unreadable(ArkoAgentsError),
-    /// Left out by its source's list: `include` or `exclude`.
+    /// Left out by its source's list, `include` or `exclude`.
     LeftOut(LoadedSkill, &'static str),
     /// The same content as the skill loaded under this name.
     Duplicate(LoadedSkill, String),
@@ -263,12 +263,12 @@ impl Settled {
 }
 
 /// The skill's content is in the system prompt, so `load_skill` doesn't load
-/// it: it loads automatically and is for the configuration's model.
+/// it, because it loads automatically and is for the configuration's model.
 pub(super) fn content_in_prompt(skill: &LoadedSkill, config: &SkillsConfig) -> bool {
     skill.auto_load && is_listed(skill, config)
 }
 
-/// The skill is for the configuration's model: its `models` match the
+/// The skill is for the configuration's model, meaning its `models` match the
 /// model's names, or there are no names to filter by. The prompt lists only
 /// such skills, and `auto_load` applies only to them.
 pub(super) fn is_listed(skill: &LoadedSkill, config: &SkillsConfig) -> bool {
@@ -345,7 +345,7 @@ fn survey_source(directory: &Path, source_label: &str) -> Result<Vec<Found>, Ark
     Ok(found)
 }
 
-/// What loading makes of the skills `found` in each source: each source's
+/// What loading makes of the skills `found` in each source. Each source's
 /// lists leave some out, a skill with the content of one loaded already is
 /// a duplicate, and one with the name of one loaded already is renamed
 /// (`name-2`). Earlier sources come first. The embedded skills come last
@@ -454,7 +454,7 @@ fn settle(found: Vec<(Origin<'_>, Vec<Found>)>, config: &SkillsConfig) -> Vec<Se
     settled
 }
 
-/// The list of `source` that leaves `skill` out, if one does: `include`
+/// The list of `source` that leaves `skill` out, if one does, `include`
 /// (applied first), or `exclude`.
 fn left_out(skill: &LoadedSkill, source: &SkillSource) -> Option<&'static str> {
     let name = skill.original_name.as_str();
@@ -471,7 +471,7 @@ fn left_out(skill: &LoadedSkill, source: &SkillSource) -> Option<&'static str> {
     None
 }
 
-/// The folder skill in `dir_path`: `None` when the folder has no
+/// The folder skill in `dir_path`, or `None` when the folder has no
 /// `SKILL.md`.
 pub(super) fn read_folder_skill(
     dir_path: &Path,
@@ -814,7 +814,7 @@ pub(super) fn parse_bundle(
 }
 
 /// Why an entry of a bundle offered as a skill can't be written to a skill's
-/// folder, if it can't: its name leaves the folder, or it isn't a file or a
+/// folder, if it can't, because its name leaves the folder, or it isn't a file or a
 /// folder.
 fn check_candidate_entry<R: Read + ?Sized>(
     entry: &zip::read::ZipFile<'_, R>,
@@ -828,7 +828,7 @@ fn check_candidate_entry<R: Read + ?Sized>(
     if name.split('/').any(|part| part == "..") || entry.enclosed_name().is_none() {
         return Err(format!("'{name}' leaves the skill's folder."));
     }
-    // The file type is in the mode's top bits: 0o10 a file, 0o04 a folder.
+    // The file type is in the mode's top bits, 0o10 a file, 0o04 a folder.
     if let Some(mode) = entry.unix_mode() {
         let kind = mode & 0o170000;
         if kind == 0o120000 {
@@ -917,7 +917,7 @@ fn compute_skill_content_hash(skill: &LoadedSkill) -> u64 {
     hasher.finish()
 }
 
-/// What the prompt holds of the skills: the content of those that load
+/// What the prompt holds of the skills, the content of those that load
 /// automatically and the line of each other, for the skills that are for
 /// the configuration's model. The others are not in the prompt.
 fn build_prompt_context(skills: &[LoadedSkill], config: &SkillsConfig) -> SkillPromptContext {
@@ -1026,7 +1026,7 @@ mod tests {
         write(&first.join(".hidden/SKILL.md"), &skill("hidden", "Hidden."));
         write(&first.join("notes/other.md"), "Not a skill folder.");
         write(&first.join("left/SKILL.md"), &skill("left", "Left."));
-        // The same name, another skill: renamed. The same content: skipped.
+        // The same name, another skill, renamed. The same content, skipped.
         write(
             &second.join("review/SKILL.md"),
             &skill("review", "Another review."),

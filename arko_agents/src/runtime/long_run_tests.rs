@@ -1,4 +1,4 @@
-//! Long-running runs: rate limits retried after the provider's delay by
+//! Long-running runs, covering rate limits retried after the provider's delay by
 //! default, plan usage limits (pause, or opt-in wait until reset), and plan
 //! usage reports with an opt-in threshold.
 
@@ -64,7 +64,7 @@ async fn rate_limits_follow_the_server_delay_by_default_outside_the_recovery_lim
     // the 30 s elapsed budget, and nothing added to the conversation.
     assert_eq!(started.elapsed(), Duration::from_secs(12 * 36));
     assert_eq!(agent.task.conversation.messages.len(), messages);
-    // Ordinary recovery is untouched: the next ordinary failure is its first.
+    // Ordinary recovery is untouched, so the next ordinary failure is its first.
     agent
         .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
         .await
@@ -377,7 +377,7 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
     let task = runner.await.unwrap().unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert_eq!(paused, 1, "the same window and reset pause once");
-    // A monitor pause is not a model error: approving it tells the model
+    // A monitor pause is not a model error, so approving it tells the model
     // nothing about one.
     assert!(!task.conversation.messages.iter().any(|message| {
         message
@@ -389,7 +389,7 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
     assert!(!task.monitor_pause);
 }
 
-/// The reported window is saved with the task: a resumed task doesn't pause
+/// The reported window is saved with the task. A resumed task doesn't pause
 /// for it again, and a report whose window has since reset is ignored.
 #[tokio::test(start_paused = true)]
 async fn a_plan_usage_threshold_pause_is_not_repeated_after_a_resume() {
@@ -453,8 +453,8 @@ async fn a_plan_usage_threshold_pause_is_not_repeated_after_a_resume() {
     );
 }
 
-/// Rate limits without a delay are waited out with backoff, but not forever:
-/// after `max_wait_ms` of such waits they are handled as a usage limit.
+/// Rate limits without a delay are waited out with backoff, but not forever.
+/// After `max_wait_ms` of such waits they are handled as a usage limit.
 #[tokio::test(start_paused = true)]
 async fn rate_limits_without_a_delay_hand_over_to_the_usage_limit_policy() {
     let (mut agent, mut events, _commands) = harness();
@@ -598,7 +598,7 @@ fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     assert!(invalid.validate().is_err());
 }
 
-/// Rate limits with a delay count toward the same per-episode budget: short
+/// Rate limits with a delay count toward the same per-episode budget. Short
 /// delays that keep coming hand over to the usage-limit policy too.
 #[tokio::test(start_paused = true)]
 async fn repeated_short_rate_limit_delays_also_hand_over_to_the_usage_limit_policy() {
@@ -625,7 +625,7 @@ async fn repeated_short_rate_limit_delays_also_hand_over_to_the_usage_limit_poli
     );
 }
 
-/// The budget counts the time actually waited: a wait cut short by a
+/// The budget counts the time actually waited. A wait cut short by a
 /// command counts only up to then.
 #[tokio::test(start_paused = true)]
 async fn a_rate_limit_wait_cut_short_counts_the_time_waited() {

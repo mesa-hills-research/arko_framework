@@ -177,7 +177,7 @@ pub struct AgentLoop {
     /// The host's handover threshold, in place of the configuration's.
     pub(super) handover_threshold: crate::handover::HandoverThreshold,
     /// The step that took a request over the model's input limit was left
-    /// out: the next report request says so
+    /// out, and the next report request says so
     /// ([`hand_over_without_the_step`](Self::hand_over_without_the_step)).
     pub(super) step_left_out: bool,
     /// Receives the task at its safe points. See [`report_task`](Self::report_task).
@@ -216,7 +216,7 @@ pub struct AgentLoop {
     /// When the request in flight was sent, unless it went to the refusal
     /// fallback's model. Its answer records it as the task's latest request.
     request_sent_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// The latest request that was answered: the task's latest reported
+    /// The latest request that was answered. The task's latest reported
     /// usage is its.
     answered_request: Option<RequestMark>,
     /// Requests sent again in this episode after shortening a tool result
@@ -242,7 +242,7 @@ impl AgentLoop {
         let parsing_config = task.agent_config.get_tool_parsing_config();
         let throttle_ms = event_throttle_ms.unwrap_or(0);
         // The opt-in stream idle timeout applies to this agent's requests
-        // only; clones of a client share its credentials.
+        // only, and clones of a client share its credentials.
         let llm_client = match task.agent_config.llm_retry_config.stream_idle_timeout_ms {
             Some(timeout) if timeout > 0 => Arc::new(
                 (*llm_client)
@@ -252,7 +252,7 @@ impl AgentLoop {
             _ => llm_client,
         };
         let now = Instant::now();
-        // The tools offered are the only tools that run: a call to any other
+        // The tools offered are the only tools that run, so a call to any other
         // one is answered as unavailable, in either tool calling mode.
         let offered = task.agent_config.tool_config.offered_tool_names();
         let all_tools = tool_registry;
@@ -341,7 +341,7 @@ impl AgentLoop {
         }
     }
 
-    /// Reports the task to the snapshot sink, if there is one: a safe point
+    /// Reports the task to the snapshot sink, if there is one, at a safe point
     /// (see [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink)). With
     /// `durable`, returns once the sink has saved it.
     async fn report_task(&mut self, durable: bool) {
@@ -360,7 +360,7 @@ impl AgentLoop {
         self.task.agent_config.tool_config.tool_calling_mode == ToolCallingMode::Native
     }
 
-    /// The start of a pass, after its snapshot: a stop requested since the
+    /// The start of a pass, after its snapshot. A stop requested since the
     /// last pass, or a task that ended, leaves the loop.
     async fn pass_start(&mut self) -> Result<Flow, ArkoAgentsError> {
         if self.stop_requested {
@@ -388,7 +388,7 @@ impl AgentLoop {
     }
 
     /// A pass that ends before its turn's calls (the turn was answered
-    /// with a note, or no usable turn came): `Exit` for a task that ended,
+    /// with a note, or no usable turn came). `Exit` for a task that ended,
     /// `NextPass` otherwise.
     fn end_of_pass(&self) -> Flow {
         if self.task.current_state.is_terminal() {
@@ -418,7 +418,7 @@ impl AgentLoop {
                 ModelTurn::Ended(Flow::Exit) => break,
                 ModelTurn::Ended(_) => continue,
             };
-            // The model's turn is in the conversation; its calls haven't run.
+            // The model's turn is in the conversation, and its calls haven't run.
             self.report_task(false).await;
 
             if self.is_native_mode() {
@@ -435,7 +435,7 @@ impl AgentLoop {
         self.finish().await
     }
 
-    /// The end of the run, however the loop stopped: context taken is
+    /// The end of the run, however the loop stopped. Context taken is
     /// kept, the task reported, and `TaskStreamEnd` sent.
     async fn finish(mut self) -> Result<Task, ArkoAgentsError> {
         self.take_last_context().await;

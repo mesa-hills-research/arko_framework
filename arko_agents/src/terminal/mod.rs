@@ -233,13 +233,13 @@ pub struct InputNotice {
     pub prompt_truncated: bool,
 }
 
-/// Whether PTY output shown to the agent loses its escape sequences: on
+/// Whether PTY output shown to the agent loses its escape sequences, true on
 /// Windows, where ConPTY adds its own (cursor moves, window titles, colour
 /// resets) whatever the program prints. The log and byte offsets keep the
 /// raw output.
 const STRIPS_ESCAPES: bool = cfg!(windows);
 
-/// The display text of an output window: its bytes as UTF-8 (invalid or
+/// The display text of an output window, its bytes as UTF-8 (invalid or
 /// split sequences replaced), without escape sequences when `strip` is set
 /// (cursor-forward moves become the spaces they stand for).
 fn window_text(bytes: &[u8], strip: bool) -> String {
@@ -795,7 +795,7 @@ impl TerminalManager {
                     ),
                 };
                 send(UserCommand::InjectContext { content });
-                // Sent: a runtime the owner binds later (its next turn)
+                // Sent, so a runtime the owner binds later (its next turn)
                 // doesn't get it again.
                 data.last_event = None;
             }
@@ -1018,7 +1018,7 @@ impl TerminalManager {
     pub fn release(self: &Arc<Self>, owner: Uuid, id: Uuid) -> Result<TerminalSnapshot> {
         let job = self.owned(owner, id)?;
         let (snapshot, event) = {
-            // Under the jobs' lock, as `close` checks them: a job doesn't
+            // Under the jobs' lock, as `close` checks them, so a job doesn't
             // move to the background while the host exits.
             let _jobs = self.jobs.lock().unwrap();
             let mut data = job.data.lock().unwrap();
@@ -1110,7 +1110,7 @@ impl TerminalManager {
                 "cancel or finish a job before forgetting it".into(),
             ));
         }
-        // Keep artifacts; rename the manifest out of the active catalog.
+        // Keep artifacts, and rename the manifest out of the active catalog.
         let directory = self.config.directory.join(id.to_string());
         std::fs::rename(directory.join("job.json"), directory.join("finished.json"))?;
         self.jobs.lock().unwrap().remove(&id);

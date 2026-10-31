@@ -1,4 +1,4 @@
-//! Native tool calling: a turn's calls checked, run in order or held for
+//! Native tool calling, with a turn's calls checked, run in order or held for
 //! approval, the approved and held calls run once decided, each call's result
 //! recorded, and the turn's results added to the conversation.
 
@@ -112,8 +112,8 @@ struct NativePlan {
     calls_needing_approval: Vec<(usize, PendingToolCallInfo)>,
     /// The calls that run now.
     runs: Vec<NativeRun>,
-    /// Auto-approved calls that must wait for a call awaiting approval:
-    /// they run once it is decided.
+    /// Auto-approved calls that must wait for a call awaiting approval.
+    /// They run once it is decided.
     held: Vec<NativeRun>,
 }
 
@@ -124,9 +124,9 @@ struct NativePlan {
     reason = "returned once per call and taken apart at once: a box would only add an allocation"
 )]
 enum NativeCall {
-    /// Answered at once: its result is recorded.
+    /// Answered at once, and its result is recorded.
     Answered,
-    /// It waits for approval. `exclusive`: it doesn't run beside other
+    /// It waits for approval. `exclusive` means it doesn't run beside other
     /// calls.
     NeedsApproval {
         pending: PendingToolCallInfo,
@@ -138,13 +138,13 @@ enum NativeCall {
 
 impl AgentLoop {
     /// Runs native calls in order under the parallel-safety rule (see
-    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig)): each group
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig)). Each group
     /// of [`tool_run::groups`] runs at the same time, after the one before.
     /// Once the task can no longer run calls (`keep_going` says so of its
     /// state, or it was suspended), the calls not yet run are answered as not
     /// run. `complete_task` after an earlier call of the turn that was
     /// rejected or failed (`failed` holds those calls' positions, and the
-    /// calls here that fail join them) doesn't run: its result says so.
+    /// calls here that fail join them) doesn't run, and its result says so.
     /// Each call's result is recorded in `results` (in the task) as its group
     /// ends, and the task reported to the snapshot sink.
     pub(super) async fn run_native_calls(
@@ -258,7 +258,7 @@ impl AgentLoop {
     }
 
     /// The result of a native call that ran, with its events and the state
-    /// changes it makes: `ask_user` awaits the answer, `complete_task`
+    /// changes it makes. `ask_user` awaits the answer, `complete_task`
     /// completes the task, a middleware's decision can end it, and a tool
     /// error is handled under the tool-error policy. The tool's images go
     /// inside its result, after its text. `message_to_agent` (given with an
@@ -360,7 +360,7 @@ impl AgentLoop {
         }
     }
 
-    /// A native call that finished: `ask_user` awaits the answer and
+    /// A native call that finished. `ask_user` awaits the answer and
     /// `complete_task` completes the task (unless another call of its
     /// group already ended it), `message_user` sends its message to the
     /// host, the result events are sent, and the result carries the host's
@@ -409,8 +409,8 @@ impl AgentLoop {
         Ok(ai::ToolResult::from_tool_call(call, &text).with_images(images))
     }
 
-    /// An `ask_user` or `close_questions` call that finished with `raw`:
-    /// its questions are numbered and recorded in the task's log, or closed
+    /// An `ask_user` or `close_questions` call that finished with `raw`.
+    /// Its questions are numbered and recorded in the task's log, or closed
     /// there, and the host is told (`UserQuestionsAsked`,
     /// `QuestionsClosed`). An `ask_user` that waits sets the task awaiting
     /// the answer. Returns the call's result for the agent, or `None` for
@@ -479,7 +479,7 @@ impl AgentLoop {
     }
 
     /// Adds the turn's native results to the conversation as one user
-    /// message: the results, then `extra_text` (an answer or a note) and
+    /// message, the results first, then `extra_text` (an answer or a note) and
     /// the environment details and reminder due with this user message, as
     /// text after the results in the same turn.
     pub(super) async fn flush_native_results_to_conversation(
@@ -504,7 +504,7 @@ impl AgentLoop {
     }
 
     /// Whether an approved native turn's results go into the conversation
-    /// now: the task no longer waits, or it waits for the answer to
+    /// now, when the task no longer waits, or it waits for the answer to
     /// `ask_user`, which follows them (as when `ask_user` is auto-approved),
     /// so the answer can also come from
     /// [`Task::prepare_for_resumption_with_user_response`].
@@ -554,7 +554,7 @@ impl AgentLoop {
         let overall_batch_id = (tool_calls.len() > 1).then(Uuid::new_v4);
         self.begin_tool_batch();
         // Every call gets exactly one result, in the order the model
-        // made them: checks answer some at once, the auto-approved
+        // made them. Checks answer some at once, the auto-approved
         // calls run, and the calls that need approval wait for it.
         let mut plan = NativePlan {
             results: NativeResults::new(&self.task),
@@ -564,7 +564,7 @@ impl AgentLoop {
         };
         // Whether an earlier call of the turn awaits approval or is
         // held, and whether one of those isn't parallel-safe. A call
-        // waiting for approval counts as not finished: a
+        // waiting for approval counts as not finished. A
         // parallel-safe call waits for every earlier call that isn't,
         // and any other call for every earlier call.
         let mut waiting_any = false;
@@ -688,8 +688,8 @@ impl AgentLoop {
     }
 
     /// The final reply of an agent whose reply in text ends the task
-    /// ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)):
-    /// the task completes with the reply as its summary, as a
+    /// ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)).
+    /// The task completes with the reply as its summary, as a
     /// `complete_task` call with it would complete it.
     async fn complete_with_reply(&mut self, reply: String) -> Result<(), ArkoAgentsError> {
         self.reset_llm_recovery();
@@ -702,7 +702,7 @@ impl AgentLoop {
         .await
     }
 
-    /// A native call's checks, in order: arguments that aren't JSON,
+    /// A native call's checks, in order. They cover arguments that aren't JSON,
     /// `handover_report` (answered by the runtime where it is offered), a
     /// handover report that is due, a tool the run doesn't offer, and its
     /// paths. A call they reject is answered (`ToolRejected` or
@@ -955,7 +955,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Answers a native call that doesn't run (`reason` says why): it is
+    /// Answers a native call that doesn't run (`reason` says why). It is
     /// reported rejected, and its error result recorded at `index`.
     async fn answer_not_run(
         &mut self,
@@ -1020,9 +1020,9 @@ impl AgentLoop {
             .unwrap_or(usize::MAX)
     }
 
-    /// Once a turn's approvals are decided: runs the approved calls
+    /// Once a turn's approvals are decided, it runs the approved calls
     /// together with the calls held for them (see
-    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig): auto-approved
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig), where auto-approved
     /// calls that aren't parallel-safe wait for an earlier call's approval),
     /// in call order under the parallel-safety rule, and adds every result,
     /// `decided` (rejections) included, in call order.
@@ -1080,7 +1080,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// The end of a wait's native decisions: the approved calls run with
+    /// The end of a wait's native decisions. The approved calls run with
     /// the held ones and every result, `decided` included, is added (see
     /// [`run_decided_native_calls`](Self::run_decided_native_calls)), the
     /// batch ends (pausing on its tool errors), and the turn's results go

@@ -109,7 +109,7 @@ pub(crate) fn ignore_line_ranges(
     }
 }
 
-/// A line-number parameter: a positive integer, as a number or as text.
+/// A line-number parameter, a positive integer, as a number or as text.
 fn line_number(params: &HashMap<String, Value>, name: &str) -> Result<Option<usize>, ToolError> {
     let Some(value) = params.get(name) else {
         return Ok(None);
@@ -278,7 +278,7 @@ impl Tool for ReadFileTool {
     }
 }
 
-/// The image type of a file that starts with `bytes`: PNG, JPEG, GIF or
+/// The image type of a file that starts with `bytes`, one of PNG, JPEG, GIF or
 /// WebP.
 fn image_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
@@ -294,7 +294,7 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// An image file's result: a line naming it, and the image, or for a file
+/// An image file's result, a line naming it, and the image, or for a file
 /// over [`MAX_TOOL_IMAGE_BYTES`] a line saying it is too large to show.
 fn image_output(path: &str, mime_type: &str, bytes: &[u8]) -> ToolOutput {
     let size = if bytes.len() < 1024 * 1024 {
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn the_terminal_hint_and_line_ranges_follow_the_configuration() {
         let plain = ReadFileTool.definition();
-        // No terminal, no ranges: the definition as it was.
+        // No terminal, no ranges, so the definition is as it was.
         let offered = offered_definition(plain.clone(), &tool_config(&["read_file"], false));
         assert_eq!(offered.description, plain.description);
         assert_eq!(parameter_names(&offered), ["path"]);
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(parameter_names(&offered), ["path"]);
         let schema = offered.to_json_schema();
         assert!(!schema.to_string().contains("start_line"), "{schema}");
-        // Ranges on: the optional parameters and their sentence.
+        // Ranges on, with the optional parameters and their sentence.
         let offered = offered_definition(plain.clone(), &tool_config(&["read_file"], true));
         assert_eq!(
             parameter_names(&offered),
@@ -397,7 +397,7 @@ mod tests {
             std::env::temp_dir().join(format!("arko-read-images-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let context = context(&directory);
-        // Only the file signature matters here; the reader does not decode pixels.
+        // Only the file signature matters here, as the reader does not decode pixels.
         for (name, bytes, mime_type) in [
             (
                 "png.txt",
@@ -561,7 +561,7 @@ mod tests {
         ] {
             assert!(read(bad.clone()).await.is_err(), "{bad}");
         }
-        // Without the setting, the runtime drops the parameters: the whole file.
+        // Without the setting, the runtime drops the parameters, so the whole file is read.
         let mut call = params(json!({"path": "f.txt", "start_line": 3, "end_line": 4}));
         ignore_line_ranges(
             &ReadFileTool,

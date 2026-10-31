@@ -6,7 +6,7 @@
 //! its hooks and permission requests (the gate every tool call passes),
 //! serves the agent's arko tools in-process, and turns what the session
 //! reports into the task's conversation, usage and events. The conversation
-//! the task keeps mirrors the session's: it is a record for hosts (a
+//! the task keeps mirrors the session's. It is a record for hosts (a
 //! workflow reads which messages it holds), not what the model is sent.
 //!
 //! The session lives while the task is in progress. A wait (for an answer,
@@ -15,7 +15,7 @@
 //! new session, after the report. A turn over the model's input limit has
 //! the report written in the session resumed at an earlier message
 //! (`ClaudeCodeRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
-//! keeps it: the runtime sends Claude Code's `/compact` between turns, and
+//! keeps it. The runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -57,7 +57,7 @@ use arko_ai::{self as ai};
 /// The in-process MCP server serving the agent's arko tools.
 pub const ARKO_TOOL_SERVER: &str = "arko";
 
-/// How long Claude Code waits for the runtime's answer to a hook: the gate
+/// How long Claude Code waits for the runtime's answer to a hook. The gate
 /// decides at once, except for a built-in call's middleware `before`.
 const HOOK_TIMEOUT_SECONDS: f64 = 600.0;
 
@@ -98,7 +98,7 @@ const USAGE_READ_EVERY: Duration = Duration::from_secs(300);
 const USAGE_END_WAIT: Duration = Duration::from_secs(1);
 
 /// What the runtime sends to have Claude Code compact the session's
-/// conversation: Claude Code's own command, as a user message.
+/// conversation. It is Claude Code's own command, as a user message.
 const COMPACT_COMMAND: &str = "/compact";
 
 /// The model's next input after a compaction the runtime asked for, when no
@@ -108,8 +108,8 @@ const COMPACTED: &str = "Claude Code compacted your conversation: the summary ab
 /// Heads the list of the calls held while a compaction was due.
 const HELD_CALLS: &str = "For the compaction, arko held these tool calls of yours and ended your turn, so they did not run. Where Claude Code said the user rejected them, that was this hold, not the user. Make them again if they are still needed:";
 
-/// A call's result as Claude Code is served it: `text`, then each image's
-/// label on a line of its own, and the images as MCP image content.
+/// A call's result as Claude Code is served it (`text`, then each image's
+/// label on a line of its own, and the images as MCP image content).
 fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolOutput {
     if images.is_empty() {
         return cc::ToolOutput::text(text);
@@ -124,7 +124,7 @@ fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolO
     cc::ToolOutput::text(text).with_images(images.into_iter().map(|image| image.image).collect())
 }
 
-/// The error a refusal resolution gets: Claude Code sends its own
+/// The error a refusal resolution gets, as Claude Code sends its own
 /// conversation.
 const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal. A Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
 
@@ -228,14 +228,14 @@ fn refused(tool: &str, reason: &str) -> Value {
     cc::Hook::deny_tool(format!("arko did not run this {tool} call: {reason}"))
 }
 
-/// A call held while the handover report is due: not an error.
+/// A call held while the handover report is due, not an error.
 fn held_for_report(tool: &str, request: &str) -> Value {
     cc::Hook::deny_tool(format!(
         "Not an error: arko held this {tool} call so you can write your handover report now. {request}"
     ))
 }
 
-/// A call held while a compaction is due: not an error.
+/// A call held while a compaction is due, not an error.
 fn held_for_compaction(tool: &str) -> Value {
     cc::Hook::deny_tool(format!(
         "Not an error: arko held this {tool} call because Claude Code compacts your conversation now. End your turn without calling a tool; you continue after the compaction, and can make this call again then."
@@ -357,7 +357,7 @@ fn add_context(text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}})
 }
 
-/// User message content as Claude Code's input blocks: text and images (an
+/// User message content as Claude Code's input blocks, text and images (an
 /// image given by URL as a line of text).
 fn input_blocks<'a>(contents: impl Iterator<Item = &'a ai::Content>) -> Value {
     Value::Array(
@@ -424,7 +424,7 @@ struct Admitted {
     /// Claude Code's ID of the call (its `tool_use_id`).
     call_id: Option<String>,
     custom_output: Option<String>,
-    /// What Claude Code reads of the call in place of its result: an
+    /// What Claude Code reads of the call in place of its result, an
     /// `ask_user` or `close_questions` call's, which the runtime words as
     /// it admits the call.
     reply: Option<String>,
@@ -494,7 +494,7 @@ impl ToolHost {
             .get_mut(&input_key(name, &arguments))
             .and_then(VecDeque::pop_front);
         let Some(admitted) = admitted else {
-            // Every call passes the gate first; one that didn't isn't run.
+            // Every call passes the gate first, and one that didn't isn't run.
             return cc::ToolOutput::error(format!(
                 "Tool '{name}' was called without passing the host's checks, so it was not run."
             ));
@@ -516,7 +516,7 @@ impl ToolHost {
         output
     }
 
-    /// Runs the admitted call `call` to `tool` (`recovering`: again, after
+    /// Runs the admitted call `call` to `tool` (`recovering` means again, after
     /// the task stopped while it ran), and returns its outcome and what
     /// Claude Code reads.
     async fn run(
@@ -676,10 +676,10 @@ impl cc::ClaudeTool for ServedTool {
 /// A response's usage, until the response is complete.
 struct PendingUsage {
     key: String,
-    /// When the runtime first saw the request: its first streamed token, or
-    /// its response for one that wasn't streamed.
+    /// When the runtime first saw the request, at its first streamed token, or
+    /// at its response for one that wasn't streamed.
     seen_at: chrono::DateTime<chrono::Utc>,
-    /// The response finished: its final `message_delta` came, or it came
+    /// The response finished when its final `message_delta` came, or when it came
     /// whole without streaming. Only a finished response is the task's latest
     /// request. One that failed or was abandoned while it streamed is
     /// recorded for its usage alone.
@@ -693,7 +693,7 @@ struct PendingUsage {
 }
 
 impl PendingUsage {
-    /// A request's whole input: uncached, cache reads and cache writes.
+    /// A request's whole input (uncached, cache reads and cache writes).
     fn input(usage: &Value) -> usize {
         [
             "input_tokens",
@@ -730,7 +730,7 @@ struct Approval {
 /// `/compact` (see [`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code)).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Compaction {
-    /// Due: the model's next tool call is held and its turn interrupted
+    /// Due. The model's next tool call is held and its turn interrupted
     /// (its other calls are held too), and `/compact` is sent when the turn
     /// ends (or first, when a session starts).
     Due,
@@ -783,8 +783,8 @@ pub(super) struct ClaudeCodeRun {
     /// `ContextInjected` events of the next input's context, reported once
     /// it is sent.
     context_receipts: Vec<AgentEvent>,
-    /// How the task's pending context goes out in hooks: the hooks in
-    /// flight, the user's typed notes sent, and the denials' rests held.
+    /// How the task's pending context goes out in hooks (the hooks in
+    /// flight, the user's typed notes sent, and the denials' rests held).
     delivery: Delivery,
     /// The ids of an update of images alone, which go with the next input.
     image_ids: Vec<String>,
@@ -824,7 +824,7 @@ pub(super) struct ClaudeCodeRun {
     bytes_per_token: f64,
     /// The plan-usage threshold's `SlowDown` delay, while usage is over it.
     slow_down: Option<Duration>,
-    /// Allowed calls the `SlowDown` holds until their deadline: the request
+    /// Allowed calls the `SlowDown` holds until their deadline. The request
     /// after each call waits with it. Commands are handled meanwhile.
     slowed: VecDeque<(tokio::time::Instant, oneshot::Sender<Value>, Value)>,
     cache_warned: bool,
@@ -860,10 +860,10 @@ pub(super) struct ClaudeCodeRun {
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
     /// (each with its call), reported with the tool-error pause at the
-    /// turn's end, as arko's own runtime reports them: once.
+    /// turn's end, as arko's own runtime reports them, once.
     tool_errors: Vec<(String, Uuid)>,
     /// The kind of API error Claude Code reported in the turn's latest
-    /// message (its `error` field: `authentication_failed`, `rate_limit`,
+    /// message (its `error` field, such as `authentication_failed`, `rate_limit`,
     /// …), if it reported one.
     api_error: Option<String>,
     /// The kind of the failed turn's error, recorded with the pause (or the
@@ -875,10 +875,10 @@ pub(super) struct ClaudeCodeRun {
     compaction: Option<Compaction>,
     /// The calls held while it was due, as the model is told of them after.
     held_calls: Vec<String>,
-    /// The latest message the session received whose UUID arko knows: a
-    /// user message it sent, or a tool result.
+    /// The latest message the session received whose UUID arko knows (a
+    /// user message it sent, or a tool result).
     last_entry: Option<Entry>,
-    /// The message before the model's latest response: the end of the
+    /// The message before the model's latest response. It holds the end of the
     /// conversation as the last request Claude Code answered had it, and
     /// whether tool results followed that response. A turn over the model's
     /// input limit hands over from it. See
@@ -1064,9 +1064,9 @@ impl ClaudeCodeRun {
 
     /// Records the call Claude Code's `tool_use_id` names as running before
     /// it is allowed to run, and waits until the task is saved with it (the
-    /// write-ahead point): a task that stops while it runs knows it may have
+    /// write-ahead point). A task that stops while it runs knows it may have
     /// run. A read-only call (a [read-only built-in](crate::claude_code::READ_ONLY_BUILT_IN_TOOLS),
-    /// or an arko tool whose calls recovery runs again) doesn't wait: if
+    /// or an arko tool whose calls recovery runs again) doesn't wait. If
     /// the task stops before it is saved, the model reads again.
     async fn record_running(
         &mut self,
@@ -1102,7 +1102,7 @@ impl ClaudeCodeRun {
         self.report(!rerunnable).await;
     }
 
-    /// A call's result, as Claude Code reported it: kept with the running
+    /// A call's result, as Claude Code reported it. It is kept with the running
     /// call until the model's next message shows Claude Code has it (its
     /// transcript is saved a little after the result is reported).
     fn record_output(&mut self, tool_use_id: Option<&String>, content: &Value) {
@@ -1150,7 +1150,7 @@ impl ClaudeCodeRun {
             let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
             let first =
                 builder.format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
-            // Moved: the first message holds them from now on.
+            // Moved. The first message holds them from now on.
             let content =
                 crate::task::with_images(first, std::mem::take(&mut self.task.initial_task_images));
             self.task
@@ -1159,7 +1159,7 @@ impl ClaudeCodeRun {
             self.task.increment_user_message_count();
             self.task.record_initial_prompt();
         }
-        // A call's approval can't outlive its session: a task saved while
+        // A call's approval can't outlive its session. A task saved while
         // one waited continues without it.
         if matches!(
             self.task.current_state,
@@ -1219,10 +1219,10 @@ impl ClaudeCodeRun {
     }
 
     /// Before a session resumes after the task stopped while tool calls ran
-    /// (its host stopped after saving it, or Claude Code exited): Claude
+    /// (its host stopped after saving it, or Claude Code exited), Claude
     /// Code settles the calls its transcript holds as interrupted, without
     /// running them again, and its transcript can lack calls arko already
-    /// ran. The task's record of them is what counts: the resumed session's
+    /// ran. The task's record of them is what counts. The resumed session's
     /// input tells the model each call's outcome. A call whose result arko
     /// had is reported completed, with its result. An arko call whose tool
     /// is [`Rerun`](ToolRecovery::Rerun) or [`Resume`](ToolRecovery::Resume)
@@ -1236,7 +1236,7 @@ impl ClaudeCodeRun {
             self.task.running_tool_calls.clear();
             return Ok(());
         }
-        // Kept until they are settled: a call run again stays recorded
+        // Kept until they are settled. A call run again stays recorded
         // while it runs.
         let open = self.task.running_tool_calls.clone();
         if open.is_empty() {
@@ -1249,7 +1249,7 @@ impl ClaudeCodeRun {
         );
         let mut lines = Vec::new();
         let mut images = Vec::new();
-        // The pauses the calls run again ask for: the task pauses once.
+        // The pauses the calls run again ask for. The task pauses once.
         let mut pauses = Vec::new();
         for call in open {
             let served = if call.built_in {
@@ -1282,7 +1282,7 @@ impl ClaudeCodeRun {
                 .then(|| self.registry.get(&call.tool_name))
                 .flatten()
                 .filter(|_| {
-                    // Their outcomes change the task; the model calls them
+                    // Their outcomes change the task, so the model calls them
                     // again.
                     ![
                         COMPLETE_TASK_TOOL_NAME,
@@ -1293,7 +1293,7 @@ impl ClaudeCodeRun {
                 });
             let mode = match (&tool, &call.custom_output) {
                 // A report asked for alone runs no call again, and resumes
-                // no run a call started: the run that goes on with the work
+                // no run a call started. The run that goes on with the work
                 // does.
                 _ if self.task.report_only() => ToolRecovery::InDoubt,
                 (Some(_), Some(_)) => ToolRecovery::Rerun,
@@ -1565,7 +1565,7 @@ impl ClaudeCodeRun {
                     return Ok(false);
                 }
                 // Claude Code keeps the conversation it sends, so the input
-                // it was refused can't be changed: reported as arko's own
+                // it was refused can't be changed. It is reported as arko's own
                 // runtime reports a change it can't apply, an error the
                 // host answers, the pause standing.
                 (
@@ -1712,8 +1712,8 @@ impl ClaudeCodeRun {
             .is_some_and(|handover| handover.compact_in_claude_code)
     }
 
-    /// The input of the conversation's latest request: this run's, else as
-    /// the task recorded it.
+    /// The input of the conversation's latest request (this run's, else as
+    /// the task recorded it).
     fn latest_size(&self) -> usize {
         self.context_size
             .or_else(|| self.task.current_conversation_context_size())
@@ -1750,7 +1750,7 @@ impl ClaudeCodeRun {
         self.task.agent_config.tool_config.chat
     }
 
-    /// The agent is offered nothing: neither arko's tools nor Claude Code's
+    /// The agent is offered nothing, neither arko's tools nor Claude Code's
     /// built-ins.
     fn offers_no_tools(&self) -> bool {
         self.task
@@ -1760,7 +1760,7 @@ impl ClaudeCodeRun {
             .is_empty()
     }
 
-    /// Whether context waits for a later input: while a handover report is
+    /// Whether context waits for a later input. While a handover report is
     /// due it waits for the fresh conversation, and during a compaction for
     /// the agent's next input. Arko calls that start meanwhile count newer
     /// context only.
@@ -1830,7 +1830,7 @@ impl ClaudeCodeRun {
             )
             .is_some();
         if !held && !typed && !images.is_empty() {
-            // Images alone: they and their ids wait for the next input.
+            // Images alone, so they and their ids wait for the next input.
             self.image_ids.extend(image_ids);
         }
         self.task.pending_context_images.extend(images);
@@ -1838,7 +1838,7 @@ impl ClaudeCodeRun {
     }
 
     /// Every text a hook gives the model, measured as it goes out, within the
-    /// budget of [`hook_budget`](super::hook_budget): call `call`'s denial in
+    /// budget of [`hook_budget`](super::hook_budget). That is call `call`'s denial in
     /// a PreToolUse hook or a permission answer (`denial`), or else a
     /// PostToolUse hook's context. A PostToolUse hook carries the task's
     /// pending context from the first item not in a hook already, as much as
@@ -1891,7 +1891,7 @@ impl ClaudeCodeRun {
     }
 
     /// Adds the context waiting for the model to the conversation as the next
-    /// input's update, with its images, and records what it holds: every
+    /// input's update, with its images, and records what it holds, namely every
     /// item, from what earlier parts gave, and the source's update. The hooks
     /// Claude Code didn't acknowledge are dropped first, their items still
     /// pending, so they go now. Returns the update's text, `None` when
@@ -1989,7 +1989,7 @@ impl ClaudeCodeRun {
             .collect();
         let mut cc_settings = serde_json::Map::new();
         if config.handover.is_some() {
-            // The handover keeps the context small; Claude Code's own
+            // The handover keeps the context small. Claude Code's own
             // compaction would replace the conversation first.
             cc_settings.insert("autoCompactEnabled".into(), json!(false));
         }
@@ -2036,7 +2036,7 @@ impl ClaudeCodeRun {
         // A cut back resumes at the entry the task recorded, and a branch
         // first copies the session it was branched from into its own. Both hold
         // until the session has the task's first new message (see
-        // `record_sent`): Claude Code saves a cut, and creates a fork, only
+        // `record_sent`), because Claude Code saves a cut, and creates a fork, only
         // with that message.
         let recorded_at = self.task.claude_code_resume_at.clone();
         let session = match (
@@ -2044,7 +2044,7 @@ impl ClaudeCodeRun {
             &self.task.claude_code_fork_of,
         ) {
             (Some(_), Some(parent)) => {
-                // Each attempt forks under an ID of its own: one an attempt
+                // Each attempt forks under an ID of its own, because one an attempt
                 // that failed may have created can't be used again.
                 let id = Uuid::new_v4().to_string();
                 self.task.claude_code_session = Some(id.clone());
@@ -2095,7 +2095,7 @@ impl ClaudeCodeRun {
             } else {
                 cc::SystemPrompt::Append(system)
             },
-            // The session recorded an earlier prompt: this one replaces it.
+            // The session recorded an earlier prompt, so this one replaces it.
             system_prompt_snapshot: self.task.claude_code_prompt_changed.then_some(false),
             built_in_tools: if built_ins.is_empty() {
                 cc::BuiltInTools::None
@@ -2179,7 +2179,7 @@ impl ClaudeCodeRun {
         Ok((session, receiver))
     }
 
-    /// The task's input the session hasn't received: user messages added
+    /// The task's input the session hasn't received, namely user messages added
     /// since it last ran (the task prompt, a follow-up, an answer, a note),
     /// and context waiting for the model. A resumed session with nothing new
     /// is asked to continue.
@@ -2294,7 +2294,7 @@ impl ClaudeCodeRun {
     ) -> Result<SessionEnd, ArkoAgentsError> {
         self.retrying_since = None;
         self.streamed_bytes = (0, 0);
-        // Message IDs are a launch's own: what an earlier launch streamed
+        // Message IDs are a launch's own, so what an earlier launch streamed
         // says nothing about this one's messages.
         self.streaming = None;
         self.response = None;
@@ -2320,7 +2320,7 @@ impl ClaudeCodeRun {
         }
         // A chat over the handover size (or asked to hand over) writes its
         // summary first. Its turns end with a reply and no tool call, so the
-        // report request can't reach it during a turn: it goes alone at the
+        // report request can't reach it during a turn, so it goes alone at the
         // start of the next one, and the host's messages since the last reply
         // wait for the fresh conversation, which answers them
         // (`HandoverSeed::for_chat`).
@@ -2340,7 +2340,7 @@ impl ClaudeCodeRun {
             self.note_handover_request().await?;
         }
         // After a cut back or a branch, the session has the task's input only
-        // once Claude Code saved it: until then the task keeps the cut's
+        // once Claude Code saved it. Until then the task keeps the cut's
         // point as what the session has, so a task saved in between (and
         // run again after a crash) sends it again from the same entry.
         let synced_before = self.task.claude_code_synced;
@@ -2350,7 +2350,7 @@ impl ClaudeCodeRun {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
         } else if self.task.report_only() && !self.report_delivered {
-            // A report asked for alone: its request goes with the input the
+            // A report asked for alone. Its request goes with the input the
             // session doesn't have yet.
             self.report_delivered = true;
             let request = self.report_request();
@@ -2384,7 +2384,7 @@ impl ClaudeCodeRun {
         }
         self.api_error = None;
         self.error_kind = None;
-        // A session that ended before its turn did: reported now.
+        // A session that ended before its turn did. It is reported now.
         self.report_tool_errors().await?;
         // The session (and what it was sent) is saved before it runs.
         self.report(true).await;
@@ -2404,7 +2404,7 @@ impl ClaudeCodeRun {
         self.ask_usage_if_due(&session).await;
         self.emit_context_receipts().await?;
         self.questions = None;
-        // Claude Code exited on its own: it may not have saved every call.
+        // Claude Code exited on its own, so it may not have saved every call.
         let mut cli_exited = false;
         let end = loop {
             let approval_deadline = self
@@ -2461,7 +2461,7 @@ impl ClaudeCodeRun {
         // Late hook requests get their stopping answer.
         drop(requests);
         self.slowed.clear();
-        // A `/compact` whose turn didn't end: whether it compacted is
+        // A `/compact` whose turn didn't end. Whether it compacted is
         // unknown, and the threshold decides again.
         if matches!(self.compaction, Some(Compaction::Sent { .. })) {
             self.compaction = None;
@@ -2479,7 +2479,7 @@ impl ClaudeCodeRun {
         // item they carried waits where it is for the next input.
         self.delivery.settle();
         match session.close().await {
-            // Claude Code saved the session as it closed: its transcript
+            // Claude Code saved the session as it closed, so its transcript
             // holds every call's outcome.
             Ok(_) if !cli_exited => self.task.running_tool_calls.clear(),
             Ok(_) => {}
@@ -2651,7 +2651,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Every tool call's first check: the gate allows it, rejects it (the
+    /// Every tool call's first check. The gate allows it, rejects it (the
     /// reason is its result), or sends it to a permission request that
     /// waits for approval.
     async fn gate(
@@ -2847,7 +2847,7 @@ impl ClaudeCodeRun {
         from_session_directory(served, input, from, &self.task.current_working_directory)
     }
 
-    /// An `ask_user` or `close_questions` call being admitted: its
+    /// An `ask_user` or `close_questions` call being admitted. Its
     /// questions are numbered now, or the ids to close are checked, so that
     /// what Claude Code reads of it names them (`call.reply`). The task's
     /// log records them, and the host hears of them, once the call ran
@@ -2931,7 +2931,7 @@ impl ClaudeCodeRun {
         Ok(refused(name, &reason))
     }
 
-    /// An approved (or auto-approved) call: a built-in passes the
+    /// An approved (or auto-approved) call. A built-in passes the
     /// middleware's `before`. An arko call is admitted for its MCP call,
     /// where the middleware runs.
     async fn admit(
@@ -2957,7 +2957,7 @@ impl ClaudeCodeRun {
             id, custom_output, ..
         } = call;
         if let Some(output) = custom_output {
-            // Claude Code runs a built-in itself: output the host supplies
+            // Claude Code runs a built-in itself, so output the host supplies
             // is its result instead of running it.
             return Ok(cc::Hook::deny_tool(format!(
                 "Not an error: the host supplied this {name} call's result instead of running it. Result: {output}"
@@ -3026,7 +3026,7 @@ impl ClaudeCodeRun {
         Ok(answer)
     }
 
-    /// A permission request: the gate asked for approval (or Claude Code
+    /// A permission request. The gate asked for approval (or Claude Code
     /// asks about a call the gate didn't see). The call waits for the host's
     /// decision.
     async fn permission(
@@ -3040,7 +3040,7 @@ impl ClaudeCodeRun {
             .and_then(|tool_use_id| self.calls.get(tool_use_id))
             .map(|call| (call.id, call.name.clone(), call.built_in));
         let Some((id, name, built_in)) = known else {
-            // Not gated (an unexpected request): refused.
+            // Not gated (an unexpected request), so refused.
             let reason = self
                 .hook_text(
                     request.tool_use_id.as_deref(),
@@ -3238,7 +3238,7 @@ impl ClaudeCodeRun {
         self.set_state(TaskState::InProgress).await
     }
 
-    /// After a call ran: the middleware's `after` for a built-in, and
+    /// After a call ran, the middleware's `after` for a built-in, and
     /// context for the model with the result.
     async fn after_tool(
         &mut self,
@@ -3320,7 +3320,7 @@ impl ClaudeCodeRun {
     /// `completed`, or `cancelled` when the turn stopped before the model's
     /// next request. A typed item whose hook was acknowledged too is done,
     /// and joins the conversation now. One the CLI cancelled never reached
-    /// the model: it waits again where it is, and the record of the results
+    /// the model. It waits again where it is, and the record of the results
     /// it went with, when they are still to come, leaves it out.
     async fn note_settled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
         let state = raw["state"].as_str();
@@ -3397,7 +3397,7 @@ impl ClaudeCodeRun {
         result
     }
 
-    /// Claude Code answered the input sent after a cut back or a branch: it
+    /// Claude Code answered the input sent after a cut back or a branch. It
     /// has saved the input, so the cut (or the fork) is saved too, and the
     /// messages sent with it count as sent.
     fn confirm_resumed(&mut self) {
@@ -3413,7 +3413,7 @@ impl ClaudeCodeRun {
         message: cc::Message,
         session: &cc::ClaudeSession,
     ) -> Result<(), ArkoAgentsError> {
-        // Any message of the turn but Claude Code's status: the turn runs,
+        // Any message of the turn but Claude Code's status. The turn runs,
         // so Claude Code has the input.
         if !matches!(message, cc::Message::System(_)) {
             self.confirm_resumed();
@@ -3421,7 +3421,7 @@ impl ClaudeCodeRun {
         match message {
             cc::Message::Assistant(assistant) => {
                 // A failed request's own message (see `api_error` below)
-                // reports no request: its usage is all zeros.
+                // reports no request, so its usage is all zeros.
                 if let Some(usage) = &assistant.usage
                     && assistant.raw.get("error").and_then(Value::as_str).is_none()
                 {
@@ -3432,7 +3432,7 @@ impl ClaudeCodeRun {
                         .map(str::to_string)
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
                     // The stream events report this request's usage, its
-                    // final output included; this message's is a snapshot.
+                    // final output included. This message's is a snapshot.
                     // A response that wasn't streamed comes whole.
                     if !self.streamed.contains(&key) {
                         self.observe_usage(
@@ -3445,7 +3445,7 @@ impl ClaudeCodeRun {
                         .await?;
                     }
                 }
-                // Over the host's budget: the turn ends here, held.
+                // Over the host's budget, so the turn ends here, held.
                 if self.pause_after_turn.is_none()
                     && let Some(reason) = self.held_request()
                 {
@@ -3456,7 +3456,7 @@ impl ClaudeCodeRun {
                 if assistant.parent_tool_use_id.is_some() {
                     return Ok(());
                 }
-                // A request that failed: Claude Code reports it as a message
+                // A request that failed. Claude Code reports it as a message
                 // of its own, its error's kind in `error`.
                 self.api_error = assistant
                     .raw
@@ -3479,7 +3479,7 @@ impl ClaudeCodeRun {
                     self.step_results = false;
                 }
                 // The response's text and thinking streamed as they came
-                // (`content_block_delta`): not again.
+                // (`content_block_delta`), so not again.
                 let streamed = id.is_some_and(|id| self.streamed_text.contains(id));
                 let mut text = String::new();
                 let mut calls = Vec::new();
@@ -3553,13 +3553,13 @@ impl ClaudeCodeRun {
                     let Some(call) = self.calls.get(tool_use_id) else {
                         continue;
                     };
-                    // A built-in's images (Claude Code's `Read`): an arko
+                    // A built-in's images (Claude Code's `Read`). An arko
                     // tool's reached the sink as it ran.
                     if call.built_in
                         && let Some(sink) = &self.image_sink
                     {
                         let mut images = result_images(content);
-                        // Captioned as `read_file` captions its images: the
+                        // Captioned as `read_file` captions its images, with the
                         // file's path and size.
                         if let Some(path) = call.record.arguments["file_path"].as_str() {
                             for image in &mut images {
@@ -3648,7 +3648,7 @@ impl ClaudeCodeRun {
                 Some("message_start") => {
                     let message = &event["message"];
                     if parent_tool_use_id.is_none() {
-                        // A response: any retry before it is over, and a
+                        // A response. Any retry before it is over, and a
                         // response that streamed without finishing failed.
                         self.discard_unfinished_stream().await?;
                         self.streaming = message["id"].as_str().map(str::to_string);
@@ -3671,7 +3671,7 @@ impl ClaudeCodeRun {
                 }
                 Some("message_delta") => {
                     if parent_tool_use_id.is_none() {
-                        // The response finished: what it streamed stands.
+                        // The response finished, so what it streamed stands.
                         self.streamed_bytes = (0, 0);
                     }
                     // The request's final usage.
@@ -3753,7 +3753,7 @@ impl ClaudeCodeRun {
                 .await?;
             }
             cc::Message::System(system) if system.subtype == "model_refusal" => {
-                // The refusal stands: no retry ran.
+                // The refusal stands, as no retry ran.
                 let refusal = refusal_of(&system.raw, self.refusal_details.take());
                 self.emit(AgentEvent::RefusalReceived(refusal.clone()))
                     .await?;
@@ -3784,7 +3784,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// A response that streamed and didn't finish failed: the host is told
+    /// A response that streamed and didn't finish failed. The host is told
     /// to drop what it streamed ([`AgentEvent::StreamedOutputDiscarded`]).
     async fn discard_unfinished_stream(&mut self) -> Result<(), ArkoAgentsError> {
         let (text_bytes, reasoning_bytes) = std::mem::take(&mut self.streamed_bytes);
@@ -3798,7 +3798,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Claude Code will retry a failed request (its `api_retry` message):
+    /// Claude Code will retry a failed request (its `api_retry` message),
     /// reported as the runtime reports its own retries, an error that needs
     /// no decision and the retry with its delay.
     async fn retry_scheduled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
@@ -3870,8 +3870,8 @@ impl ClaudeCodeRun {
         }
     }
 
-    /// A call's result arrived: its events, and what its outcome does to the
-    /// task. `arguments` are the call's.
+    /// A call's result arrived (its events, and what its outcome does to the
+    /// task). `arguments` are the call's.
     async fn call_finished(
         &mut self,
         id: Uuid,
@@ -4081,10 +4081,10 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Notes a request's usage as it starts: the main conversation's
+    /// Notes a request's usage as it starts. The main conversation's
     /// requests set the context size a handover checks at once (a request's
     /// input doesn't change as it runs). The usage is recorded once the
-    /// request is complete: its final `message_delta`, or else when the next
+    /// request is complete, at its final `message_delta`, or else when the next
     /// request of its thread starts or the turn ends. Claude Code's
     /// `assistant` messages carry the output count as it stood when the
     /// stream started, and its turn result sums the turn's requests, so
@@ -4100,7 +4100,7 @@ impl ClaudeCodeRun {
         (seen_at, complete): (chrono::DateTime<chrono::Utc>, bool),
     ) -> Result<(), ArkoAgentsError> {
         if parent.is_none() {
-            // Anthropic's input counts are exclusive: the uncached input,
+            // Anthropic's input counts are exclusive, so the uncached input,
             // cache reads and cache writes add up to the whole input.
             let input = PendingUsage::input(&usage);
             self.context_size = Some(input);
@@ -4137,7 +4137,7 @@ impl ClaudeCodeRun {
     }
 
     /// A request's response started (`message_start`, as early as Claude
-    /// Code shows a request): reported with the conversation's size for its
+    /// Code shows a request), reported with the conversation's size for its
     /// own requests, which, with the input the response reports, calibrates
     /// the bytes per token reported with the next. Returns the time it is
     /// reported with, which stands for when it was sent.
@@ -4212,12 +4212,12 @@ impl ClaudeCodeRun {
         })
     }
 
-    /// Keeps the session's prompt cache warm between turns: a ping in a
+    /// Keeps the session's prompt cache warm between turns, with a ping in a
     /// fork of the session that Claude Code doesn't save (`--fork-session
     /// --no-session-persistence`), launched with the session's own flags,
     /// so its request reads the conversation's cache. The reply is
     /// discarded, and the task and its session are unchanged. Returns the
-    /// ping's usage. Checked against Claude Code 2.1.299: such a fork read
+    /// ping's usage. Checked against Claude Code 2.1.299, where such a fork read
     /// the conversation's cache and left no transcript.
     pub(super) async fn refresh_prompt_cache(mut self) -> Result<ai::UsageInfo, ArkoAgentsError> {
         let session = self
@@ -4253,7 +4253,7 @@ impl ClaudeCodeRun {
             .send(crate::runtime::CACHE_PING)
             .await
             .map_err(failed)?;
-        // The ping runs no tool: a call it makes is refused.
+        // The ping runs no tool, so a call it makes is refused.
         let result = loop {
             tokio::select! {
                 message = claude.next_message() => match message {
@@ -4303,7 +4303,7 @@ impl ClaudeCodeRun {
         };
         let input = PendingUsage::input(&pending.usage);
         let output = count("output_tokens");
-        // Claude Code may serve another model: its refusal fallback keeps
+        // Claude Code may serve another model, as its refusal fallback keeps
         // the rest of the session on the fallback model.
         let model = pending
             .model
@@ -4458,7 +4458,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Claude Code's plan usage (`rate_limit_event`: its five-hour window as
+    /// Claude Code's plan usage (`rate_limit_event`, with its five-hour window as
     /// the primary one, its seven-day window as the secondary), reported
     /// and checked against the opt-in threshold.
     async fn plan_usage_reported(
@@ -4520,7 +4520,7 @@ impl ClaudeCodeRun {
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
                 if self.slow_down.is_none() {
                     // The configured TTL, else the one Claude Code's writes
-                    // show, else Anthropic's shorter one; Claude Code's
+                    // show, else Anthropic's shorter one. Claude Code's
                     // subagents cache for 5 minutes whatever the main TTL.
                     let config = &self.task.agent_config;
                     let subagents = config
@@ -4555,7 +4555,7 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// The opt-in cache monitor, after a request of the main conversation:
+    /// The opt-in cache monitor, after a request of the main conversation,
     /// as for other agents, over the current conversation's requests.
     async fn monitor_cache(&mut self) -> Result<(), ArkoAgentsError> {
         let Some(config) = self.task.agent_config.monitoring.cache.clone() else {
@@ -4624,7 +4624,7 @@ impl ClaudeCodeRun {
     }
 
     /// `size` (a request's input), when it reached the handover threshold
-    /// of a conversation whose first request didn't: a conversation that
+    /// of a conversation whose first request didn't. A conversation that
     /// starts over the threshold would start over it again after another
     /// handover or compaction.
     fn over_threshold(&mut self, size: usize) -> Option<usize> {
@@ -4652,7 +4652,7 @@ impl ClaudeCodeRun {
         Some(size)
     }
 
-    /// After a request of the main conversation: a handover starts once its
+    /// After a request of the main conversation. A handover starts once its
     /// input reaches the threshold. The report request reaches the model as
     /// the result of its next tool call, or as a message when its turn ends.
     /// An agent that compacts holds its next call instead and ends its turn,
@@ -4716,7 +4716,7 @@ impl ClaudeCodeRun {
                 Some((_, ErrorRecoveryCause::ToolError))
             )
         {
-            // No tool-error pause reports them: each is reported on its own.
+            // No tool-error pause reports them, so each is reported on its own.
             self.report_tool_errors().await?;
         }
         let tool_error_pause = std::mem::take(&mut self.tool_errors);
@@ -4750,7 +4750,7 @@ impl ClaudeCodeRun {
                 return Ok(Some(SessionEnd::Wait));
             }
             if matches!(cause, ErrorRecoveryCause::Monitor) {
-                // As for other agents: a pause under the pausing error
+                // As for other agents, a pause under the pausing error
                 // policies, the task returned interrupted under the others.
                 self.pause_on_error(reason, cause).await?;
                 self.task.monitor_pause = matches!(
@@ -4784,7 +4784,7 @@ impl ClaudeCodeRun {
         }
         let fallback_answered = std::mem::take(&mut self.fallback_turn);
         if fallback_answered {
-            // The fallback answered one turn; the configured model is back.
+            // The fallback answered one turn. The configured model is back.
             let model = self.task.agent_config.llm_config.model.id.clone();
             if let Err(error) = session.set_model(Some(&model)).await {
                 return self.session_failed(error.to_string()).await.map(Some);
@@ -4792,7 +4792,7 @@ impl ClaudeCodeRun {
         }
         if let Some(refusal) = self.refused.take() {
             match self.task.agent_config.refusal_fallback.clone() {
-                // Once per refusal: a fallback that refuses too, stands.
+                // Once per refusal. A fallback that refuses too, stands.
                 Some(fallback) if !fallback_answered => {
                     if let Err(error) = session.set_model(Some(&fallback.model.id)).await {
                         return self.session_failed(error.to_string()).await.map(Some);
@@ -4864,9 +4864,9 @@ impl ClaudeCodeRun {
                 &message,
             );
             self.error_kind = Some(kind).filter(|kind| *kind != arko_ai::ErrorKind::Unknown);
-            // Failures retrying doesn't fix: Claude Code isn't signed in, or
-            // its login expired or was revoked (a new login is needed); its
-            // account can't be billed (a credit or spend wall); or its
+            // Failures retrying doesn't fix. Claude Code isn't signed in, or
+            // its login expired or was revoked (a new login is needed), its
+            // account can't be billed (a credit or spend wall), or its
             // organization or plan may not use what was asked.
             let lasting = match kind {
                 arko_ai::ErrorKind::Authentication => Some("could not authenticate"),
@@ -4892,7 +4892,7 @@ impl ClaudeCodeRun {
                 && self.compacts()
                 && !self.handover_due()
             {
-                // Over the model's input limit before the compaction: Claude
+                // Over the model's input limit before the compaction, so Claude
                 // Code's `/compact` tries now (and a handover follows if it
                 // can't).
                 log::warn!(
@@ -4909,7 +4909,7 @@ impl ClaudeCodeRun {
             }
             return self.session_failed(message).await.map(Some);
         }
-        // The final reply of an agent whose reply in text ends the task: a
+        // The final reply of an agent whose reply in text ends the task. It is a
         // turn that ends with text, other than those above (Claude Code was
         // told to end them, or arko ended them) and the handover report. A
         // compaction or a report request the model hasn't seen yet waits,
@@ -4996,7 +4996,7 @@ impl ClaudeCodeRun {
         self.send_unsent(session).await
     }
 
-    /// Whether the turn's last response called no tool: the conversation
+    /// Whether the turn's last response called no tool, as the conversation
     /// ends on the model's text (Claude Code's turn result is its text).
     fn ended_on_text(&self) -> bool {
         self.task
@@ -5009,12 +5009,12 @@ impl ClaudeCodeRun {
     }
 
     /// The session failed (it exited, or a turn ended in an error Claude
-    /// Code's own retries didn't recover from): the error policy decides.
+    /// Code's own retries didn't recover from), so the error policy decides.
     async fn session_failed(&mut self, message: String) -> Result<SessionEnd, ArkoAgentsError> {
         if self.stopping.is_some() || self.task.current_state.is_terminal() {
             return Ok(SessionEnd::Stop);
         }
-        // A plan limit Claude Code reported reached: the pause waits for its
+        // A plan limit Claude Code reported reached. The pause waits for its
         // reset (a workflow's automatic recovery waits until then).
         if let Some(Some(resets_at)) = self.limit_reached
             && let Some(wait) = self.usage_limit_wait(resets_at)
@@ -5048,10 +5048,10 @@ impl ClaudeCodeRun {
     }
 
     /// Under [`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset),
-    /// the wait for a limit that resets at `resets_at` (Unix seconds): until a
+    /// the wait for a limit that resets at `resets_at` (Unix seconds), until a
     /// little past the reset, when the whole wait fits `max_wait_ms`.
     fn usage_limit_wait(&self, resets_at: u64) -> Option<Duration> {
-        // A report asked for alone doesn't wait: its host goes on without it.
+        // A report asked for alone doesn't wait, as its host goes on without it.
         if self.task.report_only() {
             return None;
         }
@@ -5147,7 +5147,7 @@ impl ClaudeCodeRun {
         if pausing {
             self.pause(message, cause).await
         } else {
-            // Reported before the task ends interrupted: a workflow stops
+            // Reported before the task ends interrupted, because a workflow stops
             // reading its events at that state.
             let error_kind = self.error_kind.take();
             self.emit(AgentEvent::ErrorEncountered {
@@ -5170,7 +5170,7 @@ impl ClaudeCodeRun {
             .and_then(|source| source.hold_request(self.task.id))
     }
 
-    /// Pauses the task for the host, which holds its next request: an
+    /// Pauses the task for the host, which holds its next request. This is an
     /// error-recovery pause whatever the error policy, whose approval adds
     /// no error note.
     async fn hold(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
@@ -5183,7 +5183,7 @@ impl ClaudeCodeRun {
     }
 
     /// Pauses for an error-recovery decision, reported as arko's own
-    /// runtime reports one: the state change that gives the pause's cause,
+    /// runtime reports one, with the state change that gives the pause's cause,
     /// then the error a host answers (a workflow decides the pause once it
     /// has both).
     async fn pause(
@@ -5263,7 +5263,7 @@ impl ClaudeCodeRun {
     }
 
     /// Claude Code compacted the session's conversation (`compact_boundary`),
-    /// at the runtime's request or on its own: its summary replaced the
+    /// at the runtime's request or on its own. Its summary replaced the
     /// earlier messages, which the task's conversation keeps. What the
     /// runtime keeps about the conversation starts over (as after a
     /// handover), and the handover hook's context waits for the agent's next
@@ -5286,7 +5286,7 @@ impl ClaudeCodeRun {
         self.cache_warned = false;
         self.cache_pause_episode = false;
         self.handover_skip_warned = false;
-        // The messages before the summary aren't the conversation's now:
+        // The messages before the summary aren't the conversation's now, so
         // the session can't be cut back to them.
         self.last_entry = None;
         self.task.claude_code_entries.clear();
@@ -5325,7 +5325,7 @@ impl ClaudeCodeRun {
         .await
     }
 
-    /// After a compaction the runtime asked for: tells the model of the calls
+    /// After a compaction the runtime asked for, it tells the model of the calls
     /// it held, and lets it continue when no other input (a user's message)
     /// does.
     fn add_compaction_note(&mut self) -> Result<(), ArkoAgentsError> {
@@ -5351,7 +5351,7 @@ impl ClaudeCodeRun {
     }
 
     /// Claude Code didn't compact the conversation (`/compact` failed, or
-    /// isn't a command of this Claude Code): the agent hands over instead.
+    /// isn't a command of this Claude Code), so the agent hands over instead.
     /// The report request goes out with the task's input that waited for
     /// the compaction, so the report covers it. In a conversation already
     /// over the model's input limit it fails as well, and the step that
@@ -5380,7 +5380,7 @@ impl ClaudeCodeRun {
 
     /// A turn went over the model's input limit, for an agent that hands
     /// over (it has `handover`, or the host set a threshold), as the native
-    /// runtime's `hand_over_without_the_step` does: the step that took the
+    /// runtime's `hand_over_without_the_step` does. The step that took the
     /// conversation there (the model's reply, its results, and the runtime's
     /// messages after them, such as a report request) is left out, and the
     /// report is asked for from the conversation as the last request Claude
@@ -5388,7 +5388,7 @@ impl ClaudeCodeRun {
     /// before the request. The next session resumes the session at the
     /// message that ended that request (Claude Code's `--resume-session-at`),
     /// and the context updates delivered since go again with the request.
-    /// Returns whether it does: not without a handover, without tool results
+    /// Returns whether it does. It doesn't without a handover, without tool results
     /// since the last answered request (a message took it over, such as the
     /// report request itself), or once a step was left out for this
     /// handover, so a report request that fails as well ends the run.
@@ -5405,7 +5405,7 @@ impl ClaudeCodeRun {
         };
         let start = answered.messages;
         self.task.leave_out_step(start);
-        // The resumed session has what came before `start`; the rest goes
+        // The resumed session has what came before `start`. The rest goes
         // with the report request.
         self.task.claude_code_synced = start;
         self.task
@@ -5449,7 +5449,7 @@ impl ClaudeCodeRun {
     }
 
     /// The fresh session of a handover runs with `config`, the
-    /// [`HandoverHook`]'s: it is served `config`'s tools and given a system
+    /// [`HandoverHook`]'s. It is served `config`'s tools and given a system
     /// prompt written from it, with `config`'s skills when they differ from
     /// the task's. One the task can't take is left out, and logged.
     fn take_handover_config(&mut self, mut config: AgentConfig) -> Result<(), ArkoAgentsError> {
@@ -5530,13 +5530,13 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// The report arrived: a fresh session starts from the seed and the
+    /// The report arrived. A fresh session starts from the seed and the
     /// report, in the same task. The hook's configuration, if it gives one,
     /// applies from then on.
     async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         let report = report.trim().to_string();
         if self.task.report_only() {
-            // Asked for alone: the task completes with it, and the
+            // Asked for alone. The task completes with it, and the
             // conversation stays.
             self.task.handover_requested = None;
             self.report_delivered = false;
@@ -5635,7 +5635,7 @@ impl ClaudeCodeRun {
 }
 
 /// Claude Code's `rate_limit_info` as plan usage of
-/// [`SubscriptionPlan::ClaudeCode`](ai::SubscriptionPlan::ClaudeCode): the
+/// [`SubscriptionPlan::ClaudeCode`](ai::SubscriptionPlan::ClaudeCode). The
 /// five-hour window is the primary one and the seven-day window the
 /// secondary, as in its `unifiedWindows`. An event without them reports its
 /// one window.
@@ -5743,7 +5743,7 @@ fn extra_usage_read(answer: &Value) -> Option<ai::ExtraUsage> {
 }
 
 /// A refusal Claude Code reported (`model_refusal`,
-/// `model_refusal_fallback`): the API's refusal category and explanation.
+/// `model_refusal_fallback`), with the API's refusal category and explanation.
 /// `details` are the refused response's `stop_details`, for what the message
 /// leaves out.
 fn refusal_of(raw: &Value, details: Option<Value>) -> ai::Refusal {
@@ -5790,7 +5790,7 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-/// A file's size as `read_file` gives it: KB under a megabyte, else MB.
+/// A file's size as `read_file` gives it, in KB under a megabyte, else MB.
 fn file_size(bytes: usize) -> String {
     if bytes < 1024 * 1024 {
         format!("{} KB", bytes.div_ceil(1024))

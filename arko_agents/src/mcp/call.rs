@@ -1,4 +1,4 @@
-//! A tool call on an MCP server, and its result as a tool's output: shared
+//! A tool call on an MCP server, and its result as a tool's output, shared
 //! by [`McpTool`](super::McpTool) and [`McpHub`](super::McpHub).
 
 use serde_json::Value;
@@ -14,7 +14,7 @@ use crate::tool::{ToolError, ToolImage, ToolOutput};
 /// The image types accepted from MCP tools.
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-/// Why a call failed: the tool error, and the server's message when it
+/// Why a call failed, namely the tool error, and the server's message when it
 /// rejected the arguments (JSON-RPC's "invalid params", `-32602`).
 #[derive(Debug)]
 pub(crate) struct CallFailure {
@@ -71,7 +71,7 @@ pub(crate) async fn call_tool(
         request: Some(handle.id.clone()),
     };
     let response = handle.await_response().await;
-    // Answered, or the server is gone: there's nothing to cancel.
+    // Answered, or the server is gone, so there's nothing to cancel.
     cancel.request = None;
     let result = match response.map_err(failed)? {
         ServerResult::CallToolResult(result) => result,
@@ -158,7 +158,7 @@ pub(crate) async fn call_tool(
 }
 
 /// Cancels a request on the server (MCP's `notifications/cancelled`) when
-/// the call awaiting it is dropped first: it was stopped, ran past its time
+/// the call awaiting it is dropped first, because it was stopped, ran past its time
 /// limit, or its task was cancelled. The server can then stop working on
 /// it, and a server that handles one request at a time takes the next.
 struct CancelOnDrop {

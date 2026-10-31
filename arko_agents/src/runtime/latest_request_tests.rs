@@ -1,4 +1,4 @@
-//! The task's latest request (`Task::latest_request`) in arko's own runtime:
+//! The task's latest request (`Task::latest_request`) in arko's own runtime,
 //! recorded with each answered request's send time and usage, in the same
 //! step as its usage, and none after a handover until the fresh
 //! conversation's first request is answered.
@@ -83,8 +83,8 @@ fn input(record: &RequestRecord) -> Option<usize> {
     record.latest().map(|request| request.input_tokens)
 }
 
-/// The answered request is the latest, from when its own attempt was sent:
-/// a failed attempt before it (retried after 250 ms) isn't, and the
+/// The answered request is the latest, from when its own attempt was sent.
+/// A failed attempt before it (retried after 250 ms) isn't, and the
 /// request's usage gives its input and cache counts.
 #[tokio::test]
 async fn the_answered_request_is_the_latest_from_its_own_attempt() {

@@ -1,4 +1,4 @@
-//! Recovery follow-ups: attempt accounting across capacity waits, partial
+//! Recovery follow-ups, covering attempt accounting across capacity waits, partial
 //! output of failed streams, and conversations that end on an assistant turn.
 
 use super::retry_tests::{capacity_failure, complete_response, harness, provider_failure};
@@ -29,7 +29,7 @@ fn assistant_texts(task: &Task) -> Vec<String> {
 }
 
 /// Capacity failures between ordinary ones neither reset nor consume the
-/// ordinary limits: the attempt limit still ends recovery, and hours of
+/// ordinary limits. The attempt limit still ends recovery, and hours of
 /// capacity waiting don't use up the ordinary elapsed budget.
 #[tokio::test(start_paused = true)]
 async fn alternating_capacity_and_ordinary_failures_still_exhaust_the_attempt_limit() {
@@ -66,13 +66,13 @@ async fn alternating_capacity_and_ordinary_failures_still_exhaust_the_attempt_li
             _ => None,
         })
         .collect();
-    // Ordinary backoff continues from attempt to attempt (250, 500 ms);
+    // Ordinary backoff continues from attempt to attempt (250, 500 ms),
     // capacity waits honor the hour-long hint in between.
     assert_eq!(delays, [250, 3_600_000, 500, 3_600_000]);
 }
 
 /// A stream that fails with a capacity error under opt-in capacity recovery
-/// is retried unchanged: its partial output is not kept (it would end the
+/// is retried unchanged. Its partial output is not kept (it would end the
 /// retried request on an assistant turn), and no message is added.
 #[tokio::test(start_paused = true)]
 async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
@@ -108,7 +108,7 @@ async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
 }
 
 /// A failed request (here a 503 after some output, then a truncated
-/// stream) is sent again unchanged: the failed stream's output is not kept
+/// stream) is sent again unchanged. The failed stream's output is not kept
 /// and no note about the failure is added, since the model had no part in
 /// it.
 #[tokio::test(start_paused = true)]
@@ -156,10 +156,10 @@ async fn a_failed_request_is_sent_again_unchanged_without_a_note() {
     }
 }
 
-/// A response the runtime can't use gets a note before the next request:
-/// a native turn without a tool call is told how to go on. It is asked
+/// A response the runtime can't use gets a note before the next request.
+/// A native turn without a tool call is told how to go on. It is asked
 /// again at once, without backoff, and without starting the elapsed
-/// recovery budget (the model's work is not an outage): an hour-long
+/// recovery budget (the model's work is not an outage). An hour-long
 /// response afterwards is not cut off.
 #[tokio::test(start_paused = true)]
 async fn a_response_without_a_tool_call_gets_a_note() {
@@ -314,7 +314,7 @@ fn a_resumed_task_takes_current_model_data_from_the_registry() {
 }
 
 /// A response that ends at the output-token limit is reported, so a host
-/// can tell the user; the turn is then handled as usual.
+/// can tell the user, and the turn is then handled as usual.
 #[tokio::test(start_paused = true)]
 async fn a_response_cut_at_the_output_limit_is_reported() {
     let (mut agent, mut events, _commands) = harness();
@@ -357,7 +357,7 @@ async fn a_response_cut_at_the_output_limit_is_reported() {
 }
 
 /// Under `InformAgentAndContinue` (no attempt limit), responses without a
-/// tool call are asked again at once but not forever: they get
+/// tool call are asked again at once but not forever. They get
 /// `MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT` attempts, then the task is
 /// returned interrupted.
 #[tokio::test(start_paused = true)]
@@ -386,7 +386,7 @@ async fn responses_without_a_tool_call_are_bounded_without_an_attempt_limit() {
     );
 }
 
-/// A completed response ends an outage's elapsed budget: after a failed
+/// A completed response ends an outage's elapsed budget. After a failed
 /// request, a response without a tool call and a slow next response are
 /// not cut off by the budget the failure started.
 #[tokio::test(start_paused = true)]
@@ -420,7 +420,7 @@ async fn a_completed_response_ends_the_elapsed_budget_of_a_failure() {
 }
 
 /// Under `InformAgentAndContinue` (no attempt limit), responses the provider
-/// accepts and then fails at once stay bounded by the elapsed budget: only
+/// accepts and then fails at once stay bounded by the elapsed budget. Only
 /// the time a response runs is left out of it, not the waits between
 /// attempts.
 #[tokio::test(start_paused = true)]
@@ -518,7 +518,7 @@ async fn error_recovery_pauses_record_their_cause() {
     ));
 }
 
-/// Runs `agent`, answering its error-recovery pause with `command`; returns
+/// Runs `agent`, answering its error-recovery pause with `command`, and returns
 /// the task and the pause's cause.
 async fn run_answering_the_pause(
     agent: AgentLoop,
@@ -584,7 +584,7 @@ async fn a_rejected_recovery_fails_with_the_hosts_reason() {
         };
         assert!(reason.starts_with(expected), "{reason}");
         assert_eq!(recorded, &Some(ErrorRecoveryCause::NonRetryable));
-        // The pause's error kind stays with the failure: a 401 is a lost
+        // The pause's error kind stays with the failure. A 401 is a lost
         // credential.
         assert_eq!(error_kind, &Some(ai::ErrorKind::Authentication));
     }
@@ -592,7 +592,7 @@ async fn a_rejected_recovery_fails_with_the_hosts_reason() {
 
 /// Continuing after an error-recovery pause as the host's own decision
 /// sends the failed request again unchanged, with no note that a user
-/// approved; a note, when given, is added as the runtime's text. Approving
+/// approved, and a note, when given, is added as the runtime's text. Approving
 /// the recovery adds the user-approval note.
 #[tokio::test(start_paused = true)]
 async fn continuing_after_an_error_sends_the_request_again_unchanged_or_with_the_note() {
@@ -641,7 +641,7 @@ async fn continuing_after_an_error_sends_the_request_again_unchanged_or_with_the
             .filter(|text| !text.is_empty())
             .collect();
         match added {
-            // The task prompt only: the request was sent again as it was.
+            // The task prompt only, so the request was sent again as it was.
             None => assert_eq!(user_texts.len(), 1, "{user_texts:?}"),
             Some(text) => {
                 assert_eq!(user_texts.len(), 2, "{user_texts:?}");

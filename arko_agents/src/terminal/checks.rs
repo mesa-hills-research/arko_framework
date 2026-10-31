@@ -590,7 +590,7 @@ mod tests {
         }
     }
 
-    /// What `observe` gives for each result: `None`, or whether the news
+    /// What `observe` gives for each result, either `None`, or whether the news
     /// alerts and how long the earlier result lasted, in seconds.
     fn observed(when: CheckChange, results: &[(bool, &str)]) -> Vec<Option<(bool, u64)>> {
         let mut state = CheckState::new(when);

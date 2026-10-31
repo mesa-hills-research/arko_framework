@@ -176,7 +176,7 @@ impl Task {
         branch.plan_usage_threshold_reported = None;
         branch.monitor_pause = false;
         if index == self.conversation.messages.len() {
-            // A task stopped while its last turn's calls ran: each call gets
+            // A task stopped while its last turn's calls ran. Each call gets
             // a result, as providers require of the next request.
             branch.answer_open_calls();
             branch.cut_at(branch.conversation.messages.len())?;
@@ -246,7 +246,7 @@ impl Task {
     }
 
     fn cut_at(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
-        // First, as it can refuse: nothing changes then.
+        // First, as it can refuse, and nothing changes then.
         self.cut_claude_code_session(index)?;
         let messages = &mut self.conversation.messages;
         messages.truncate(index);
@@ -271,12 +271,12 @@ impl Task {
         // Its latest request isn't the shorter conversation's.
         self.latest_request = RequestRecord::NoRequest;
         if index == 0 {
-            // A new conversation: its usage starts here.
+            // A new conversation. Its usage starts here.
             self.conversation_usage_start = self.usage_history.len();
             self.conversation_model_call_start = self.model_call_usage_history.len();
             self.context_size_unknown = false;
         } else {
-            // The same conversation, shorter: its first call (which decides
+            // The same conversation, shorter. Its first call (which decides
             // whether it can hand over) stays, and its size is unknown until
             // the next call.
             self.context_size_unknown = true;
@@ -305,7 +305,7 @@ impl Task {
     }
 
     /// Where a cut back to just before message `index` leaves the Claude
-    /// Code session: resumed at the last entry before it, with the host's
+    /// Code session, resumed at the last entry before it, with the host's
     /// messages after that entry sent again, or, with no entry before it,
     /// a new session.
     fn cut_claude_code_session(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
@@ -337,7 +337,7 @@ impl Task {
         match entry {
             Some((_, uuid)) => self.claude_code_resume_at = Some(uuid),
             None => {
-                // Nothing of the session stays: the next run starts one.
+                // Nothing of the session stays, so the next run starts one.
                 self.claude_code_session = None;
                 self.claude_code_directory = None;
                 self.claude_code_resume_at = None;
@@ -352,7 +352,7 @@ impl Task {
 
     /// Leaves out the step the conversation took from message `start` on,
     /// as a runtime does when the step's request was over the model's input
-    /// limit: the model's replies, their results and the runtime's own
+    /// limit. The model's replies, their results and the runtime's own
     /// messages go. A message holding context the task recorded stays, so
     /// the record keeps what it says, and one that also holds the step's
     /// results (an answer beside them) stays without them, since their calls
@@ -518,7 +518,7 @@ mod tests {
             .unwrap();
         assert_eq!(task.conversation.messages.len(), 3);
 
-        // A context update in the middle of a turn: its results stay.
+        // A context update in the middle of a turn, so its results stay.
         let mut task = self::task();
         conversation(&mut task);
         task.cut_back(5).unwrap();
@@ -542,7 +542,7 @@ mod tests {
                 "{index}: {error}"
             );
         }
-        // The first message: a fresh start from the task's prompt.
+        // The first message, a fresh start from the task's prompt.
         task.cut_back(0).unwrap();
         assert!(task.conversation.messages.is_empty());
         assert!(task.conversation.system_message.is_none());
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(cut.claude_code_synced, 5);
         assert_eq!(cut.claude_code_entries.len(), 5);
 
-        // The follow-up was sent with a note added before it went out: both
+        // The follow-up was sent with a note added before it went out, so both
         // go again.
         let mut bundled = task.clone();
         bundled.claude_code_entries.remove(&2);
@@ -582,12 +582,12 @@ mod tests {
         assert_eq!(bundled.claude_code_resume_at.as_deref(), Some("a1"));
         assert_eq!(bundled.claude_code_synced, 2);
 
-        // The first message: a new session.
+        // The first message, a new session.
         let mut fresh = task.clone();
         fresh.cut_back(0).unwrap();
         assert!(fresh.claude_code_session.is_none());
 
-        // The model's reply has no entry: refused, nothing changed.
+        // The model's reply has no entry, so refused, nothing changed.
         let mut unknown = task.clone();
         unknown.claude_code_entries.remove(&3);
         unknown.claude_code_entries.remove(&4);
@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// A whole branch of a task stopped while its last turn's calls ran
-    /// answers each of them: with the result the task holds, as a call a
+    /// answers each of them, with the result the task holds, as a call a
     /// restarted task settles, or as one that never ran.
     #[test]
     fn a_branch_answers_the_calls_its_last_turn_left_open() {
@@ -673,7 +673,7 @@ mod tests {
         // The original is unchanged.
         assert_eq!(task.conversation.messages.len(), 8);
 
-        // All of it: the conversation's length.
+        // All of it, the conversation's length.
         let whole = task.branch(8);
         assert!(whole.is_err(), "the runtime's note has no entry");
         task.conversation.messages.pop();
@@ -686,7 +686,7 @@ mod tests {
         let again = whole.branch(7).unwrap();
         assert_eq!(again.claude_code_fork_of.as_deref(), Some("s1"));
 
-        // At the first message: no conversation, and the rest kept.
+        // At the first message, no conversation, and the rest kept.
         task.handovers.push(crate::handover::HandoverRecord {
             at: chrono::Utc::now(),
             input_tokens: 500,

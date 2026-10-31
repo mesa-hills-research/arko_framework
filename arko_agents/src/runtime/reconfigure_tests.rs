@@ -1,4 +1,4 @@
-//! A task continued with a new configuration (`Task::reconfigure`): a chat
+//! A task continued with a new configuration (`Task::reconfigure`). A chat
 //! that becomes an agent offers its tools under a new system prompt, and an
 //! agent that becomes a chat sends its tool history as text.
 
@@ -28,7 +28,7 @@ fn registry() -> ToolRegistry {
     registry
 }
 
-/// A chat continued as an agent: the same conversation and prompt cache
+/// A chat continued as an agent, with the same conversation and prompt cache
 /// key, its tools offered, and a system prompt that says how to use them.
 #[tokio::test]
 async fn a_chat_continued_as_an_agent_offers_its_tools_under_a_new_prompt() {
@@ -66,7 +66,7 @@ async fn a_chat_continued_as_an_agent_offers_its_tools_under_a_new_prompt() {
     assert!(texts[2].starts_with("Now use your tool."), "{texts:?}");
 }
 
-/// An agent continued as a chat: its requests offer no tools, and the
+/// An agent continued as a chat. Its requests offer no tools, and the
 /// conversation they send holds its earlier calls and results as text
 /// (the task's own conversation keeps them).
 #[tokio::test]
@@ -155,7 +155,7 @@ fn a_task_is_reconfigured_between_turns_with_its_model() {
 }
 
 /// A cut back past the first message keeps the conversation's first call
-/// as it was: a conversation that went over the handover size and was cut
+/// as it was. A conversation that went over the handover size and was cut
 /// back (an edit, a regenerate) still hands over once its next call is
 /// over the size again. Its size is unknown until that call.
 #[tokio::test]
@@ -179,7 +179,7 @@ async fn a_cut_back_over_the_handover_size_still_hands_over() {
     assert_eq!(task.current_conversation_context_size(), None);
     task.prepare_for_resumption_from_completed("Second, again.".into())
         .unwrap();
-    // The next call is over the size: the handover starts before the one
+    // The next call is over the size, so the handover starts before the one
     // after it.
     task.record_usage(usage(1200));
     assert_eq!(task.current_conversation_context_size(), Some(1200));
@@ -191,7 +191,7 @@ async fn a_cut_back_over_the_handover_size_still_hands_over() {
     assert!(agent.task.handover_requested.is_some());
 }
 
-/// A reconfiguration starts the cache monitor's window over: the new
+/// A reconfiguration starts the cache monitor's window over. The new
 /// prefix's full cache write isn't held against the conversation.
 #[test]
 fn a_reconfiguration_starts_the_cache_window_over() {
@@ -206,7 +206,7 @@ fn a_reconfiguration_starts_the_cache_window_over() {
     assert_eq!(task.conversation_usage_start, 0);
 }
 
-/// A chat is what says so: `AgentToolConfig::chat()` is offered nothing and
+/// A chat is what says so. `AgentToolConfig::chat()` is offered nothing and
 /// ends its task with text, and an agent that merely lists no tools isn't one.
 /// A chat can't list tools, run output-based, or send replies as messages.
 #[test]

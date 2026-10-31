@@ -1134,7 +1134,7 @@ mod tests {
             )
         );
 
-        // Flapping: the alert, then changes it doesn't alert of.
+        // Flapping, the alert, then changes it doesn't alert of.
         outbox.add(header.clone(), checked(true, "", ok, true), &limits, now);
         outbox.add(
             header.clone(),

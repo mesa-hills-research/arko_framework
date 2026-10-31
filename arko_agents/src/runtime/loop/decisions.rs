@@ -1,4 +1,4 @@
-//! The decisions that end a wait: approvals and rejections of calls (one, or
+//! The decisions that end a wait, namely approvals and rejections of calls (one, or
 //! a batch), answers to the agent's questions, and decisions on an
 //! error-recovery pause.
 
@@ -21,15 +21,15 @@ pub(super) struct FollowUp {
 
 /// How a command applied to the state a task waits in.
 pub(super) enum Decision {
-    /// It doesn't fit the wait: the pass ends, and the wait goes on.
+    /// It doesn't fit the wait, so the pass ends, and the wait goes on.
     Ignored,
     /// It decided the wait.
     Decided(FollowUp),
 }
 
 impl AgentLoop {
-    /// `ApproveToolUse` or `RejectToolUse` for the call awaiting approval:
-    /// an approved call runs (with the calls held for it, in native
+    /// `ApproveToolUse` or `RejectToolUse` for the call awaiting approval.
+    /// An approved call runs (with the calls held for it, in native
     /// mode), a rejected one is answered. A decision for another call is
     /// ignored (a rejection reports the state again), as is any other
     /// command but `CancelTask` and `SuspendTask`.
@@ -97,7 +97,7 @@ impl AgentLoop {
         Ok(Decision::Decided(follow_up))
     }
 
-    /// The approved call runs: natively with the calls held for it, then
+    /// The approved call runs natively with the calls held for it, then
     /// the turn's results go into the conversation once due.
     /// Output-based, its result is the next message.
     async fn approve_tool_use(
@@ -111,7 +111,7 @@ impl AgentLoop {
         let mut next_user_message_from_command = String::new();
         let mut follow_up_done = false;
         self.begin_tool_batch();
-        // Decided: a snapshot taken while the
+        // Decided. A snapshot taken while the
         // call runs no longer waits for it.
         self.task.set_state(TaskState::InProgress);
         if self.is_native_mode() {
@@ -172,7 +172,7 @@ impl AgentLoop {
         })
     }
 
-    /// The rejected call is answered with the reason: natively beside the
+    /// The rejected call is answered with the reason, natively beside the
     /// held calls, which run now. Output-based, as the next message.
     async fn reject_tool_use(
         &mut self,
@@ -216,7 +216,7 @@ impl AgentLoop {
         })
     }
 
-    /// `SubmitBatchToolApprovals` for the batch awaiting approval: the
+    /// `SubmitBatchToolApprovals` for the batch awaiting approval. The
     /// rejections and the calls without a decision are answered, and the
     /// approved calls run (natively with the held ones, in call order,
     /// output-based one at a time until one changes the state). A
@@ -243,7 +243,7 @@ impl AgentLoop {
             }
 
             self.begin_tool_batch();
-            // Decided: a snapshot taken while the
+            // Decided. A snapshot taken while the
             // calls run no longer waits for them.
             self.task.set_state(TaskState::InProgress);
             follow_up = if self.is_native_mode() {
@@ -266,7 +266,7 @@ impl AgentLoop {
         Ok(Decision::Decided(follow_up))
     }
 
-    /// A native batch decided: rejections are answered at once, then the
+    /// A native batch decided. Rejections are answered at once, then the
     /// approved calls run like a turn's (parallel-safe ones at the same
     /// time) with the held ones, in the turn's order.
     async fn decide_native_batch(
@@ -274,7 +274,7 @@ impl AgentLoop {
         pending_calls: &[PendingToolCallInfo],
         decisions: &HashMap<Uuid, ToolApprovalDecision>,
     ) -> Result<FollowUp, ArkoAgentsError> {
-        // Rejections are answered at once;
+        // Rejections are answered at once,
         // the approved calls then run like a
         // turn's (parallel-safe ones at the
         // same time), in the batch's order.
@@ -340,7 +340,7 @@ impl AgentLoop {
         })
     }
 
-    /// An output-based batch decided: in order, each call runs or is
+    /// An output-based batch decided. In order, each call runs or is
     /// answered as rejected. Once a call changed the state (or the task was
     /// suspended while it ran), the approved calls after it are answered as
     /// not run, as in native mode. The results are the next message.
@@ -429,7 +429,7 @@ impl AgentLoop {
         })
     }
 
-    /// `SubmitUserResponse` to the questions the task asked: the answer
+    /// `SubmitUserResponse` to the questions the task asked. The answer
     /// goes beside the turn's native results, or is the next
     /// output-based message.
     pub(super) async fn answer_question(
@@ -493,7 +493,7 @@ impl AgentLoop {
         }))
     }
 
-    /// A decision on an error-recovery pause: `ContinueAfterError` (with an
+    /// A decision on an error-recovery pause, namely `ContinueAfterError` (with an
     /// optional note), `ApproveErrorRecovery` (with an error note unless a
     /// monitor paused), `ResolveRefusal` (which fails, and leaves the wait
     /// on, when the changes don't apply) or `RejectErrorRecovery`.
@@ -520,8 +520,8 @@ impl AgentLoop {
                         self.task.fallback_for = None;
                         self.task.set_state(TaskState::InProgress);
                         self.reset_llm_recovery();
-                        // Tools observed the old input:
-                        // they see the changed history
+                        // Tools observed the old input,
+                        // so they see the changed history
                         // from the start again.
                         self.tool_context_cursor = usize::MAX;
                         // The changed input is sent as it is.
@@ -582,7 +582,7 @@ impl AgentLoop {
         Ok(Decision::Decided(follow_up))
     }
 
-    /// `ContinueAfterError`: a pending refusal fallback's request is sent
+    /// `ContinueAfterError`. A pending refusal fallback's request is sent
     /// again (a note waits as context), waiting native results go out with
     /// the note beside them, or the note is the next message. Without one
     /// the failed request is sent again, or the waiting output-based
@@ -608,7 +608,7 @@ impl AgentLoop {
         }
         if self.fallback_resend() {
             // The fallback answers exactly the
-            // refused input: a note waits, as
+            // refused input, so a note waits, as
             // context, until it has answered.
             if let Some(note) = note {
                 self.queue_context_injection(note.to_string());
@@ -642,7 +642,7 @@ impl AgentLoop {
         })
     }
 
-    /// `ApproveErrorRecovery`: like continuing, but a model error is noted
+    /// `ApproveErrorRecovery` is like continuing, but a model error is noted
     /// for the model (with the host's message). A monitor's pause adds only
     /// the host's message.
     async fn approve_error_recovery(
@@ -657,7 +657,7 @@ impl AgentLoop {
         let monitor_pause = std::mem::take(&mut self.task.monitor_pause);
         if self.fallback_resend() {
             // The fallback answers exactly the
-            // refused input: no error note, and
+            // refused input, so there is no error note, and
             // the host's message waits, as
             // context, until it has answered.
             if self.is_native_mode() {
@@ -675,7 +675,7 @@ impl AgentLoop {
             follow_up_done = true;
         } else if monitor_pause {
             // A monitor paused the task, not a
-            // model error: nothing to report to
+            // model error, so there is nothing to report to
             // the model beyond the host's note.
             match user_msg_on_recovery
                 .as_deref()

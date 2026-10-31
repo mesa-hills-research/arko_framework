@@ -1,10 +1,10 @@
 //! The size of the next request and the tool results that would put it over
-//! the model's input limit: the overflow guard, the opt-in caps, and the
+//! the model's input limit, covering the overflow guard, the opt-in caps, and the
 //! recovery from a request the provider found too large.
 
 use super::*;
 
-/// The facts the notice of a shortened `result` gives: `text` is its text
+/// The facts the notice of a shortened `result` gives. `text` is its text
 /// as it stands (without a notice it already ends with), at `tokens`
 /// tokens, under its opt-in `cap`.
 fn notice_facts<'a>(
@@ -35,7 +35,7 @@ fn notice_facts<'a>(
     }
 }
 
-/// A request as it was sent: what its reported usage is compared with to
+/// A request as it was sent, what its reported usage is compared with to
 /// estimate the next request (see [`result_budget`]).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RequestMark {
@@ -57,7 +57,7 @@ const MAX_OVERFLOW_RECOVERIES: u32 = 2;
 
 impl AgentLoop {
     /// The estimated input of the current conversation's next request, in
-    /// tokens: the latest answered request's reported input, plus the bytes
+    /// tokens. It is the latest answered request's reported input, plus the bytes
     /// added since at the task's bytes-per-token ratio (see
     /// [`result_budget`]). Without such a request in this run (a task run
     /// again, or a fresh conversation), the whole request is estimated from
@@ -68,11 +68,11 @@ impl AgentLoop {
         self.request_estimate(false)
     }
 
-    /// The fewest tokens the current conversation's next request can take:
-    /// as [`estimated_request_tokens`](Self::estimated_request_tokens), but
+    /// The fewest tokens the current conversation's next request can take.
+    /// It is as [`estimated_request_tokens`](Self::estimated_request_tokens), but
     /// with every byte added since the latest answered request at
     /// [`result_budget::LEAST_BYTES_PER_TOKEN`] and the reply at its bytes
-    /// alone. What the overflow guard decides by: it acts only when even
+    /// alone. What the overflow guard decides by. It acts only when even
     /// this is over the model's input limit.
     fn least_request_tokens(&self) -> usize {
         self.request_estimate(true)
@@ -120,7 +120,7 @@ impl AgentLoop {
     }
 
     /// For a task that runs again with requests in its current
-    /// conversation: its latest request, as the conversation shows it (the
+    /// conversation, its latest request, as the conversation shows it (the
     /// messages before the model's latest reply), with the task's ratio
     /// calibrated from its reported input, so the next request is estimated
     /// as in the run that made it. `None` without such a request.
@@ -151,7 +151,7 @@ impl AgentLoop {
     }
 
     /// The paths the calls of the conversation's latest model turn passed
-    /// to `read_file`, by call id: what a shortened result's notice names.
+    /// to `read_file`, by call id, what a shortened result's notice names.
     fn read_file_paths(&self) -> HashMap<String, String> {
         self.task
             .conversation
@@ -171,7 +171,7 @@ impl AgentLoop {
 
     /// The overflow guard and the opt-in caps
     /// ([`ToolResultLimits`](crate::agent_config::ToolResultLimits)) over
-    /// the turn's native results, as they go into the conversation: after
+    /// the turn's native results, as they go into the conversation, after
     /// result interceptors and distillers, before the next request. A
     /// result over its cap, or among the largest when the turn's results
     /// would certainly put the next request over the model's input limit
@@ -279,11 +279,11 @@ impl AgentLoop {
     }
 
     /// The largest tool result added to the conversation since the
-    /// latest answered request (or since the last message with results):
-    /// its message, its place in it, and its size in bytes.
+    /// latest answered request (or since the last message with results),
+    /// given as its message, its place in it, and its size in bytes.
     fn largest_new_result(&self) -> Option<(usize, usize, usize)> {
         let messages = &self.task.conversation.messages;
-        // The results added since the latest answered request: one of them
+        // The results added since the latest answered request. One of them
         // made this request too large.
         let start = self
             .answered_request
@@ -320,7 +320,7 @@ impl AgentLoop {
     }
 
     /// A request the provider found over the model's input limit
-    /// ([`ai::ErrorKind::ContextOverflow`]): with the overflow guard on, in
+    /// ([`ai::ErrorKind::ContextOverflow`]). With the overflow guard on, in
     /// native tool calling, the largest tool result added since the latest
     /// answered request is shortened (to a preview, or one already that
     /// small to its notice alone) and the request is sent again, at most
@@ -380,7 +380,7 @@ impl AgentLoop {
         if tokens < result_budget::MIN_KEPT_TOKENS {
             return self.hand_over_without_the_step(error).await;
         }
-        // A preview first; one shortened before (by the guard, a cap or the
+        // A preview first, and one shortened before (by the guard, a cap or the
         // previous attempt) keeps its notice alone.
         let keep = if tokens > preview && !shortened_before {
             preview
@@ -411,7 +411,7 @@ impl AgentLoop {
             result.output = text;
         }
         self.overflow_recoveries += 1;
-        // Sent again at once; not an ordinary recovery attempt.
+        // Sent again at once, not an ordinary recovery attempt.
         self.recovery.indefinite_interactions =
             self.recovery.indefinite_interactions.saturating_add(1);
         log::warn!(
@@ -435,13 +435,13 @@ impl AgentLoop {
 
     /// The last step of [`recover_from_overflow`](Self::recover_from_overflow),
     /// for an agent that hands over (it has `handover`, or the host set a
-    /// threshold): the step the request added since the latest answered
+    /// threshold). The step the request added since the latest answered
     /// request, which fit, is left out (the model's reply, its results, and
     /// the runtime's messages after them, such as a report request), and the
     /// report is asked for at the next turn boundary from the conversation
     /// as it was, with [`STEP_LEFT_OUT`](crate::handover::STEP_LEFT_OUT)
-    /// before the request. Context updates added since stay: they hold what
-    /// the host sent. Returns whether a request is sent again: not without
+    /// before the request. Context updates added since stay, as they hold what
+    /// the host sent. Returns whether a request is sent again. It isn't without
     /// a handover, without an answered request in this conversation, with a
     /// report already given, or with no reply or results to leave out (the
     /// report request itself was too large).
@@ -486,7 +486,7 @@ impl AgentLoop {
             self.task.current_conversation_context_size().unwrap_or(0),
         ));
         self.step_left_out = true;
-        // Sent again at once; not an ordinary recovery attempt.
+        // Sent again at once, not an ordinary recovery attempt.
         self.recovery.indefinite_interactions =
             self.recovery.indefinite_interactions.saturating_add(1);
         log::warn!(

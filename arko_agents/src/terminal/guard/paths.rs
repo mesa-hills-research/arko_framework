@@ -42,7 +42,7 @@ impl PathStyle {
     }
 }
 
-/// An absolute, normalized path: a root (`/`, `C:\`, `\\server\share\`, or
+/// An absolute, normalized path, made of a root (`/`, `C:\`, `\\server\share\`, or
 /// the device namespace `\\.\`) and the names below it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct AbsPath {
@@ -147,7 +147,7 @@ impl AbsPath {
 
 enum Root {
     Absolute(String),
-    /// `\foo` on Windows: the root of the current drive.
+    /// `\foo` on Windows is the root of the current drive.
     CurrentDrive,
     /// `C:foo`.
     DriveRelative(String),

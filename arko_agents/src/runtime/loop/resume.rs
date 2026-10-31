@@ -1,4 +1,4 @@
-//! A task that runs again: the calls it was running when it stopped, settled
+//! A task that runs again, covering the calls it was running when it stopped, settled
 //! by their tools' recovery modes, the turn it left open, and the calls a wait
 //! left undecided.
 
@@ -6,7 +6,7 @@ use super::*;
 
 impl AgentLoop {
     /// Answers the native calls of the last turn that have no result yet,
-    /// alongside its other waiting results: a call still awaiting approval
+    /// alongside its other waiting results. A call still awaiting approval
     /// is rejected with `reason` (and `ToolRejected`), and a call with no
     /// result at all (a turn an older version left early) is answered as
     /// unreached.
@@ -131,7 +131,7 @@ impl AgentLoop {
     }
 
     /// The tool and recovery mode of a call that was running when its task
-    /// stopped: [`ToolRecovery::InDoubt`] for a tool this run doesn't offer,
+    /// stopped. It is [`ToolRecovery::InDoubt`] for a tool this run doesn't offer,
     /// and [`ToolRecovery::Rerun`] for a call the host answered with its own
     /// output (only that output is given again).
     fn recovery_of(&self, call: &RunningToolCall) -> (Option<Arc<dyn Tool>>, ToolRecovery) {
@@ -139,7 +139,7 @@ impl AgentLoop {
             return (None, ToolRecovery::InDoubt);
         };
         // A report asked for alone runs no call again, and resumes no run a
-        // call started: the run that goes on with the work does.
+        // call started. The run that goes on with the work does.
         if self.task.report_only() {
             return (Some(tool), ToolRecovery::InDoubt);
         }
@@ -153,7 +153,7 @@ impl AgentLoop {
 
     /// Settles the calls a task was running when it stopped (saved at a
     /// safe point by a host that stopped, see [`Task::running_tool_calls`]),
-    /// each by its tool's [`recovery_mode`](Tool::recovery_mode):
+    /// each by its tool's [`recovery_mode`](Tool::recovery_mode).
     /// [`InDoubt`](ToolRecovery::InDoubt) calls are answered with
     /// [`RESTARTED_CALL`], [`Rerun`](ToolRecovery::Rerun) and
     /// [`Resume`](ToolRecovery::Resume) calls run again (with
@@ -223,7 +223,7 @@ impl AgentLoop {
                         .any(|result| result.call_id == call.id)
             };
             let Some(call) = call.filter(|call| !answered(&self.task, call)) else {
-                // Answered already, or not a call of the last turn: nothing
+                // Answered already, or not a call of the last turn, so nothing
                 // to settle.
                 self.call_settled(entry.tool_call_id);
                 continue;
@@ -312,7 +312,7 @@ impl AgentLoop {
     }
 
     /// When a task runs again (not after an interruption, which
-    /// [`settle_interrupted_wait`](Self::settle_interrupted_wait) settles):
+    /// [`settle_interrupted_wait`](Self::settle_interrupted_wait) settles),
     /// the last turn's calls that have no result (the task stopped before
     /// they ran, or a version that didn't record running calls saved it)
     /// are answered as unreached, a pause on the recovered calls' tool
@@ -320,7 +320,7 @@ impl AgentLoop {
     /// at the end of a turn. In output-based mode the results waiting (the
     /// turn's, and the recovered calls') are sent with [`RESTARTED_TURN`].
     /// A wait for an approval goes on, with the results that wait with it.
-    /// `recovered`: calls were running when the task stopped.
+    /// `recovered` means calls were running when the task stopped.
     pub(super) async fn settle_open_turn(
         &mut self,
         recovered: bool,

@@ -65,7 +65,7 @@ impl Fixture {
         id: Uuid,
         predicate: impl Fn(&TerminalSnapshot) -> bool,
     ) -> TerminalSnapshot {
-        // Only bounds a genuinely stuck job; passing waits return as soon as the
+        // Only bounds a genuinely stuck job, and passing waits return as soon as the
         // predicate holds. Loaded Windows CI runners spawning many ConPTY
         // children in parallel have exceeded 5 s.
         timeout(Duration::from_secs(30), async {
@@ -714,7 +714,7 @@ async fn control_stream_handles_partial_utf8_frames_and_rejects_overflow_or_trun
     f.manager.shutdown().await;
 }
 
-/// PTY jobs get the quiet environment on every platform; pipe jobs, and PTY
+/// PTY jobs get the quiet environment on every platform, and pipe jobs, and PTY
 /// jobs with it turned off, get the host's.
 #[tokio::test]
 async fn pty_jobs_get_a_quiet_environment_unless_turned_off() {
@@ -779,7 +779,7 @@ async fn windows_pipe_jobs_get_a_hidden_console_of_their_own() {
 }
 
 /// Output shown to the agent loses escape sequences only where they are
-/// stripped (Windows PTYs); the byte offsets always count the raw output.
+/// stripped (Windows PTYs), and the byte offsets always count the raw output.
 #[test]
 fn stripped_windows_keep_raw_offsets() {
     let raw = b"\x1b[32mgreen\x1b[0m done";
@@ -1019,7 +1019,7 @@ async fn a_held_job_tells_nothing_until_it_is_released() {
 
 /// Closing for an exit is refused while a job the host's user didn't agree
 /// to stop runs in the background, which comes back. With every one known,
-/// it closes: from then on no job starts and none moves to the background.
+/// it closes. From then on no job starts and none moves to the background.
 #[tokio::test]
 async fn closing_needs_every_background_job_known() {
     let f = Fixture::new(|_| {});
@@ -1037,7 +1037,7 @@ async fn closing_needs_every_background_job_known() {
         refused.iter().map(|job| job.job_id).collect::<Vec<_>>(),
         [background.job_id]
     );
-    // Still open: a job starts.
+    // Still open, so a job starts.
     let other = f.python(sleep, Default::default());
     assert!(f.manager.close(&[background.job_id]).is_err());
 
@@ -1055,7 +1055,7 @@ async fn closing_needs_every_background_job_known() {
     f.manager.shutdown().await;
 }
 
-/// A held job that finished stays held: its host has the result, and the
+/// A held job that finished stays held. Its host has the result, and the
 /// agent gets no update for it.
 #[tokio::test]
 async fn a_finished_held_job_stays_held() {
@@ -1084,7 +1084,7 @@ async fn a_finished_held_job_stays_held() {
     f.manager.forget(f.owner, job.job_id).unwrap();
 }
 
-/// An update reaches the owner once: the runtime of its next turn (a new
+/// An update reaches the owner once. The runtime of its next turn (a new
 /// command channel) isn't sent it again.
 #[tokio::test]
 async fn an_update_sent_is_not_sent_again_to_the_next_runtime() {

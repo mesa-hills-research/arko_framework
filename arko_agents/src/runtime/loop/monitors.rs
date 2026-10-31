@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// The cache monitor's state in a run: a low-efficiency warning is out, a
-/// pause episode is active, and the pause to apply before the next request.
+/// The cache monitor's state in a run (a low-efficiency warning is out, a
+/// pause episode is active, and the pause to apply before the next request).
 #[derive(Default)]
 pub(super) struct CacheMonitorState {
     pub(super) warned: bool,
@@ -20,7 +20,7 @@ impl AgentLoop {
         let Some(config) = self.task.agent_config.monitoring.cache.clone() else {
             return Ok(());
         };
-        // Calls to the refusal fallback model use another cache: they are
+        // Calls to the refusal fallback model use another cache, so they are
         // not judged, and later calls compare with the configured model's.
         if self.task.fallback_calls.last()
             == Some(&(self.task.usage_history.len().saturating_sub(1)))
@@ -102,8 +102,8 @@ impl AgentLoop {
     }
 
     /// Holds the next model request for the host
-    /// ([`TurnContextSource::hold_request`](super::super::TurnContextSource::hold_request)):
-    /// the task pauses for error-recovery approval, whatever the error
+    /// ([`TurnContextSource::hold_request`](super::super::TurnContextSource::hold_request)).
+    /// The task pauses for error-recovery approval, whatever the error
     /// policy, marked as a monitor pause is, so that approving it adds no
     /// error note. A fallback still to be made survives the pause.
     pub(super) async fn hold_request(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
@@ -131,7 +131,7 @@ impl AgentLoop {
         .await
     }
 
-    /// Before a model request: applies the opt-in plan usage threshold
+    /// Before a model request. Applies the opt-in plan usage threshold
     /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage))
     /// to the most recent report. Returns whether to make the request.
     pub(super) async fn apply_plan_usage_threshold(&mut self) -> Result<bool, ArkoAgentsError> {
@@ -193,7 +193,7 @@ impl AgentLoop {
         }
     }
 
-    /// The plan-usage slow-down: waits `delay_ms` before the request,
+    /// The plan-usage slow-down. Waits `delay_ms` before the request,
     /// taking commands (a stop ends the wait and the request), then takes
     /// the commands queued meanwhile as a turn boundary does, and the
     /// context sent meanwhile joins this request. Returns whether to make
@@ -228,7 +228,7 @@ impl AgentLoop {
                 _ = &mut sleep => break,
             }
         }
-        // The wait came after the boundary: commands sent meanwhile
+        // The wait came after the boundary, so commands sent meanwhile
         // are taken as there, and context sent meanwhile joins this
         // request rather than the next, under the boundary's rule
         // (only a pending fallback holds it back).

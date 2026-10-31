@@ -6,7 +6,7 @@
 //! With [`AgentToolConfig::async_questions`](crate::agent_config::AgentToolConfig::async_questions)
 //! on, `ask_user` still waits for the answer by default, and an agent that
 //! passes `wait: false` gets it later, as context such as a note. The
-//! helpers here write those notes in one format: [`answer_note`],
+//! helpers here write those notes in one format. They are [`answer_note`],
 //! [`dismissed_note`], [`message_answers`] and [`still_open`]. The agent
 //! settles a question itself with `close_questions`.
 
@@ -99,7 +99,7 @@ impl QuestionLog {
         self.open.iter().find(|question| question.id == id)
     }
 
-    /// Settles the questions `ids` (answered, dismissed or closed): they are
+    /// Settles the questions `ids` (answered, dismissed or closed). They are
     /// no longer open. Returns those that were.
     pub fn settle<S: AsRef<str>>(&mut self, ids: &[S]) -> Vec<AskedQuestion> {
         let mut settled = Vec::new();
@@ -154,7 +154,7 @@ pub fn normalize_id(id: &str) -> Option<String> {
     number_of(id).map(|number| format!("q{number}"))
 }
 
-/// Reads `ask_user`'s `questions`: an array of questions (each an object
+/// Reads `ask_user`'s `questions`, an array of questions (each an object
 /// with `question` and optionally `choices`, `multiple` and `default`, or a
 /// plain string), or one question as text (the form older configurations
 /// and models use). Text that holds a JSON array, as an output-based call
@@ -254,7 +254,7 @@ fn parse_question(value: &Value) -> Result<Question, String> {
     })
 }
 
-/// Reads `ask_user`'s `wait`: a boolean, or `"false"` as text. The agent
+/// Reads `ask_user`'s `wait`, a boolean, or `"false"` as text. The agent
 /// waits unless it passed false.
 pub fn parse_wait(value: Option<&Value>) -> bool {
     match value {
@@ -264,7 +264,7 @@ pub fn parse_wait(value: Option<&Value>) -> bool {
     }
 }
 
-/// Reads `close_questions`' `ids`: an array of ids, or text such as
+/// Reads `close_questions`' `ids`, an array of ids, or text such as
 /// `"q3, q4"`. Each is normalized to `q{n}`. Returns why they can't be read.
 pub fn parse_ids(value: &Value) -> Result<Vec<String>, String> {
     let raw: Vec<String> = match value {
@@ -299,7 +299,7 @@ pub fn parse_ids(value: &Value) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// Ids as a sentence lists them: `q3`, `q3 and q4`, `q3, q4 and q5`.
+/// Ids as a sentence lists them, such as `q3`, `q3 and q4`, `q3, q4 and q5`.
 pub fn id_list<S: AsRef<str>>(ids: &[S]) -> String {
     match ids {
         [] => String::new(),
@@ -315,7 +315,7 @@ pub fn id_list<S: AsRef<str>>(ids: &[S]) -> String {
     }
 }
 
-/// `ask_user`'s result when it returns at once (`wait: false`): "Asked q3
+/// `ask_user`'s result when it returns at once (`wait: false`), which reads "Asked q3
 /// and q4. Their answers reach you as a note. Until then, do only work that
 /// no answer could change."
 pub fn asked_reply(asked: &[AskedQuestion]) -> String {
@@ -334,7 +334,7 @@ pub fn asked_reply(asked: &[AskedQuestion]) -> String {
 }
 
 /// The questions as text, one block each, with their ids, choices and
-/// defaults: what a lead reads of a subagent's questions, and what a host
+/// defaults, which is what a lead reads of a subagent's questions, and what a host
 /// that only shows text shows.
 ///
 /// ```text
@@ -365,7 +365,7 @@ fn question_block(asked: &AskedQuestion) -> String {
     block
 }
 
-/// The user's answer to one question. Several parts may be set: chosen
+/// The user's answer to one question. Several parts may be set, namely chosen
 /// choices and text of their own ("Other"). With `you_decide` the agent
 /// goes on with its default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,7 +470,7 @@ impl Answers {
 pub const EXCERPT_CHARS: usize = 80;
 
 /// `text` on one line, cut at a word to about `max` characters with "…"
-/// where it was cut: how a note names a question the agent asked without
+/// where it was cut. This is how a note names a question the agent asked without
 /// repeating it whole.
 pub fn excerpt(text: &str, max: usize) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -534,13 +534,13 @@ pub fn answer_note<S: AsRef<str>>(
     lines.join("\n")
 }
 
-/// The note that tells the agent the user dismissed questions: "The user
+/// The note that tells the agent the user dismissed questions, such as "The user
 /// dismissed q5." The agent goes on with its defaults.
 pub fn dismissed_note<S: AsRef<str>>(ids: &[S]) -> String {
     format!("The user dismissed {}.", id_list(ids))
 }
 
-/// The user's message labelled as the answer to `ids`: "(This message
+/// The user's message labelled as the answer to `ids`, with "(This message
 /// answers q3 and q4.)" before the text.
 pub fn message_answers<S: AsRef<str>>(ids: &[S], text: &str) -> String {
     if ids.is_empty() {
@@ -549,7 +549,7 @@ pub fn message_answers<S: AsRef<str>>(ids: &[S], text: &str) -> String {
     format!("(This message answers {}.)\n{text}", id_list(ids))
 }
 
-/// The user's message with the questions still open named at its end:
+/// The user's message with the questions still open named at its end, as in
 /// "(Still open: q5.)".
 pub fn still_open<S: AsRef<str>>(text: &str, ids: &[S]) -> String {
     if ids.is_empty() {
@@ -573,8 +573,8 @@ pub fn open_section(open: &[AskedQuestion]) -> Option<String> {
     ))
 }
 
-/// An `ask_user` call that asks `questions` (`wait`: the agent didn't pass
-/// `wait: false`): they are numbered after `last` (or the log's count, when
+/// An `ask_user` call that asks `questions` (`wait` is true when the agent didn't pass
+/// `wait: false`). They are numbered after `last` (or the log's count, when
 /// higher) and recorded in `log`. Returns them,
 /// whether the agent waits for the answer (it always does without
 /// `async_questions`), and the call's result for the agent.
@@ -590,7 +590,7 @@ pub(crate) fn take_ask(
     (asked, wait, reply)
 }
 
-/// [`take_ask`] without recording the questions: they are numbered after
+/// [`take_ask`] without recording the questions. They are numbered after
 /// `last`, the highest number taken, and the caller records them with
 /// [`QuestionLog::record`] once the call runs.
 pub(crate) fn plan_ask(
@@ -605,7 +605,7 @@ pub(crate) fn plan_ask(
     (asked, wait, reply)
 }
 
-/// A `close_questions` call that closes `ids`: those the task asked are
+/// A `close_questions` call that closes `ids`. Those the task asked are
 /// settled in `log`. Returns their ids and the call's result for the agent.
 pub(crate) fn take_close(log: &mut QuestionLog, ids: Vec<String>) -> (Vec<String>, String) {
     let (known, reply) = plan_close(log.asked, ids);
@@ -613,7 +613,7 @@ pub(crate) fn take_close(log: &mut QuestionLog, ids: Vec<String>) -> (Vec<String
     (known, reply)
 }
 
-/// [`take_close`] without settling them: those among the first `last`
+/// [`take_close`] without settling them. Those among the first `last`
 /// questions are known.
 pub(crate) fn plan_close(last: u32, ids: Vec<String>) -> (Vec<String>, String) {
     let (known, unknown): (Vec<String>, Vec<String>) =
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(structured[0].default.as_deref(), Some("Spaces"));
         assert!(structured[1].multiple);
         assert_eq!(structured[2].question, "Push now?");
-        // Today's form: one question as text.
+        // Today's form, one question as text.
         let text = parse_questions(&json!("  Which file?\nAnd why?  ")).unwrap();
         assert_eq!(
             text,

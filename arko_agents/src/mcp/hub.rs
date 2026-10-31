@@ -1,4 +1,4 @@
-//! [`McpHub`]: a session's MCP servers, started, stopped, added and removed
+//! [`McpHub`] holds a session's MCP servers, started, stopped, added and removed
 //! while it runs, and asked for their tools each time.
 
 use std::collections::{HashMap, HashSet};
@@ -96,7 +96,7 @@ impl McpToolInfo {
     }
 }
 
-/// The tool name of `server`'s tool `tool` as a tool of its own:
+/// The tool name of `server`'s tool `tool` as a tool of its own,
 /// `mcp__<server>__<tool>`, with the characters the providers don't take
 /// replaced by `_`, and cut to 64 characters ending in a hash of the full
 /// name, to stay unique. The same names every time, as conversations keep
@@ -117,7 +117,7 @@ pub fn direct_tool_name(server: &str, tool: &str) -> String {
     if name.len() <= MAX_TOOL_NAME {
         return name;
     }
-    // FNV-1a: stable across Rust versions, as names saved in a session's
+    // FNV-1a, stable across Rust versions, as names saved in a session's
     // checkpoints must be.
     let hash = format!("{server}\n{tool}")
         .bytes()
@@ -267,7 +267,7 @@ impl Drop for Starting<'_> {
     }
 }
 
-/// Stops a server the hub reached: its own is stopped with what it started,
+/// Stops a server the hub reached. Its own is stopped with what it started,
 /// and a shared one is let go.
 async fn let_go(link: Link) {
     match link {
@@ -452,7 +452,7 @@ impl McpHub {
     }
 
     /// Adds the server `config` describes and starts it, and returns its
-    /// facts: [`Running`](ServerState::Running), or
+    /// facts, which are [`Running`](ServerState::Running), or
     /// [`Failed`](ServerState::Failed) with the reason when it didn't start
     /// (it stays added, and a later start tries again). A server of the
     /// same name is replaced. An error is a config without a name or a
@@ -540,7 +540,7 @@ impl McpHub {
     }
 
     /// Calls `tool` on the server `server` with `arguments`, and returns its
-    /// result as [`McpTool`](super::McpTool) gives it: text, images,
+    /// result as [`McpTool`](super::McpTool) gives it, as text, images,
     /// resources and structured content, a result marked `isError` as a
     /// tool error, and cancellation sent to the server when the call is
     /// dropped. A server that isn't running is started first.
@@ -577,7 +577,7 @@ impl McpHub {
     }
 
     /// A tool for each tool of each server, as a conversation saved with
-    /// them knows them: named by [`direct_tool_name`], with the server's
+    /// them knows them, named by [`direct_tool_name`], with the server's
     /// description and schema, and its calls made through the hub. Servers
     /// whose tools were never listed (they didn't start) give none. A name
     /// taken by an earlier tool is left out.
@@ -648,7 +648,7 @@ impl McpHub {
 struct DirectTool {
     hub: Arc<McpHub>,
     access: Arc<dyn McpAccess>,
-    /// A worker's: a server kept to the main agent is refused.
+    /// A worker's access, where a server kept to the main agent is refused.
     worker: bool,
     server: String,
     tool: String,

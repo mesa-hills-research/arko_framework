@@ -1,11 +1,11 @@
-//! The in-place handover of a long conversation: the request for the agent's
+//! The in-place handover of a long conversation, covering the request for the agent's
 //! report, the report turn, and the fresh conversation that starts from it.
 
 use super::*;
 use crate::handover::HANDOVER_REPORT_PARAM_NAME;
 
 impl AgentLoop {
-    /// Notes a host's [`UserCommand::RequestHandover`]: the report is
+    /// Notes a host's [`UserCommand::RequestHandover`]. The report is
     /// requested at the next boundary where a user message can go. Ignored
     /// while a handover is under way.
     pub(super) fn note_handover_request(&mut self) {
@@ -26,7 +26,7 @@ impl AgentLoop {
             .is_some_and(|request| request.report_requested)
     }
 
-    /// Whether context waits for later: while a handover report is due,
+    /// Whether context waits for later, while a handover report is due,
     /// and from the start of a run asked for a report alone, whose context
     /// waits for the task's next run (also when the run stops before the
     /// request is in the conversation).
@@ -35,7 +35,7 @@ impl AgentLoop {
     }
 
     /// Whether the agent gives its report with the `handover_report` tool,
-    /// which its native requests then offer: native tool calling with
+    /// which its native requests then offer, namely native tool calling with
     /// `handover` set, for an agent offered other tools. Otherwise the report
     /// is a reply without a tool call, so an agent without tools keeps
     /// making requests without tools.
@@ -44,7 +44,7 @@ impl AgentLoop {
     }
 
     /// Whether a call to `tool_name` is rejected because the handover report
-    /// is due: every call except `complete_task` (and `handover_report`,
+    /// is due, which is every call except `complete_task` (and `handover_report`,
     /// which is answered before this check).
     pub(super) fn handover_blocks(&self, tool_name: &str) -> bool {
         self.handover_report_due()
@@ -64,10 +64,10 @@ impl AgentLoop {
     }
 
     /// Answers a `handover_report` call with `arguments`, offered to this
-    /// agent: `Ok` with its result when the report is taken (kept in the
+    /// agent, `Ok` with its result when the report is taken (kept in the
     /// task's handover request for the next turn boundary, a second report
     /// in the same turn is answered as received and ignored), `Err` with the
-    /// reason it was rejected: no report is due, or the call has none.
+    /// reason it was rejected (no report is due, or the call has none).
     pub(super) fn take_report_call(
         &mut self,
         arguments: &HashMap<String, Value>,
@@ -96,7 +96,7 @@ impl AgentLoop {
         })
     }
 
-    /// Before a model request (not a refusal fallback's): replaces the
+    /// Before a model request (not a refusal fallback's). Replaces the
     /// conversation when the agent gave its report with `handover_report`
     /// and the turn's results are in. Otherwise asks the agent for its
     /// handover report when a host asked for a handover or the current
@@ -124,14 +124,14 @@ impl AgentLoop {
             let Some((threshold, size)) = threshold.zip(context_size) else {
                 return Ok(());
             };
-            // The request about to be sent, not the one before it: what
+            // The request about to be sent, not the one before it. What
             // the turn added since (its tool results, above all) counts.
             let coming = self.estimated_request_tokens().max(size);
             if coming < threshold {
                 return Ok(());
             }
             // A conversation whose first request was already over the
-            // threshold would start over the threshold again: handing over
+            // threshold would start over the threshold again. Handing over
             // can't make it smaller.
             let first = self
                 .task
@@ -179,7 +179,7 @@ impl AgentLoop {
         self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
         if report_only {
-            // Not a handover: the host asked for the report.
+            // Not a handover. The host asked for the report.
             log::info!("Task {}: Report requested.", self.task.id);
             return Ok(());
         }
@@ -192,7 +192,7 @@ impl AgentLoop {
             .await
     }
 
-    /// A reply without tool calls while the handover report is due: its
+    /// A reply without tool calls while the handover report is due. Its
     /// text is the report, and the conversation is handed over. A reply
     /// without text is answered with a note, like a turn without a tool
     /// call. An agent offered `handover_report` gives the report with it, so
@@ -219,7 +219,7 @@ impl AgentLoop {
         self.complete_handover(report).await
     }
 
-    /// The report asked for alone came ([`Task::request_report`]): the task
+    /// The report asked for alone came ([`Task::request_report`]). The task
     /// completes with it as its summary, and the conversation stays.
     async fn complete_report(&mut self, report: String) -> Result<(), ArkoAgentsError> {
         self.task.handover_requested = None;
@@ -233,7 +233,7 @@ impl AgentLoop {
     }
 
     /// The fresh conversation of a handover runs with `config`, the
-    /// [`HandoverHook`]'s: it offers `config`'s tools under a system prompt
+    /// [`HandoverHook`]'s. It offers `config`'s tools under a system prompt
     /// written from it, with `config`'s skills when they differ from the
     /// task's. One the task can't take is left out, and logged.
     fn take_handover_config(
@@ -357,7 +357,7 @@ impl AgentLoop {
         self.task
             .record_held_ids(0, [seed.ids.clone(), covered].concat());
 
-        // What the loop keeps about the replaced conversation: tools that
+        // What the loop keeps about the replaced conversation. Tools that
         // track what the conversation holds start over (see
         // `observe_committed_tool_context`), the file tree is sent in full
         // again, and the cache monitor judges the fresh conversation alone.

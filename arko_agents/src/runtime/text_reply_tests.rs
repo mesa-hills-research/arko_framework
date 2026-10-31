@@ -1,4 +1,4 @@
-//! `text_reply_ends_task`: a reply in plain text, without a tool call, is
+//! With `text_reply_ends_task`, a reply in plain text, without a tool call, is
 //! the agent's final reply and completes the task, as `complete_task` would.
 
 use super::image_tests::{call, harness, response};
@@ -75,7 +75,7 @@ fn retries(events: &[AgentEvent]) -> usize {
 }
 
 /// A reply in text completes the task with the reply (trimmed) as its
-/// summary, reported as a `complete_task` completion is: one
+/// summary, reported as a `complete_task` completion is, with one
 /// `TaskStateChanged(Completed)`, after the reply streamed. The agent isn't
 /// offered `complete_task`, although its configuration lists it, and the
 /// system prompt says how the task ends.
@@ -135,7 +135,7 @@ async fn a_reply_in_text_completes_the_task_with_it() {
     assert!(!system.contains("complete_task"), "{system}");
 }
 
-/// Text beside tool calls doesn't end the task: the calls run and the
+/// Text beside tool calls doesn't end the task. The calls run and the
 /// task goes on until a reply without a call.
 #[tokio::test]
 async fn text_beside_calls_does_not_end_the_task() {
@@ -157,7 +157,7 @@ async fn text_beside_calls_does_not_end_the_task() {
 }
 
 /// A response with neither text nor a tool call is still one the runtime
-/// can't use: a note (without `complete_task`) asks again, under the error
+/// can't use. A note (without `complete_task`) asks again, under the error
 /// policy, and the next reply completes the task.
 #[tokio::test]
 async fn an_empty_response_still_gets_a_note() {
@@ -180,7 +180,7 @@ async fn an_empty_response_still_gets_a_note() {
 }
 
 /// A call to `complete_task` from an agent that isn't offered it is a call
-/// to an unavailable tool: it completes nothing.
+/// to an unavailable tool, and it completes nothing.
 #[tokio::test]
 async fn complete_task_is_not_available() {
     let (mut agent, mut events, _commands) = replying_harness();
@@ -203,7 +203,7 @@ async fn complete_task_is_not_available() {
     assert_eq!(completions(&events), ["Through text."]);
 }
 
-/// A handover report that is due comes first: a reply then is the report
+/// A handover report that is due comes first. A reply then is the report
 /// (for an agent that gives it as a reply), and the task ends with a reply
 /// in the fresh conversation. Calls rejected meanwhile don't mention
 /// `complete_task`.
@@ -269,7 +269,7 @@ async fn with_the_report_tool_a_reply_waits_for_the_report() {
 }
 
 /// Context taken while the final reply streams is not added to the
-/// completed task's conversation, as with a final `complete_task`: the task
+/// completed task's conversation, as with a final `complete_task`. The task
 /// keeps it, and a continuation sends it once, after its message.
 #[tokio::test(start_paused = true)]
 async fn context_taken_during_the_final_reply_waits_for_a_continuation() {
@@ -337,7 +337,7 @@ fn registry() -> ToolRegistry {
     registry
 }
 
-/// Output-based mode ignores the setting: `complete_task` is offered and a
+/// Output-based mode ignores the setting. `complete_task` is offered and a
 /// reply in text without a tool call is not an ending.
 #[tokio::test]
 async fn output_based_agents_ignore_the_setting() {

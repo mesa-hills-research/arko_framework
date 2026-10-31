@@ -1,4 +1,4 @@
-//! [`McpBridgeTool`]: one tool, `mcp`, that reaches every MCP server of a
+//! [`McpBridgeTool`] is one tool, `mcp`, that reaches every MCP server of a
 //! hub, so a conversation's tool list stays the same while servers are
 //! started, stopped, added and removed.
 
@@ -93,7 +93,7 @@ impl AddServer {
     }
 }
 
-/// The host's side of adding and removing servers: it asks the user,
+/// The host's side of adding and removing servers. It asks the user,
 /// writes the server's entry, records it, and changes the hub.
 #[async_trait]
 pub trait McpChanges: Send + Sync {
@@ -115,7 +115,7 @@ enum Role {
     Worker,
 }
 
-/// The `mcp` tool: one tool that reaches every MCP server of a hub.
+/// The `mcp` tool is one tool that reaches every MCP server of a hub.
 ///
 /// The main agent's ([`lead`](Self::lead)) takes the actions `servers`,
 /// `tools`, `call`, `start`, `stop`, `add` and `remove`, and a worker's
@@ -382,7 +382,7 @@ impl McpBridgeTool {
         }
     }
 
-    /// One line per server: its name, state, tool count and what it's for.
+    /// One line per server, with its name, state, tool count and what it's for.
     fn servers_text(&self, ctx: &TaskContext<'_>) -> String {
         let servers = self.reachable(ctx);
         if servers.is_empty() {
@@ -616,7 +616,7 @@ impl McpBridgeTool {
         text(params, "action").unwrap_or_default()
     }
 
-    /// Whether the call only reads: `servers`, `tools`, and `call` of a tool
+    /// Whether the call only reads, which holds for `servers`, `tools`, and `call` of a tool
     /// the server marks read-only when it was last listed.
     fn reads_only(&self, params: &HashMap<String, Value>) -> bool {
         match Self::action_of(params) {
@@ -637,7 +637,7 @@ impl McpBridgeTool {
     }
 }
 
-/// What a server is for: its description on one line, or the first
+/// What a server is for, its description on one line, or the first
 /// sentence of its own instructions.
 fn about(server: &ServerFacts) -> String {
     match (&server.description, &server.instructions) {
@@ -659,7 +659,7 @@ fn cut(text: &str, most: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// A tool's line: `create_issue(owner, repo, title, body?, labels?)  Create
+/// A tool's line, like `create_issue(owner, repo, title, body?, labels?)  Create
 /// a new issue in a GitHub repository.`, required parameters first and
 /// optional ones marked `?`.
 fn tool_line(tool: &McpToolInfo) -> String {
@@ -718,7 +718,7 @@ fn unknown_tool(server: &str, name: &str, tools: &[McpToolInfo]) -> String {
     format!("{server} has no tool named {name}. {closest}")
 }
 
-/// The three names nearest `name`: those holding it, or held by it, first,
+/// The three names nearest `name`, those holding it, or held by it, first,
 /// then by edit distance, ignoring case.
 fn closest<'a>(name: &str, names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
     let wanted = name.to_lowercase();
@@ -774,7 +774,7 @@ fn text<'p>(params: &'p HashMap<String, Value>, name: &str) -> Option<&'p str> {
         .filter(|text| !text.is_empty())
 }
 
-/// A list argument: a JSON array of strings, or text that holds one (as
+/// A list argument, a JSON array of strings, or text that holds one (as
 /// output-based calls give it) or names separated by commas.
 fn list(params: &HashMap<String, Value>, name: &str) -> Vec<String> {
     match params.get(name) {

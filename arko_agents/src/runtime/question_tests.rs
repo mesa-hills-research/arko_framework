@@ -159,7 +159,7 @@ async fn an_ask_returns_at_once_with_ids_that_go_on() {
     }
 }
 
-/// A task saved and resumed keeps its questions: the next ask goes on
+/// A task saved and resumed keeps its questions. The next ask goes on
 /// from their ids, and those still open stay open.
 #[tokio::test]
 async fn the_ids_go_on_after_a_resume() {
@@ -221,7 +221,7 @@ async fn the_ids_go_on_after_a_resume() {
 }
 
 /// An ask holds the task until the answer, which reaches the agent as the
-/// host wrote it and settles the questions: with `wait: true`, without
+/// host wrote it and settles the questions, with `wait: true`, without
 /// `wait` (it defaults to true), and always without `async_questions`.
 #[tokio::test]
 async fn wait_holds_the_task_until_the_answer() {
@@ -275,7 +275,7 @@ async fn wait_holds_the_task_until_the_answer() {
     }
 }
 
-/// A report asked for alone of a task waiting for its answer: the asking
+/// A report asked for alone of a task waiting for its answer. The asking
 /// call keeps its one result, ahead of the request, and the task completes
 /// with the report, its question still waiting in its log.
 #[tokio::test]
@@ -404,7 +404,7 @@ impl HandoverHook for HostKeepsQ2 {
     }
 }
 
-/// The host answers only `q1` of a batch the agent waited for: the answer
+/// The host answers only `q1` of a batch the agent waited for. The answer
 /// settles `q1` alone, so `q2` stays open in the task's log, a checkpoint
 /// keeps it, and the handover after it restates it.
 #[tokio::test]
@@ -426,7 +426,7 @@ async fn a_partial_answer_to_a_waited_batch_leaves_the_rest_open() {
                 )],
                 500,
             ),
-            // Over the threshold: the next request asks for the report.
+            // Over the threshold, the next request asks for the report.
             with_input(
                 vec![native_call(
                     "list",
@@ -507,7 +507,7 @@ async fn a_handover_restates_the_open_questions() {
                     )],
                     500,
                 ),
-                // Over the threshold: the next request asks for the report.
+                // Over the threshold, the next request asks for the report.
                 with_input(
                     vec![native_call(
                         "again",
@@ -542,7 +542,7 @@ async fn a_handover_restates_the_open_questions() {
     }
 }
 
-/// A host's record of the questions: it numbers them from 41 and keeps
+/// A host's record of the questions. It numbers them from 41 and keeps
 /// those asked open.
 #[derive(Default)]
 struct HostBook {
@@ -589,7 +589,7 @@ async fn a_handover_right_after_an_ask_restates_it_once() {
                 )],
                 500,
             ),
-            // Over the threshold: the next request asks for the report.
+            // Over the threshold, the next request asks for the report.
             with_input(
                 vec![native_call(
                     "ask",

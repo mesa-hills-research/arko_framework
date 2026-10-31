@@ -1,4 +1,4 @@
-//! One running MCP server: its process tree, its stderr, and the MCP
+//! One running MCP server, with its process tree, its stderr, and the MCP
 //! session with it. Shared by [`McpManager`](super::McpManager) and
 //! [`McpHub`](super::McpHub).
 
@@ -46,7 +46,7 @@ pub(crate) enum OpenError {
     Handshake { error: String, exit: Option<String> },
 }
 
-/// Whether a spawn's `error` may come after its process started: any error
+/// Whether a spawn's `error` may come after its process started, true of any error
 /// but the program missing or not allowed to run, and a start refused as the
 /// host exits.
 fn is_lost_start(error: &std::io::Error) -> bool {
@@ -59,7 +59,7 @@ fn is_lost_start(error: &std::io::Error) -> bool {
 }
 
 impl OpenError {
-    /// The reason in a few fixed words, for an agent or a user: the
+    /// The reason in a few fixed words, for an agent or a user, namely the
     /// server's exit when it exited. It never holds the server's command or
     /// what it wrote, which can hold the values of its environment. Those
     /// go to the log.
@@ -83,7 +83,7 @@ impl OpenError {
         }
     }
 
-    /// What the log says of it: the program by its file name and the error
+    /// What the log says of it, namely the program by its file name and the error
     /// in full, with `redactions` applied.
     fn diagnostic(&self, config: &McpServerConfig, redactions: &Redactions) -> String {
         let program = program(config);
@@ -97,7 +97,7 @@ impl OpenError {
     }
 }
 
-/// Whether the variable `name` looks like it holds a secret: its name has
+/// Whether the variable `name` looks like it holds a secret, meaning its name has
 /// one of [`SECRET_NAME_PARTS`] in it, or ends in `PASS`, ignoring case.
 fn secret_name(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
@@ -164,7 +164,7 @@ impl Redactions {
     }
 }
 
-/// What a server's process starts from, fixed when it is taken: the whole
+/// What a server's process starts from, fixed when it is taken, namely the whole
 /// environment and the working directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Launch {
@@ -174,8 +174,8 @@ pub(crate) struct Launch {
 }
 
 impl Launch {
-    /// `config`'s launch from the host's `env` and working directory `dir`:
-    /// `env` with the config's `env` over it. On Windows, where names don't
+    /// `config`'s launch from the host's `env` and working directory `dir`.
+    /// It is `env` with the config's `env` over it. On Windows, where names don't
     /// differ by case, a config's `Path` replaces the host's `PATH`.
     pub(crate) fn of(
         config: &McpServerConfig,
@@ -199,7 +199,7 @@ impl Launch {
             .map(|(_, value)| value.as_os_str())
     }
 
-    /// Where the process would find `command`: a path made absolute against
+    /// Where the process would find `command`, a path made absolute against
     /// the working directory, or the first program of that name on the
     /// launch's `PATH` (with `PATHEXT`'s extensions on Windows). `None` when
     /// there's none.
@@ -420,7 +420,7 @@ impl Connection {
         if let Some(exit) = self.exit.lock().unwrap().clone() {
             return Some(exit);
         }
-        // Closed without an exit report: its connection ended.
+        // Closed without an exit report, since its connection ended.
         (self.service.is_closed() || self.service.peer().is_transport_closed())
             .then(|| "its connection closed".to_string())
     }
@@ -471,7 +471,7 @@ fn server_groups() -> std::sync::MutexGuard<'static, ServerGroups> {
 pub(crate) static UNLISTED: Mutex<Vec<(i32, bool)>> = Mutex::new(Vec::new());
 
 /// Pauses a test's server start between the spawn and the listing, while
-/// the list's lock is held: sends the child's process ID, then waits.
+/// the list's lock is held. Sends the child's process ID, then waits.
 #[cfg(all(test, unix))]
 #[allow(clippy::type_complexity)]
 pub(crate) static PAUSE_AFTER_SPAWN: Mutex<
@@ -527,7 +527,7 @@ impl ServerProcess {
                     "MCP servers no longer start, as the host is exiting",
                 ));
             }
-            // shortcut: Tokio's `Command::spawn` starts the process, then sets
+            // A shortcut. Tokio's `Command::spawn` starts the process, then sets
             // up its pipes and its reaper, and if that fails it returns the
             // error and drops the started child without killing it. Tokio
             // offers no way to get that child back, so such a server goes on
@@ -607,8 +607,8 @@ pub fn kill_mcp_servers() {
     }
 }
 
-/// A server process that exited on its own (not stopped by the manager):
-/// its exit status and last stderr lines, reported in a warning.
+/// A server process that exited on its own (not stopped by the manager),
+/// with its exit status and last stderr lines, reported in a warning.
 #[derive(Debug)]
 // Only the tests that run a shell script read the report back (Unix only).
 // The warning carries it otherwise.
@@ -643,12 +643,12 @@ fn describe_exit(status: &std::io::Result<ExitStatus>) -> String {
     }
 }
 
-/// Watches a server process: logs each stderr line at info level, tagged
+/// Watches a server process. It logs each stderr line at info level, tagged
 /// with the server's name and with `redactions` applied, and when the
 /// process exits on its own, logs one warning with its exit status and last
 /// stderr lines, records how it ended in `exit` (see [`describe_exit`]),
 /// and returns them.
-/// `stop` stops the process: sent, it gets [`SHUTDOWN_GRACE`] to exit before
+/// `stop` stops the process. Sent, it gets [`SHUTDOWN_GRACE`] to exit before
 /// it is killed. Dropped, it is killed at once. A stopped process's exit is
 /// logged at info level only.
 ///
@@ -667,7 +667,7 @@ fn watch_server(
     let reader = stderr.map(|stderr| {
         let (name, tail) = (name.clone(), tail.clone());
         tokio::spawn(async move {
-            // Read until the pipe closes, whatever the bytes: a reader that
+            // Read until the pipe closes, whatever the bytes, because a reader that
             // stopped early would close the pipe, and the server's next
             // write to stderr would fail.
             let mut reader = BufReader::new(stderr);
@@ -1021,7 +1021,7 @@ mod tests {
         );
     }
 
-    /// Bytes that aren't UTF-8 don't stop the reading: the server can keep
+    /// Bytes that aren't UTF-8 don't stop the reading. The server can keep
     /// writing to stderr, and its lines are logged with replacements.
     #[tokio::test]
     async fn stderr_that_is_not_utf8_is_still_read() {

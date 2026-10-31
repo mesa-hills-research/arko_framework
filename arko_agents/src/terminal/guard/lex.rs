@@ -1,6 +1,6 @@
 //! Splits a command line into simple commands and words for the command
-//! guard. The lexers keep what matters for finding a command's targets:
-//! words, variable references, output redirections, where commands and
+//! guard. The lexers keep what matters for finding a command's targets,
+//! namely words, variable references, output redirections, where commands and
 //! pipelines begin, and where POSIX subshells open and close. Everything
 //! else (arithmetic, most expansions, parameter parsing) is left to the
 //! analysis or treated as unknown text.
@@ -14,12 +14,12 @@ pub(super) enum Piece {
     /// A value only known when the command runs, such as `$((...))`.
     Unknown,
     /// The output of a command substitution (`$(...)` or backticks, and in
-    /// PowerShell `$(...)` and `@(...)`): only known when the command runs.
+    /// PowerShell `$(...)` and `@(...)`), only known when the command runs.
     /// The text is the command it runs.
     Substitution(String),
-    /// `$(pwd)`: the working directory.
+    /// `$(pwd)` is the working directory.
     WorkingDirectory,
-    /// `$(mktemp)` and `$(mktemp -d)`: a new path in the temporary directory.
+    /// `$(mktemp)` and `$(mktemp -d)` are a new path in the temporary directory.
     TempPath,
     /// A PowerShell parenthesized argument, kept raw (`foreach ($f in $x)`).
     Group(String),
@@ -30,9 +30,9 @@ pub(super) enum Piece {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum VarForm {
     Plain,
-    /// `${X:?}`: the shell stops when the value is empty.
+    /// `${X:?}` stops the shell when the value is empty.
     Required,
-    /// `${X:-word}`: the word stands in for an empty value.
+    /// `${X:-word}` makes the word stand in for an empty value.
     Default(String),
     /// A transformation of the value (`${X%/*}`), empty when the value is.
     Transform,
@@ -86,38 +86,38 @@ pub(super) struct Command {
     /// Commands of one pipeline, including PowerShell script blocks inside
     /// it, share this number.
     pub pipeline: usize,
-    /// PowerShell's call operator `&` came first: the first word names the
+    /// PowerShell's call operator `&` came first, so the first word names the
     /// command to run, even when it is quoted or a variable.
     pub call: bool,
     /// POSIX subshells that open before this command, outermost first.
     pub opens: Vec<Subshell>,
     /// How many POSIX subshells close after this command.
     pub closes: usize,
-    /// Later POSIX pipelines its output reaches beyond its own: in a
+    /// Later POSIX pipelines its output reaches beyond its own, in a
     /// subshell, group or compound command that is a pipeline's member, the
     /// next member's.
     pub feeds: Vec<usize>,
 }
 
-/// Commands of a POSIX line that run in a subshell: a `cd` or assignment
+/// Commands of a POSIX line that run in a subshell. A `cd` or assignment
 /// there ends with it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Subshell {
     /// `( … )`, a background list (`… &`), or a pipeline's member other
     /// than the last.
     Always,
-    /// A pipeline's last member: a subshell in bash, the shell itself in
+    /// A pipeline's last member, a subshell in bash, the shell itself in
     /// zsh, ksh, and bash with `lastpipe`.
     Maybe,
 }
 
-/// A POSIX list being read: the line, or a `( … )`, `{ … }` or compound
+/// A POSIX list being read, namely the line, or a `( … )`, `{ … }` or compound
 /// command (`while … done`, `if … fi`, …) in it. Indexes are of the
 /// commands read.
 struct List {
     /// The word that closes it.
     close: &'static str,
-    /// Where its current and-or list began: `&` runs that in the background.
+    /// Where its current and-or list began. `&` runs that in the background.
     start: usize,
     /// Where its current pipeline's member began.
     member: usize,
@@ -132,7 +132,7 @@ enum Separator {
     List,
     /// `&&` or `||`.
     AndOr,
-    /// `&`: the and-or list runs in the background.
+    /// `&` runs the and-or list in the background.
     Background,
     /// `|` or `|&`.
     Pipe,
@@ -153,7 +153,7 @@ struct Builder {
     pending: Pending,
     pipeline: usize,
     heredocs: Vec<(String, bool)>,
-    /// POSIX only: reserved words, groups and subshells are read.
+    /// POSIX only. Reserved words, groups and subshells are read.
     posix: bool,
     /// `( … )` subshells opened since the last command.
     opens: usize,
@@ -257,8 +257,8 @@ impl Builder {
         }
     }
 
-    /// Ends the current command. `piped`: the next one reads its output.
-    /// `new_pipeline`: the next one starts a new pipeline.
+    /// Ends the current command. `piped` means the next one reads its output.
+    /// `new_pipeline` means the next one starts a new pipeline.
     fn end_command(&mut self, piped: bool, new_pipeline: bool) {
         self.end_word();
         self.pending = Pending::None;
@@ -281,8 +281,8 @@ impl Builder {
         };
     }
 
-    /// Ends a POSIX command at `separator`, marking what runs in a subshell:
-    /// a pipeline's members, and a background list.
+    /// Ends a POSIX command at `separator`, marking what runs in a subshell,
+    /// namely a pipeline's members, and a background list.
     fn separate(&mut self, separator: Separator) {
         if separator == Separator::Pipe {
             self.end_command(true, false);
@@ -313,7 +313,7 @@ impl Builder {
         }
     }
 
-    /// The current pipeline ends: its last member, after a `|`, may run in
+    /// The current pipeline ends. Its last member, after a `|`, may run in
     /// a subshell.
     fn end_pipeline(&mut self) {
         let list = self.list();
@@ -645,7 +645,7 @@ fn posix(chars: &[char]) -> Vec<Command> {
     b.finish()
 }
 
-/// The value of a command substitution: the working directory for `pwd`, a
+/// The value of a command substitution, which is the working directory for `pwd`, a
 /// new temporary path for a `mktemp` that names no directory of its own, and
 /// the command's output otherwise.
 fn substitution(inner: &[char]) -> Piece {

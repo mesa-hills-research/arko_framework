@@ -1,4 +1,4 @@
-//! Monitors: alerts of matching lines, the outbox's rate, how monitors end,
+//! Monitors, covering alerts of matching lines, the outbox's rate, how monitors end,
 //! the limits, and restarts.
 
 use super::monitor::{EndReason, Line};
@@ -1382,7 +1382,7 @@ async fn an_owners_end_quiets_its_monitors_waiting_news() {
 }
 
 /// `has_alerts` counts the news that should wake an idle agent, and
-/// `has_news` all of it: an alert does, and so does a warning while the
+/// `has_news` all of it. An alert does, and so does a warning while the
 /// user counts as active or a command that exited by itself. A stop, an
 /// expiry and a warning while the user is away go with the next turn.
 #[tokio::test(start_paused = true)]
@@ -1771,7 +1771,7 @@ async fn a_late_first_check_with_the_awaited_result_alerts() {
     assert_eq!(ended_paused(&f, id).await.state, JobState::Succeeded);
 }
 
-/// A [`WorkerLiveness`] a test drives: the owners whose workers run.
+/// A [`WorkerLiveness`] a test drives, with the owners whose workers run.
 struct Workers {
     running: Mutex<HashSet<Uuid>>,
     changes: watch::Sender<u64>,

@@ -1,4 +1,4 @@
-//! Agents offered no tools: no tools, a reply in text ends the task. Their
+//! Agents offered no tools, where a reply in text ends the task. Their
 //! requests carry no tool configuration and their system prompt says
 //! nothing about tools.
 
@@ -26,7 +26,7 @@ pub(super) fn replying_agent(
     agent_for(task, registry, Arc::new(ai::LLMClient::new()))
 }
 
-/// A native chat (`AgentToolConfig::chat`): no tools, and its reply in
+/// A native chat (`AgentToolConfig::chat`), with no tools, and its reply in
 /// text ends the task.
 pub(super) fn chat_agent() -> (
     AgentLoop,
@@ -105,7 +105,7 @@ fn chat_with_history() -> (
     (agent, events, commands)
 }
 
-/// A chat with a handover gives its report as a reply in text: it isn't
+/// A chat with a handover gives its report as a reply in text. It isn't
 /// offered `handover_report`, its requests stay without tools, and the
 /// report request asks for a summary that leaves the latest message to the
 /// fresh conversation.
@@ -138,7 +138,7 @@ async fn a_chat_is_asked_for_a_summary_in_text() {
     assert_eq!(message_text(request), "Summarize.");
 }
 
-/// The summary replaces the conversation: the fresh one starts from the
+/// The summary replaces the conversation. The fresh one starts from the
 /// user's unanswered message (with its image) and the summary, and the
 /// reply there ends the task.
 #[tokio::test]

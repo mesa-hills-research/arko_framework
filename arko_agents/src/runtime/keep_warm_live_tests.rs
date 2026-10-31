@@ -1,5 +1,5 @@
 //! Opt-in live tests of the prompt cache refresh
-//! ([`AgentRuntime::refresh_prompt_cache`]) per route: that the provider
+//! ([`AgentRuntime::refresh_prompt_cache`]) per route. They check that the provider
 //! takes its output limit with the route's thinking settings, and that it
 //! reads the cached conversation. They make paid requests and need each
 //! route's key (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`):
@@ -9,7 +9,7 @@
 //! ```
 //!
 //! A test whose key isn't set passes without a request. Each prints the
-//! refresh it saw: its usage, its output limit, and the error of a limit
+//! refresh it saw, namely its usage, its output limit, and the error of a limit
 //! the provider refused (the refresh then went again with a larger one).
 //! The OpenRouter model can be set with `OPENROUTER_LIVE_CLAUDE`.
 
@@ -86,8 +86,8 @@ async fn run_then_refresh(
     refresh
 }
 
-/// Anthropic with adaptive thinking (Opus 5.5 always thinks adaptively):
-/// a one-token limit with the thinking settings unchanged.
+/// Anthropic with adaptive thinking (Opus 5.5 always thinks adaptively).
+/// A one-token limit with the thinking settings unchanged.
 #[tokio::test]
 #[ignore = "makes a paid request; needs ANTHROPIC_API_KEY"]
 async fn keep_warm_live_anthropic_adaptive_thinking() {
@@ -106,7 +106,7 @@ async fn keep_warm_live_anthropic_adaptive_thinking() {
     );
 }
 
-/// OpenRouter's Anthropic models without reasoning: a one-token limit.
+/// OpenRouter's Anthropic models without reasoning, with a one-token limit.
 #[tokio::test]
 #[ignore = "makes a paid request; needs OPENROUTER_API_KEY"]
 async fn keep_warm_live_openrouter_claude() {
@@ -127,7 +127,7 @@ async fn keep_warm_live_openrouter_claude() {
     );
 }
 
-/// OpenAI's Responses API with reasoning: its smallest limit, 16.
+/// OpenAI's Responses API with reasoning, with its smallest limit, 16.
 #[tokio::test]
 #[ignore = "makes a paid request; needs OPENAI_API_KEY"]
 async fn keep_warm_live_openai() {

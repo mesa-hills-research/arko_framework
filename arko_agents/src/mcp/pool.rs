@@ -1,4 +1,4 @@
-//! The servers shared by the hubs of a process (`"shared": true`): one
+//! The servers shared by the hubs of a process (`"shared": true`). One
 //! process per command line and environment, kept while a hub uses it.
 //!
 //! The pool is process-wide, behind a static, rather than an object a host
@@ -20,7 +20,7 @@ use rmcp::service::{Peer, RoleClient};
 use super::config::McpServerConfig;
 use super::connection::{Connection, Launch, Redactions};
 
-/// What makes two servers the same: the command and arguments, as
+/// What makes two servers the same, namely the command and arguments, as
 /// expanded, the whole environment and working directory they start with,
 /// and the program the command finds. A host whose own environment changed
 /// (another `PATH`, another `DATABASE_URL`) gets a process of its own.
@@ -196,7 +196,7 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 impl Drop for SharedServer {
-    /// The last hub let go: the server stops, with what it started, on the
+    /// The last hub let go. The server stops, with what it started, on the
     /// pool's runtime.
     fn drop(&mut self) {
         if let Some(mut connection) = self.connection.get_mut().unwrap().take() {

@@ -53,7 +53,7 @@ pub struct SkillManager {
     prompt_context: SkillPromptContext,
     /// The skills loaded.
     total: usize,
-    /// How many of them `load_skill` loads: all but those whose content is
+    /// How many of them `load_skill` loads, all but those whose content is
     /// in the prompt.
     loadable: usize,
 }
@@ -107,7 +107,7 @@ impl SkillManager {
         &self.prompt_context
     }
 
-    /// Returns true if `load_skill` has any skill to load: one that isn't
+    /// Returns true if `load_skill` has any skill to load, meaning one that isn't
     /// auto-loaded into the prompt. That includes skills for other models,
     /// which load by name without being listed.
     pub fn has_on_demand_skills(&self) -> bool {
@@ -164,7 +164,7 @@ impl SkillManager {
 }
 
 /// The per-tool entry [`SkillManager::setup`] gives `load_skill` when the
-/// configuration has none: auto-approved.
+/// configuration has none, auto-approved.
 pub(crate) fn load_skill_default_override() -> PerToolConfigOverride {
     PerToolConfigOverride {
         auto_approve_tool_use: Some(true),

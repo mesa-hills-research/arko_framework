@@ -1,5 +1,5 @@
-//! Refusal recovery: the refused input is reported, the host changes it and
-//! the task continues; the opt-in fallback model; announced calls and
+//! Refusal recovery. The refused input is reported, the host changes it and
+//! the task continues, the opt-in fallback model, announced calls and
 //! output-based markup of refused turns.
 
 use super::retry_tests::{
@@ -31,7 +31,7 @@ fn refused() -> ai::StreamEvent {
     refused_response(ai::Message::new_assistant(""), model_refusal())
 }
 
-/// A native turn calling a tool the registry doesn't have: its error result
+/// A native turn calling a tool the registry doesn't have. Its error result
 /// is the next input.
 fn missing_tool_turn() -> ai::StreamEvent {
     let mut message = ai::Message::new_assistant("");
@@ -314,7 +314,7 @@ async fn a_returned_task_can_be_resolved_and_run_again() {
     );
     // Saved and loaded, the refused input survives.
     let mut task: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
-    // The prompt is the only user message: it can be rephrased, not removed.
+    // The prompt is the only user message, so it can be rephrased, not removed.
     assert!(
         task.resolve_refusal(vec![RefusalResolution::RemoveUserMessage {
             message_index: 0
@@ -486,7 +486,7 @@ async fn an_opt_in_fallback_model_answers_a_refused_turn_once() {
         .unwrap()
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    // The refused turn went to the fallback once; later turns use the
+    // The refused turn went to the fallback once, and later turns use the
     // configured model again.
     assert_eq!(
         *requested.lock().unwrap(),
@@ -547,10 +547,10 @@ async fn a_refusal_from_the_fallback_model_stops_the_task() {
 }
 
 /// A failed fallback request is recovered from by its own error, like any
-/// request, and the fallback stays pending: a transient failure (a dropped
-/// stream, a server error, a rate limit) is retried to the fallback model;
+/// request, and the fallback stays pending. A transient failure (a dropped
+/// stream, a server error, a rate limit) is retried to the fallback model, and
 /// once the retries run out the task pauses with `RetriesExhausted`, and on
-/// a request error with `NonRetryable`; continuing sends the fallback's
+/// a request error with `NonRetryable`. Continuing sends the fallback's
 /// request again. (Every failure of the fallback request once made the
 /// refusal stand, as `Refusal`, which a workflow's automatic recovery
 /// doesn't retry.)
@@ -633,7 +633,7 @@ async fn a_failed_fallback_request_is_recovered_from_by_its_own_error() {
 }
 
 /// Continuing after a failed fallback request sends the refused input to
-/// the fallback again exactly: an approval adds no error note, and the
+/// the fallback again exactly. An approval adds no error note, and the
 /// host's note or message waits as context until the fallback has answered.
 /// (Both were once added to the conversation first, so the fallback
 /// answered, and could refuse, the refused input plus the note.)
@@ -720,7 +720,7 @@ async fn the_runtime_refuses_to_start_with_a_cross_provider_fallback() {
     assert!(agent.run().await.is_err());
 }
 
-/// Low (a): calls a native stream announced before the refusal get
+/// Low (a). Calls a native stream announced before the refusal get
 /// `ToolRejected("turn refused")`.
 #[tokio::test(start_paused = true)]
 async fn calls_announced_before_a_native_refusal_are_rejected() {
@@ -801,9 +801,9 @@ async fn announced_calls_missing_from_a_completed_response_are_rejected() {
     assert_eq!(rejected, ["read_file"]);
 }
 
-/// Low (b): an output-based refused turn keeps only the refusal
+/// Low (b). An output-based refused turn keeps only the refusal
 /// explanation, or without one its text minus the tool-call markup that
-/// was never run; OpenAI message items holding that markup are not replayed.
+/// was never run, and OpenAI message items holding that markup are not replayed.
 #[tokio::test(start_paused = true)]
 async fn output_based_refusals_keep_no_tool_call_markup() {
     let markup = "Sure. <complete_task><summary>done</summary></complete_task>";
@@ -926,7 +926,7 @@ pub(super) fn call_item(id: &str, name: &str, arguments: &str) -> Value {
         "name": name, "arguments": arguments, "status": "completed"})
 }
 
-/// B1: over ChatGPT OAuth, a same-provider fallback request doesn't echo the
+/// B1. Over ChatGPT OAuth, a same-provider fallback request doesn't echo the
 /// configured model's turn-state token, the configured model's later
 /// request keeps its own token (or none), and reasoning is replayed between
 /// the two models, both ways, only within one Codex compaction family.
@@ -1018,7 +1018,7 @@ async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders()
                 .find_map(|line| line.strip_prefix("x-codex-turn-state: "))
                 .map(str::to_string)
         };
-        // The fallback request carries no token; the configured model's
+        // The fallback request carries no token, and the configured model's
         // later request carries its own turn's token (or none), never the
         // fallback's.
         assert_eq!(turn_header(1).as_deref(), turn_state);
@@ -1038,7 +1038,7 @@ async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders()
                 .iter()
                 .any(|item| item["type"] == "reasoning" && item["encrypted_content"] == content)
         };
-        // Request direction: the fallback request replays the configured
+        // Request direction. The fallback request replays the configured
         // model's earlier turn with its reasoning only within the family,
         // and without the ids of a turn whose reasoning was dropped.
         let fallback_input = input(2);
@@ -1060,8 +1060,8 @@ async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders()
                 .any(|item| item["id"] == "msg_refused"),
             "the refused turn is not kept"
         );
-        // Back to the configured model: the fallback's call and result are
-        // replayed, its reasoning and ids only within the family; the
+        // Back to the configured model. The fallback's call and result are
+        // replayed, its reasoning and ids only within the family, and the
         // configured model's own turn keeps everything.
         let last_input = input(3);
         assert_eq!(
@@ -1082,8 +1082,8 @@ async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders()
     }
 }
 
-/// M3: nothing is added between a refusal and the fallback's answer to it,
-/// so after a failed fallback the refusal can still be resolved; context
+/// M3. Nothing is added between a refusal and the fallback's answer to it,
+/// so after a failed fallback the refusal can still be resolved, and context
 /// the host sent meanwhile follows the changed input.
 #[tokio::test(start_paused = true)]
 async fn a_failed_fallback_stays_resolvable_when_context_arrives_meanwhile() {
@@ -1152,8 +1152,8 @@ async fn a_failed_fallback_stays_resolvable_when_context_arrives_meanwhile() {
     assert!(texts[1].contains("peer update"), "{texts:?}");
 }
 
-/// A refused response reporting plan usage over the opt-in threshold: the
-/// monitor pauses before the fallback request, and the fallback is still
+/// A refused response reporting plan usage over the opt-in threshold.
+/// The monitor pauses before the fallback request, and the fallback is still
 /// made once the pause is approved.
 #[tokio::test(start_paused = true)]
 async fn a_monitor_pause_before_the_fallback_keeps_it() {
@@ -1208,7 +1208,7 @@ async fn a_monitor_pause_before_the_fallback_keeps_it() {
     assert_eq!(*requested.lock().unwrap(), ["gpt-5.6-luna", "gpt-6-sol"]);
 }
 
-/// L6: a pending fallback is saved with the task, so a task suspended after
+/// L6. A pending fallback is saved with the task, so a task suspended after
 /// the refusal still sends the refused input to the fallback model.
 #[tokio::test(start_paused = true)]
 async fn a_pending_fallback_survives_a_restart() {
@@ -1232,7 +1232,7 @@ async fn a_pending_fallback_survives_a_restart() {
 }
 
 /// The elapsed recovery budget of an earlier failure doesn't cut off the
-/// fallback request: it waits for its answer until the host stops the task,
+/// fallback request. It waits for its answer until the host stops the task,
 /// and a suspended task keeps the fallback to make.
 #[tokio::test(start_paused = true)]
 async fn the_recovery_budget_does_not_cut_off_the_fallback_request() {

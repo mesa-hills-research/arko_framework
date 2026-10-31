@@ -59,7 +59,7 @@ pub(crate) async fn execute_command_from_template(
                 }
                 // A path parameter passes the path the workspace check
                 // judged, with `..` already resolved, so a symbolic link on
-                // the way can't take it elsewhere: `./`-relative inside the
+                // the way can't take it elsewhere. It is `./`-relative inside the
                 // working directory, where the command runs, and absolute
                 // outside it, so the program can't read it as an option.
                 let argument = if def.is_path && !str_val.is_empty() {
@@ -350,7 +350,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("outside/deep"), workspace.join("link")).unwrap();
 
         // An option-like value is inside the workspace as a path, and the
-        // program gets it as one: `./`-relative, never an option.
+        // program gets it as one, `./`-relative, never an option.
         for option in ["-n", "--output=/etc/x"] {
             assert!(crate::utils::is_path_in_workspace(option, &workspace).unwrap());
         }
@@ -368,7 +368,7 @@ mod tests {
             run_with_path("echo", " . ", &workspace).await.unwrap(),
             ".\n"
         );
-        // `link/..` is the workspace lexically, which the check judged; the
+        // `link/..` is the workspace lexically, which the check judged, but the
         // kernel would follow the link to `outside` first.
         assert!(crate::utils::is_path_in_workspace("link/../x", &workspace).unwrap());
         assert_eq!(
