@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::error::ArkoAgentsError;
 
-/// One MCP server, run over stdio: the program, its arguments and its
+/// One MCP server, run over stdio, with the program, its arguments and its
 /// environment, already expanded.
 ///
 /// The struct is `#[non_exhaustive]`, so fields can be added without

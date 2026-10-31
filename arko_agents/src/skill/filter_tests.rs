@@ -1237,7 +1237,7 @@ fn a_bundle_in_a_source_folder_with_mismatched_headers_is_skipped() {
 }
 
 /// A bundle in a source folder is read within the limits of one offered to
-/// be saved: 16 MB unpacked, 1,000 files, and a file no larger than that
+/// be saved, namely 16 MB unpacked, 1,000 files, and a file no larger than that
 /// could make. Over them, it's skipped as a broken skill is.
 #[test]
 fn a_bundle_in_a_source_folder_over_the_limits_is_skipped() {

@@ -61,7 +61,7 @@ impl McpTool {
     }
 }
 
-/// The definition of `tool` of `server` as a tool named `name`: its
+/// The definition of `tool` of `server` as a tool named `name`, with its
 /// description marked with the server's name, its raw input schema, and
 /// parallel-safe and read-only when the server marks it read-only.
 pub(crate) fn mcp_definition(
@@ -75,10 +75,10 @@ pub(crate) fn mcp_definition(
         description: format!("[MCP:{}] {}", server_name, tool.description),
         output_based_example: None,
         parameters,
-        // As Codex does: only a tool the server marks read-only runs at the
+        // As Codex does, only a tool the server marks read-only runs at the
         // same time as other calls ("Correctly implemented MCP servers should
         // tolerate parallel calls to tools that advertise themselves as
-        // read-only"); any other runs alone, in call order.
+        // read-only"), and any other runs alone, in call order.
         parallel_safe: tool.read_only,
         tool_type_details: ToolTypeDetails::DeveloperDefined,
         read_only: tool.read_only,

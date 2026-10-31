@@ -289,7 +289,7 @@ pub(crate) mod tests {
     }
 
     /// Set in the child process of
-    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: the files its
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`], the files its
     /// server writes its own and its program's process IDs to.
     const EXIT_PIDS_ENV: &str = "ARKO_TEST_MCP_EXIT_PIDS";
     /// Set there to `after` for the child to call `kill_mcp_servers` after
@@ -383,7 +383,7 @@ pub(crate) mod tests {
     }
 
     /// The child process of
-    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]: starts a server
+    /// [`kill_mcp_servers_ends_the_servers_before_an_exit`]. It starts a server
     /// behind a `sh -c` launcher, which ignores the end of its input and
     /// leaves a program running, writes their process IDs, kills the servers
     /// when asked, and exits at once, with status 7 when the server started
