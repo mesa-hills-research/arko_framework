@@ -1,10 +1,10 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9b74b9f49f9323b1
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=751dbf755571f107
 R msgs=1 model=gpt-5.6-luna request=114aefc75b829cdb
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1228,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1228,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5b2c059875ba45f3
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1a14d194f3744c62
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"check"}}
 E {"ToolParamName":{"param_name":"path","tool_call_id":"id2"}}
 E {"ToolParamValueChunk":{"chunk":"../outside.txt","param_name":"path","tool_call_id":"id2"}}
@@ -18,33 +18,33 @@ E {"ToolParamValueChunk":{"chunk":"fail","param_name":"what","tool_call_id":"id3
 E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id3"}}
 E {"AssistantResponseChunk":"Checking both.\n\n\n\n\n\n\n\n\n"}
 E {"ToolCallFormatted":{"parameters":{"path":"../outside.txt"},"tool_call_id":"id2","tool_name":"check"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=506de366548d78c6
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=c2ecdb009116633f
 E {"ToolCallFormatted":{"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_name":"check"}}
 E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}}}
 E {"BatchToolCallAwaitingApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}} task=9fffb8a9d42ab890
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 injections=0 handovers=0 state="InProgress" task=63ef28d64b3dc410
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=d298ac168ffccdbf
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}} task=14468e979b12d65d
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 injections=0 handovers=0 state="InProgress" task=32af3b496af83213
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=b22becaccfdd7744
 E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}}}
 E {"ErrorEncountered":{"error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it","requires_approval_to_retry":true,"tool_call_id":null}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}} task=11a6b383dab22560
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}} task=904e3d06056b43d3
 E {"TaskStateChanged":"InProgress"}
 R msgs=3 model=gpt-5.6-luna request=a8fca3dce1311943
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":159,"image_tokens":0,"images":0,"system_prompt":1228,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":227}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":159,"image_tokens":0,"images":0,"system_prompt":1228,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":227}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a16f2f0b193d23b7
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fc8b1326816cbd4e
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"ToolParamName":{"param_name":"summary","tool_call_id":"id5"}}
 E {"ToolParamValueChunk":{"chunk":"done","param_name":"summary","tool_call_id":"id5"}}
 E {"ToolParamEnd":{"param_name":"summary","tool_call_id":"id5"}}
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1367d843ece93cd1
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=ee6029c3b8f0ccac
 E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=bb3d189e40b4af6b
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d916e05ef2406766
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=eaa92843037c7a18
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=9384936225fada2f
 E "TaskStreamEnd"
 --- conversation: 4 messages, system prompt eea3acbac1d47bb8
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

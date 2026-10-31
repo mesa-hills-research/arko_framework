@@ -21,6 +21,9 @@ use crate::runtime::event::AgentEvent;
 use crate::task::{Task, TaskState};
 use crate::tool::ToolRegistry;
 
+#[path = "claude_code_latest_request_tests.rs"]
+mod latest_request;
+
 /// A fake CLI with its script, log and turn counter in a fresh directory.
 struct Fake {
     dir: PathBuf,
@@ -5584,6 +5587,7 @@ async fn each_request_is_reported_when_its_response_starts() {
                 subagent,
                 sizes,
                 bytes_per_token,
+                ..
             } => Some((model.clone(), subagent.clone(), *sizes, *bytes_per_token)),
             _ => None,
         })

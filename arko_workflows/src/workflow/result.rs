@@ -123,6 +123,7 @@ impl AgentResult {
 /// What a run's task holds besides its conversation, which lists, notices
 /// and a resume's checks read without loading the task. See
 /// [`AgentResult::info`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
     /// The configuration the task runs with (`Task::agent_config`).
@@ -152,6 +153,16 @@ pub struct TaskInfo {
     pub usage: arko_ai::UsageInfo,
     /// How many model calls `usage` adds up (`Task::usage_history`'s length).
     pub model_calls: usize,
+    /// What the task knows of its current conversation's latest completed
+    /// model request (`Task::latest_request`), which its prompt cache lasts
+    /// from. A checkpoint saved before it existed reads as
+    /// [`RequestRecord::Unrecorded`](arko_agents::RequestRecord::Unrecorded),
+    /// as its task does.
+    #[serde(
+        default,
+        skip_serializing_if = "arko_agents::RequestRecord::is_unrecorded"
+    )]
+    pub latest_request: arko_agents::RequestRecord,
 }
 
 impl TaskInfo {
@@ -166,6 +177,7 @@ impl TaskInfo {
             reconfigured: task.reconfigured,
             usage: task.total_usage(),
             model_calls: task.usage_history.len(),
+            latest_request: task.latest_request.clone(),
         }
     }
 }

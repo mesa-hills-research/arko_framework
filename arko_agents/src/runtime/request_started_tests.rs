@@ -95,6 +95,7 @@ async fn each_request_is_reported_as_it_goes_out() {
             subagent,
             sizes,
             bytes_per_token,
+            ..
         } => (
             model.clone(),
             subagent.clone(),

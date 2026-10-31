@@ -68,7 +68,7 @@ static TIMEOUT_STATE: LazyLock<Regex> =
 
 /// Object keys whose values are wall-clock times.
 fn is_time_key(key: &str) -> bool {
-    key.ends_with("_unix_ms") || key == "start_time" || key == "end_time"
+    key.ends_with("_unix_ms") || ["start_time", "end_time", "sent_at"].contains(&key)
 }
 
 /// Object keys whose values are durations measured on tokio's clock: the

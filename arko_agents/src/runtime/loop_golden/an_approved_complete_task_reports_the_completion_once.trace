@@ -1,42 +1,42 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=221e00ad7421de85
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=284fba3c4fbc8b08
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id2","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}}
 E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}
-S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=050a2e595a860200
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c5cbf68fa3c413d0
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=494ed92bb5a20745
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=e43b9e858c412f6b
 E {"ToolResult":{"output":"done","tool_call_id":"id2","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=1bde5625a5d879fc
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=93cb6e84d85811f1
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=dc79be2d80832e6b
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=f77398f18e4f0a98
 E "TaskStreamEnd"
 --- conversation: 3 messages, system prompt d1669b0441bd8242
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
 M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bda16c8eb04b58ba
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=65d723fc334b4e58
 R msgs=1 model=gpt-5.6-luna request=fba4ce452a6d08d1
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c126ffca61a92d0b
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9539aa382dca5c8a
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}}
 E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=e1d0a8d3262d7d03
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dbbdcc856146f2f1
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=af56a54a713475b2
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1469301b4bdb6a8c
 E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=37c0ebfc7f51c841
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=fa6f02a7acc849ca
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=02354220fe8ceae2
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d21af587f414f6c3
 E "TaskStreamEnd"
 --- conversation: 2 messages, system prompt 08c6670afdf61d85
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

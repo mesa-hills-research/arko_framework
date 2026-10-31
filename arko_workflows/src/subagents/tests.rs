@@ -315,6 +315,73 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     ));
 }
 
+/// A subagent's end is told once its result is recorded, so the result
+/// read at the news has the run's latest request, which a host times the
+/// run's prompt cache by: the request its run announced last, at its first
+/// end and again at the end of its continuation.
+#[tokio::test]
+async fn a_subagent_s_end_is_told_with_its_latest_request_recorded() {
+    let server = serve(vec![
+        ("lead", vec![start("Paint it."), complete("Started it.")]),
+        (
+            "r1",
+            vec![complete("Painted it blue."), complete("Painted it red.")],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = Arc::new(
+        builder(&server, &workspace, SubagentsConfig::default())
+            .build()
+            .unwrap(),
+    );
+    let mut requests = workflow.subscribe_events_lossless();
+    let mut events = workflow.subscribe_subagents();
+    let watcher = tokio::spawn({
+        let workflow = workflow.clone();
+        async move {
+            let mut told = Vec::new();
+            while let Ok(event) = events.recv().await {
+                if matches!(event.kind, SubagentEventKind::Finished { .. }) {
+                    let result = workflow.agent_result(event.run_id).unwrap();
+                    told.push((event.run_id, result.info().latest_request.clone()));
+                    if told.len() == 2 {
+                        break;
+                    }
+                }
+            }
+            told
+        }
+    });
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    workflow
+        .message_subagent(
+            "r1",
+            "Now make it red.",
+            "The user sent you a message:",
+            "The user messaged r1 (a copy for you):",
+        )
+        .unwrap();
+    let told = within(watcher).await.unwrap();
+    let run = told[0].0;
+    let mut sent = Vec::new();
+    while let Some(event) = requests.try_recv() {
+        if let (true, arko_agents::AgentEvent::ModelRequestStarted { sent_at, .. }) =
+            (event.agent_run_id == run, &event.event)
+        {
+            sent.push(sent_at.unwrap());
+        }
+    }
+    // One request each time: its first end, then its continuation's.
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for ((_, record), sent) in told.iter().zip(&sent) {
+        assert_eq!(record.latest().map(|request| request.sent_at), Some(*sent));
+    }
+}
+
 /// A report reaches a lead that is busy at its next turn boundary, in its
 /// context update, which `ContextInjected` reports with the item's id.
 #[tokio::test]

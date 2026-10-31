@@ -145,15 +145,34 @@ impl AgentLoop {
         }
     }
 
-    /// Refresh and model stream initialization share one attempt. A request
-    /// once sent runs until it completes or fails, or the host cancels or
-    /// suspends the task: the elapsed recovery budget never cuts it off.
+    /// One attempt at a model request, counted, then run as
+    /// [`run_llm_step`](Self::run_llm_step).
+    #[cfg(test)]
     pub(super) async fn run_llm_attempt<T>(
         &mut self,
         operation: impl std::future::Future<Output = Result<T, ai::Error>>,
     ) -> Result<Option<T>, ArkoAgentsError> {
+        self.count_llm_attempt();
+        self.run_llm_step(operation).await
+    }
+
+    /// Counts an attempt at a model request, which its credential refresh
+    /// and its stream's start share.
+    fn count_llm_attempt(&mut self) {
         self.recovery.llm_interaction_attempts =
             self.recovery.llm_interaction_attempts.saturating_add(1);
+    }
+
+    /// Runs a step of an attempt at a model request (the credential refresh,
+    /// or the request and its stream's start) under the error policy's
+    /// recovery. `None` once a failure or a command ended the attempt. A
+    /// request once sent runs until it completes or fails, or the host
+    /// cancels or suspends the task: the elapsed recovery budget never cuts
+    /// it off.
+    pub(super) async fn run_llm_step<T>(
+        &mut self,
+        operation: impl std::future::Future<Output = Result<T, ai::Error>>,
+    ) -> Result<Option<T>, ArkoAgentsError> {
         tokio::pin!(operation);
         loop {
             tokio::select! {
@@ -191,34 +210,46 @@ impl AgentLoop {
             image_tokens: sizes.image_tokens,
             conversation: self.task.conversation_usage_start,
         });
+        // The credential refresh and the request are one attempt. The
+        // request is announced, with its send time, once the refresh is done.
+        self.count_llm_attempt();
+        #[cfg(test)]
+        let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
+        #[cfg(test)]
+        let refreshes = scripted_response.is_none();
+        #[cfg(not(test))]
+        let refreshes = true;
+        if refreshes && conversation.model.provider == ai::Provider::OpenAI {
+            // Decided under the credential lock, so tasks sharing a client
+            // (or an auth.json) don't rotate twice.
+            let refresh = llm_client.refresh_openai_oauth_token_if_expiring(Duration::from_secs(
+                OAUTH_REFRESH_MARGIN_SECS,
+            ));
+            if self.run_llm_step(refresh).await?.is_none() {
+                return Ok(ModelTurn::Ended(Flow::NextPass));
+            }
+        }
+        // The provider uses the cache as it reads the request.
+        let sent_at = chrono::Utc::now();
         self.emit_event(AgentEvent::ModelRequestStarted {
             model: conversation.model.id.clone(),
             subagent: None,
             sizes: Some(sizes),
             bytes_per_token: self.bytes_per_token,
+            sent_at: Some(sent_at),
         })
         .await?;
-        #[cfg(test)]
-        let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
         let request = async move {
             #[cfg(test)]
             if let Some(response) = scripted_response {
                 return response;
             }
-            if conversation.model.provider == ai::Provider::OpenAI {
-                // Decided under the credential lock, so tasks sharing a
-                // client (or an auth.json) don't rotate twice.
-                llm_client
-                    .refresh_openai_oauth_token_if_expiring(Duration::from_secs(
-                        OAUTH_REFRESH_MARGIN_SECS,
-                    ))
-                    .await?;
-            }
             llm_client.generate_stream(&conversation, gen_config).await
         };
-        let Some(response_stream) = self.run_llm_attempt(request).await? else {
+        let Some(response_stream) = self.run_llm_step(request).await? else {
             return Ok(ModelTurn::Ended(Flow::NextPass));
         };
+        self.request_sent_at = (!self.current_request_is_fallback).then_some(sent_at);
         // The provider accepted the request: the elapsed budget stops
         // counting while the response runs, however long that is, and
         // resumes if it fails (the waits between attempts still count,

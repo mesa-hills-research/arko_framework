@@ -1191,6 +1191,16 @@ async fn latest_names_the_newest_checkpoint_without_auto_checkpoints() {
     );
 }
 
+/// The input and send time (to the millisecond, as saved) of the latest
+/// request `result`'s record holds.
+fn latest_request(result: &AgentResult) -> Option<(usize, i64)> {
+    result
+        .info()
+        .latest_request
+        .latest()
+        .map(|request| (request.input_tokens, request.sent_at.timestamp_millis()))
+}
+
 /// Runs `coder` (a probe call, then completion) in a workflow that crashes
 /// as the run's end reaches `point`; returns the run's result and the
 /// checkpoint to resume from.
@@ -1217,9 +1227,9 @@ async fn crash_as_the_run_ends(
 }
 
 /// A crash after a run's result is recorded (its task version written) and
-/// before any checkpoint records it: the run comes back interrupted, and
-/// recovering it finishes it without running its calls again; each model
-/// call is charged once.
+/// before any checkpoint records it: the run comes back interrupted, with
+/// its last request as its latest, and recovering it finishes it without
+/// running its calls again; each model call is charged once.
 #[tokio::test]
 async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
     let workspace = Workspace::new();
@@ -1241,9 +1251,27 @@ async fn a_crash_between_recording_a_result_and_its_checkpoint_is_recovered() {
         .unwrap();
     let saved = resumed.interrupted_runs().remove(0);
     assert_eq!(saved.agent_run_id, ended.agent_run_id);
+    // The save it comes back from is the run's last, or one before it, and
+    // its latest request is the one of its own last model call: never one
+    // it doesn't hold.
+    let last = latest_request(&ended).expect("the run's last request");
+    let restored = resumed.agent_result(ended.agent_run_id).unwrap();
+    let kept = latest_request(&restored).expect("the saved run's request");
+    let calls = restored.info().model_calls;
+    assert!((1..=ended.info().model_calls).contains(&calls), "{calls}");
+    if calls == ended.info().model_calls {
+        assert_eq!(kept, last);
+    } else {
+        let usage = &ended.task().unwrap().usage_history[calls - 1];
+        assert_eq!(kept.0, usage.input_tokens);
+        assert!(kept.1 <= last.1, "{kept:?} after {last:?}");
+    }
     let result = within(resumed.recover_agent(&saved)).await.unwrap();
     assert_eq!(result.status, AgentRunStatus::Completed);
     assert_eq!(result.summary, "done");
+    // The saved request, or one recovery made after it.
+    let after = latest_request(&result).unwrap();
+    assert!(after.1 >= kept.1, "{after:?} after {kept:?}");
     assert_eq!(probe.calls(), 0);
     assert!(server.requests() <= 3, "{}", server.requests());
     assert_eq!(
@@ -1275,10 +1303,10 @@ async fn a_crash_before_the_checkpoint_after_a_run_keeps_its_end() {
         .build()
         .unwrap();
     assert!(resumed.interrupted_runs().is_empty());
-    assert_eq!(
-        resumed.agent_result(ended.agent_run_id).unwrap().status,
-        AgentRunStatus::Completed
-    );
+    let restored = resumed.agent_result(ended.agent_run_id).unwrap();
+    assert_eq!(restored.status, AgentRunStatus::Completed);
+    assert!(latest_request(&ended).is_some());
+    assert_eq!(latest_request(&restored), latest_request(&ended));
     assert!(!live_file(&workspace, ended.agent_run_id).exists());
 }
 

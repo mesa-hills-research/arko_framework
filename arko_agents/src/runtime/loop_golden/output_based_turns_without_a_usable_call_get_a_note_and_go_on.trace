@@ -1,35 +1,35 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=50caff5a3c997877
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2844bd42fcbc92cd
 R msgs=1 model=gpt-5.6-luna request=0b77995f5d37f1eb
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3fc8dcaeaa6f5759
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fcd3e6948d203204
 E {"AssistantResponseChunk":"I will look at the files first."}
 E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 1/10): Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"RetryScheduled":{"attempt":1,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=982602c55b2ff247
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=02bc6d4c94c00238
 R msgs=3 model=gpt-5.6-luna request=974c47566411842c
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":31,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":160}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":31,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":160}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=24c0328f6f981d09
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1f585c40d62b7426
 E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 2/10): Your tool call could not be read (Batch tool calls must all be for the same tool, found mixed types.). Write it again in the format the system prompt describes.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"RetryScheduled":{"attempt":2,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7b2044255a1d0595
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2133ceb645b78da2
 R msgs=5 model=gpt-5.6-luna request=7cff90ef12d2d1a9
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":133,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":320}}}
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":133,"image_tokens":0,"images":0,"system_prompt":1416,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":320}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=91502c992e1aa46f
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c84eada079e01068
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id2","tool_name":"complete_task"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=ac968eb5764e8c6a
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=090eb1d1a375645d
 E {"ToolResult":{"output":"done","tool_call_id":"id2","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=135ae1a0904c4af3
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=22663a27dcfd1870
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=19767176379b980a
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d58dbe239afae0f7
 E "TaskStreamEnd"
 --- conversation: 6 messages, system prompt ef9a0efbe1779ece
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

@@ -11,9 +11,11 @@ use uuid::Uuid;
 
 mod copy;
 mod cut_back;
+mod latest_request;
 mod refusal;
 pub(crate) use cut_back::{CONTEXT_UPDATE, RESTARTED_CALL, UNREACHED_CALL};
 pub use cut_back::{UserTurn, UserTurnKind};
+pub use latest_request::{LatestRequest, RequestRecord};
 pub use refusal::{RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult};
 
 /// Information about a single tool call pending approval, typically part of a batch.
@@ -482,6 +484,13 @@ pub struct Task {
     /// where it was.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_size_unknown: bool,
+    /// What the task knows of its current conversation's latest completed
+    /// model request, the one its prompt cache lasts from. The runtime sets
+    /// it with the request's usage, and a handover, a compaction, a cut back
+    /// or a branch makes it [`RequestRecord::NoRequest`]. A task saved before
+    /// it existed reads as [`RequestRecord::Unrecorded`].
+    #[serde(default, skip_serializing_if = "RequestRecord::is_unrecorded")]
+    pub latest_request: RequestRecord,
     /// Index in `usage_history` of the first call the cache monitor judges.
     /// This is the conversation's first, or the first after a change of the prompt
     /// prefix ([`Task::reconfigure`]), whose full cache write is expected.
@@ -793,6 +802,7 @@ impl Task {
             conversation_usage_start: 0,
             conversation_model_call_start: 0,
             context_size_unknown: false,
+            latest_request: RequestRecord::NoRequest,
             cache_window_start: 0,
             claude_code_session: None,
             claude_code_directory: None,
@@ -1327,6 +1337,7 @@ impl Task {
         self.user_message_count = 0;
         self.conversation_usage_start = self.usage_history.len();
         self.conversation_model_call_start = self.model_call_usage_history.len();
+        self.latest_request = RequestRecord::NoRequest;
         replaced
     }
 

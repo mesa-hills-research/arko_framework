@@ -213,6 +213,9 @@ pub struct AgentLoop {
     bytes_per_token: f64,
     /// The request in flight, or last sent.
     sent_request: Option<RequestMark>,
+    /// When the request in flight was sent, unless it went to the refusal
+    /// fallback's model. Its answer records it as the task's latest request.
+    request_sent_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The latest request that was answered: the task's latest reported
     /// usage is its.
     answered_request: Option<RequestMark>,
@@ -316,6 +319,7 @@ impl AgentLoop {
             file_tree_error: None,
             bytes_per_token: result_budget::DEFAULT_BYTES_PER_TOKEN,
             sent_request: None,
+            request_sent_at: None,
             answered_request: None,
             overflow_recoveries: 0,
         }
@@ -593,6 +597,10 @@ mod tool_less_tests;
 #[cfg(test)]
 #[path = "request_started_tests.rs"]
 mod request_started_tests;
+
+#[cfg(test)]
+#[path = "latest_request_tests.rs"]
+mod latest_request_tests;
 
 #[cfg(test)]
 #[path = "user_image_tests.rs"]
