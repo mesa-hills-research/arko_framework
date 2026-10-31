@@ -6521,6 +6521,42 @@ async fn a_typed_note_waits_until_a_hook_carries_what_is_ahead_of_it() {
     assert_eq!(task.context_marks.get("notes"), Some(&3));
 }
 
+/// A long item saved as bare text, before items had ids, is never split
+/// across hooks, so the conversation holds its whole text in one message for
+/// a host to find.
+#[tokio::test]
+async fn a_long_item_saved_as_bare_text_lands_whole_in_one_message() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let legacy = long_note();
+    assert!(legacy.len() > 12_000);
+    let mut saved = serde_json::to_value(&task).unwrap();
+    saved["pending_context_injections"] = json!([legacy]);
+    let task: Task = serde_json::from_value(saved).unwrap();
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(hooked(&fake).is_empty());
+    let unknown = task.unidentified_context();
+    let whole = unknown.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .filter_map(arko_ai::Content::as_text)
+            .any(|text| text.contains(&legacy))
+    });
+    assert!(whole, "{:?}", texts(&task));
+    assert!(task.pending_context_injections.is_empty());
+}
+
 /// A message given with an approval waits in the queue, so it comes after
 /// a long note's rest that was waiting before it.
 #[tokio::test]

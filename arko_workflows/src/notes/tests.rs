@@ -426,6 +426,39 @@ fn a_conversation_holds_a_note_whose_image_was_lost() {
     assert!(holds(&task, &note));
 }
 
+/// A 12 KB note saved as bare text, before items had ids, and recorded since
+/// is held by its text. No hook splits such an item, so one message has it
+/// whole.
+#[test]
+fn a_long_note_saved_as_bare_text_is_held_by_its_text() {
+    let note = posted(4, &"A line of a long note.\n".repeat(540));
+    let update = format!(
+        "# Workflow context update\n\nA new note on your task.{}",
+        item_with(&note, 0)
+    );
+    assert!(update.len() > 12_000);
+    let task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    let mut json = serde_json::to_value(&task).unwrap();
+    json["pending_context_injections"] = serde_json::json!([update]);
+    let pending: arko_agents::Task = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        pending.holding(&format!("note:{}", note.seq)),
+        arko_agents::Holding::Unknown
+    );
+    assert!(holds(&pending, &note));
+    json["pending_context_injections"] = serde_json::json!([]);
+    json["conversation"]["messages"] =
+        serde_json::to_value(vec![arko_ai::Message::new_user(&update)]).unwrap();
+    json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+    let recorded: arko_agents::Task = serde_json::from_value(json).unwrap();
+    assert!(holds(&recorded, &note));
+}
+
 /// Whether `task`'s conversation or pending context has `text` in a user
 /// message, read directly rather than through its records.
 fn holds_text(task: &arko_agents::Task, text: &str) -> bool {

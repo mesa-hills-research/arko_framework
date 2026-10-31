@@ -17,7 +17,9 @@
 //! 3. An item longer than an empty hook is split when it is first in line.
 //!    The part that fits goes now, cut at a line break in its last fifth
 //!    when there is one, and ends with [`GOES_ON`]. The next part starts
-//!    with [`CONTINUED`].
+//!    with [`CONTINUED`]. An item saved as bare text
+//!    ([`unidentified`](crate::PendingContext::unidentified)) is never
+//!    split, and waits whole for the next input.
 //!
 //! A hook leaves the list as it was. Once Claude Code reports its call's
 //! results, in the order the hooks were given, the hook's text joins the
@@ -204,10 +206,20 @@ impl Delivery {
             || (self.typed(item) && self.sent(item.id))
     }
 
-    /// Every item is in a hook already: the turn context source may be
-    /// asked for its update.
+    /// Whether `item`, saved as bare text and too long for a hook, waits for
+    /// the next input with everything behind it.
+    fn waits_for_input(&self, item: &PendingContext) -> bool {
+        item.unidentified
+            && self.in_flight_end(item.id).is_none()
+            && heading().len() + shown_from(item, item.given).len() > HOOK_MAX_BYTES
+    }
+
+    /// Every item is in a hook already, or waits for the next input: the
+    /// turn context source may be asked for its update.
     pub(super) fn caught_up(&self, list: &[PendingContext]) -> bool {
-        list.iter().all(|item| self.gone(item))
+        list.iter()
+            .find(|item| !self.gone(item))
+            .is_none_or(|item| self.waits_for_input(item))
     }
 
     /// Where a denial's rest joins the list: behind the items in hooks, an
@@ -257,8 +269,10 @@ impl Delivery {
                 continue;
             }
             // It waits whole for a hook it fits, or it is split once it is
-            // first in line.
-            if !parts.is_empty() || empty + shown.len() <= HOOK_MAX_BYTES {
+            // first in line. An item saved as bare text is never split,
+            // since only its whole text tells a host what it holds. It waits
+            // for the next input, which has no budget.
+            if !parts.is_empty() || empty + shown.len() <= HOOK_MAX_BYTES || item.unidentified {
                 break;
             }
             let marker = shown.len() - (item.text.len() - item.given);

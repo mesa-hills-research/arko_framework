@@ -3831,7 +3831,7 @@ mod update_tests {
         assert!(!task_holds(&task, &item), "its first part alone");
         task.conversation
             .add_user_message("# Workflow context update\n\nThe rest.");
-        task.record_held_ids(1, vec![id]);
+        task.record_held_ids(1, vec![id.clone()]);
         assert!(task_holds(&task, &item));
         // Saved before ids: its text, whole.
         let mut old = task.clone();
@@ -3843,6 +3843,18 @@ mod update_tests {
             item.excerpt()
         ));
         assert!(task_holds(&old, &item));
+        // Saved before ids, then numbered and recorded since: no hook
+        // splits it, so its 12 KB are whole in one message.
+        let mut json = serde_json::to_value(&old).unwrap();
+        json["conversation"]["messages"] = serde_json::to_value(vec![arko_ai::Message::new_user(
+            &format!("# Workflow context update\n\n- {}", item.excerpt()),
+        )])
+        .unwrap();
+        json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+        json["context_records_from"] = serde_json::json!(0);
+        let recorded: Task = serde_json::from_value(json).unwrap();
+        assert_eq!(recorded.holding(&id), Holding::Unknown);
+        assert!(task_holds(&recorded, &item));
         // A result cut short doesn't hold it.
         let mut cut = task.clone();
         cut.context_records.clear();

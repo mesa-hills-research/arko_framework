@@ -1165,15 +1165,22 @@ mod tests {
         old.pending_context_injections = vec![injection(&taken).into()];
         assert!(kept(&old, &taken));
         // Numbered and recorded since, still known by its text only.
-        let mut json = serde_json::to_value(&old).unwrap();
-        json["pending_context_injections"] = serde_json::json!([]);
-        json["conversation"]["messages"] =
-            serde_json::to_value(vec![update(&injection(&taken))]).unwrap();
-        json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
-        json["context_records_from"] = serde_json::json!(0);
-        let recorded: arko_agents::Task = serde_json::from_value(json).unwrap();
+        let recorded_whole = |message: &AgentMessage| {
+            let mut json = serde_json::to_value(&old).unwrap();
+            json["pending_context_injections"] = serde_json::json!([]);
+            json["conversation"]["messages"] =
+                serde_json::to_value(vec![update(&injection(message))]).unwrap();
+            json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+            json["context_records_from"] = serde_json::json!(0);
+            serde_json::from_value::<arko_agents::Task>(json).unwrap()
+        };
+        let recorded = recorded_whole(&taken);
         assert_eq!(recorded.holding(&message_id(taken.id)), Holding::Unknown);
         assert!(kept(&recorded, &taken));
+        // A 12 KB one too, which no hook splits, so one message has it whole.
+        let long = message(&"A line of a long message.\n".repeat(480));
+        assert!(injection(&long).len() > 12_000);
+        assert!(kept(&recorded_whole(&long), &long));
     }
 
     /// A message sent while a run registers reaches it once: with the late

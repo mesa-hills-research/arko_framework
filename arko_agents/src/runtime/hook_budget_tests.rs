@@ -97,6 +97,34 @@ fn an_item_that_fits_an_empty_hook_waits_whole() {
     assert_eq!(list.texts(), ["b".repeat(6_000)]);
 }
 
+/// An item saved as bare text is never split, so its whole text lands in one
+/// message. Longer than a hook, it waits for the next input with what is
+/// behind it, and the hooks count as caught up meanwhile.
+#[test]
+fn a_long_item_saved_as_bare_text_waits_whole_for_the_next_input() {
+    let mut delivery = Delivery::default();
+    let legacy = "a legacy note line\n".repeat(650);
+    assert!(legacy.len() > 12_000);
+    let mut list = List::of(&[]);
+    list.items.push(PendingContext {
+        id: 1,
+        ..legacy.as_str().into()
+    });
+    list.next = 1;
+    list.push(PendingKind::Context, "Behind it.", &["b"]);
+    assert!(delivery.fill(&list.items, "c1").is_none());
+    assert!(delivery.caught_up(&list.items));
+    // One that fits a hook goes in one whole.
+    let mut short = List::of(&[]);
+    short.items.push(PendingContext {
+        id: 1,
+        ..PendingContext::from("A short legacy note.")
+    });
+    assert!(!delivery.caught_up(&short.items));
+    let hook = delivery.fill(&short.items, "c2").unwrap();
+    assert_eq!(body(&hook), "A short legacy note.");
+}
+
 #[test]
 fn a_long_item_moves_its_cursor_and_stays_whole_in_the_list() {
     let mut delivery = Delivery::default();
