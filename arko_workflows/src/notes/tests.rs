@@ -1051,6 +1051,12 @@ async fn a_handover_carries_the_standing_notes() {
 
     let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
     assert_eq!(result.task().unwrap().handovers.len(), 1);
+    // The fresh conversation records the note it shows, so a later cut or
+    // recovery doesn't give it again.
+    assert_eq!(
+        result.task().unwrap().holding("note:1"),
+        arko_agents::Holding::Recorded
+    );
     let requests = requests_of(&server, "Draft it.");
     assert_eq!(requests.len(), 4);
     let fresh = &requests[3];
@@ -1428,6 +1434,51 @@ async fn note_images_are_checked_when_posted_and_fitted_when_given() {
     let body = server.bodies().last().unwrap().clone();
     assert!(body.contains("data:image/png;base64,"), "{body}");
     assert!(!body.contains("data:image/bmp"), "{body}");
+}
+
+/// A handover's seed and a compaction show the standing notes the task's
+/// conversation holds whole, by its records, with their ids. A note still
+/// pending, also one whose first part the model has read, comes with the
+/// next input instead, and one not given yet in the next update.
+#[test]
+fn a_handover_shows_the_standing_notes_the_task_recorded() {
+    let board = NoteBoard::new(
+        Some(NotesSnapshot {
+            notes: vec![
+                posted(1, "In the prompt."),
+                posted(2, "Partly given."),
+                posted(3, "In an update."),
+                posted(4, "Not given yet."),
+            ],
+            ..NotesSnapshot::default()
+        }),
+        BTreeSet::new(),
+        None,
+        None,
+    );
+    let mut task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    task.conversation.add_user_message("Do it.");
+    task.record_held_ids(0, vec!["note:1".into()]);
+    task.conversation
+        .add_user_message("# Workflow context update\n\nIn an update.");
+    task.record_held_ids(1, vec!["note:3".into()]);
+    let mut rest = arko_agents::PendingContext::new(
+        arko_agents::PendingKind::Context,
+        "A new note on your task. Partly given.",
+        vec!["note:2".into()],
+    );
+    rest.given = 5;
+    task.queue_context(rest);
+    let (section, ids) = board.handover_section("worker", &task, false);
+    assert_eq!(ids, ["note:3", "note:1"]);
+    assert!(section.find("In an update.").unwrap() < section.find("In the prompt.").unwrap());
+    assert!(!section.contains("Partly given."), "{section}");
+    assert!(!section.contains("Not given yet."), "{section}");
 }
 
 /// A checkpoint written while notes held their images still restores them:

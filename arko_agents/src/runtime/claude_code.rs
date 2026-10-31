@@ -5565,6 +5565,8 @@ impl ClaudeCodeRun {
             .handover_requested
             .take()
             .map_or(0, |request| request.input_tokens);
+        // What the old conversation held whole, which the report covers.
+        let covered = self.task.recorded_ids();
         let replaced_messages = self.task.start_fresh_conversation();
         self.task.handovers.push(HandoverRecord {
             at: chrono::Utc::now(),
@@ -5583,7 +5585,8 @@ impl ClaudeCodeRun {
             .conversation
             .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
-        self.task.record_held_ids(0, seed.ids.clone());
+        self.task
+            .record_held_ids(0, [seed.ids.clone(), covered].concat());
         // The next session is a new Claude Code conversation, which records
         // the current prompt.
         self.task.claude_code_session = None;

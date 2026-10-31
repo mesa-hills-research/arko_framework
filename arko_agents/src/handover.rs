@@ -493,7 +493,9 @@ pub struct HandoverSeed {
     pub context: Option<String>,
     /// The host's ids of what the message presents, which the task records
     /// with the fresh conversation's first message
-    /// ([`Task::holding`](crate::Task::holding)).
+    /// ([`Task::holding`](crate::Task::holding)). The runtime records there
+    /// too what the old conversation held whole, which the report covers
+    /// ([`Task::recorded_ids`](crate::Task::recorded_ids)).
     pub ids: Vec<String>,
 }
 

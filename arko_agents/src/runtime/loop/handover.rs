@@ -333,6 +333,8 @@ impl AgentLoop {
             .handover_requested
             .take()
             .map_or(0, |request| request.input_tokens);
+        // What the old conversation held whole, which the report covers.
+        let covered = self.task.recorded_ids();
         let replaced_messages = self.task.start_fresh_conversation();
         self.task.handovers.push(HandoverRecord {
             at: chrono::Utc::now(),
@@ -352,7 +354,8 @@ impl AgentLoop {
             .conversation
             .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
-        self.task.record_held_ids(0, seed.ids.clone());
+        self.task
+            .record_held_ids(0, [seed.ids.clone(), covered].concat());
 
         // What the loop keeps about the replaced conversation: tools that
         // track what the conversation holds start over (see

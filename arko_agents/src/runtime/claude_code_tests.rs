@@ -6878,12 +6878,17 @@ async fn a_step_left_out_keeps_the_context_the_task_recorded() {
     let task = Task::new(config, "Search.".into(), fake.workspace(), None);
     let recorder = Arc::new(Recorder::default());
     let note = long_note();
+    let mail = |text: &str, id: &str| crate::runtime::TurnContext {
+        content: text.into(),
+        ids: vec![id.into()],
+        ..Default::default()
+    };
     let updates = vec![
         noted(&note, ""),
         // (With the next input.)
         Default::default(),
-        "Mail M for the agent.".to_string().into(),
-        "Mail P for the agent.".to_string().into(),
+        mail("Mail M for the agent.", "mail:M"),
+        mail("Mail P for the agent.", "mail:P"),
     ];
     let (task, _) = start_with(task, with_updates(&recorder, updates))
         .finish()
@@ -6935,12 +6940,16 @@ async fn a_step_left_out_keeps_the_context_the_task_recorded() {
             &expected[..20.min(expected.len())]
         );
     }
-    // The fresh conversation holds nothing of the old one's context.
+    // The fresh conversation holds nothing of the old one's context, and
+    // its first message records what the report covers.
     assert!(
         task.context_records
             .iter()
             .all(|record| record.message < task.conversation.messages.len())
     );
+    for id in ["mail:M", "mail:P"] {
+        assert_eq!(task.holding(id), crate::task::Holding::Recorded, "{id}");
+    }
 }
 
 /// A tool that returns whether its call says the task runs in Claude Code.

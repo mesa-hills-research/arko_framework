@@ -2346,9 +2346,9 @@ impl HandoverHook for WorkflowHandover {
             tracker.clear_actor(&ActorId::new(task.id, &self.agent_name));
         }
         let prompt = &task.initial_task_prompt;
-        let mut context = ctx
+        let (mut context, ids) = ctx
             .notes
-            .handover_section(&self.agent_name, task.id, self.review);
+            .handover_section(&self.agent_name, task, self.review);
         let recipients = ctx.message_recipients(&self.agent_name);
         if prompt.contains(ROSTER_HEADING) && !recipients.is_empty() {
             let roster = ctx.registry.roster(
@@ -2374,12 +2374,13 @@ impl HandoverHook for WorkflowHandover {
         } else {
             task_part(prompt).to_string()
         };
-        // Its messages count as read at the handover (`hand_over`), and its
-        // notes by their mark, so the seed presents nothing by id.
+        // Its messages count as read at the handover (`hand_over`). The seed
+        // presents the standing notes it shows, and the runtime records what
+        // the report covers with them.
         HandoverSeed {
             task_prompt,
             context: (!context.is_empty()).then_some(context),
-            ids: Vec::new(),
+            ids,
         }
     }
 
@@ -2451,10 +2452,10 @@ impl HandoverHook for WorkflowHandover {
     }
 
     fn on_compaction(&self, task: &Task) -> Option<String> {
-        let notes = self
+        let (notes, _) = self
             .context
             .notes
-            .handover_section(&self.agent_name, task.id, self.review);
+            .handover_section(&self.agent_name, task, self.review);
         let workers = self.context.subagents.workers_section(task.id);
         let parts = [notes.trim(), workers.as_deref().unwrap_or_default()]
             .into_iter()
@@ -3763,12 +3764,12 @@ impl WorkflowEngine {
             None => ctx.registry.start(&[(task.id, agent_name)]),
         }
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
-        let notes = ctx
+        let (notes, note_ids) = ctx
             .notes
             .initial_section(ctx, agent_name, task.id, options.review);
         let roster = roster_section(ctx, agent_name, &task, options.roster);
         task.initial_task_prompt = format!("{prompt}{messages}{notes}{roster}");
-        task.initial_prompt_ids = message_ids(&pending_message_ids);
+        task.initial_prompt_ids = [message_ids(&pending_message_ids), note_ids].concat();
         Ok(self.launch(
             agent_name,
             task,
@@ -4529,11 +4530,11 @@ impl WorkflowEngine {
             // Cut back to its first message: it starts over from the prompt
             // as a new run does, with the standing notes and its roster.
             (Some(0), _) => {
-                let notes = ctx.notes.initial_section(ctx, agent_name, task.id, review);
+                let (notes, note_ids) = ctx.notes.initial_section(ctx, agent_name, task.id, review);
                 let roster = roster_section(ctx, agent_name, &task, true);
                 task.initial_task_prompt =
                     format!("{continuation_prompt}{messages}{notes}{roster}{changed_notice}");
-                task.initial_prompt_ids = message_ids(&pending_message_ids);
+                task.initial_prompt_ids = [message_ids(&pending_message_ids), note_ids].concat();
                 task.initial_task_images = input.images;
                 Ok(())
             }

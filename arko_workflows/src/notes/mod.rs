@@ -540,19 +540,20 @@ impl NoteBoard {
 
     /// The notes section of the initial prompt of run `task_id` of `agent`
     /// (`review` for a completion verifier's review): the standing notes it
-    /// receives, newest first and capped. Empty when there are none. The
-    /// run has then been given every note so far.
+    /// receives, newest first and capped, and the ids of those it shows,
+    /// which the task records with its prompt. Empty when there are none.
+    /// The run has then been given every note so far.
     pub(crate) fn initial_section(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> String {
+    ) -> (String, Vec<String>) {
         self.poll(ctx);
         let mut state = self.state.lock();
         let Some(newest) = state.notes.last().map(|note| note.seq) else {
-            return String::new();
+            return (String::new(), Vec::new());
         };
         state.seen.insert(task_id, newest);
         state.started.insert(task_id, newest);
@@ -564,31 +565,44 @@ impl NoteBoard {
                 posted.note.kind == NoteKind::Standing && self.receives(&posted.note, agent, review)
             })
             .collect::<Vec<_>>();
-        section(&notes)
+        (section(&notes), shown_ids(&notes))
     }
 
-    /// The notes for the fresh conversation of run `task_id` after a
+    /// The notes for the fresh conversation of run `task` of `agent` after a
     /// handover, and for its conversation after Claude Code compacted it:
-    /// the standing notes it receives that it had been given,
-    /// newest first and capped, as an initial prompt shows them. The notes
-    /// it hasn't been given (such as one posted while it wrote its report)
-    /// come in the context update before its first request, so none is lost
-    /// to the cap or given twice. The one-time notes it had been given
-    /// aren't repeated (its report covers them).
-    pub(crate) fn handover_section(&self, agent: &str, task_id: Uuid, review: bool) -> String {
-        let state = self.state.lock();
-        let seen = state.seen.get(&task_id).copied().unwrap_or(0);
-        let notes = state
-            .notes
+    /// the standing notes it receives that its conversation holds whole, by
+    /// the task's records, newest first and capped, as an initial prompt
+    /// shows them, with the ids of those it shows. The notes still pending
+    /// in the task, also one whose first part the model has read, come with
+    /// its next input, and those it hasn't been given (such as one posted
+    /// while it wrote its report) in the context update before its first
+    /// request, so none is lost to the cap or given twice. The one-time
+    /// notes it holds aren't repeated (its report covers them).
+    pub(crate) fn handover_section(
+        &self,
+        agent: &str,
+        task: &arko_agents::Task,
+        review: bool,
+    ) -> (String, Vec<String>) {
+        let standing = {
+            let state = self.state.lock();
+            state
+                .notes
+                .iter()
+                .rev()
+                .filter(|posted| {
+                    posted.note.kind == NoteKind::Standing
+                        && self.receives(&posted.note, agent, review)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // Searched outside the lock (a conversation can be long).
+        let notes = standing
             .iter()
-            .rev()
-            .filter(|posted| {
-                posted.note.kind == NoteKind::Standing
-                    && posted.seq <= seen
-                    && self.receives(&posted.note, agent, review)
-            })
+            .filter(|posted| recorded(task, posted))
             .collect::<Vec<_>>();
-        section(&notes)
+        (section(&notes), shown_ids(&notes))
     }
 
     /// The notes run `task_id` of `agent` (`review` for a completion
@@ -1043,7 +1057,7 @@ fn insert(
 /// text says: a user message, or context it took and hasn't added, with the
 /// note's item whole.
 fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
-    match task.holding(&format!("note:{}", posted.seq)) {
+    match task.holding(&note_id(posted.seq)) {
         arko_agents::Holding::Recorded | arko_agents::Holding::Pending => true,
         arko_agents::Holding::Unknown => {
             let text = item_head(posted);
@@ -1052,17 +1066,47 @@ fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
                 .pending
                 .iter()
                 .any(|content| content.contains(&text))
-                || unknown.messages.iter().any(|message| {
-                    message.role == arko_ai::Role::User
-                        && message
-                            .content
-                            .iter()
-                            .filter_map(arko_ai::Content::as_text)
-                            .any(|part| part.contains(&text))
-                })
+                || in_messages(&unknown.messages, &text)
         }
         _ => false,
     }
+}
+
+/// Whether `task`'s conversation holds `posted` whole: by its records, or
+/// by its text where only text can say. A note still pending doesn't count.
+fn recorded(task: &arko_agents::Task, posted: &PostedNote) -> bool {
+    match task.holding(&note_id(posted.seq)) {
+        arko_agents::Holding::Recorded => true,
+        arko_agents::Holding::Unknown => {
+            in_messages(&task.unidentified_context().messages, &item_head(posted))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a user message of `messages` has `text`.
+fn in_messages(messages: &[&arko_ai::Message], text: &str) -> bool {
+    messages.iter().any(|message| {
+        message.role == arko_ai::Role::User
+            && message
+                .content
+                .iter()
+                .filter_map(arko_ai::Content::as_text)
+                .any(|part| part.contains(text))
+    })
+}
+
+/// The id a task's records and pending context know note `seq` by.
+fn note_id(seq: u64) -> String {
+    format!("note:{seq}")
+}
+
+/// The ids of the notes [`section`] shows of `notes`.
+fn shown_ids(notes: &[&PostedNote]) -> Vec<String> {
+    notes[..fitting(notes)]
+        .iter()
+        .map(|posted| note_id(posted.seq))
+        .collect()
 }
 
 /// Whether `note` may reach run `task_id`: a note for one run reaches
@@ -1457,18 +1501,8 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
                 }
                 user_content.push_str(&notes.operator);
             }
-            ids.extend(
-                notes
-                    .other_seqs
-                    .into_iter()
-                    .map(|seq| format!("note:{seq}")),
-            );
-            user_ids.extend(
-                notes
-                    .operator_seqs
-                    .into_iter()
-                    .map(|seq| format!("note:{seq}")),
-            );
+            ids.extend(notes.other_seqs.into_iter().map(note_id));
+            user_ids.extend(notes.operator_seqs.into_iter().map(note_id));
             images.extend(notes.images);
             marks.insert(NOTES_MARK.to_string(), notes.given);
         }

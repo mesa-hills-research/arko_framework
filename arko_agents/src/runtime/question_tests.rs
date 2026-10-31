@@ -802,6 +802,11 @@ async fn a_step_left_out_keeps_an_answer_without_the_result_beside_it() {
     let (task, _) = finish(run, &mut events).await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert_eq!(task.handovers.len(), 1);
+    // The report covers the answer, which the fresh conversation records.
+    assert_eq!(
+        task.holding("message:answer"),
+        crate::task::Holding::Recorded
+    );
     let old = handed_over.0.lock().unwrap().clone().unwrap();
     let calls = old
         .conversation

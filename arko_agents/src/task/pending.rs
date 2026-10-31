@@ -304,6 +304,22 @@ impl Task {
         self.record_held_ids(0, ids);
     }
 
+    /// The host's ids of what the conversation holds whole, by its records,
+    /// in order and once each, without those of items still pending. A
+    /// handover's report covers them (see
+    /// [`HandoverSeed::ids`](crate::handover::HandoverSeed::ids)).
+    pub fn recorded_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for part in self.context_records.iter().flat_map(|record| &record.parts) {
+            for id in part.host_ids.iter().filter(|_| part.last) {
+                if !ids.contains(id) && self.holding(id) == Holding::Recorded {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
+
     /// The pending texts, in order.
     pub fn pending_texts(&self) -> Vec<&str> {
         self.pending_context_injections
@@ -470,6 +486,22 @@ mod tests {
         task.queue_context("A bare text.".into());
         assert_eq!(task.holding("mail:3"), Holding::Unknown);
         assert_eq!(task.unidentified_context().pending, ["A bare text."]);
+    }
+
+    /// What a report covers: the ids the conversation holds whole, once
+    /// each, without a first part alone or what still waits.
+    #[test]
+    fn the_recorded_ids_are_those_held_whole() {
+        let mut task = task(3);
+        task.record_held_ids(0, vec!["note:1".into(), "message:9".into()]);
+        task.record_context(1, vec![part(1, "mail:1", true), part(2, "mail:2", false)]);
+        task.record_context(2, vec![part(3, "note:1", true), part(4, "note:2", true)]);
+        task.queue_context(PendingContext::new(
+            PendingKind::Context,
+            "note 2 again",
+            vec!["note:2".into()],
+        ));
+        assert_eq!(task.recorded_ids(), ["note:1", "message:9", "mail:1"]);
     }
 
     #[test]
