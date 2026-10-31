@@ -100,7 +100,7 @@ impl PlanBudget {
         }
     }
 
-    /// Where each limit is set: the general ones (`None`), then each plan's
+    /// Where each limit is set, the general ones (`None`), then each plan's
     /// own.
     pub(crate) fn slots() -> impl Iterator<Item = (Option<SubscriptionPlan>, PlanWindow)> {
         std::iter::once(None)
@@ -108,7 +108,7 @@ impl PlanBudget {
             .flat_map(|plan| PlanWindow::ALL.map(move |window| (plan, window)))
     }
 
-    /// The limit set for `window` of `plan` (`None`: the general one).
+    /// The limit set for `window` of `plan` (`None` for the general one).
     pub(crate) fn own(&self, plan: Option<SubscriptionPlan>, window: PlanWindow) -> Option<f64> {
         match plan {
             None => self.limit(window),
@@ -117,7 +117,7 @@ impl PlanBudget {
         }
     }
 
-    /// Sets the limit for `window` of `plan` (`None`: the general one).
+    /// Sets the limit for `window` of `plan` (`None` for the general one).
     pub(crate) fn set(
         &mut self,
         plan: Option<SubscriptionPlan>,
@@ -236,9 +236,9 @@ impl PlanWindow {
         }
     }
 
-    /// The window a reported window is: by its length when reported (300
-    /// minutes: five-hour, 10080: seven-day, another length is neither),
-    /// otherwise by position (primary: five-hour, secondary: seven-day).
+    /// The window a reported window is, by its length when reported (300
+    /// minutes is five-hour, 10080 is seven-day, another length is neither),
+    /// otherwise by position (primary is five-hour, secondary is seven-day).
     fn of(window: &PlanUsageWindow, primary: bool) -> Option<Self> {
         match window.window_minutes {
             Some(300) => Some(PlanWindow::FiveHour),
@@ -305,7 +305,7 @@ impl PlanWindowUsage {
     }
 
     /// Takes a report of the window. A reset time moved later means the
-    /// window reset: the points used before are kept and the new period
+    /// window reset. The points used before are kept and the new period
     /// counts from 0. Without reset times to compare, a lower level means
     /// the same. A lower level with the same reset time is an earlier
     /// report arriving late, and is ignored.
@@ -516,7 +516,7 @@ impl PlanBudgetTracker {
         self.forget_within();
     }
 
-    /// The points used of each window: the most any plan has used.
+    /// The points used of each window, the most any plan has used.
     pub(crate) fn spent(&self) -> PlanUsageSpent {
         let most = |a: Option<f64>, b: Option<f64>| match (a, b) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -552,7 +552,7 @@ impl PlanBudgetTracker {
         }
     }
 
-    /// Restores the tracking a checkpoint recorded (`unnamed`: without a
+    /// Restores the tracking a checkpoint recorded (`unnamed` means without a
     /// plan). Windows already over their limits count as reported.
     pub(crate) fn restore(
         &mut self,
@@ -598,7 +598,7 @@ mod tests {
         }
     }
 
-    /// A report of `plan`'s windows: five-hour at `five` (resetting at
+    /// A report of `plan`'s windows, five-hour at `five` (resetting at
     /// `resets_at`), seven-day at `seven`.
     fn of(plan: Option<SubscriptionPlan>, five: f64, resets_at: u64, seven: f64) -> PlanUsage {
         PlanUsage {
@@ -659,7 +659,7 @@ mod tests {
         // Jitter of the reset time is no reset.
         tracking.observe(&five(91.0, Some(18_010)), 0);
         approx(tracking.spent().five_hour, 21.0);
-        // The window reset: the new period counts from 0.
+        // The window reset, so the new period counts from 0.
         tracking.observe(&five(4.0, Some(36_000)), 0);
         approx(tracking.spent().five_hour, 25.0);
         tracking.observe(&five(10.0, Some(36_000)), 0);
@@ -686,7 +686,7 @@ mod tests {
         );
         assert_eq!(tracking.window(PlanWindow::SevenDay).unwrap().latest, 20.0);
         assert_eq!(tracking.window(PlanWindow::FiveHour).unwrap().latest, 5.0);
-        // Without lengths: primary five-hour, secondary seven-day; another
+        // Without lengths, primary is five-hour, secondary is seven-day, and another
         // length is neither.
         let mut tracking = PlanUsageTracking::default();
         tracking.observe(
@@ -731,7 +731,7 @@ mod tests {
         assert!(tracker.exceeded().is_none());
         assert_eq!(tracker.observe(&five(71.0), 0).len(), 1, "a new crossing");
 
-        // A checkpoint round trip keeps the baseline: a resumed run counts
+        // A checkpoint round trip keeps the baseline, so a resumed run counts
         // from where the run started, not from the level at the resume.
         let json = serde_json::to_string(&tracker.state()).unwrap();
         let state: PlanBudgetState = serde_json::from_str(&json).unwrap();
@@ -746,8 +746,8 @@ mod tests {
         assert_eq!(empty, PlanBudgetState::default());
     }
 
-    /// Two plans report interleaved, with their own levels and reset times:
-    /// neither moves the other's counting, and the general limits apply to
+    /// Two plans report interleaved, with their own levels and reset times.
+    /// Neither moves the other's counting, and the general limits apply to
     /// each plan's windows separately.
     #[test]
     fn plans_are_counted_apart_and_the_general_limits_apply_to_each() {
@@ -776,7 +776,7 @@ mod tests {
             PlanUsageSpent::default()
         );
 
-        // Claude Code's window resets; ChatGPT's goes on.
+        // Claude Code's window resets, and ChatGPT's goes on.
         assert!(
             tracker
                 .observe(&of(CLAUDE_CODE, 0.0, 30_000, 62.0), 0)
@@ -841,14 +841,14 @@ mod tests {
                 .observe(&of(CLAUDE_CODE, 0.0, 12_000, 1.0), 0)
                 .is_empty()
         );
-        // ChatGPT: 90 five-hour points (no limit), 20 seven-day (of 25).
+        // ChatGPT at 90 five-hour points (no limit), 20 seven-day (of 25).
         assert!(
             tracker
                 .observe(&of(CHATGPT, 100.0, 18_000, 30.0), 0)
                 .is_empty()
         );
         assert!(tracker.exceeded().is_none());
-        // Claude Code: over its own five-hour limit, then over the general
+        // Claude Code is over its own five-hour limit, then over the general
         // seven-day one.
         let crossed = tracker.observe(&of(CLAUDE_CODE, 86.0, 12_000, 6.0), 0);
         assert_eq!(crossed.len(), 1);
@@ -865,7 +865,7 @@ mod tests {
         tracker.set_limits(limits.claude_code(PlanLimits::none().five_hour(90.0).seven_day(10.0)));
         assert!(tracker.exceeded().is_none());
 
-        // The JSON: the general limits as before, each plan's own apart.
+        // The JSON has the general limits as before, each plan's own apart.
         let json = serde_json::to_value(tracker.limits).unwrap();
         assert_eq!(
             json,
@@ -885,7 +885,7 @@ mod tests {
         );
     }
 
-    /// A checkpoint from before plans were counted apart: its tracking and
+    /// A checkpoint from before plans were counted apart. Its tracking and
     /// limits load, the counting goes on, and the first plan to report
     /// takes the tracking over. Another plan counts from its own first
     /// report.
@@ -930,7 +930,7 @@ mod tests {
             0.0,
         );
 
-        // Tracking over its limit at the resume was reported before it: the
+        // Tracking over its limit at the resume was reported before it, so the
         // plan taking it over doesn't report it again, and reports its next
         // crossing once raised.
         let mut state: PlanBudgetState = serde_json::from_str(old).unwrap();

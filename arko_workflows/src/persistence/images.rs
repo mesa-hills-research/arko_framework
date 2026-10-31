@@ -36,7 +36,7 @@ pub struct ImageFiles {
     budget: usize,
 }
 
-/// The images saved or read lately, to recognize them without hashing:
+/// The images saved or read lately, to recognize them without hashing,
 /// by length and a sample of their data, then compared in full.
 #[derive(Default)]
 struct Cache {
@@ -233,7 +233,7 @@ impl ImageStore for ImageFiles {
         let path = self.dir.join(name);
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("could not read image {}: {error}", path.display()))?;
-        // The name is the content's hash: a file cut short or changed is
+        // The name is the content's hash, so a file cut short or changed is
         // damaged.
         if !name.starts_with(&crate::digest::sha256_hex(&bytes)) {
             return Err(format!(
@@ -274,7 +274,7 @@ pub(crate) fn image_file(data: &str, mime_type: &str) -> (String, Option<Vec<u8>
     }
 }
 
-/// A file extension for `mime_type`: its subtype when that is short and
+/// A file extension for `mime_type`, its subtype when that is short and
 /// plain (`jpg` for JPEG), else `img`.
 fn extension(mime_type: &str) -> String {
     let subtype = mime_type
@@ -308,7 +308,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 /// Flushes `directory`'s entries to disk (on Unix, as Windows can't open a
-/// directory for that). A failure is ignored: the file is written either
+/// directory for that). A failure is ignored, since the file is written either
 /// way, and only a crash of the machine could lose its name.
 fn sync_directory(directory: &Path) {
     #[cfg(unix)]
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG\r\n\x1a\n pixels");
         let written = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        // Saved again: the same name, the file untouched.
+        // Saved again gets the same name, with the file untouched.
         let again = files.with(|| serde_json::to_value(image.clone()).unwrap());
         assert_eq!(again, json);
         assert_eq!(
@@ -357,7 +357,7 @@ mod tests {
         let fresh = Arc::new(ImageFiles::new(dir.join(IMAGES_DIR), CACHE_BYTES));
         let read: arko_ai::Image = fresh.with(|| serde_json::from_value(json.clone()).unwrap());
         assert_eq!(read, image);
-        // What was read is known: saving it again doesn't hash it.
+        // What was read is known, so saving it again doesn't hash it.
         assert_eq!(
             fresh.known(
                 match &image {

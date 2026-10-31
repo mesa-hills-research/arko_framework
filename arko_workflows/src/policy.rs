@@ -432,7 +432,7 @@ impl ErrorRecoveryPolicy {
                     "The model's responses could not be used: {error}"
                 ));
             }
-            // A monitor's pause stops for the application, as configured; so
+            // A monitor's pause stops for the application, as configured, and so
             // does a pause the execution middleware asked for (a completion
             // a verifier could not review), and a cause not recorded. A
             // budget hold waits for a raise instead (the workflow answers it
@@ -467,7 +467,7 @@ mod tests {
     }
 
     /// A usage limit reported again right after its reset (a reset already
-    /// past, or reported wrongly) is not resent every few seconds: from the
+    /// past, or reported wrongly) is not resent every few seconds. From the
     /// second pause in a row, the growing wait applies too.
     #[test]
     fn a_usage_limit_reported_again_waits_at_least_the_growing_wait() {
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(waits.backoff(u32::MAX), Duration::from_secs(900));
     }
 
-    /// Each cause under each policy: `Automatic` recovers from what may
+    /// Each cause under each policy. `Automatic` recovers from what may
     /// pass, without a limit. `Limited` the same, up to its count.
     /// `ReturnToCaller` returns every pause.
     #[test]
@@ -555,7 +555,7 @@ mod tests {
             ),
             RecoveryAction::ContinueAfter(Duration::from_secs(3_605))
         );
-        // A reset already past: the margin alone.
+        // A reset already past gets the margin alone.
         assert_eq!(
             action(
                 &automatic,

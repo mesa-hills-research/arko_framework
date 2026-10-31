@@ -1,4 +1,4 @@
-//! Test support: a local model server speaking the OpenAI Responses
+//! Test support with a local model server speaking the OpenAI Responses
 //! streaming protocol, and helpers for workflows that talk to it.
 
 use std::collections::HashMap;
@@ -298,7 +298,7 @@ pub(crate) struct ProbeTool {
 }
 
 impl ProbeTool {
-    /// A blocking probe is stuck: a stop doesn't interrupt it
+    /// A blocking probe is stuck. A stop doesn't interrupt it
     /// ([`Tool::interruptible`]), so its agent must be aborted.
     pub fn new(name: &'static str, block: bool) -> Arc<Self> {
         Arc::new(Self {

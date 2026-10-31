@@ -211,7 +211,7 @@ impl Default for AgentRegistry {
     }
 }
 
-/// Whether an agent runs and when it last started: what a change of tells
+/// Whether an agent runs and when it last started. A change of it tells
 /// a waiting agent that the agent started or finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Activity {
@@ -354,7 +354,7 @@ impl AgentRegistry {
         self.state.lock().reports.contains_key(&task_id)
     }
 
-    /// The report agent `agent`'s run wrote on request came: the run is
+    /// The report agent `agent`'s run wrote on request came. The run is
     /// completed, which the agent's record says unless another run of it
     /// runs.
     pub(crate) fn report_came(&self, agent: &str) {
@@ -686,7 +686,7 @@ impl AgentRegistry {
     }
 
     /// The recipients (of `recipients`) that started or finished after the
-    /// version run `task_id` has seen, in order: those running that started
+    /// version run `task_id` has seen, in order, namely those running that started
     /// since, and those not running that finished since (one that did both
     /// is reported finished). The run has then seen the current version. A
     /// run without a seen version (a task from an older checkpoint) is told
@@ -746,7 +746,7 @@ fn status(state: &RegistryState, agent: &str, paused: bool) -> AgentStatus {
                 continue;
             }
             match &run.waiting {
-                // A wait whose time has passed is over: the retry is under way.
+                // A wait whose time has passed is over, because the retry is under way.
                 Some(reason) if !until_passed(reason, now) => {
                     first_wait.get_or_insert_with(|| reason.clone());
                 }
@@ -880,7 +880,7 @@ mod tests {
             }
             let notices = registry.started_since_seen(lead, &recipients);
             let in_roster = roster[0].1 == AgentStatus::Running;
-            // Exactly one of the two tells the lead: the roster or a notice.
+            // Exactly one of the two tells the lead, the roster or a notice.
             assert_eq!(in_roster, notices.is_empty(), "order {order}");
             assert_eq!(in_roster, order < 2, "order {order}");
             assert!(registry.started_since_seen(lead, &recipients).is_empty());
@@ -888,7 +888,7 @@ mod tests {
     }
 
     /// Three agents that may all message each other start concurrently, many
-    /// times over: each learns of each other agent exactly once, from its
+    /// times over. Each learns of each other agent exactly once, from its
     /// roster or a notice.
     #[test]
     fn concurrent_starts_neither_miss_nor_repeat_a_start() {
@@ -952,8 +952,8 @@ mod tests {
         registry.abandon(b);
         assert_eq!(status_of(&registry, "b"), AgentStatus::NotStarted);
 
-        // Two runs of one agent in a batch: the first runs and completes,
-        // the second is abandoned; the agent is finished, not unstarted.
+        // Two runs of one agent in a batch, the first runs and completes,
+        // the second is abandoned, and the agent is finished, not unstarted.
         let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
         registry.start(&[(first, "c"), (second, "c")]);
         registry.finish(first, AgentRunStatus::Completed);
@@ -1099,14 +1099,14 @@ mod tests {
         let restored: RegistrySnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(restored, snapshot);
 
-        // The worker was running at the checkpoint: after the resume it is
+        // The worker was running at the checkpoint, and after the resume it is
         // no longer running.
         let resumed = AgentRegistry::restore(Some(restored), &[]);
         assert_eq!(
             status_of(&resumed, "worker"),
             AgentStatus::Finished(AgentRunStatus::Interrupted)
         );
-        // The lead continues; a reviewer starts, then the worker again.
+        // The lead continues, a reviewer starts, then the worker again.
         resumed.start(&[(lead, "lead")]);
         assert!(resumed.started_since_seen(lead, &recipients).is_empty());
         resumed.start(&[(Uuid::new_v4(), "reviewer")]);
@@ -1139,7 +1139,7 @@ mod tests {
         let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
         registry.start(&[(first, "worker"), (second, "worker")]);
         registry.finish(first, AgentRunStatus::Completed);
-        // Another run of it still runs: it started, not finished.
+        // Another run of it still runs, so it started, not finished.
         assert_eq!(
             registry.changes_since_seen(lead, &recipients),
             [ActivityChange::Started("worker".into())]
@@ -1154,7 +1154,7 @@ mod tests {
         );
         assert!(registry.changes_since_seen(lead, &recipients).is_empty());
 
-        // Started and finished between two looks: reported finished.
+        // Started and finished between two looks, so reported finished.
         let again = Uuid::new_v4();
         registry.start(&[(again, "worker")]);
         registry.finish(again, AgentRunStatus::Completed);

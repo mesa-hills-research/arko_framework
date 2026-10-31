@@ -162,7 +162,7 @@ impl CompletionVerifierConfig {
         self
     }
 
-    /// Whether the verifier gates `agent`'s completions: one of its named
+    /// Whether the verifier gates `agent`'s completions. It does for one of its named
     /// targets (`build` requires at least one), never its own verifier
     /// agent.
     pub(crate) fn applies_to(&self, agent: &str) -> bool {
@@ -176,7 +176,7 @@ impl CompletionVerifierConfig {
 
 /// Refuses `config` for agent `agent` when a reply in text ends its task
 /// ([`AgentToolConfig::text_reply_ends_task`](arko_agents::agent_config::AgentToolConfig::text_reply_ends_task))
-/// and one of `verifiers` reviews it or runs on it: a verifier reviews
+/// and one of `verifiers` reviews it or runs on it, because a verifier reviews
 /// `complete_task` calls, and a verifier agent gives its verdict with one.
 pub(crate) fn refuse_text_endings(
     verifiers: &[CompletionVerifierConfig],

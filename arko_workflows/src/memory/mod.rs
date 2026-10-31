@@ -115,10 +115,10 @@ impl MemoryTier {
             .collect()
     }
 
-    /// Stores each write's text once: a text that is (still) in the content
+    /// Stores each write's text once. A text that is (still) in the content
     /// becomes a range of it. A tier saved before (whose entries each held
-    /// their text) is converted: an append-only tier's writes from the
-    /// end of its content back, a full-edit tier's latest write.
+    /// their text) is converted (an append-only tier's writes from the
+    /// end of its content back, a full-edit tier's latest write).
     fn store_texts_once(&mut self) {
         match self.write_mode {
             WriteMode::AppendOnly => {
@@ -126,7 +126,7 @@ impl MemoryTier {
                 for write in self.entries.iter_mut().rev() {
                     let Some(text) = write.content.as_deref() else {
                         match write.range {
-                            // Already a range: the ones before end at its
+                            // Already a range, so the ones before end at its
                             // start.
                             Some((start, _)) => {
                                 end = start.saturating_sub(1);
@@ -516,7 +516,7 @@ impl MemoryConfig {
         Ok(())
     }
 
-    /// The store of a resumed run: the configured tiers, each with the
+    /// The store of a resumed run, with the configured tiers, each with the
     /// content and history the checkpoint saved under its name (or under a
     /// name `renames` maps to it). Access, limit and write mode come from
     /// this configuration. A configured tier the checkpoint lacks starts as
@@ -608,7 +608,7 @@ mod tests {
         store.tiers[name].read().clone()
     }
 
-    /// Each write's text is stored once: in the tier's content for every
+    /// Each write's text is stored once, in the tier's content for every
     /// append and the latest full edit, in the entry for an earlier
     /// version. The history reads the same either way.
     #[test]

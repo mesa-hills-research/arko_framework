@@ -104,7 +104,7 @@ pub struct PyWorkflowBuilder {
     agent_wait_for_message_timeouts: Vec<(String, Option<f64>)>,
 }
 
-/// A `wait_for_message` limit from Python: `None` is automatic, otherwise
+/// A `wait_for_message` limit from Python. `None` is automatic, otherwise
 /// seconds, more than zero.
 #[cfg(feature = "python")]
 fn wait_timeout_seconds(seconds: Option<f64>) -> PyResult<Option<f64>> {
@@ -178,7 +178,7 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    /// What happens over the budget: `"pause"` (the default: each agent is
+    /// What happens over the budget is `"pause"` (the default, where each agent is
     /// held before its next model request until `set_budget` raises the
     /// budget, a run the host started raises `AgentPaused`, or waits with
     /// `wait_for_raise=True`) or `"cancel"` (the agent is cancelled,
@@ -198,7 +198,7 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
+    /// Persist the run in `checkpoint_dir`. As in Rust, a checkpoint after
     /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
     /// and task version kept (`retain_checkpoints=None`, a count of at least
     /// 1 keeps the newest checkpoints and the task versions they refer to,
@@ -253,9 +253,9 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    /// `"approve_all"` (the default: every tool call is approved) or
+    /// `"approve_all"` (the default, where every tool call is approved) or
     /// `"respect_agent_config"` (a call the agent's configuration marks for
-    /// approval pauses the agent: `AgentPaused`, decided with
+    /// approval pauses the agent with `AgentPaused`, decided with
     /// `resume_agent`).
     fn approval_policy(&mut self, policy: &str) -> PyResult<()> {
         self.approval_policy = match policy {
@@ -270,7 +270,7 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    /// `"automatic"` (the default: recover without an attempt limit from
+    /// `"automatic"` (the default, recovering without an attempt limit from
     /// errors that may pass), `"limited"` with `max` automatic recoveries,
     /// or `"return_to_caller"` (every error-recovery pause raises
     /// `AgentPaused`).
@@ -291,7 +291,7 @@ impl PyWorkflowBuilder {
     }
 
     /// Run at most `max` agents of a `run_agents_parallel` call at once
-    /// (default: no cap).
+    /// (no cap by default).
     fn max_parallel_agents(&mut self, max: usize) -> PyResult<()> {
         self.max_parallel_agents = Some(max);
         Ok(())
@@ -511,7 +511,7 @@ impl PyWorkflow {
         })
     }
 
-    /// Continue a paused agent (`AgentPaused`): `"approve"` or `"reject"`
+    /// Continue a paused agent (`AgentPaused`) with `"approve"` or `"reject"`
     /// every call awaiting approval, or `"continue"` (the failed request is
     /// sent again, `note`, when given, is added for the model first) or
     /// `"fail"` (`note` is the reason) after an error-recovery pause.
@@ -620,8 +620,8 @@ impl PyWorkflow {
         })
     }
 
-    /// Change the workflow's budget limit (None: no limit) while agents
-    /// run: raising it releases the agents held on it.
+    /// Change the workflow's budget limit (None means no limit) while agents
+    /// run. Raising it releases the agents held on it.
     #[pyo3(signature = (limit=None))]
     fn set_budget(&self, limit: Option<f64>) -> PyResult<()> {
         self.inner
@@ -629,7 +629,7 @@ impl PyWorkflow {
             .map_err(|error| value_error(error.to_string()))
     }
 
-    /// Change an agent's own budget limit (None: none) while it runs.
+    /// Change an agent's own budget limit (None means none) while it runs.
     #[pyo3(signature = (agent, limit=None))]
     fn set_agent_budget(&self, agent: String, limit: Option<f64>) -> PyResult<()> {
         self.inner
@@ -637,7 +637,7 @@ impl PyWorkflow {
             .map_err(|error| value_error(error.to_string()))
     }
 
-    /// Whether the budget holds up the whole run: no agent can go on until
+    /// Whether the budget holds up the whole run, so no agent can go on until
     /// it is raised.
     fn is_budget_blocked(&self) -> bool {
         self.inner.is_budget_blocked()
@@ -651,7 +651,7 @@ impl PyWorkflow {
         Ok(self.inner.agent_result(id).map(PyAgentResult::from))
     }
 
-    /// Finish the run: fire `PostWorkflow`, save a checkpoint, and return
+    /// Finish the run by firing `PostWorkflow`, saving a checkpoint, and returning
     /// the recorded agent results.
     fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let workflow = self.inner.clone();
@@ -670,7 +670,7 @@ impl PyWorkflow {
         })
     }
 
-    /// Cancels the run: running agents stop, and pending and later runs
+    /// Cancels the run. Running agents stop, and pending and later runs
     /// raise `WorkflowCancelled`. Returns False when it was already stopped.
     fn cancel(&self) -> bool {
         self.inner.cancel()

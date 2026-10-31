@@ -60,7 +60,7 @@ pub struct SharedContext {
     pub global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
     /// Interceptors applied only to a specific agent's tool results.
     pub agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
-    /// The host's handover thresholds, by agent: in place of the
+    /// The host's handover thresholds, by agent, in place of the
     /// configuration's (`WorkflowBuilder::agent_handover_threshold`).
     pub(crate) handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
     /// Receives the images tool calls return (`WorkflowBuilder::tool_image_sink`).
@@ -78,7 +78,7 @@ pub struct SharedContext {
     pub verification_records: RwLock<Vec<crate::verification::VerificationRecord>>,
     /// Failed reviews per target task and verifier.
     pub(crate) verification_failures: parking_lot::Mutex<HashMap<(uuid::Uuid, String), u32>>,
-    /// Target tasks a verifier stopped because it failed: the verifier's
+    /// Target tasks a verifier stopped because it failed, with the verifier's
     /// name and why.
     pub(crate) verifier_failures: parking_lot::Mutex<HashMap<uuid::Uuid, (String, String)>>,
     pub distillation_configs: Vec<crate::distillation::DistillationConfig>,
@@ -86,7 +86,7 @@ pub struct SharedContext {
     pub workflow_services: std::sync::OnceLock<crate::services::WorkflowServices>,
     pub paused: std::sync::atomic::AtomicBool,
     pub resume_notify: tokio::sync::Notify,
-    /// Agent statuses: rosters, start notices, and `list_recipients`.
+    /// Agent statuses for rosters, start notices, and `list_recipients`.
     pub(crate) registry: crate::messaging::registry::AgentRegistry,
     /// The notes posted to the agents (`Workflow::post_note`).
     pub(crate) notes: crate::notes::NoteBoard,
@@ -94,7 +94,7 @@ pub struct SharedContext {
     pub(crate) subagents: crate::subagents::Board,
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
-    /// The run's persistence, when configured: changes the host makes
+    /// The run's persistence, when configured. Changes the host makes
     /// while agents run (such as a stop of one run) are saved with it.
     pub(crate) persistence: Option<crate::persistence::PersistenceManager>,
     /// Reads stop requests from the control folder, when enabled.
@@ -108,7 +108,7 @@ pub struct SharedContext {
     pub error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
     pub(crate) recovery_waits: crate::policy::RecoveryWaits,
     /// Why each approved call (by call ID) of a run (task ID) awaited
-    /// approval, until it has run, won't run, or its run ended: for the tool
+    /// approval, until it has run, won't run, or its run ended, for the tool
     /// hooks.
     pub(crate) approval_reasons:
         parking_lot::Mutex<HashMap<uuid::Uuid, (uuid::Uuid, arko_agents::ApprovalReason)>>,
@@ -142,7 +142,7 @@ impl SharedContext {
 
     /// The model settings run `task_id` of `agent` works with, which may
     /// not be the agent's registered ones
-    /// ([`RunOptions::config`](crate::RunOptions::config)): as it last
+    /// ([`RunOptions::config`](crate::RunOptions::config)), as it last
     /// started, went on or was handed over, else as its recorded result
     /// saved them (a run restored from a checkpoint), else the registered
     /// ones.
@@ -163,7 +163,7 @@ impl SharedContext {
         recorded.or_else(|| Some(self.agent_configs.get(agent)?.llm_config.clone()))
     }
 
-    /// The models `agent`'s runs work with: as they last started, went on
+    /// The models `agent`'s runs work with, as they last started, went on
     /// or were handed over, else as their recorded results saved them (runs
     /// restored from a checkpoint that haven't run again).
     pub(crate) fn run_models_of(&self, agent: &str) -> Vec<arko_ai::Model> {
@@ -243,7 +243,7 @@ impl SharedContext {
     }
 
     /// The agents whose starts and finishes end `agent_name`'s
-    /// `wait_for_message`: those it may message and those that may message
+    /// `wait_for_message`, meaning those it may message and those that may message
     /// it, sorted by name.
     pub(crate) fn status_peers(&self, agent_name: &str) -> Vec<String> {
         let mut peers = self.message_recipients(agent_name);

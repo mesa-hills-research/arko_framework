@@ -223,7 +223,7 @@ impl WorkflowServices {
         targets
     }
 
-    /// The `agent` parameter's description for `caller`: the agents it may
+    /// The `agent` parameter's description for `caller`, the agents it may
     /// run, with their roles. Configuration only, so it doesn't change
     /// during a task.
     pub(crate) fn target_guidance(&self, caller: &str) -> String {
@@ -256,7 +256,7 @@ impl WorkflowServices {
         self.run_agent_at(caller, agent_name, prompt, 0, None).await
     }
 
-    /// Runs `agent_name` for `caller` at `depth`: inside tool call `parent`
+    /// Runs `agent_name` for `caller` at `depth`, inside tool call `parent`
     /// of a run at `depth - 1`.
     pub(crate) async fn run_agent_at(
         &self,
@@ -324,13 +324,13 @@ impl WorkflowServices {
 
     /// Recovers call `parent` of `caller`, which was running `agent_name`
     /// with `prompt` (resuming run `resume_run`, if set) at `depth` when the
-    /// workflow stopped: the agent run the call ran ends as the call would
+    /// workflow stopped. The agent run the call ran ends as the call would
     /// have. A run that completed returns its result without running again
     /// (the caller's task wasn't saved with it). An interrupted one is
     /// recovered and waited for (as is another recovery of it already
     /// running). A run that ended otherwise returns its error. When the call
-    /// ran no run that was saved with it (it can't have run a tool: runs are
-    /// saved before their first), the call runs now: `agent_name` starts,
+    /// ran no run that was saved with it (it can't have run a tool, since runs are
+    /// saved before their first), the call runs now, and `agent_name` starts,
     /// or run `resume_run` is resumed. The call was admitted before the
     /// stop, so the active-call limit counts it without refusing it.
     #[allow(clippy::too_many_arguments)]
@@ -355,8 +355,8 @@ impl WorkflowServices {
             .find(|result| result.info().parent == Some(parent))
             .cloned();
         match started {
-            // Retired by the host in its wrap-up when the workflow stopped:
-            // it stays stopped, and the call fails naming it.
+            // Retired by the host in its wrap-up when the workflow stopped.
+            // It stays stopped, and the call fails naming it.
             Some(run)
                 if run.status == AgentRunStatus::Interrupted
                     && run.stopped_by.as_ref().is_some_and(StopRecord::is_retired) =>
@@ -428,10 +428,10 @@ impl WorkflowServices {
     }
 
     /// Resumes agent run `run_id` of `agent_name`, which did not finish, for
-    /// the caller's run `caller_run` (authorized to run `agent_name`): it continues its own task, with
+    /// the caller's run `caller_run` (authorized to run `agent_name`). It continues its own task, with
     /// `message` as a user message, instead of a new run starting. The run
     /// must be one `caller_run` started (its parent link names it), or an
-    /// orphaned run ([`is_orphaned`]: the run that started it can't resume
+    /// orphaned run ([`is_orphaned`], meaning the run that started it can't resume
     /// it any more). An interrupted run is recovered (the calls it was
     /// running are settled first). A completed run, or one waiting for an
     /// answer, continues. A run paused after an error continues with the
@@ -497,7 +497,7 @@ impl WorkflowServices {
             AgentRunStatus::Cancelled if crate::workflow::engine::is_superseded(&run) => {
                 refuse("a run that replaced it after a restart superseded it".to_string())
             }
-            // Cancelled (by the budget, say): reopened where it stopped.
+            // Cancelled (by the budget, say), reopened where it stopped.
             AgentRunStatus::Cancelled => {
                 let message = crate::workflow::engine::reopened_message(message);
                 let recovery = Recovery {
@@ -544,7 +544,7 @@ impl WorkflowServices {
     /// What a `run_workflow_agent` call that failed tells `caller` about
     /// agent run `run`, which it ran and which did not finish (or what a
     /// call that succeeded adds to the summary of a run that completed
-    /// after a stop's wrap-up notice): the run's id and agent, and how to
+    /// after a stop's wrap-up notice), the run's id and agent, and how to
     /// resume it (or that the host recovers it, when the caller may not run
     /// its agent). `None` for a run that can't be resumed with a message,
     /// or is running.
@@ -554,7 +554,7 @@ impl WorkflowServices {
             return None;
         }
         let state = match run.status {
-            // Stopped alone by the host: it says whether it may go on.
+            // Stopped alone by the host, and it says whether it may go on.
             AgentRunStatus::Cancelled | AgentRunStatus::Completed | AgentRunStatus::Interrupted
                 if run
                     .stopped_by
@@ -581,7 +581,7 @@ impl WorkflowServices {
             {
                 "was stopped with the workflow and did not finish"
             }
-            // Completed after the wrap-up notice told it to stop: its
+            // Completed after the wrap-up notice told it to stop, so its
             // summary is a progress report its completion verifiers didn't
             // review, and `stopped_runs` leaves a nested run to its caller.
             AgentRunStatus::Completed if run.stopped_by.is_some() => {
@@ -597,7 +597,7 @@ impl WorkflowServices {
     }
 
     /// What a caller is told about agent run `run`, which the workflow's
-    /// host stopped alone (`Workflow::stop_run`): why, and whether it can
+    /// host stopped alone (`Workflow::stop_run`), meaning why, and whether it can
     /// be resumed (not when the host retired it).
     fn stopped_alone_note(&self, caller: &str, run: &AgentResult) -> String {
         let (id, agent) = (run.agent_run_id, &run.agent_name);
@@ -790,7 +790,7 @@ impl Tool for RunWorkflowAgentTool {
                 })?),
                 None => None,
             };
-        // A run being stopped alone wraps up: it starts no agent runs.
+        // A run being stopped alone wraps up, so it starts no agent runs.
         if !context.recovering
             && self
                 .services
@@ -833,7 +833,7 @@ impl Tool for RunWorkflowAgentTool {
                     .await
             }
         };
-        // A run a stop's wrap-up ended early: named after its progress
+        // A run a stop's wrap-up ended early, named after its progress
         // report, so that the caller can resume it.
         let result = result.map(|result| {
             let note = self.services.unfinished_note(&self.caller, &result);
@@ -843,7 +843,7 @@ impl Tool for RunWorkflowAgentTool {
             }
         });
         result.map_err(|error| {
-            // The run the call ran, if it did not finish: named, so that
+            // The run the call ran, if it did not finish, named, so that
             // the caller can resume it rather than start over.
             let ran =
                 self.services
@@ -896,7 +896,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Callers and targets are named explicitly: none named means nobody.
+    /// Callers and targets are named explicitly, so none named means nobody.
     #[test]
     fn empty_caller_and_target_sets_mean_nobody() {
         let workflow = build(WorkflowServicesConfig::default());

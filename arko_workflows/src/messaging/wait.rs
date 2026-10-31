@@ -126,7 +126,7 @@ impl WaitForMessageTimeout {
     }
 }
 
-/// The workflow's `wait_for_message` limits: its own and agents'.
+/// The workflow's `wait_for_message` limits, its own and agents'.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WaitTimeouts {
     pub workflow: WaitForMessageTimeout,
@@ -177,7 +177,7 @@ impl WaitForMessageTool {
         }
     }
 
-    /// How long run `task_id` may wait: the agent's limit. An automatic
+    /// How long run `task_id` may wait, which is the agent's limit. An automatic
     /// limit counts from the run's last model request, when the cache was
     /// last used, so the time the model took to answer is included. At least
     /// a second is left.
@@ -245,7 +245,7 @@ impl Drop for AwaitingMessage<'_> {
     }
 }
 
-/// The model's `timeout_seconds`, if given: a positive number of seconds,
+/// The model's `timeout_seconds`, if given, a positive number of seconds,
 /// as a number (the parameter's type) or a string (as conversations saved
 /// before it was an integer hold it).
 fn requested_timeout(params: &HashMap<String, Value>) -> Result<Option<f64>, ToolError> {
@@ -349,7 +349,7 @@ impl Tool for WaitForMessageTool {
         let task_id = task_context.task_id;
         let _waiting = AwaitingMessage::start(&context.registry, task_id);
 
-        // Taken, and marked seen, before the first check: whatever happens
+        // Taken, and marked seen, before the first check, so whatever happens
         // after the check wakes the wait.
         let mut arrivals = context.messages.watch_arrivals(task_id);
         arrivals.borrow_and_update();
@@ -363,7 +363,7 @@ impl Tool for WaitForMessageTool {
         let mut forward_deadline = None;
         let (mut arrivals_open, mut versions_open, mut stopping_open) = (true, true, true);
         loop {
-            // Stopped, or a graceful stop's wrap-up began: the agent is
+            // Stopped, or a graceful stop's wrap-up began, so the agent is
             // told what to do at its next turn boundary.
             if context.run_control.is_stopped() || context.run_control.is_wrapping_up() {
                 return Ok("Workflow stopping.".to_string());

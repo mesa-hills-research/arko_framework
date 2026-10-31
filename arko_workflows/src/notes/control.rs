@@ -200,7 +200,7 @@ pub(crate) struct Batch {
 
 /// The notes written to `folder`'s notes file after byte `offset`. `None`
 /// when there are none, or a writer holds the lock (they are read next
-/// time). A file shorter than `offset` was replaced: it is read from the
+/// time). A file shorter than `offset` was replaced, so it is read from the
 /// start, and the notes it repeats are skipped by their `id`.
 pub(crate) fn read_from(folder: &Path, offset: u64) -> io::Result<Option<Batch>> {
     Ok(
@@ -223,7 +223,7 @@ struct Lines {
 
 /// The complete lines written to `folder`'s file `name` after byte
 /// `offset`. `None` when there are none, or a writer holds the lock (they
-/// are read next time). A file shorter than `offset` was replaced: it is
+/// are read next time). A file shorter than `offset` was replaced, so it is
 /// read from the start. An unfinished last line (one a writer crashed in)
 /// is read once a later write ends it.
 fn read_lines_from(folder: &Path, name: &str, offset: u64) -> io::Result<Option<Lines>> {
