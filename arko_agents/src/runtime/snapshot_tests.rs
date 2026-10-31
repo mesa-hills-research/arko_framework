@@ -182,7 +182,7 @@ fn saved_native_task(agent: &mut AgentLoop, calls: Vec<ai::ToolCall>) {
     task.conversation.messages.push(assistant);
 }
 
-/// The task as a host would load it: through its saved form.
+/// The task as a host would load it, through its saved form.
 fn reloaded(task: &Task) -> Task {
     serde_json::from_str(&serde_json::to_string(task).unwrap()).unwrap()
 }
@@ -232,7 +232,7 @@ async fn the_turn_is_reported_and_its_calls_saved_before_they_run() {
         .iter()
         .position(|(task, durable)| *durable && !task.running_tool_calls.is_empty())
         .unwrap();
-    // Before it: the turn, reported with no call running and no result.
+    // Before it, the turn, reported with no call running and no result.
     let (turn_saved, _) = snapshots[..write_ahead]
         .iter()
         .rev()
@@ -247,7 +247,7 @@ async fn the_turn_is_reported_and_its_calls_saved_before_they_run() {
         .expect("the turn is reported before its calls run");
     assert!(turn_saved.running_tool_calls.is_empty());
     assert!(turn_saved.pending_native_tool_results.is_empty());
-    // After it: the result, with nothing running.
+    // After it, the result, with nothing running.
     let (after, durable) = &snapshots[write_ahead + 1];
     assert!(!durable);
     assert!(after.running_tool_calls.is_empty());
@@ -348,7 +348,7 @@ async fn each_result_is_in_the_task_before_the_next_call_runs() {
     assert_eq!(seen.len(), 2);
     let (saved, durable) = seen[1].snapshot.clone().unwrap();
     assert!(durable);
-    // The first call's result is saved; only the second runs.
+    // The first call's result is saved, and only the second runs.
     assert_eq!(saved.pending_native_tool_results.len(), 1);
     assert_eq!(
         saved.pending_native_tool_results[0].call_id.as_deref(),
@@ -499,7 +499,7 @@ async fn open_native_calls_are_settled_by_their_tools_recovery_modes() {
 
 /// A report asked for alone of a task cancelled while calls ran (aborted
 /// after the grace period) runs none of them again and resumes no run one
-/// started: each is in doubt, and the report comes after them.
+/// started. Each is in doubt, and the report comes after them.
 #[tokio::test]
 async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
     let workspace = workspace();
@@ -555,7 +555,7 @@ async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A tool whose calls differ settles each open call by the call: a read
+/// A tool whose calls differ settles each open call by the call. A read
 /// runs again and a write is in doubt. A read is reported without waiting
 /// for the save, and a write waits.
 #[tokio::test]
@@ -607,7 +607,7 @@ async fn open_calls_are_settled_by_each_calls_recovery_mode() {
     assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].tool_call_id, Some(read_id));
     assert!(seen[0].recovering);
-    // The read's write-ahead report doesn't wait for the save; the write's
+    // The read's write-ahead report doesn't wait for the save, and the write's
     // does.
     for (index, durable) in [(1, false), (2, true)] {
         let (_, reported_durable) = seen[index].snapshot.clone().unwrap();
@@ -705,7 +705,7 @@ async fn open_output_based_calls_are_settled_with_the_turns_results() {
         .iter()
         .map(message_text)
         .collect();
-    // The message after the turn holds its results: the one saved, the
+    // The message after the turn holds its results, namely the one saved, the
     // rerun, the in-doubt call, and the note, in that order.
     let answer = &texts[2];
     let positions: Vec<usize> = [
@@ -785,7 +785,7 @@ async fn an_approved_call_running_at_the_stop_is_not_asked_about_again() {
     assert_eq!(saved.current_state, TaskState::InProgress);
     assert_eq!(saved.running_tool_calls[0].tool_call_id, id);
 
-    // That snapshot runs again (its host crashed): the call is in doubt,
+    // That snapshot runs again (its host crashed). The call is in doubt,
     // and nobody is asked about it.
     let (mut agent, mut events, _commands) = agent_for(
         reloaded(&saved),
@@ -873,7 +873,7 @@ async fn an_approval_wait_saved_at_a_stop_waits_again() {
             )
         };
         agent.scripted_responses.get_mut().unwrap().push_back(call);
-        // The host crashes during the wait: the run is dropped.
+        // The host crashes during the wait, so the run is dropped.
         let run = tokio::spawn(agent.run());
         let mut seen = Vec::new();
         wait_for(&mut events, &mut seen, |event| match event {
@@ -1094,7 +1094,7 @@ async fn a_sink_that_fails_does_not_stop_the_task() {
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert_eq!(probe.seen.lock().unwrap().len(), 1);
-    // A failed report is not taken as saved: the next safe point reports
+    // A failed report is not taken as saved, so the next safe point reports
     // the same task again.
     let snapshots = recorder.snapshots();
     assert!(snapshots.len() >= 2);
@@ -1111,7 +1111,7 @@ async fn the_runtime_reports_to_the_sink_it_is_given() {
         workspace.clone(),
         None,
     );
-    // No model is reachable: the run pauses on its first request.
+    // No model is reachable, so the run pauses on its first request.
     let runtime = super::super::AgentRuntime::new(Arc::new(ai::LLMClient::new()))
         .with_task_snapshots(recorder.clone());
     let (_events, commands, handle) = runtime.run_task(

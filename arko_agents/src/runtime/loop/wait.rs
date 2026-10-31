@@ -1,4 +1,4 @@
-//! The host's commands: the wait for a command and its deadline, what follows
+//! The host's commands, covering the wait for a command and its deadline, what follows
 //! a decision, the end of a wait without one, and the commands taken at a turn
 //! boundary or while recovery waits.
 
@@ -6,23 +6,23 @@ use super::*;
 
 /// The current wait for a command, timed by the opt-in
 /// `AgentConfig::user_command_timeout_seconds`. Its deadline is set once,
-/// when the wait starts: context injected during the wait and commands the
+/// when the wait starts. Context injected during the wait and commands the
 /// wait ignores don't move it, and a decision ends the wait (the next one
 /// gets a deadline of its own).
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CommandWait {
     /// No wait has started since the last one ended.
     NotStarted,
-    /// Waiting until this deadline (`None`: no timeout).
+    /// Waiting until this deadline (`None` means no timeout).
     Until(Option<tokio::time::Instant>),
     /// The host is deciding this wait itself ([`UserCommand::HostDeciding`],
     /// or the run's [`HostDecisions`](super::super::HostDecisions) when it
-    /// started): no deadline.
+    /// started), so no deadline.
     HostDeciding,
 }
 
 impl AgentLoop {
-    /// Takes what every place that reads commands takes alike: context,
+    /// Takes what every place that reads commands takes alike, namely context,
     /// kept for the next turn boundary, and a handover request, noted.
     /// Returns any other command.
     pub(super) fn absorb_command(&mut self, command: UserCommand) -> Option<UserCommand> {
@@ -69,8 +69,8 @@ impl AgentLoop {
         Ok(self.stop_requested)
     }
 
-    /// Takes every command queued at a turn boundary without waiting:
-    /// context joins the next request, and `CancelTask`, `SuspendTask`, or a
+    /// Takes every command queued at a turn boundary without waiting.
+    /// Context joins the next request, and `CancelTask`, `SuspendTask`, or a
     /// closed channel stops the loop at once (returns true, with
     /// `TaskStateChanged`). Context taken before a stop is not lost. See
     /// [`keep_taken_context`](Self::keep_taken_context).
@@ -161,7 +161,7 @@ impl AgentLoop {
                 self.interrupt_wait(reason, HOST_STOPPED_CALL).await
             }
             // The host took over the run's decisions during the
-            // wait: it isn't timed any more.
+            // wait, so it isn't timed any more.
             Err(_) if self.host_decisions.get() => Ok(Flow::NextPass),
             Err(_timeout_err) => {
                 let seconds = self
@@ -230,7 +230,7 @@ impl AgentLoop {
         self.after_decision(&cmd, state_before, follow_up).await
     }
 
-    /// After a command the wait didn't ignore: the wait ends, a
+    /// After a command the wait didn't ignore. The wait ends, a
     /// cancellation or suspension takes effect, a changed state is
     /// reported, and a task that goes on gets the command's message (or
     /// a request to continue) unless the decision needs none.
@@ -247,7 +247,7 @@ impl AgentLoop {
             held_ids,
         } = follow_up;
         // A command the wait didn't ignore (those continue
-        // above) ends it; a later wait gets its own deadline.
+        // above) ends it, and a later wait gets its own deadline.
         self.command_wait = CommandWait::NotStarted;
 
         if let UserCommand::CancelTask = cmd {
@@ -280,8 +280,8 @@ impl AgentLoop {
         }
 
         // Output-based results of a command that leaves the
-        // task waiting (a pause on a tool error) wait with it;
-        // the message that ends a wait carries them first.
+        // task waiting (a pause on a tool error) wait with it,
+        // and the message that ends a wait carries them first.
         if !self.is_native_mode() && !follow_up_done {
             if self.task.current_state.is_awaiting_approval() {
                 if !next_user_message_from_command.is_empty() {
@@ -319,7 +319,7 @@ impl AgentLoop {
     }
 
     /// A wait that ended without a command (a closed command channel, or
-    /// the command timeout): the calls it waited on are answered with
+    /// the command timeout). The calls it waited on are answered with
     /// `call_reason`, and the task is interrupted.
     async fn interrupt_wait(
         &mut self,
@@ -334,7 +334,7 @@ impl AgentLoop {
     }
 
     /// Interrupts the task for `reason` (its host stopped, or a wait for a
-    /// command timed out): `TaskStateChanged`, then `ErrorEncountered`.
+    /// command timed out). Sends `TaskStateChanged`, then `ErrorEncountered`.
     pub(super) async fn interrupt(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
         self.task.set_state(TaskState::Interrupted {
             reason: reason.clone(),

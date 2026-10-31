@@ -33,7 +33,7 @@ mod keep_warm_live_tests;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 
-/// What a prompt-cache refresh asks after the conversation: a one-word
+/// What a prompt-cache refresh asks after the conversation. It wants a one-word
 /// reply (see [`AgentRuntime::refresh_prompt_cache`]).
 pub(crate) const CACHE_PING: &str =
     "Reply with the single word ok. This message only checks the connection.";

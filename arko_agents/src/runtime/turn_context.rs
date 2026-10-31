@@ -15,7 +15,7 @@ pub struct TurnContext {
     pub content: String,
     /// The part of the update the user typed themselves, such as the
     /// operator's notes, which follows `content`. Only a Claude Code agent
-    /// treats it apart: during a turn it gets this text as a message from the
+    /// treats it apart. During a turn it gets this text as a message from the
     /// user at a tool boundary, once a hook has carried everything that came
     /// before it. Every other agent gets it after `content` in the same
     /// update. May be empty.

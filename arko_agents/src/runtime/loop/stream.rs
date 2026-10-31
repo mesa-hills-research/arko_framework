@@ -1,4 +1,4 @@
-//! The model's response as it streams: its text and reasoning sent as they
+//! The model's response as it streams, with its text and reasoning sent as they
 //! come, the calls it announces, the commands that arrive meanwhile, and its
 //! end, whose usage is recorded and reported.
 
@@ -32,7 +32,7 @@ pub(super) struct StreamedTurn {
     /// The output-based parser's events (none in native mode).
     pub(super) parser_events: Vec<RawParserEvent>,
     /// The calls the stream announced (`ToolCallInitiated`), by index, with
-    /// their runtime ids and names: the turn runs those its response holds
+    /// their runtime ids and names. The turn runs those its response holds
     /// and rejects the others.
     pub(super) announced: HashMap<usize, (Uuid, String)>,
 }
@@ -45,7 +45,7 @@ pub(super) struct StreamedTurn {
 pub(super) enum ModelTurn {
     /// With a turn whose calls the turn phase handles.
     Streamed(StreamedTurn),
-    /// Otherwise: the pass ends (`NextPass`, or `Exit` for a task that
+    /// Otherwise, the pass ends (`NextPass`, or `Exit` for a task that
     /// ended).
     Ended(Flow),
 }
@@ -145,8 +145,8 @@ impl AgentLoop {
         self.monitor_cache().await
     }
 
-    /// Streams a response to its end, or until the host stops the task:
-    /// its text and reasoning are sent as they come, the calls it
+    /// Streams a response to its end, or until the host stops the task.
+    /// Its text and reasoning are sent as they come, the calls it
     /// announces are reported, and its end is accounted for (usage, the
     /// request estimate, refusals). Every outcome but a usable turn ends
     /// the pass.
@@ -175,7 +175,7 @@ impl AgentLoop {
         let mut streamed_refusal: Option<ai::Refusal> = None;
 
         // The stream runs until it ends or fails, or the host stops the
-        // task; no recovery budget cuts it off (only arko_ai's opt-in
+        // task, and no recovery budget cuts it off (only arko_ai's opt-in
         // stream idle timeout can).
         loop {
             // The final response ends the loop as it arrives.
@@ -217,7 +217,7 @@ impl AgentLoop {
                             }
                         }
                         Ok(Some(ai::StreamEvent::ToolCallArgumentsDelta { .. })) => {}
-                        // Providers repeat the refusal on `End`; it is
+                        // Providers repeat the refusal on `End`, so it is
                         // kept only for a stream that ends without one.
                         Ok(Some(ai::StreamEvent::Refusal(refusal))) => {
                             streamed_refusal = Some(refusal);
@@ -252,7 +252,7 @@ impl AgentLoop {
                             break;
                         }
                         // A refusal reported as an error (Gemini
-                        // generation-blocked codes): its partial text is
+                        // generation-blocked codes), so its partial text is
                         // not kept.
                         Err(ai::Error::Refusal(refusal)) => {
                             self.discard_streamed(&streamed_text, streamed_reasoning).await?;
@@ -262,7 +262,7 @@ impl AgentLoop {
                             break;
                         }
                         // The request is sent again unchanged, so what the
-                        // failed stream delivered is not kept: it would end
+                        // failed stream delivered is not kept, because it would end
                         // the retried request on an assistant turn (a
                         // prefill, which Claude 4.6 and later reject).
                         Err(e) => {
@@ -290,7 +290,7 @@ impl AgentLoop {
     }
 
     /// The response failed after streaming `text` and `reasoning` bytes of
-    /// reasoning: what is still buffered isn't sent, and the host is told to
+    /// reasoning. What is still buffered isn't sent, and the host is told to
     /// drop what was ([`AgentEvent::StreamedOutputDiscarded`]).
     async fn discard_streamed(
         &mut self,
@@ -317,7 +317,7 @@ impl AgentLoop {
     }
 
     /// A command that arrived while a response streamed. `CancelTask`,
-    /// `SuspendTask` or a closed channel stops the stream: the partial
+    /// `SuspendTask` or a closed channel stops the stream. The partial
     /// text is kept, the calls it announced are rejected, and `true` says
     /// the pass ends. Context and handover requests are taken. Other
     /// commands are ignored.
@@ -363,7 +363,7 @@ impl AgentLoop {
         Ok(false)
     }
 
-    /// A stream the host stopped (before its final response): the text it
+    /// A stream the host stopped (before its final response). The text it
     /// delivered is kept as the turn, and the calls it announced are
     /// rejected.
     async fn keep_partial_output(
@@ -378,9 +378,9 @@ impl AgentLoop {
             .await
     }
 
-    /// A response's `End`: its usage and the request it answered are
+    /// A response's `End`. Its usage and the request it answered are
     /// recorded and reported, then a refused turn is handled as a refusal
-    /// (`true`: the pass ends), and any other turn joins the conversation
+    /// (`true` means the pass ends), and any other turn joins the conversation
     /// as the final response.
     async fn on_response_end(
         &mut self,
@@ -399,7 +399,7 @@ impl AgentLoop {
                 crate::task::LatestRequest::new(sent_at, &generation_response.usage),
             );
         }
-        // The request was answered: its usage calibrates the estimate of
+        // The request was answered. Its usage calibrates the estimate of
         // the next one. Its text's share of the input is what its images'
         // estimated tokens leave.
         self.answered_request = self.sent_request.take();
@@ -460,7 +460,7 @@ impl AgentLoop {
         // refusal and answers any refused input.
         self.task.fallback_for = None;
         self.task.refused_input = None;
-        // The provider answered: an outage is over, so
+        // The provider answered. An outage is over, so
         // its elapsed budget no longer runs (a response
         // the runtime can't use still counts as an
         // attempt).

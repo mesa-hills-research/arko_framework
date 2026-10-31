@@ -1,5 +1,5 @@
 //! The Claude Code runtime against a scripted fake CLI
-//! (`tests/fixtures/fake_claude_agent.py`; `ARKO_TEST_PYTHON` selects the
+//! (`tests/fixtures/fake_claude_agent.py`, where `ARKO_TEST_PYTHON` selects the
 //! interpreter).
 
 use std::collections::BTreeMap;
@@ -75,7 +75,7 @@ impl Fake {
         }
     }
 
-    /// The fake's log: one JSON object per event.
+    /// The fake's log, one JSON object per event.
     fn log(&self) -> Vec<Value> {
         std::fs::read_to_string(self.dir.join("log.jsonl"))
             .unwrap_or_default()
@@ -239,7 +239,7 @@ async fn an_agent_completes_through_its_arko_tool() {
     let session = task.claude_code_session.clone().unwrap();
     assert!(has(&format!("--session-id={session}")), "{argv:?}");
 
-    // Its arko tools are served with their schemas; only offered ones.
+    // Its arko tools are served with their schemas, and only offered ones.
     let served = &fake.logged("tools")[0]["tools"];
     let names: Vec<&str> = served
         .as_array()
@@ -264,7 +264,7 @@ async fn an_agent_completes_through_its_arko_tool() {
             .unwrap()
             .contains("mcp__arko__complete_task")
     );
-    // Usage: the whole input, cached reads included, billed nothing.
+    // Usage is the whole input, cached reads included, billed nothing.
     let usage = &task.usage_history[0];
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.cached_tokens, Some(1198));
@@ -280,7 +280,7 @@ async fn an_agent_completes_through_its_arko_tool() {
         AgentEvent::AssistantResponseChunk(text) if text == "Working on it."
     )));
     assert!(matches!(events.last(), Some(AgentEvent::TaskStreamEnd)));
-    // The conversation mirrors the session's: the call and its result.
+    // The conversation mirrors the session's, with the call and its result.
     assert!(task.conversation.messages.iter().any(|message| {
         message
             .tool_calls
@@ -388,7 +388,7 @@ async fn thinking_reaches_the_host_as_reasoning_before_the_text() {
 
 /// A Claude Code agent's `message_user` calls reach the host as
 /// `MessageToUser`, and with `text_reply_as_message` so does the text of a
-/// turn that ends without `complete_task`; off, that text isn't sent.
+/// turn that ends without `complete_task`. Off, that text isn't sent.
 #[tokio::test]
 async fn messages_reach_the_user_through_the_tool_and_open_turns() {
     for opted_in in [false, true] {
@@ -496,7 +496,7 @@ async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
             .unwrap()
             .contains("outside the workspace")
     );
-    // Not listed: refused, though Claude Code has it.
+    // Not listed, so refused, though Claude Code has it.
     assert_eq!(posts[3]["is_error"], true);
     assert!(
         posts[3]["output"]
@@ -693,7 +693,7 @@ impl crate::tool::ToolExecutionMiddleware for RefusesQuestions {
 }
 
 /// A middleware refuses an `ask_user` and a `close_questions` call after
-/// Claude Code's gate admitted them: the refused ask leaves no question
+/// Claude Code's gate admitted them. The refused ask leaves no question
 /// open and the refused close closes none, and the host hears of neither,
 /// so the task's log and the host agree.
 #[tokio::test]
@@ -750,7 +750,7 @@ async fn refused_question_calls_in_claude_code_change_no_questions() {
     assert_eq!(task.questions.asked, 1);
 }
 
-/// A launch's message IDs are its own: after an answer relaunches Claude
+/// A launch's message IDs are its own. After an answer relaunches Claude
 /// Code (whose IDs may start over), a reply whose ID an earlier launch
 /// streamed is still sent to the host.
 #[tokio::test]
@@ -898,7 +898,7 @@ async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() 
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["text"], TYPED_NOTE);
     assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
-    // The message is no input of the session: no entry of the transcript
+    // The message is no input of the session. No entry of the transcript
     // stands for it, and the CLI completed it.
     assert_eq!(fake.logged("user").len(), 1);
     let uuid = sent[0]["uuid"].as_str().unwrap();
@@ -1074,7 +1074,7 @@ impl crate::runtime::TurnContextSource for MarkedTypedNote {
 }
 
 /// A note given with a call's result that the CLI took, but exited before
-/// it reported the result: the task never keeps the note's mark without
+/// it reported the result. The task never keeps the note's mark without
 /// the note, and once the session ends the note waits in the task again,
 /// with its mark, for the next input. Once the result is reported with the
 /// note, the task holds both.
@@ -1173,7 +1173,7 @@ async fn a_cancelled_note_goes_back_with_its_mark() {
 }
 
 /// The same when the CLI reports the note cancelled before the result it
-/// went with: the task holds the note, with its mark, once it goes with the
+/// went with. The task holds the note, with its mark, once it goes with the
 /// next call's result.
 #[tokio::test]
 async fn a_note_cancelled_before_its_result_keeps_its_mark() {
@@ -1225,7 +1225,7 @@ async fn a_reconfigured_task_resumes_its_session_with_the_new_prompt_and_tools()
     assert!(task.claude_code_prompt_changed);
 }
 
-/// A cc chat (`AgentToolConfig::chat`): no tools, its replies in text end
+/// A cc chat (`AgentToolConfig::chat`), with no tools, and its replies in text end
 /// its task.
 fn chat_config(fake: &Fake) -> crate::agent_config::AgentConfig {
     let mut config = config(fake, &[]);
@@ -1292,7 +1292,7 @@ async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
     assert_eq!(history[1], "Where to?");
     assert!(branch.claude_code_fork_of.is_none());
 
-    // The original, cut back to its follow-up: the same session, resumed
+    // The original, cut back to its follow-up, the same session, resumed
     // at the reply.
     let mut cut = original.clone();
     cut.cut_back(2).unwrap();
@@ -1423,9 +1423,9 @@ async fn a_failed_requests_message_is_a_warning_and_not_part_of_the_reply() {
 }
 
 /// Claude Code sends a response as one assistant message per block, each
-/// with the response's id: its thinking, its text, then its call. Streamed,
+/// with the response's id (its thinking, its text, then its call). Streamed,
 /// each block's text comes once, as it streams, and the complete messages
-/// don't repeat it. The conversation records each block's message: the
+/// don't repeat it. The conversation records each block's message, the
 /// text, then the call.
 #[tokio::test]
 async fn a_response_streamed_block_by_block_comes_once() {
@@ -1476,7 +1476,7 @@ async fn a_response_streamed_block_by_block_comes_once() {
 }
 
 /// A subagent Claude Code runs (its `Agent` tool) makes requests of its
-/// own: each is reported with the call that started it and no sizes (its
+/// own. Each is reported with the call that started it and no sizes (its
 /// conversation isn't the task's), its usage is marked as the subagent's
 /// and compared with that subagent's previous call only, and its messages
 /// stay out of the task's conversation.
@@ -1534,7 +1534,7 @@ async fn a_subagent_s_requests_are_reported_as_its_own() {
     );
 }
 
-/// A response that fails while it streams is retried by Claude Code: the
+/// A response that fails while it streams is retried by Claude Code. The
 /// host is told to drop what it streamed before the retry is reported, and
 /// the retry streams anew. Only the full reply is kept.
 #[tokio::test]
@@ -1582,7 +1582,7 @@ async fn a_response_that_fails_while_it_streams_is_discarded() {
     );
 }
 
-/// A retry series that ends in a failure ends with its turn: the next
+/// A retry series that ends in a failure ends with its turn. The next
 /// series counts its time from its own first retry.
 #[tokio::test]
 async fn a_failed_retry_series_doesn_t_count_into_the_next() {
@@ -1675,7 +1675,7 @@ async fn text_of_a_response_asked_again_without_streaming_stays() {
 
 /// A response that fails while it streams is discarded too when it ends
 /// the turn, or when Claude Code starts another response without reporting
-/// a retry: the host drops what it streamed before the turn's error, or
+/// a retry. The host drops what it streamed before the turn's error, or
 /// before the next response's text.
 #[tokio::test]
 async fn a_response_that_fails_while_it_streams_is_discarded_however_it_ends() {
@@ -1742,7 +1742,7 @@ async fn a_response_that_fails_while_it_streams_is_discarded_however_it_ends() {
     );
 }
 
-/// A cache refresh pings a fork of the session that isn't saved: the ping
+/// A cache refresh pings a fork of the session that isn't saved. The ping
 /// reads the conversation (and its cache), its usage comes back, and the
 /// session's own conversation never sees it.
 #[tokio::test]
@@ -1782,7 +1782,7 @@ async fn a_cache_refresh_pings_a_fork_that_isn_t_saved() {
     assert_eq!(texts(&task).last().map(String::as_str), Some("Again."));
 }
 
-/// A chat over the handover size hands over at its next message: the
+/// A chat over the handover size hands over at its next message. The
 /// report request goes alone first (a chat's turns end with a reply, so it
 /// can't go during one), the summary replaces the conversation, and the
 /// fresh session answers the message that was waiting.
@@ -1837,8 +1837,8 @@ async fn a_chat_over_the_handover_size_hands_over_at_its_next_message() {
     assert_eq!(histories(&fake)[3].len(), 0);
 }
 
-/// A conversation cut back while over the handover size still hands over:
-/// the cut keeps the conversation's first request (under the size) as it
+/// A conversation cut back while over the handover size still hands over.
+/// The cut keeps the conversation's first request (under the size) as it
 /// was.
 #[tokio::test]
 async fn a_cut_back_over_the_handover_size_still_hands_over() {
@@ -1903,7 +1903,7 @@ async fn finish_through_a_failure(mut run: Run) -> (Task, Vec<AgentEvent>) {
 }
 
 /// The launch after a cut back, saved before Claude Code has the edited
-/// message, keeps the cut's point: Claude Code saves the cut only with that
+/// message, keeps the cut's point. Claude Code saves the cut only with that
 /// message, so a launch that failed before it (the CLI exited, or the host
 /// crashed) resumes at the same entry again and sends the edited message,
 /// never the conversation from before the cut.
@@ -2010,7 +2010,7 @@ async fn a_branch_forks_again_after_a_failed_first_launch() {
     assert_eq!(history[1], "One.");
 }
 
-/// What a tool image sink is given for a call: its runtime ID, Claude
+/// What a tool image sink is given for a call, namely its runtime ID, Claude
 /// Code's ID, its name and its images' captions.
 type Reported = (uuid::Uuid, Option<String>, String, Vec<String>);
 
@@ -2053,7 +2053,7 @@ impl crate::tool::ToolImageSink for Images {
 /// The host's sink gets the images of an arko tool's call once (not again
 /// when Claude Code reports the result) and those of Claude Code's own
 /// `Read`, each by the call's ID in the events and Claude Code's own ID for
-/// it, and captioned alike: the file's path and size.
+/// it, and captioned alike, with the file's path and size.
 #[tokio::test]
 async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
     let fake = Fake::new(json!([[
@@ -2186,7 +2186,7 @@ impl crate::runtime::TurnContextSource for SecondUpdateWithImage {
 }
 
 /// Context with images that arrives during a turn can't go whole with a
-/// hook's text: its text goes at once, saying the image follows, and the
+/// hook's text. Its text goes at once, saying the image follows, and the
 /// image waits for the turn's end and goes with the next input, after its
 /// label.
 #[tokio::test]
@@ -2256,7 +2256,7 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     assert_eq!(injected[0], ["note:3"]);
 }
 
-/// The same for a note the user typed: its text goes at once as their
+/// The same for a note the user typed. Its text goes at once as their
 /// message, with the line saying the image follows, and the image goes with
 /// the next input.
 #[tokio::test]
@@ -2437,7 +2437,7 @@ impl crate::handover::HandoverHook for ConfigHook {
     }
 }
 
-/// The handover hook's configuration runs the fresh session: its tools and
+/// The handover hook's configuration runs the fresh session, with its tools and
 /// a system prompt written from it, and the task keeps it.
 #[tokio::test]
 async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
@@ -2478,7 +2478,7 @@ async fn a_handover_s_fresh_session_runs_on_the_hook_s_configuration() {
 }
 
 /// The handover hook's configuration brings its skills to the fresh
-/// session: its system prompt lists them and `load_skill` is served for
+/// session. Its system prompt lists them and `load_skill` is served for
 /// them, from one skill to another, from none to some, and from some to
 /// none (`load_skill` is no longer served).
 #[tokio::test]
@@ -2756,7 +2756,7 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
         AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
             .with_handover_threshold(crate::handover::HandoverThreshold::new(Some(tokens)))
     };
-    // Raised over the configured 1,000: no handover at 1,500.
+    // Raised over the configured 1,000, so no handover at 1,500.
     let fake = Fake::new(json!([[
         {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
         {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
@@ -2778,7 +2778,7 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
             .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
     );
 
-    // Lowered under the configured 1,000,000: a handover at 1,500.
+    // Lowered under the configured 1,000,000, so a handover at 1,500.
     let fake = Fake::new(json!([
         [
             {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
@@ -2829,7 +2829,7 @@ async fn a_crash_pauses_and_continuing_resumes_the_session() {
             )
         })
         .await;
-    // As arko's own runtime reports a pause: the state change that gives
+    // As arko's own runtime reports a pause, with the state change that gives
     // its cause, then the error a host answers.
     assert!(
         seen.iter().any(|event| matches!(
@@ -2874,7 +2874,7 @@ impl crate::runtime::TurnContextSource for HoldAfterFirst {
 }
 
 /// A turn the host holds is interrupted and the task pauses with the
-/// `BudgetExceeded` cause; continuing while it is still held starts no
+/// `BudgetExceeded` cause. Continuing while it is still held starts no
 /// session, and once released the session resumes.
 #[tokio::test]
 async fn a_held_turn_pauses_until_the_host_releases_it() {
@@ -3238,7 +3238,7 @@ async fn a_moved_tasks_file_paths_in_the_session_directory_become_the_tasks() {
     assert_eq!(calls[2]["input"]["file_path"], path(&project, "kept.txt"));
     assert_eq!(calls[3]["input"]["file_path"], path(&project, "m.txt"));
     assert_eq!(calls[4]["input"]["file_path"], path(&project, "src/lib.rs"));
-    // Outside the session's directory, also by `..`: refused as written.
+    // Outside the session's directory, also by `..`, refused as written.
     for (call, given) in calls[5..].iter().zip([&elsewhere, &up]) {
         assert_eq!(call["is_error"], true, "{call}");
         assert!(
@@ -3295,7 +3295,7 @@ async fn an_approved_call_of_a_moved_task_runs_in_its_directory() {
     assert_eq!(calls[0]["input"]["path"], project.display().to_string());
 }
 
-/// A task that didn't move runs where the CLI does: its calls are left as
+/// A task that didn't move runs where the CLI does, so its calls are left as
 /// the model wrote them.
 #[tokio::test]
 async fn a_task_that_didnt_move_keeps_its_calls_as_written() {
@@ -3844,7 +3844,7 @@ async fn arko_tools_get_long_mcp_limits() {
 
 #[tokio::test]
 async fn bash_calls_start_in_the_workspace() {
-    // The command guard checks each Bash call from the workspace; by default
+    // The command guard checks each Bash call from the workspace. By default
     // the CLI would keep a `cd` from the call before. The settings' `env`
     // can still change it.
     const VARIABLE: &str = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
@@ -3885,7 +3885,7 @@ async fn metered_billing_bills_the_estimate() {
 
 #[tokio::test]
 async fn claude_codes_retry_is_recorded_as_live() {
-    // As Claude Code 2.1.285 sends it: the refused response's stop_details
+    // As Claude Code 2.1.285 sends it. The refused response's stop_details
     // carry the explanation the system message leaves out, and the rest of
     // the session runs on the fallback model.
     let fake = Fake::new(json!([[
@@ -3992,7 +3992,7 @@ async fn without_a_fallback_a_standing_refusal_pauses() {
         ),
         "{reported:#?}"
     );
-    // Claude Code keeps its conversation: a change to the refused input is
+    // Claude Code keeps its conversation, so a change to the refused input is
     // answered with an error to decide, the pause standing (the command
     // was once ignored, and a host waited for ever).
     run.commands
@@ -4023,7 +4023,7 @@ async fn without_a_fallback_a_standing_refusal_pauses() {
 /// A request that fails because Claude Code can't authenticate (it isn't
 /// signed in, or its login expired or was revoked), can't bill its account
 /// or isn't allowed to make it pauses as one retrying can't fix, by the
-/// error's kind or status Claude Code reports; another failed request pauses as retries exhausted, as
+/// error's kind or status Claude Code reports, and another failed request pauses as retries exhausted, as
 /// before. Claude Code reports these on the first turn, not at its start
 /// (checked with Claude Code 2.1.286). The pause records the error's kind
 /// when Claude Code's report names one.
@@ -4212,7 +4212,7 @@ async fn wait_until_reset_waits_out_the_limit_and_continues() {
         AgentEvent::UsageLimitReached { waiting_until_unix_ms: Some(_), resets_at_unix_ms: Some(at), .. }
             if *at == resets_at * 1000
     )));
-    // No pause: the task waited and resumed its session.
+    // No pause. The task waited and resumed its session.
     assert!(!events.iter().any(|event| matches!(
         event,
         AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
@@ -4359,7 +4359,7 @@ async fn the_session_is_saved_before_it_is_sent_anything() {
 }
 
 /// A read-only built-in call is recorded running without waiting for the
-/// save; any other call waits.
+/// save, and any other call waits.
 #[tokio::test]
 async fn only_calls_with_effects_wait_for_the_save() {
     let fake = Fake::new(json!([[
@@ -4423,7 +4423,7 @@ async fn a_call_running_when_the_host_stopped_is_reported_when_the_session_resum
         )
     })
     .await;
-    // The host crashed while the call ran: what it saved last then is what
+    // The host crashed while the call ran, so what it saved last then is what
     // it runs again.
     run.handle.abort();
     let saved = recorder.latest(|task| {
@@ -4493,7 +4493,7 @@ async fn a_rerun_tool_open_at_the_stop_runs_again_for_the_resumed_session() {
 }
 
 /// A report asked for alone of a task cancelled while a call ran doesn't
-/// run the call again: the session hears its outcome is unknown, then the
+/// run the call again. The session hears its outcome is unknown, then the
 /// report's request.
 #[tokio::test]
 async fn a_report_asked_of_a_cancelled_task_runs_no_open_call_again() {
@@ -4753,7 +4753,7 @@ async fn a_call_that_finished_before_claude_code_exited_is_reported_completed() 
         saved.running_tool_calls[0].output.is_some(),
         "its result is saved"
     );
-    // Claude Code exited on its own; the host continues the task.
+    // Claude Code exited on its own, and the host continues the task.
     run.commands
         .send(UserCommand::ContinueAfterError { note: None })
         .await
@@ -4771,7 +4771,7 @@ async fn a_call_that_finished_before_claude_code_exited_is_reported_completed() 
 }
 
 /// Line ranges Claude Code passes to arko's `read_file` while they are
-/// off are ignored: the call reads the whole file. On, they read only those
+/// off are ignored, so the call reads the whole file. On, they read only those
 /// lines.
 #[tokio::test]
 async fn read_file_line_ranges_passed_while_off_are_ignored() {
@@ -4830,7 +4830,7 @@ async fn calls_that_ended_normally_are_not_reported_again() {
     run.events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
         .await;
     // Until the session closes, the finished calls are kept with their
-    // results; once it closed cleanly for the wait, nothing is open.
+    // results, and once it closed cleanly for the wait, nothing is open.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let waiting = recorder.latest(|task| {
@@ -4953,7 +4953,7 @@ async fn a_compaction_holds_the_next_call_and_continues_in_the_same_session() {
         AgentEvent::ToolRejected { tool_name, reason: Some(reason), .. }
             if tool_name == "Grep" && reason.starts_with("Held so that Claude Code can compact")
     )));
-    // One session: `/compact` as it is, then the note that continues.
+    // One session, with `/compact` as it is, then the note that continues.
     assert_eq!(fake.logged("argv").len(), 1);
     let users = user_texts(&fake);
     assert_eq!(users.len(), 3, "{users:#?}");
@@ -5030,7 +5030,7 @@ impl crate::handover::HandoverHook for KeepsQ2 {
 }
 
 /// The host answers `q1` of a batch the agent waited for (an ask without
-/// `wait` waits) and keeps `q2` open: the log settles `q1` alone, and the
+/// `wait` waits) and keeps `q2` open. The log settles `q1` alone, and the
 /// compaction after it restates `q2`.
 #[tokio::test]
 async fn a_compaction_after_a_partial_answer_restates_the_rest() {
@@ -5072,7 +5072,7 @@ async fn a_compaction_after_a_partial_answer_restates_the_rest() {
 }
 
 /// A conversation whose last turn ended over the threshold compacts as
-/// its next session starts: `/compact` first, then the task's new input.
+/// its next session starts, with `/compact` first, then the task's new input.
 #[tokio::test]
 async fn a_compaction_due_as_a_session_starts_comes_first() {
     let fake = Fake::new(json!([
@@ -5116,7 +5116,7 @@ async fn a_compaction_due_as_a_session_starts_comes_first() {
     let users = user_texts(&fake);
     assert_eq!(users.len(), 3, "{users:#?}");
     assert_eq!(users[1], "/compact");
-    // The new input continues the task: no note to continue is needed.
+    // The new input continues the task, so no note to continue is needed.
     assert!(users[2].starts_with("Second question."), "{}", users[2]);
     assert!(!users[2].contains("Claude Code compacted"), "{}", users[2]);
     assert!(users[2].contains("Keep the tests green."), "{}", users[2]);
@@ -5126,7 +5126,7 @@ async fn a_compaction_due_as_a_session_starts_comes_first() {
     assert!(second.iter().any(|arg| arg.starts_with("--resume=")));
 }
 
-/// A host's request compacts an agent that compacts: sent before its next
+/// A host's request compacts an agent that compacts. It is sent before its next
 /// run starts, before that run's input. Sent before anything, it has nothing
 /// to compact.
 #[tokio::test]
@@ -5181,7 +5181,7 @@ async fn a_host_request_compacts() {
 
 /// When Claude Code doesn't compact (`/compact` fails, or this Claude
 /// Code passes it to the model as a message), the agent hands over
-/// instead: the report request follows, and a fresh session starts from
+/// instead. The report request follows, and a fresh session starts from
 /// the report.
 #[tokio::test]
 async fn a_compaction_that_doesnt_happen_falls_back_to_a_handover() {
@@ -5285,14 +5285,14 @@ impl crate::handover::HandoverHook for Replaced {
 }
 
 /// A turn over the model's input limit as Claude Code 2.1.299 reports it
-/// when it refuses the request itself: its own message ("Prompt is too
+/// when it refuses the request itself, with its own message ("Prompt is too
 /// long", `invalid_request`), then an error result.
 fn too_long() -> Value {
     json!({"api_error": "invalid_request", "text": "Prompt is too long",
            "terminal_reason": "blocking_limit"})
 }
 
-/// The step that took the conversation over the limit: a search whose
+/// The step that took the conversation over the limit, a search whose
 /// result is too large, after one whose result fit.
 fn oversized_step() -> Value {
     json!([
@@ -5317,8 +5317,8 @@ fn history(entry: &Value) -> Vec<String> {
 }
 
 /// An agent that hands over (not compacting) whose step takes the
-/// conversation over the model's input limit hands over without that step:
-/// the session resumes at the message that ended the last request Claude
+/// conversation over the model's input limit hands over without that step.
+/// The session resumes at the message that ended the last request Claude
 /// Code answered (the first search's result), and the report is asked for
 /// there, told that the step was left out. The fresh session starts from
 /// the report.
@@ -5381,7 +5381,7 @@ async fn going_over_the_input_limit_hands_over_without_the_step() {
         "{resumed:?}"
     );
     assert!(!argv(&fake, 2).contains(&format!("--session-id={session}")));
-    // The report request went to the conversation without the step: it
+    // The report request went to the conversation without the step, and it
     // ends with the first search's result.
     let users = fake.logged("user");
     let request = users[1]["text"].as_str().unwrap();
@@ -5448,8 +5448,8 @@ async fn a_step_that_starts_a_turn_is_left_out_back_to_its_message() {
     );
 }
 
-/// A report request that goes over the limit too ends the run on the error:
-/// a step is left out once per handover.
+/// A report request that goes over the limit too ends the run on the error.
+/// A step is left out once per handover.
 #[tokio::test]
 async fn a_step_is_left_out_once() {
     let fake = Fake::new(json!([
@@ -5561,7 +5561,7 @@ async fn claude_codes_own_compaction_is_reported() {
     assert!(!argv.iter().any(|arg| arg.contains("autoCompactEnabled")));
 }
 
-// `text_reply_ends_task`: a turn that ends with text is the final reply.
+// With `text_reply_ends_task`, a turn that ends with text is the final reply.
 
 /// `config` for an agent whose reply in text ends the task.
 fn replying(fake: &Fake, tools: &[&str]) -> AgentConfig {
@@ -5722,7 +5722,7 @@ async fn an_agent_offered_no_tools_is_told_nothing_about_tools() {
     assert!(!system.contains("mcp__"), "{system}");
 }
 
-/// After `ask_user`, Claude Code is told to end its turn: that turn's text
+/// After `ask_user`, Claude Code is told to end its turn. That turn's text
 /// is not the final reply, and the task waits for the answer. The reply
 /// after it ends the task.
 #[tokio::test]
@@ -5821,7 +5821,7 @@ impl crate::runtime::TurnContextSource for AnswersMidTurn {
 
 /// The agent asks and waits, but goes on working in the same turn, and the
 /// answer reaches it there as a note. When the turn ends, the task doesn't
-/// wait for the questions answered meanwhile: a batch answered whole ends
+/// wait for the questions answered meanwhile. A batch answered whole ends
 /// the turn as any other turn does, and of one answered in part, only the
 /// rest is waited for.
 #[tokio::test]
@@ -5918,7 +5918,7 @@ async fn questions_answered_while_the_turn_goes_on_are_not_waited_for() {
     }
 }
 
-/// The handover report comes before the final reply: the text of the turn
+/// The handover report comes before the final reply. The text of the turn
 /// the report was asked for in is the report, and the reply in the fresh
 /// conversation ends the task.
 #[tokio::test]
@@ -5943,8 +5943,8 @@ async fn a_handover_report_is_not_the_final_reply() {
     assert_eq!(completions(&events), ["Searched a, b and c."]);
 }
 
-/// A final reply whose request crossed the handover size ends the task:
-/// the report asked for meanwhile hadn't reached the model, as a
+/// A final reply whose request crossed the handover size ends the task.
+/// The report asked for meanwhile hadn't reached the model, as a
 /// `complete_task` call would end it.
 #[tokio::test]
 async fn a_reply_before_the_report_request_reaches_the_model_ends_the_task() {
@@ -5958,8 +5958,8 @@ async fn a_reply_before_the_report_request_reaches_the_model_ends_the_task() {
     assert_eq!(fake.logged("user").len(), 1);
 }
 
-/// `/compact` and the turn arko interrupted for it are not final replies;
-/// the reply after the compaction ends the task. A reply whose request
+/// `/compact` and the turn arko interrupted for it are not final replies.
+/// The reply after the compaction ends the task. A reply whose request
 /// crossed the size ends the task before compacting, as `complete_task`
 /// does, and the next run compacts first.
 #[tokio::test]
@@ -6149,7 +6149,7 @@ async fn context_over_the_hooks_limit_comes_with_the_next_results() {
     assert!(items.left.lock().unwrap().is_empty());
 }
 
-/// The same for context sent to the agent (messages, terminal updates): the
+/// The same for context sent to the agent (messages, terminal updates). The
 /// injections that don't fit wait for the next result, in order.
 #[tokio::test]
 async fn injected_context_over_the_hooks_limit_comes_with_the_next_results() {
@@ -6370,7 +6370,7 @@ async fn a_part_never_acknowledged_leaves_its_note_whole_for_the_next_input() {
 }
 
 /// Once the first part's call is reported, the conversation holds the part
-/// with its marker and the queue starts with the rest, in one step: every
+/// with its marker and the queue starts with the rest, in one step. Every
 /// snapshot holds the note once or not at all, and never its mark without
 /// it. Claude Code exiting with the rest in flight leaves the rest, and the
 /// typed note sent with its hook, pending in order for the next input.
@@ -6496,7 +6496,7 @@ async fn a_typed_note_waits_until_a_hook_carries_what_is_ahead_of_it() {
     let runtime = with_updates(&recorder, vec![noted(&note, TYPED_NOTE)]);
     let (task, _) = start_with(task, runtime).finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    // Sent with the second call's hook: the fake logs it as it reads it,
+    // Sent with the second call's hook. The fake logs it as it reads it,
     // which can be before it reads the hook's answer.
     let events = fake
         .log()
@@ -6720,7 +6720,7 @@ async fn a_note_completed_before_its_result_joins_its_hooks_record() {
 }
 
 /// An update's content and the part the user typed each carry their own
-/// ids: the task records each with its item, and each is reported as its
+/// ids. The task records each with its item, and each is reported as its
 /// item reaches the model.
 #[tokio::test]
 async fn an_updates_ids_go_with_their_own_items() {
@@ -6811,7 +6811,7 @@ impl crate::snapshot::TaskSnapshotSink for SlowSaves {
 
 /// The host's output for a built-in, too long for its answer, can't be
 /// given again, so the task is saved with its rest before the answer goes
-/// out: no answer has reached the CLI when that save ends.
+/// out. No answer has reached the CLI when that save ends.
 #[tokio::test]
 async fn a_denials_rest_is_saved_before_the_denial_goes_out() {
     let fake = Fake::new(json!([[
@@ -6858,7 +6858,7 @@ async fn a_denials_rest_is_saved_before_the_denial_goes_out() {
 /// A long note's first part goes in a hook, and its rest with the next
 /// input after the open turn, as a context message of its own after the
 /// runtime's note. The next turn goes over the input limit, so the step is
-/// left out and the report asked for: the context messages the task
+/// left out and the report asked for. The context messages the task
 /// recorded stay, their records following them, so every record points at
 /// the context it holds.
 #[tokio::test]
@@ -6910,7 +6910,7 @@ async fn a_step_left_out_keeps_the_context_the_task_recorded() {
     assert!(texts_before[rest - 1].starts_with("Your turn ended"));
     assert!(before.runtime_messages.contains(&(rest - 1)));
     assert!(!before.runtime_messages.contains(&rest));
-    // With the step left out, before the fresh conversation: every record
+    // With the step left out, before the fresh conversation, every record
     // points at a context message, and they hold all the context.
     let left_out = recorder.latest(|task| task.handover_requested.is_some());
     let texts = texts(&left_out);
@@ -7108,7 +7108,7 @@ async fn a_moved_arko_call_answers_claude_code_at_once() {
 }
 
 /// A monitor a Claude Code agent starts through arko's tool host alerts it
-/// as moved calls send notes: its alert ends the agent's wait, and goes to
+/// as moved calls send notes. Its alert ends the agent's wait, and goes to
 /// the CLI with that call's PostToolUse hook.
 #[tokio::test]
 async fn a_monitor_started_in_claude_code_alerts_the_agent() {
@@ -7169,7 +7169,7 @@ async fn a_monitor_started_in_claude_code_alerts_the_agent() {
 }
 
 /// A host's record of questions with an allocator another run already took
-/// numbers from: the next ask is numbered from 43.
+/// numbers from. The next ask is numbered from 43.
 #[derive(Default)]
 struct SharedNumbers {
     asked: std::sync::Mutex<Vec<crate::questions::AskedQuestion>>,

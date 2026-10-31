@@ -147,9 +147,9 @@ impl super::super::TurnContextSource for HoldWhile {
     }
 }
 
-/// A held request isn't made: the task pauses with the
+/// A held request isn't made. The task pauses with the
 /// `BudgetExceeded` cause, whatever its LLM error policy, and
-/// continuing asks again; once released, the request is made without
+/// continuing asks again, and once released, the request is made without
 /// an error note.
 #[tokio::test]
 async fn a_held_request_pauses_the_task_until_it_is_released() {

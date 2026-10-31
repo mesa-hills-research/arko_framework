@@ -1,5 +1,5 @@
 //! Context sent with `InjectContext` is never lost once the runtime has
-//! taken it from the command channel: it goes into the conversation where a
+//! taken it from the command channel. It goes into the conversation where a
 //! user message can go, or is saved with the task
 //! (`Task::pending_context_injections`) and added at the first safe turn
 //! boundary after the task runs again, in the order sent, once. A native
@@ -21,7 +21,7 @@ use futures::StreamExt;
 
 const UPDATE: &str = "# Workflow context update\n\n";
 
-/// The conversation's context updates: where each is, and the context it
+/// The conversation's context updates, where each is, and the context it
 /// carries (without the sections the runtime appends to a user message).
 fn updates(conversation: &ai::Conversation) -> Vec<(usize, String)> {
     conversation
@@ -66,7 +66,7 @@ fn last_assistant(conversation: &ai::Conversation) -> usize {
 
 /// Every native turn's calls are answered by the message after it, or the
 /// turn is the conversation's last message and still waits for its
-/// results: nothing comes between a call and its result.
+/// results. Nothing comes between a call and its result.
 fn assert_nothing_between_calls_and_results(conversation: &ai::Conversation) {
     let mut conversation = conversation.clone();
     if conversation
@@ -148,9 +148,9 @@ fn states(events: &[AgentEvent]) -> Vec<TaskState> {
         .collect()
 }
 
-/// L1: a task suspended at a turn boundary while a refusal fallback is
+/// L1. A task suspended at a turn boundary while a refusal fallback is
 /// pending keeps the context the fallback holds back, saved with it. Run
-/// again, the fallback answers the refused input alone; the saved context
+/// again, the fallback answers the refused input alone, and the saved context
 /// follows, once, before context sent after the resume.
 #[tokio::test(start_paused = true)]
 async fn context_held_for_a_pending_fallback_survives_a_suspension() {
@@ -205,7 +205,7 @@ async fn context_held_for_a_pending_fallback_survives_a_suspension() {
 }
 
 /// Sends context through the task's command channel as it runs, then drops
-/// the channel's last sender: a host that shuts down right after sending.
+/// the channel's last sender, such as a host that shuts down right after sending.
 #[derive(Debug)]
 struct SendsThenCloses(std::sync::Mutex<Option<mpsc::Sender<UserCommand>>>);
 
@@ -303,7 +303,7 @@ async fn context_taken_before_a_refusal_leaves_it_resolvable() {
 
 /// As the loop stops, context stays with the task while any of the last
 /// turn's results is not in the conversation, even in a state that awaits
-/// nothing; once they all are, it is added.
+/// nothing, and once they all are, it is added.
 #[test]
 fn context_waits_for_every_result_of_the_last_turn() {
     let call = native_call("read", "read_file", serde_json::json!({}));
@@ -346,7 +346,7 @@ fn context_waits_for_every_result_of_the_last_turn() {
     }
 }
 
-/// L2: when the host's side of the channel closes while the loop takes the
+/// L2. When the host's side of the channel closes while the loop takes the
 /// queued commands, the context already taken is added to the interrupted
 /// task's conversation, after the results of the turn before.
 #[tokio::test]
@@ -391,7 +391,7 @@ async fn a_disconnect_while_taking_commands_keeps_the_context_taken() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// L3: context queued ahead of a cancel is recorded in the cancelled task's
+/// L3. Context queued ahead of a cancel is recorded in the cancelled task's
 /// conversation, at a turn boundary and during an approval wait (after the
 /// results of the calls it waited on), and the cancel still makes no
 /// request.
@@ -454,8 +454,8 @@ async fn context_queued_ahead_of_a_cancel_is_recorded() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// L4: a suspension during a stream keeps the partial output, then the
-/// context taken during the stream (no call is open: the calls it announced
+/// L4. A suspension during a stream keeps the partial output, then the
+/// context taken during the stream (no call is open, as the calls it announced
 /// are not in the conversation), and reports the state (N3). Run again, the
 /// context is sent once.
 #[tokio::test]
@@ -514,7 +514,7 @@ async fn a_suspension_during_a_stream_adds_the_context_taken_after_the_partial_o
     assert!(updates[0].0 < last_assistant(&task.conversation));
 }
 
-/// L4: a suspension during a retry wait adds the context taken during the
+/// L4. A suspension during a retry wait adds the context taken during the
 /// wait to the conversation, and a run again sends it once.
 #[tokio::test(start_paused = true)]
 async fn a_suspension_during_a_retry_wait_adds_the_context_taken() {
@@ -545,8 +545,8 @@ async fn a_suspension_during_a_retry_wait_adds_the_context_taken() {
     assert_eq!(update_texts(&task.conversation), ["Retry note."]);
 }
 
-/// L4: in every awaiting state, context taken while the task waits is saved
-/// with the suspended task, not added: the answer the task waits for (such
+/// L4. In every awaiting state, context taken while the task waits is saved
+/// with the suspended task, not added, because the answer the task waits for (such
 /// as a turn's tool results) comes first.
 #[tokio::test]
 async fn context_taken_in_an_awaiting_state_is_saved_with_the_suspended_task() {
@@ -615,7 +615,7 @@ fn results_message(conversation: &ai::Conversation, call_id: &str) -> usize {
         .unwrap()
 }
 
-/// L4: context taken while a native turn awaits approval is saved with the
+/// L4. Context taken while a native turn awaits approval is saved with the
 /// suspended task, and after a save, a load and the approval it goes into
 /// the conversation right after the turn's results, before context sent
 /// later, once.
@@ -687,8 +687,8 @@ async fn context_taken_during_an_approval_wait_follows_the_results_after_a_resum
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// L4: context taken while the task waits for the answer to `ask_user` is
-/// saved with it; answered through the task, the context follows the answer.
+/// L4. Context taken while the task waits for the answer to `ask_user` is
+/// saved with it. Answered through the task, the context follows the answer.
 #[tokio::test]
 async fn context_taken_while_a_question_waits_follows_the_answer() {
     let workspace = workspace();
@@ -728,7 +728,7 @@ async fn context_taken_while_a_question_waits_follows_the_answer() {
     let task = finish(agent).await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert_calls_paired(&task.conversation);
-    // The auto-approved question's result went in as it was asked; the
+    // The auto-approved question's result went in as it was asked, and the
     // answer follows it.
     let answer = task
         .conversation
@@ -744,7 +744,7 @@ async fn context_taken_while_a_question_waits_follows_the_answer() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// L4: context taken while a native turn's tool error pauses the task (its
+/// L4. Context taken while a native turn's tool error pauses the task (its
 /// results wait with it) is saved with it, and follows the results once
 /// recovery is approved.
 #[tokio::test]
@@ -812,8 +812,8 @@ fn slow_down(agent: &mut AgentLoop) {
     push(agent, scripted(complete_response()));
 }
 
-/// L4: context sent while the plan-usage slow-down waits before a request
-/// joins that request, not the one after; a suspension during the wait
+/// L4. Context sent while the plan-usage slow-down waits before a request
+/// joins that request, not the one after, and a suspension during the wait
 /// keeps it.
 #[tokio::test(start_paused = true)]
 async fn context_sent_during_a_slow_down_joins_the_request_after_it() {
@@ -854,7 +854,7 @@ async fn context_sent_during_a_slow_down_joins_the_request_after_it() {
     assert!(task.pending_context_injections.is_empty());
 }
 
-/// N3: a suspension taken at a turn boundary reports the task's state, as a
+/// N3. A suspension taken at a turn boundary reports the task's state, as a
 /// suspension anywhere else does.
 #[tokio::test]
 async fn a_suspension_at_a_turn_boundary_reports_the_state() {
@@ -880,7 +880,7 @@ async fn a_suspension_at_a_turn_boundary_reports_the_state() {
 }
 
 /// Context sent with the approval of a call, as a workflow's driver
-/// approves every call, reaches the request right after the call: the loop
+/// approves every call, reaches the request right after the call. The loop
 /// takes the queued commands after an approved call too.
 #[tokio::test]
 async fn context_sent_with_an_approval_reaches_the_very_next_request() {
@@ -926,7 +926,7 @@ async fn context_sent_with_an_approval_reaches_the_very_next_request() {
 }
 
 /// Context taken during a task's final turn is not added to the completed
-/// task's conversation, which the model never read after it; the task keeps
+/// task's conversation, which the model never read after it, and the task keeps
 /// it, and a continuation sends it once.
 #[tokio::test(start_paused = true)]
 async fn context_taken_in_the_final_turn_waits_for_a_continuation() {
@@ -993,7 +993,7 @@ impl crate::runtime::TurnContextSource for Identified {
 }
 
 /// Each context update is reported once it is in the conversation, with
-/// the identifiers of what it holds: the injected content the source
+/// the identifiers of what it holds, namely the injected content the source
 /// identifies, then the source's own. The part of the update the user typed
 /// follows the rest in the same message.
 #[tokio::test]

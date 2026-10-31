@@ -17,7 +17,7 @@ pub(super) fn harness() -> (
     .role_description("test".into())
     .instructions("test".into())
     .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
-    // Short, exact delays: these tests check the mechanisms, not the
+    // Short, exact delays, because these tests check the mechanisms, not the
     // default timing.
     .llm_retry_config(LLMRetryConfig {
         initial_delay_ms: 250,
@@ -288,7 +288,7 @@ async fn stream_capacity_error_retries_without_requesting_configuration_changes(
         })
         .await
         .unwrap();
-    // Retried by the default rate-limit retry: 1 s without a server delay.
+    // Retried by the default rate-limit retry, 1 s without a server delay.
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert_eq!(
         agent
@@ -380,7 +380,7 @@ async fn permanent_failures_pause_immediately_and_inform_policy_returns_to_host(
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.llm_error_policy =
         LLMErrorPolicy::RetryThenInformAgent { max_attempts: 1 };
-    // Run the real runtime with missing provider configuration: it must
+    // Run the real runtime with missing provider configuration. It must
     // return the preserved task to the host instead of spinning Interrupted.
     let task = timeout(Duration::from_secs(1), agent.run())
         .await
@@ -407,8 +407,8 @@ async fn excessive_server_delay_stops_without_retrying_early() {
     ));
 }
 
-/// The elapsed budget never cuts off a request in flight: a retried request
-/// that runs past it completes. It still decides whether to try again: a
+/// The elapsed budget never cuts off a request in flight. A retried request
+/// that runs past it completes. It still decides whether to try again. A
 /// failure after it is spent ends recovery. (Real time, short durations.)
 #[tokio::test]
 async fn a_retried_request_past_the_elapsed_budget_still_completes() {
@@ -515,7 +515,7 @@ async fn peer_context_does_not_reset_recovery_limits() {
     ));
 }
 
-// Real sockets run on the real clock: a paused one would jump to the next
+// Real sockets run on the real clock, because a paused one would jump to the next
 // timer while they wait.
 #[tokio::test]
 async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losing_task() {
@@ -594,7 +594,7 @@ async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losi
     assert!(task.usage_history.is_empty());
 }
 
-/// The default recovery lasts long enough for its limits to apply: ten
+/// The default recovery lasts long enough for its limits to apply. Ten
 /// attempts whose backoff grows from 2 s to the 64 s cap, and whose delays
 /// (at their largest, without jitter) add up to more than the 5-minute
 /// elapsed budget, which then ends recovery.
@@ -670,8 +670,8 @@ async fn refresh_failure_consumes_the_shared_budget_before_model_request() {
     let (mut agent, _events, _commands) = harness();
     let model_calls = std::sync::atomic::AtomicUsize::new(0);
     let started = tokio::time::Instant::now();
-    // The production operation performs refresh before creating a stream;
-    // inject a transient refresh error at that boundary, then a success.
+    // The production operation performs refresh before creating a stream.
+    // Inject a transient refresh error at that boundary, then a success.
     for refresh_succeeds in [false, true] {
         agent
             .run_llm_attempt(async {
@@ -813,7 +813,7 @@ async fn full_runtime_capacity_recovers_after_old_limits_and_completes_once() {
     assert_eq!((retries, tools), (12, 1));
 }
 
-/// A retried response that runs a long time and then fails is retried: the
+/// A retried response that runs a long time and then fails is retried. The
 /// budget the first failure started ended when the provider accepted the
 /// retry. (Real time, short durations.)
 #[tokio::test]
@@ -850,7 +850,7 @@ async fn a_failure_late_in_a_long_retried_response_is_retried() {
 }
 
 /// In the full runtime, a retried stream that runs past the elapsed budget
-/// is not cut off: it completes and the task goes on. (Real time, short
+/// is not cut off. It completes and the task goes on. (Real time, short
 /// durations.)
 #[tokio::test]
 async fn full_runtime_lets_a_retried_stream_run_past_the_elapsed_budget() {
@@ -1127,9 +1127,9 @@ async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
         Some("turn-1")
     );
 
-    // The trace records the next request before it is sent; nothing listens
+    // The trace records the next request before it is sent, and nothing listens
     // on the port, so the call itself fails. Real sockets run on the real
-    // clock: a paused one would jump to the next timer while they wait.
+    // clock, because a paused one would jump to the next timer while they wait.
     tokio::time::resume();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -1289,7 +1289,7 @@ async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
 }
 
 /// A refusal delivered as an error (Gemini generation-blocked codes), before
-/// or after the stream starts, is reported like other refusals; text
+/// or after the stream starts, is reported like other refusals, and text
 /// streamed before it is not kept.
 #[tokio::test(start_paused = true)]
 async fn refusals_reported_as_errors_are_reported_and_drop_partial_text() {
@@ -1372,7 +1372,7 @@ fn retries_scheduled(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<(u32, u64, 
         .collect()
 }
 
-/// 503, 503, a completed response without a tool call, 503, done: a
+/// 503, 503, a completed response without a tool call, 503, done. A
 /// completed response ends the elapsed budget the failures before it
 /// started, even one the runtime can't use, so the retry after the last 503
 /// starts a new episode (its `elapsed_ms` is 0, not the 2 s of waits
@@ -1419,7 +1419,7 @@ async fn a_completed_unusable_response_ends_the_elapsed_budget() {
 
 /// A response the runtime can't use is asked again at once, even when the
 /// elapsed budget is already spent (a request accepted after it ran out,
-/// whose stream then ended without its final response): the note retry
+/// whose stream then ended without its final response). The note retry
 /// doesn't resume the budget or wait on its deadline. (7cb1970)
 #[tokio::test(start_paused = true)]
 async fn a_note_retry_goes_ahead_when_the_elapsed_budget_is_spent() {
@@ -1458,7 +1458,7 @@ async fn a_note_retry_goes_ahead_when_the_elapsed_budget_is_spent() {
     assert_eq!(retries_scheduled(&mut events), [(1, 0, 0)]);
 }
 
-/// A response that fails after streaming part of it is retried: the host is
+/// A response that fails after streaming part of it is retried. The host is
 /// told to drop what it streamed (as much as it was sent of it) before the
 /// error and the retry are reported, nothing of it comes after, and the
 /// retry streams anew.

@@ -1,21 +1,21 @@
 //! The overflow guard and the opt-in caps on tool results
-//! ([`ToolResultLimits`](crate::agent_config::ToolResultLimits)): token
+//! ([`ToolResultLimits`](crate::agent_config::ToolResultLimits)). It covers token
 //! estimates, which results to shorten, head-and-tail shortening, and the
 //! notices the model reads.
 //!
 //! Tokens are estimated from bytes. No tokenizer is in this crate's
 //! dependencies. Two estimates are used:
 //!
-//! - **Whether to act** uses a lower bound: the latest request's reported
+//! - **Whether to act** uses a lower bound, the latest request's reported
 //!   input tokens, plus every byte added since at
 //!   [`LEAST_BYTES_PER_TOKEN`] (10). No content measured packs that many
-//!   bytes into a token (o200k, the GPT-5 and GPT-6 tokenizer: code 3.6 to
-//!   4.8, English 3.8 to 4.3, padded tables 8.6, Claude's tokenizer counts
+//!   bytes into a token (o200k, the GPT-5 and GPT-6 tokenizer, gives code 3.6 to
+//!   4.8, English 3.8 to 4.3, padded tables 8.6, and Claude's tokenizer counts
 //!   more tokens for the same text, not fewer), so the guard acts only when
 //!   the next request would certainly be over the model's input limit.
 //!   When it is unsure it sends the request. An underestimate is caught by
 //!   the provider's overflow error and the bounded recovery.
-//! - **How much to keep** uses the calibrated estimate: the bytes per token
+//! - **How much to keep** uses the calibrated estimate, the bytes per token
 //!   of the task's own requests (each request's size in bytes over the
 //!   input tokens the provider reported for it). Content without bytes here
 //!   (images, reasoning a provider replays) counts in the reported tokens
@@ -31,12 +31,12 @@ use super::event::ShortenReason;
 /// Bytes per token before a task's own usage calibrates it. About right
 /// for code and English with current tokenizers.
 pub const DEFAULT_BYTES_PER_TOKEN: f64 = 3.0;
-/// The calibrated ratio's bounds: dense text (JSON, non-Latin scripts) has
+/// The calibrated ratio's bounds. Dense text (JSON, non-Latin scripts) has
 /// fewer bytes per token, prose more.
 pub(crate) const MIN_BYTES_PER_TOKEN: f64 = 2.0;
 pub(crate) const MAX_BYTES_PER_TOKEN: f64 = 4.0;
 /// The bytes per token of the lower bound that decides whether the guard
-/// acts: more than any content measured (see the module docs).
+/// acts, more than any content measured (see the module docs).
 pub(crate) const LEAST_BYTES_PER_TOKEN: f64 = 10.0;
 
 /// The default margin is this share of the input limit...
@@ -48,11 +48,11 @@ const PREVIEW_SHARE: f64 = 0.02;
 /// ...between these bounds.
 const MIN_PREVIEW_TOKENS: usize = 4_000;
 const MAX_PREVIEW_TOKENS: usize = 16_000;
-/// A preview smaller than this isn't worth keeping: the result is replaced
+/// A preview smaller than this isn't worth keeping, so the result is replaced
 /// by its notice alone. A result no larger than this beyond its notice is
 /// never shortened by the guard.
 pub(crate) const MIN_KEPT_TOKENS: usize = 500;
-/// Room for what a notice says beyond its text without lines kept: the
+/// Room for what a notice says beyond its text without lines kept, namely the
 /// lines shown, and the marker between head and tail.
 const NOTICE_SLACK_BYTES: usize = 80;
 /// The share of a preview taken from the start of the result.
@@ -63,7 +63,7 @@ pub(crate) fn tokens(bytes: usize, ratio: f64) -> usize {
     (bytes as f64 / ratio).ceil() as usize
 }
 
-/// The fewest tokens `bytes` bytes of text take: at
+/// The fewest tokens `bytes` bytes of text take, at
 /// [`LEAST_BYTES_PER_TOKEN`], rounded down.
 pub(crate) fn least_tokens(bytes: usize) -> usize {
     (bytes as f64 / LEAST_BYTES_PER_TOKEN) as usize
@@ -82,21 +82,21 @@ pub(crate) fn calibrated_ratio(request_bytes: usize, input_tokens: usize) -> Opt
     })
 }
 
-/// The default margin for an input limit of `limit` tokens: 2%, at least
+/// The default margin for an input limit of `limit` tokens, which is 2%, at least
 /// 4,000 tokens.
 pub(crate) fn default_margin(limit: usize) -> usize {
     ((limit as f64 * MARGIN_SHARE) as usize).max(MIN_MARGIN_TOKENS)
 }
 
 /// The size of a shortened result's preview for an input limit of `limit`
-/// tokens: 2%, between 4,000 and 16,000 tokens.
+/// tokens, which is 2%, between 4,000 and 16,000 tokens.
 pub(crate) fn preview_tokens(limit: usize) -> usize {
     ((limit as f64 * PREVIEW_SHARE) as usize).clamp(MIN_PREVIEW_TOKENS, MAX_PREVIEW_TOKENS)
 }
 
-/// The bytes a message adds to a request, as far as they are known here:
-/// its text, its tool calls' names and arguments, and its tool results'
-/// output. Images and replayed reasoning are not counted (see the module
+/// The bytes a message adds to a request, as far as they are known here
+/// (its text, its tool calls' names and arguments, and its tool results'
+/// output). Images and replayed reasoning are not counted (see the module
 /// docs).
 pub(crate) fn message_bytes(message: &ai::Message) -> usize {
     let content: usize = message
@@ -116,7 +116,7 @@ pub(crate) fn message_bytes(message: &ai::Message) -> usize {
     content + calls
 }
 
-/// The bytes of a request: the system message, the messages, and the tool
+/// The bytes of a request, namely the system message, the messages, and the tool
 /// definitions ([`ai::RequestSizes::text_bytes`]).
 pub(crate) fn request_bytes(
     conversation: &ai::Conversation,
@@ -165,11 +165,11 @@ pub(crate) struct Cut {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Room {
     /// Tokens the results may take, at the calibrated estimate, for the
-    /// request to fit the input limit less the margin: how much shortened
+    /// request to fit the input limit less the margin, which is how much shortened
     /// results keep.
     pub available: usize,
     /// Tokens left under the input limit by the lower bound of the rest of
-    /// the request: the results certainly overflow it when their own lower
+    /// the request. The results certainly overflow it when their own lower
     /// bound is more.
     pub certain: usize,
     /// A result's lower bound, in tokens per calibrated token (the
@@ -183,14 +183,14 @@ pub(crate) struct Room {
 /// (`sizes`), the tokens its notice would add (`notices`), its opt-in cap
 /// (`caps`), and with the overflow guard on, the [`Room`]. A result over
 /// its cap is cut to the cap. Then the guard acts only while the results
-/// certainly overflow (their lower bound is over [`Room::certain`]): the
+/// certainly overflow (their lower bound is over [`Room::certain`]). The
 /// largest are cut first, each to the preview. If that leaves the overflow
 /// certain, the room the calibrated estimate leaves is shared between the
 /// results above [`MIN_KEPT_TOKENS`], a share below it keeping the notice
 /// alone. A result is never replaced by something larger (notices count at
 /// their size), and results no larger than [`MIN_KEPT_TOKENS`] beyond their
 /// notice are never cut by the guard. When the overflow isn't certain,
-/// nothing is cut: the request is sent, and the provider's overflow error
+/// nothing is cut. The request is sent, and the provider's overflow error
 /// and the bounded recovery catch an underestimate.
 pub(crate) fn plan(
     sizes: &[usize],
@@ -211,7 +211,7 @@ pub(crate) fn plan(
     let Some(room) = room else {
         return cuts;
     };
-    // What a result takes: all of it, or what it keeps and its notice.
+    // What a result takes, all of it, or what it keeps and its notice.
     let kept = |cuts: &[Option<Cut>], index: usize| {
         cuts[index].map_or(sizes[index], |cut| cut.keep + notices[index])
     };
@@ -245,7 +245,7 @@ pub(crate) fn plan(
     if !certain(&cuts) {
         return cuts;
     }
-    // The previews leave it certain (the context is nearly full): the room
+    // The previews leave it certain (the context is nearly full), so the room
     // the calibrated estimate leaves is shared between the results above
     // the smallest worth keeping, smallest first, each keeping all it has
     // while its share allows.
@@ -288,7 +288,7 @@ pub(crate) struct NoticeFacts<'a> {
     /// The result's size in bytes and lines.
     pub bytes: usize,
     pub lines: usize,
-    /// What was kept: the first and last lines (both 0 for none).
+    /// What was kept, the first and last lines (both 0 for none).
     pub head_lines: usize,
     pub tail_lines: usize,
     /// The cap a [`ShortenReason::ResultCap`] result was over.
@@ -322,7 +322,7 @@ fn grouped(number: usize) -> String {
 }
 
 /// The notice after a shortened result, the only part of the guard the
-/// model sees: how large the result was, what of it is shown, and how to
+/// model sees. It says how large the result was, what of it is shown, and how to
 /// get the rest. With a terminal, it names commands (for a `read_file`
 /// result, on its file). Without one, `read_file`'s line ranges when they
 /// are on, or else to ask for less. Read ranges are never mentioned unless
@@ -416,7 +416,7 @@ fn ceil_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-/// `text` cut to about `keep_bytes` bytes: [`HEAD_SHARE`] from its start
+/// `text` cut to about `keep_bytes` bytes, with [`HEAD_SHARE`] from its start
 /// and the rest from its end, on line boundaries where a line fits, with a
 /// marker between them saying how much was left out. `keep_bytes` of 0
 /// keeps nothing.
@@ -557,7 +557,7 @@ mod tests {
             [None, None]
         );
         // Over the calibrated estimate's room, but not certainly over the
-        // limit: sent as they are.
+        // limit, so sent as they are.
         assert_eq!(
             keeps(&guard(&[5_000, 4_000], room(3_000, 4_000))),
             [None, None]
@@ -572,7 +572,7 @@ mod tests {
         let cuts = guard(&[1_000, 2_000_000, 3_000], room(50_000, 60_000));
         assert_eq!(keeps(&cuts), [None, Some(5_000), None]);
         assert_eq!(cuts[1].unwrap().reason, ShortenReason::Overflow);
-        // Two large parallel results: both, largest first, while the
+        // Two large parallel results. Both are cut, largest first, while the
         // overflow is certain.
         let cuts = guard(&[600_000, 2_000_000, 100], room(50_000, 100_000));
         assert_eq!(keeps(&cuts), [Some(5_000), Some(5_000), None]);
@@ -582,20 +582,20 @@ mod tests {
 
     #[test]
     fn a_nearly_full_context_shares_what_is_left_and_keeps_small_results() {
-        // 6,000 tokens left for two large results: 3,000 each, notices
+        // 6,000 tokens left for two large results, 3,000 each, notices
         // included.
         let cuts = guard(&[90_000, 80_000], room(6_000, 1_000));
         assert_eq!(keeps(&cuts), [Some(2_900), Some(2_900)]);
         // A result under the preview shares the room too.
         let cuts = guard(&[4_000, 100], room(3_000, 1_000));
         assert_eq!(keeps(&cuts), [Some(2_800), None]);
-        // Nothing left: the large result keeps its notice; a small one is
+        // Nothing left. The large result keeps its notice, and a small one is
         // never replaced, by a notice larger than it or at all.
         let cuts = guard(&[90_000, 10, 550], room(0, 0));
         assert_eq!(keeps(&cuts), [Some(0), None, None]);
         let cuts = plan(&[150], &[200], &[None], room(0, 0));
         assert_eq!(keeps(&cuts), [None]);
-        // Too little to share: the large ones keep their notices.
+        // Too little to share, so the large ones keep their notices.
         let cuts = guard(&[90_000, 80_000, 200], room(700, 0));
         assert_eq!(keeps(&cuts), [Some(0), Some(0), None]);
     }
@@ -634,7 +634,7 @@ mod tests {
             assert_eq!(rest, format!("line {number}"));
         }
         // One long line (minified code) is cut mid-line, on a character
-        // boundary: the head's end (803 bytes for 1,004) and the tail's
+        // boundary, as the head's end (803 bytes for 1,004) and the tail's
         // start (201 bytes from the end) both fall inside a 2-byte
         // character.
         let minified = "é".repeat(10_000);

@@ -1,5 +1,5 @@
-//! The opt-in `user_command_timeout_seconds`: one deadline per wait for a
-//! command, set when the wait starts. (Paused time: the waits are exact.)
+//! The opt-in `user_command_timeout_seconds` gives one deadline per wait for a
+//! command, set when the wait starts. (Paused time, so the waits are exact.)
 
 use super::tool_call_tests::{agent, complete, config, result_for, workspace};
 use super::*;
@@ -24,7 +24,7 @@ fn approving_config() -> AgentConfig {
     config
 }
 
-/// An agent waiting for error-recovery approval; approved, it completes
+/// An agent waiting for error-recovery approval. Approved, it completes
 /// (its `complete_task` needs approval when `approving`).
 fn waiting_for_recovery(
     approving: bool,
@@ -76,7 +76,7 @@ async fn sleep_until(start: TokioInstant, seconds: u64) {
 }
 
 /// Context injected during the wait (as a workflow's message bus does)
-/// doesn't restart its deadline: the wait ends at its deadline, and a
+/// doesn't restart its deadline. The wait ends at its deadline, and a
 /// decision after it is too late.
 #[tokio::test(start_paused = true)]
 async fn injected_context_does_not_extend_the_wait() {
@@ -179,7 +179,7 @@ async fn ignored_commands_do_not_extend_the_wait() {
 }
 
 /// A refusal resolution the task can't apply (here, it has no refused
-/// input) is reported and the wait goes on: it doesn't restart the
+/// input) is reported and the wait goes on. It doesn't restart the
 /// deadline either.
 #[tokio::test(start_paused = true)]
 async fn a_refusal_resolution_that_fails_does_not_extend_the_wait() {
@@ -215,7 +215,7 @@ async fn a_refusal_resolution_that_fails_does_not_extend_the_wait() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A decision ends the wait; a later wait has a deadline of its own, a
+/// A decision ends the wait, and a later wait has a deadline of its own, a
 /// full timeout from when it starts.
 #[tokio::test(start_paused = true)]
 async fn a_decision_ends_the_wait_and_the_next_wait_has_its_own_deadline() {
@@ -257,7 +257,7 @@ async fn a_decision_ends_the_wait_and_the_next_wait_has_its_own_deadline() {
 
 /// A wait the host says it is deciding (`HostDeciding`, as a workflow does
 /// for each wait of its agents) has no deadline, however long the decision
-/// takes; the next wait is timed again.
+/// takes, and the next wait is timed again.
 #[tokio::test(start_paused = true)]
 async fn a_wait_the_host_is_deciding_is_not_timed() {
     let (agent, mut events, commands, workspace) = waiting_for_recovery(true);
@@ -292,7 +292,7 @@ async fn a_wait_the_host_is_deciding_is_not_timed() {
 }
 
 /// A saved task holding a zero timeout (which ended every wait at once,
-/// before validation rejected it) still loads; running it fails at start
+/// before validation rejected it) still loads, and running it fails at start
 /// with the validation error, until the value is changed.
 #[tokio::test(start_paused = true)]
 async fn a_saved_task_with_a_zero_timeout_loads_but_does_not_start() {
@@ -309,7 +309,7 @@ async fn a_saved_task_with_a_zero_timeout_loads_but_does_not_start() {
 }
 
 /// While the run's `HostDecisions` is set (as a workflow sets it for the
-/// runs it drives), no wait is timed; it isn't saved with the task, so the
+/// runs it drives), no wait is timed. It isn't saved with the task, so the
 /// same task run without it is timed as configured.
 #[tokio::test(start_paused = true)]
 async fn a_run_whose_host_decides_its_waits_is_not_timed() {
@@ -347,7 +347,7 @@ async fn a_run_whose_host_decides_its_waits_is_not_timed() {
 }
 
 /// Set during a wait (as `AgentHandle::wait` does for a spawned agent), the
-/// wait is no longer timed: its deadline passes without interrupting it.
+/// wait is no longer timed. Its deadline passes without interrupting it.
 #[tokio::test(start_paused = true)]
 async fn host_decisions_set_during_a_wait_stop_its_timeout() {
     let (mut agent, _events, commands, workspace) = waiting_for_recovery(false);

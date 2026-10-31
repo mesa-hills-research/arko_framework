@@ -59,7 +59,7 @@ mod tests {
                 .iter()
                 .all(|d| *d >= Duration::from_secs(60) && *d <= Duration::from_secs(61))
         );
-        // A huge hint saturates instead of overflowing; the recovery loop
+        // A huge hint saturates instead of overflowing, and the recovery loop
         // then fails the retry (checked deadline) rather than panicking.
         let huge = retry_delay(&config, 3, Some(Duration::from_secs(u64::MAX)), u64::MAX);
         assert!(huge >= Duration::from_secs(u64::MAX));

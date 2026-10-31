@@ -1,4 +1,4 @@
-//! Output-based tool calling: a turn's parsed calls reported, checked and run
+//! Output-based tool calling, with a turn's parsed calls reported, checked and run
 //! in order or held for approval, each call's result recorded as text, and the
 //! turn's results sent as the next message.
 
@@ -7,11 +7,11 @@ use super::*;
 /// What became of one call of an output-based turn. See
 /// [`AgentLoop::handle_text_call`].
 enum TextCall {
-    /// Answered or run: the turn goes on with its next call.
+    /// Answered or run, and the turn goes on with its next call.
     Handled,
     /// It waits for approval.
     NeedsApproval(PendingToolCallInfo),
-    /// The task stopped or no longer runs calls: the turn's other calls
+    /// The task stopped or no longer runs calls, so the turn's other calls
     /// don't run.
     EndsBatch,
 }
@@ -149,7 +149,7 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
-    /// The calls of an output-based turn's group: each is checked and run
+    /// The calls of an output-based turn's group. Each is checked and run
     /// or held for approval, in order, until one ends the batch. Then, as
     /// in native mode, a turn a call stopped answers the calls awaiting
     /// approval and the calls it didn't reach as not run, and otherwise the
@@ -166,7 +166,7 @@ impl AgentLoop {
         let calls_to_process_with_ids =
             self.calls_of_group(current_group, parsed_call_ids, turn_message);
         if !turn_message.is_empty() {
-            // The batch can't run: its announced calls get the error.
+            // The batch can't run, so its announced calls get the error.
             self.reject_announced_text_calls(parsed_call_ids, turn_message)
                 .await?;
         }
@@ -193,7 +193,7 @@ impl AgentLoop {
 
         // A turn a call stopped (it ended the task or made it wait, or
         // the task was suspended while it ran) answers every other call
-        // once, as native mode does: the calls awaiting approval are not
+        // once, as native mode does. The calls awaiting approval are not
         // asked about, and the calls after it don't run.
         if self.stop_requested || !matches!(self.task.current_state, TaskState::InProgress) {
             let not_run = self.not_run_after_stop();
@@ -227,7 +227,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// An output-based call that doesn't run (`reason` says why): it is
+    /// An output-based call that doesn't run (`reason` says why). It is
     /// reported rejected, and the turn's message says so.
     pub(super) async fn answer_text_call_not_run(
         &mut self,
@@ -248,7 +248,7 @@ impl AgentLoop {
 
     /// Rejects, in order, the calls the parser announced
     /// (`ToolCallInitiated`) that the turn won't run, with `reason`, the
-    /// error the turn's message gives: every announced call gets an
+    /// error the turn's message gives. Every announced call gets an
     /// outcome, as in native mode.
     async fn reject_announced_text_calls(
         &self,
@@ -267,7 +267,7 @@ impl AgentLoop {
     }
 
     /// Reports an output-based turn's parser events (unless tool events
-    /// are simplified): `ToolCallInitiated` and the parameters of each
+    /// are simplified), namely `ToolCallInitiated` and the parameters of each
     /// call, then the turn's plain text. Returns the ids given to the
     /// calls, with their tools' names, in order.
     async fn emit_parser_events(
@@ -351,8 +351,8 @@ impl AgentLoop {
 
     /// The calls of an output-based turn's group, with their ids (those
     /// the parser events gave, or new ones), and their boolean parameters
-    /// made booleans. A batch of a tool that can't be batched has no calls:
-    /// the turn's message says why.
+    /// made booleans. A batch of a tool that can't be batched has no calls,
+    /// and the turn's message says why.
     fn calls_of_group(
         &self,
         current_group: ToolCallGroup,
@@ -397,7 +397,7 @@ impl AgentLoop {
             }
         };
 
-        // Text calls carry every value as a string: give
+        // Text calls carry every value as a string, so give
         // boolean parameters booleans, as in native mode.
         let mut calls_to_process_with_ids = calls_to_process_with_ids;
         for (call, _) in &mut calls_to_process_with_ids {
@@ -409,7 +409,7 @@ impl AgentLoop {
         calls_to_process_with_ids
     }
 
-    /// One call of an output-based turn: reported, then checked (a due
+    /// One call of an output-based turn. It is reported, then checked (a due
     /// handover report, a tool the run doesn't offer, its paths), then run
     /// or, if it needs approval, returned to wait for it. Its result is
     /// recorded in the task.
@@ -531,7 +531,7 @@ impl AgentLoop {
         }
     }
 
-    /// The message after an output-based turn: its results (which wait with
+    /// The message after an output-based turn, either its results (which wait with
     /// the task if it now waits), or a request to use a tool.
     fn text_turn_message(
         &mut self,
@@ -566,7 +566,7 @@ impl AgentLoop {
 
     /// Runs an output-based call (auto-approved or approved) and returns
     /// its result as text for the next user message. A cancellation or
-    /// suspension while it runs stops it. `recovering`: the call runs again
+    /// suspension while it runs stops it. `recovering` means the call runs again
     /// after the task stopped while it ran (see
     /// [`TaskContext::recovering`](crate::tool::TaskContext::recovering)).
     pub(super) async fn execute_text_call(
@@ -772,7 +772,7 @@ impl AgentLoop {
         }
     }
 
-    /// An output-based call that finished: `ask_user` awaits the answer
+    /// An output-based call that finished. `ask_user` awaits the answer
     /// (its result is the questions alone, and no message follows), and
     /// `complete_task` completes the task (reported with
     /// `TaskStateChanged`, as in native mode). The result is formatted with

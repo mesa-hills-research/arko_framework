@@ -1,4 +1,4 @@
-//! A request that keeps the task's prompt cache warm between turns: the
+//! A request that keeps the task's prompt cache warm between turns. It is the
 //! task's next request with a short ping after its conversation, or its last
 //! request again, its reply discarded.
 
@@ -16,7 +16,7 @@ impl AgentLoop {
     /// allows, so the provider reads the cached prefix and keeps it. The
     /// reply is discarded and the task is unchanged. A task waiting with
     /// calls of the model's that have no results yet (paused for an
-    /// approval) can't take a message after them: its last request goes
+    /// approval) can't take a message after them, so its last request goes
     /// again unchanged instead, ending where the cache entry the next request
     /// reads ends. A provider that refuses the cap gets the request once
     /// more with [`FALLBACK_OUTPUT_CAP`], which the result reports.

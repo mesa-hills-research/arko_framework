@@ -1,4 +1,4 @@
-//! In-place conversation handover: the report request, the report turn,
+//! In-place conversation handover, covering the report request, the report turn,
 //! and the fresh conversation.
 
 use super::image_tests::{call, harness};
@@ -73,7 +73,7 @@ fn native_report(before: &[&str], report: &str, input_tokens: usize) -> Scripted
 }
 
 /// A native agent with `handover` set, which gives its report with the
-/// `handover_report` tool. The threshold is out of reach: the tests ask for
+/// `handover_report` tool. The threshold is out of reach, so the tests ask for
 /// the handover with a command.
 fn tool_harness() -> (
     AgentLoop,
@@ -139,9 +139,9 @@ async fn a_conversation_over_the_threshold_is_handed_over_in_place() {
     push(
         &mut agent,
         vec![
-            // Under the threshold: no handover.
+            // Under the threshold, no handover.
             native_call("plain_text", 500),
-            // Over it: the next request asks for the report.
+            // Over it, the next request asks for the report.
             native_call("plain_text", 1_500),
             native_report(&[], "Done: read the fixture. Next: finish.", 1_600),
             // The fresh conversation, small again.
@@ -266,7 +266,7 @@ async fn the_report_comes_from_the_report_tool() {
     )));
 }
 
-/// What the old conversation held when it was replaced: the request for
+/// What the old conversation held when it was replaced, namely the request for
 /// the tool, and the report call answered.
 #[tokio::test]
 async fn the_replaced_conversation_asks_for_the_tool_and_holds_its_result() {
@@ -302,7 +302,7 @@ async fn the_replaced_conversation_asks_for_the_tool_and_holds_its_result() {
 }
 
 /// An agent offered `handover_report` that replies without a tool call
-/// gets a note asking for the tool: its text isn't taken as the report.
+/// gets a note asking for the tool. Its text isn't taken as the report.
 #[tokio::test]
 async fn a_reply_without_the_report_tool_gets_a_note() {
     let (mut agent, mut events, commands) = tool_harness();
@@ -321,8 +321,8 @@ async fn a_reply_without_the_report_tool_gets_a_note() {
     assert_eq!(task.handovers[0].report, "The real report.");
 }
 
-/// A report call without a report is rejected and the report asked again;
-/// one made when no report is due is rejected and the task goes on.
+/// A report call without a report is rejected and the report asked again,
+/// and one made when no report is due is rejected and the task goes on.
 #[tokio::test]
 async fn report_calls_without_a_report_or_a_request_are_rejected() {
     let (mut agent, mut events, commands) = tool_harness();
@@ -358,7 +358,7 @@ async fn report_calls_without_a_report_or_a_request_are_rejected() {
     );
 }
 
-/// `complete_task` beside the report completes the task: no handover.
+/// `complete_task` beside the report completes the task, with no handover.
 #[tokio::test]
 async fn complete_task_beside_the_report_completes_the_task() {
     let (mut agent, mut events, commands) = tool_harness();
@@ -406,7 +406,7 @@ async fn a_task_saved_with_its_report_hands_over_when_it_runs_again() {
 #[tokio::test]
 async fn tool_calls_in_the_report_turn_are_rejected_except_complete_task() {
     let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
-    // No threshold: the host asks.
+    // No threshold, so the host asks.
     commands.try_send(UserCommand::RequestHandover).unwrap();
     push(
         &mut agent,
@@ -458,7 +458,7 @@ async fn a_reply_without_text_gets_a_note_and_the_report_is_asked_again() {
 }
 
 /// Output-based agents give the report as plain text, also with `handover`
-/// set: the tool is for native tool calling.
+/// set, because the tool is for native tool calling.
 #[tokio::test]
 async fn output_based_agents_hand_over_from_their_plain_text() {
     let (mut agent, mut events, commands) = harness(ToolCallingMode::OutputBased);
@@ -522,7 +522,7 @@ async fn the_hook_sees_the_old_conversation_and_sets_the_seed() {
         "{first}"
     );
     assert!(first.contains("Hooked report.\n\n# Agents you can message\n- `lead`"));
-    // The runtime still frames it as a task prompt; the saved initial
+    // The runtime still frames it as a task prompt, and the saved initial
     // prompt is unchanged.
     assert_eq!(task.initial_task_prompt, "Inspect fixture image");
 }
@@ -549,7 +549,7 @@ fn results(events: &[AgentEvent], tool: &str) -> Vec<String> {
         .collect()
 }
 
-/// The hook's configuration runs the fresh conversation: its system prompt
+/// The hook's configuration runs the fresh conversation. Its system prompt
 /// is written from it, and a tool it offers that the task didn't offer
 /// runs. The task keeps it, without being marked reconfigured.
 #[tokio::test]
@@ -585,8 +585,8 @@ async fn the_hook_s_configuration_runs_the_fresh_conversation() {
     assert_eq!(results(&events, "plain_text"), ["Legacy text output"]);
 }
 
-/// A configuration with another model than the task's is left out: the
-/// fresh conversation keeps the task's.
+/// A configuration with another model than the task's is left out.
+/// The fresh conversation keeps the task's.
 #[tokio::test]
 async fn a_hook_s_configuration_with_another_model_is_left_out() {
     let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
@@ -642,7 +642,7 @@ async fn completed(mut agent: AgentLoop, events: &mut mpsc::Receiver<AgentEvent>
     task
 }
 
-/// A report asked for alone: one more turn of the same conversation, whose
+/// A report asked for alone is one more turn of the same conversation, whose
 /// `handover_report` call gives the report. The task completes with it as
 /// its summary, without a handover, and the conversation keeps the request
 /// and the report.
@@ -824,8 +824,8 @@ fn loop_with_skills(
     (agent, receiver, sender)
 }
 
-/// The hook's configuration brings its skills to the fresh conversation:
-/// its system prompt lists them and `load_skill` loads them, from one skill
+/// The hook's configuration brings its skills to the fresh conversation.
+/// Its system prompt lists them and `load_skill` loads them, from one skill
 /// to another, from none to some, and from some to none (`load_skill` is no
 /// longer offered).
 #[tokio::test]
@@ -1008,7 +1008,7 @@ fn tasks_saved_before_handovers_load() {
 
 /// Context that arrives as a handover starts (a message that needs a reply,
 /// say) is not added to the conversation being replaced, where only the
-/// report could carry it: it is added to the fresh one.
+/// report could carry it. It is added to the fresh one.
 #[tokio::test]
 async fn context_arriving_during_the_report_waits_for_the_fresh_conversation() {
     let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
@@ -1053,7 +1053,7 @@ async fn context_arriving_during_the_report_waits_for_the_fresh_conversation() {
 }
 
 /// A conversation whose first request was already over the threshold
-/// doesn't hand over: the fresh one would start over it too.
+/// doesn't hand over. The fresh one would start over it too.
 #[tokio::test]
 async fn no_handover_loop_when_the_first_request_is_over_the_threshold() {
     let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
@@ -1080,7 +1080,7 @@ async fn no_handover_loop_when_the_first_request_is_over_the_threshold() {
 /// and unset, the configured one applies again.
 #[tokio::test]
 async fn the_hosts_threshold_moves_the_handover_both_ways() {
-    // Raised over the configured 1,000: no handover at 2,500.
+    // Raised over the configured 1,000, so no handover at 2,500.
     let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
     agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000));
     let threshold = HandoverThreshold::new(Some(5_000));
@@ -1097,7 +1097,7 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert!(task.handovers.is_empty());
 
-    // Lowered under the configured 1,000,000: a handover at 1,500.
+    // Lowered under the configured 1,000,000, so a handover at 1,500.
     let (mut agent, mut events, _commands) = tool_harness();
     threshold.set(Some(1_000));
     agent.handover_threshold = threshold.clone();
@@ -1122,7 +1122,7 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
         }
     )));
 
-    // Unset: the configured 1,000,000 again, so no handover at 1,500.
+    // Unset, the configured 1,000,000 again, so no handover at 1,500.
     let (mut agent, mut events, _commands) = tool_harness();
     threshold.set(None);
     agent.handover_threshold = threshold;
@@ -1139,12 +1139,12 @@ async fn the_hosts_threshold_moves_the_handover_both_ways() {
     assert!(task.handovers.is_empty());
 }
 
-/// A threshold with a cap per run: runs that share the host's threshold
+/// A threshold with a cap per run. Runs that share the host's threshold
 /// each hand over at no more than the cap their own configuration gets
 /// (as runs on models of different sizes), whichever threshold they go by.
 #[tokio::test]
 async fn a_capped_threshold_holds_each_run_under_its_own_cap() {
-    // The cap for the configurations named "small"; none for the others.
+    // The cap for the configurations named "small", and none for the others.
     let threshold = HandoverThreshold::new(Some(5_000))
         .with_most(|config| (config.name == "small").then_some(1_000));
     let handed_over = |responses: Vec<ScriptedStreamResult>, name: &str, threshold| {

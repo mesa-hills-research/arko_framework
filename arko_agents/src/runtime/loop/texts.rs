@@ -1,4 +1,4 @@
-//! The texts the loop gives the model and the host: the results of calls it
+//! The texts the loop gives the model and the host, namely the results of calls it
 //! didn't run or stopped, and its notes.
 
 use super::*;
@@ -12,21 +12,21 @@ pub(super) const HANDOVER_REPORT_DUE_NO_COMPLETION: &str = "This call was not ru
 /// The note after a reply to a report request that had no text.
 pub(super) const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
 
-/// For an agent offered `handover_report`: the result of another tool call
+/// For an agent offered `handover_report`, the result of another tool call
 /// made while the report is due.
 pub(super) const HANDOVER_REPORT_TOOL_DUE: &str = "This call was not run: your handover report is due. Call handover_report with the report (or complete_task if the task is done).";
 /// [`HANDOVER_REPORT_TOOL_DUE`] for an agent not offered `complete_task`.
 pub(super) const HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION: &str =
     "This call was not run: your handover report is due. Call handover_report with the report.";
 
-/// For an agent offered `handover_report`: the note after a reply without a
+/// For an agent offered `handover_report`, the note after a reply without a
 /// tool call while the report is due.
 pub(super) const NO_REPORT_TOOL_CALL: &str = "Your response did not call a tool, so no handover report was received. Call handover_report with the report (or complete_task if the task is done).";
-/// [`NO_REPORT_TOOL_CALL`] for an agent not offered `complete_task`: its
+/// [`NO_REPORT_TOOL_CALL`] for an agent not offered `complete_task`. Its
 /// reply ends the task only once the report is in.
 pub(super) const NO_REPORT_TOOL_CALL_NO_COMPLETION: &str = "Your response did not call a tool, so no handover report was received, and the task is still open: your reply ends it only after the handover. Call handover_report with the report first.";
 
-/// The results of `handover_report` calls: the report taken, no report
+/// The results of `handover_report` calls, namely the report taken, no report
 /// asked for, and a call without a report.
 pub(super) const REPORT_RECEIVED: &str =
     "Handover report received. Your conversation continues from it in a fresh one.";
@@ -77,7 +77,7 @@ pub(super) const TASK_FAILED_CALL: &str =
     "The task failed on an earlier tool error, so this call was not run.";
 
 /// Results of calls a `CancelTask` command stopped. The command carries no
-/// reason: it comes from the user or from a host such as a workflow
+/// reason, as it comes from the user or from a host such as a workflow
 /// stopping its agents.
 pub(super) const TASK_CANCELLED_CALL: &str = "The task was cancelled, so this call was not run.";
 /// Results of calls a `SuspendTask` command left unrun.
@@ -89,7 +89,7 @@ pub(super) const STOPPED_BY_SUSPEND: &str = "The task was suspended while this c
 
 /// The result of a call the host rejected without giving a reason.
 pub(super) const REJECTED_BY_USER: &str = "Rejected by user";
-/// A call of a batch the host decided without a decision for it: the
+/// A call of a batch the host decided without a decision for it. This is the
 /// `ToolRejected` reason, and its result (native) or the reason in its
 /// result (output-based).
 pub(super) const NO_DECISION: &str = "No decision provided";
@@ -114,7 +114,7 @@ pub(super) const CONTINUE_FROM_PARTIAL_TURN: &str =
 pub(super) const HELD_CALL_NOT_RUN: &str = "An earlier call in this turn was still waiting for approval when the wait ended, so this call was not run. Call it again if it is still needed.";
 
 /// The result of `complete_task` called after an earlier call of its turn
-/// was rejected or failed: the model chose to finish before it saw those
+/// was rejected or failed. The model chose to finish before it saw those
 /// results.
 pub(super) const COMPLETION_AFTER_FAILURE: &str = "The task was not completed: an earlier call in this turn was rejected or failed (see its result). Review the results, and call complete_task again if the task is done.";
 
@@ -124,7 +124,7 @@ pub(super) const STOPPED_TASK_ENDED: &str =
     "The task ended while this call was running, so the call was stopped before it finished.";
 
 /// The result text of a call a stop ended while it ran, given the task's
-/// state once the stop is applied: a cancellation it made, a suspension, or
+/// state once the stop is applied, which is a cancellation it made, a suspension, or
 /// an end another call of the group had already brought about.
 pub(super) fn stopped_call_reason(stop: ToolsStopped, state: &TaskState) -> &'static str {
     match (stop, state) {

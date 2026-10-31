@@ -1,4 +1,4 @@
-//! Running one tool call: middleware, the tool itself under the host's time
+//! Running one tool call, covering middleware, the tool itself under the host's time
 //! limit, and result interception. A call's inputs are owned, so the
 //! parallel-safe calls of a response can run at the same time while the
 //! loop watches its command channel. Once the middleware lets a call run,
@@ -28,7 +28,7 @@ pub(super) struct RunEnvironment {
     pub initial_task_prompt: String,
     pub working_directory: PathBuf,
     pub middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
-    /// What the task's calls see of a stop: see [`TaskContext::stop`].
+    /// What the task's calls see of a stop. See [`TaskContext::stop`].
     pub stop: StopSignal,
     /// The model whose image capabilities apply to tool results.
     pub model: arko_ai::Model,
@@ -214,7 +214,7 @@ pub(super) async fn run_tool(
     Ok(execute(environment, run, signals, None).await)
 }
 
-/// A call answered with the host's output instead of running: the
+/// A call answered with the host's output instead of running. The
 /// middleware's `after` sees it, and it is intercepted like a result.
 async fn caller_provided(
     environment: &RunEnvironment,
@@ -254,7 +254,7 @@ async fn caller_provided(
     }
 }
 
-/// The middleware's `before`: `None` when it lets the call run, else how
+/// The middleware's `before`. It gives `None` when it lets the call run, else how
 /// the call ends.
 async fn before(environment: &RunEnvironment, run: &ToolRun) -> Option<RunOutcome> {
     let middleware = environment.middleware.as_ref()?;
@@ -297,7 +297,7 @@ async fn before(environment: &RunEnvironment, run: &ToolRun) -> Option<RunOutcom
     }
 }
 
-/// The rest of a call the middleware let run: the tool under the host's
+/// The rest of a call the middleware let run, namely the tool under the host's
 /// time limit, the image sink, the middleware's `after` and interception.
 /// It owns what it uses, so a call that moves to the background goes on as
 /// a job. Once `adopted` is set (the call moved), its images are kept as
@@ -318,7 +318,7 @@ fn execute(
         let middleware = environment.middleware.as_ref();
         let context = environment.task_context(&run, &signals);
         let execution_future = run.tool.execute_with_output(&context, run.params.clone());
-        // Dropping the call at the limit stops it: a command it started
+        // Dropping the call at the limit stops it, and a command it started
         // is killed with it.
         let result = match run.timeout {
             Some(limit) => tokio::time::timeout(limit, execution_future)
@@ -639,7 +639,7 @@ async fn intercept(
     (raw_result.to_string(), false)
 }
 
-/// Splits calls, in order, into the groups that run at the same time: each
+/// Splits calls, in order, into the groups that run at the same time, namely each
 /// run of consecutive parallel-safe calls, and each other call alone.
 pub(super) fn groups<T>(calls: Vec<T>, parallel_safe: impl Fn(&T) -> bool) -> Vec<Vec<T>> {
     let mut groups: Vec<Vec<T>> = Vec::new();

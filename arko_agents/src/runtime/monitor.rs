@@ -16,7 +16,7 @@ pub(super) struct CacheEfficiency {
 }
 
 /// Cache efficiency after the last call in `history` (the conversation's
-/// calls in order), or `None` when that call is not judged: during warm-up,
+/// calls in order), or `None` when that call is not judged, such as during warm-up,
 /// without a cache figure, or without input to compare.
 pub(super) fn cache_efficiency(
     history: &[UsageInfo],
@@ -50,12 +50,12 @@ pub(super) fn cache_efficiency(
     })
 }
 
-/// How close to the prompt-cache lifetime a delay may come: 4½ minutes of
+/// How close to the prompt-cache lifetime a delay may come, which is 4½ minutes of
 /// a 5-minute cache.
 const CACHE_HEADROOM: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Logs a warning when a plan-usage `SlowDown` delay comes within
-/// [`CACHE_HEADROOM`] of the model's prompt-cache lifetime: the request after
+/// [`CACHE_HEADROOM`] of the model's prompt-cache lifetime. The request after
 /// the delay could miss the cache and read the whole context again as
 /// uncached input, using more of the plan than the delay saves.
 pub(super) fn warn_if_slow_down_outlasts_cache(
@@ -93,10 +93,10 @@ mod tests {
             ..Default::default()
         };
         let mut history = vec![call(1000, Some(0)), call(2000, Some(900))];
-        // Warm-up: the first two calls are not judged.
+        // Warm-up, so the first two calls are not judged.
         assert_eq!(cache_efficiency(&history[..1], &config), None);
         assert_eq!(cache_efficiency(&history, &config), None);
-        // min(2000, 3000) = 2000 could have been cached; 1500 was.
+        // min(2000, 3000) = 2000 could have been cached, and 1500 was.
         history.push(call(3000, Some(1500)));
         let efficiency = cache_efficiency(&history, &config).unwrap();
         assert_eq!(

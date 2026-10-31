@@ -4,8 +4,8 @@
 //! [`loop_trace`](super::loop_trace)) and the conversation each run leaves
 //! with `loop_golden/<test>.trace`. `ARKO_LOOP_GOLDEN=bless` writes the
 //! files instead, and prints them as `@@golden <test> <line>` lines for a
-//! run on another machine. A blessed file records what the loop does now:
-//! review it by hand.
+//! run on another machine. A blessed file records what the loop does now.
+//! Review it by hand.
 
 use super::long_run_tests::turn_with_plan_usage;
 use super::loop_trace::{self, TestTrace};
@@ -23,14 +23,14 @@ use futures::StreamExt;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-/// Every scenario's workspace: a path that is never created (no tool here
+/// Every scenario's workspace, a path that is never created (no tool here
 /// touches the file system), written the same on every platform.
 const WORKSPACE: &str = "/arko-golden-workspace";
 
 /// The longest string a golden conversation keeps whole.
 const LONGEST_MESSAGE_STRING: usize = 4_000;
 
-/// A scenario's expected output: the trace and conversation of each run.
+/// A scenario's expected output, the trace and conversation of each run.
 struct Golden {
     name: &'static str,
     trace: Arc<TestTrace>,
@@ -50,7 +50,7 @@ impl Golden {
         }
     }
 
-    /// A run ended: its trace, then the conversation its task holds.
+    /// A run ended, with its trace, then the conversation its task holds.
     fn run_ended(&mut self, task: &Task) {
         let lines = self.trace.lines();
         self.output.extend(lines[self.taken..].iter().cloned());
@@ -124,7 +124,7 @@ impl Golden {
 }
 
 /// A tool whose calls answer at once, `<name> ran <what>`, unless `what`
-/// asks otherwise: `fail` fails, `big` answers 400,000 bytes, `image`
+/// asks otherwise. `fail` fails, `big` answers 400,000 bytes, `image`
 /// answers with an image after its text, `hang` runs until the call is
 /// dropped, and `wait` runs until the task's stop signal fires. A `Resume`
 /// tool's recovered call answers `<name> resumed <what>`.
@@ -320,7 +320,7 @@ fn golden_loop_with(
     (agent, receiver, sender)
 }
 
-/// The task as a host would load it again: through its saved form.
+/// The task as a host would load it again, through its saved form.
 fn reloaded(task: &Task) -> Task {
     serde_json::from_str(&serde_json::to_string(task).unwrap()).unwrap()
 }
@@ -465,7 +465,7 @@ fn is_pause(event: &AgentEvent) -> bool {
     )
 }
 
-/// A native turn [read, gate, write, read]: the first read runs at once,
+/// A native turn [read, gate, write, read]. The first read runs at once,
 /// the gate awaits approval, and the write and the read after it are held
 /// (the write waits for every earlier call, and the read for the earlier
 /// calls that aren't parallel-safe). Once the gate is approved it runs,
@@ -506,7 +506,7 @@ async fn native_held_calls_run_after_the_approval() {
     golden.check();
 }
 
-/// A native batch decided call by call: approved with a message to the
+/// A native batch decided call by call, approved with a message to the
 /// agent, approved with the host's own output (the call doesn't run),
 /// rejected with a reason, and left without a decision.
 #[tokio::test(start_paused = true)]
@@ -563,7 +563,7 @@ async fn native_batch_decisions_approve_reject_and_leave_out() {
 }
 
 /// An output-based batch under `ToolErrorPolicy::PauseAndAwaitApproval`
-/// (with the granular parser events): the first call's path is outside
+/// (with the granular parser events). The first call's path is outside
 /// the workspace and rejected, the second awaits approval, and once
 /// approved it fails. The task pauses once, for both errors, and the
 /// results wait with the pause until it is continued.
@@ -601,7 +601,7 @@ async fn output_based_batch_pauses_once_for_a_path_rejection_and_a_failure() {
     golden.check();
 }
 
-/// An output-based call, then `complete_task`: the task completes, reported
+/// An output-based call, then `complete_task`. The task completes, reported
 /// with `TaskStateChanged(Completed)` after the call's result, as in native
 /// mode.
 #[tokio::test(start_paused = true)]
@@ -624,7 +624,7 @@ async fn output_based_complete_task() {
     golden.check();
 }
 
-/// A host's handover request: the report request, the report turn and the
+/// A host's handover request, with the report request, the report turn and the
 /// fresh conversation. Then the next response is suspended mid-stream
 /// with context arriving just before, its partial text kept, and the
 /// suspended task runs again to completion.
@@ -666,9 +666,9 @@ async fn a_handover_then_a_suspension_mid_stream_then_a_resume() {
 }
 
 /// `CancelTask` while a call that isn't interruptible runs, with context
-/// sent before and after it: the call runs to its end (its stop signal
+/// sent before and after it. The call runs to its end (its stop signal
 /// fires), the cancellation then ends the task and the call after it is
-/// answered as not run; the context taken before the cancellation is kept,
+/// answered as not run, and the context taken before the cancellation is kept,
 /// and so is the context sent after it, taken as the run ends.
 #[tokio::test(start_paused = true)]
 async fn a_cancellation_waits_for_a_call_that_is_not_interruptible() {
@@ -703,7 +703,7 @@ async fn a_cancellation_waits_for_a_call_that_is_not_interruptible() {
     golden.check();
 }
 
-/// `SuspendTask` while a call runs: the call is stopped, the call after it
+/// `SuspendTask` while a call runs. The call is stopped, the call after it
 /// is answered as not run, the turn's results go into the conversation,
 /// and the loop reports the task's state as it stops. The task then runs
 /// again to completion.
@@ -736,7 +736,7 @@ async fn a_suspension_during_tool_calls_reports_the_state() {
     golden.check();
 }
 
-/// Three error-recovery decisions: `ApproveErrorRecovery` on a cache
+/// Three error-recovery decisions, namely `ApproveErrorRecovery` on a cache
 /// monitor's pause without a message (no note reaches the model) and with
 /// one (the message does), then `ContinueAfterError` with a note while a
 /// native batch's results wait with a pause on its tool error (the note
@@ -809,7 +809,7 @@ async fn error_recovery_decisions_after_a_monitor_pause_and_a_tool_error() {
     golden.check();
 }
 
-/// A refused task prompt: a `ResolveRefusal` that can't be applied is
+/// A refused task prompt. A `ResolveRefusal` that can't be applied is
 /// reported and the wait goes on, and one that rephrases the prompt
 /// continues the task.
 #[tokio::test(start_paused = true)]
@@ -849,7 +849,7 @@ async fn refusal_resolutions_that_fail_and_that_work() {
     golden.check();
 }
 
-/// Commands that don't fit the wait: an `ApproveToolUse` or a batch
+/// Commands that don't fit the wait. An `ApproveToolUse` or a batch
 /// decision for another call or batch is ignored without an event, while a
 /// `RejectToolUse` for another call and a command of another kind report
 /// the state again. The right decisions then end the waits.
@@ -990,11 +990,11 @@ fn running(call_id: Option<&str>, tool: &str, what: &str) -> RunningToolCall {
 }
 
 /// Tasks saved while their calls ran (a host that stopped), run again.
-/// Native: an answered call keeps its result, an in-doubt call is
+/// Native. An answered call keeps its result, an in-doubt call is
 /// answered as restarted, rerun and resumed calls run again, a call that
 /// waited for approval and one that never started are answered as not
-/// reached; the saved approval wait (as an older version left it) no longer
-/// waits. Output-based: the running call runs again, and the turn's
+/// reached, and the saved approval wait (as an older version left it) no longer
+/// waits. Output-based, the running call runs again, and the turn's
 /// results go out with the restart note.
 #[tokio::test(start_paused = true)]
 async fn tasks_saved_while_calls_ran_settle_them_when_run_again() {
@@ -1075,10 +1075,10 @@ async fn tasks_saved_while_calls_ran_settle_them_when_run_again() {
     golden.check();
 }
 
-/// Streams that end without a final response: with partial text and an
+/// Streams that end without a final response, with partial text and an
 /// announced call (the call is rejected, the text kept, and the turn
-/// answered as one without a tool call); with nothing (retried as a
-/// truncated stream); and with a streamed refusal (handled as a refusal;
+/// answered as one without a tool call), with nothing (retried as a
+/// truncated stream), and with a streamed refusal (handled as a refusal,
 /// continuing asks the model to go on from its kept turn).
 #[tokio::test(start_paused = true)]
 async fn streams_that_end_without_a_final_response() {
@@ -1113,7 +1113,7 @@ async fn streams_that_end_without_a_final_response() {
 }
 
 /// A response stopped mid-stream, after partial text and an announced
-/// call: by `CancelTask` (the text is kept, the call rejected, and the loop
+/// call, by `CancelTask` (the text is kept, the call rejected, and the loop
 /// ends at once, without another pass) and by a closed command channel (the
 /// task is interrupted, and the loop ends after one more pass start).
 #[tokio::test(start_paused = true)]
@@ -1165,7 +1165,7 @@ impl crate::runtime::TurnContextSource for ContextOnce {
 
 /// The turn boundary of a task run again whose conversation ends on the
 /// model's text (a stream suspended mid-way), with saved context, a turn
-/// context source and the file tree in diff mode: the saved context and the
+/// context source and the file tree in diff mode. The saved context and the
 /// source's go out as one update, then the file tree's full snapshot, so
 /// the request ends on a user turn and needs no request to continue.
 #[tokio::test(start_paused = true)]
@@ -1200,7 +1200,7 @@ async fn a_turn_boundary_adds_context_then_the_file_tree() {
 }
 
 /// One response that crosses the plan-usage threshold (`Pause`) and the
-/// cache monitor's pause threshold: the boundary pauses for plan usage
+/// cache monitor's pause threshold. The boundary pauses for plan usage
 /// first, then, once that is approved, for the cache.
 #[tokio::test(start_paused = true)]
 async fn plan_usage_pauses_before_the_cache_monitor() {
@@ -1310,7 +1310,7 @@ impl crate::runtime::TurnContextSource for HoldOnce {
     }
 }
 
-/// The host holds the first request: the task pauses before the tools
+/// The host holds the first request. The task pauses before the tools
 /// observe the conversation, and they observe it once the request is
 /// released, right before it is made.
 #[tokio::test(start_paused = true)]
@@ -1335,9 +1335,9 @@ async fn tools_observe_the_conversation_after_a_held_request() {
 }
 
 /// An approval with a command queued right behind it, for a call whose
-/// error then pauses the task (`ToolErrorPolicy::PauseAndAwaitApproval`):
-/// the queued command is the pause's. Native, `CancelTask` ends the pause
-/// and the task, the failed call's result recorded; output-based,
+/// error then pauses the task (`ToolErrorPolicy::PauseAndAwaitApproval`).
+/// The queued command is the pause's. Native, `CancelTask` ends the pause
+/// and the task, the failed call's result recorded. Output-based,
 /// `ContinueAfterError` with a note continues the task with the call's
 /// result and the note.
 #[tokio::test(start_paused = true)]
@@ -1408,7 +1408,7 @@ async fn a_command_queued_behind_an_approval_answers_the_pause_after_it() {
     golden.check();
 }
 
-/// `SuspendTask` right behind an approval: the approved call runs in the
+/// `SuspendTask` right behind an approval. The approved call runs in the
 /// wait and is stopped, the turn boundary sees the stop, and the next pass
 /// reports the state and saves the task before the loop stops. The task
 /// then runs again to completion.
@@ -1453,7 +1453,7 @@ impl crate::runtime::TurnContextSource for AtTheSecondBoundary {
 }
 
 /// The environment details go once into each turn's user messages (the
-/// working directory, with each user message here): context added right
+/// working directory, with each user message here). Context added right
 /// after a turn's results message comes without them. The results message
 /// of an output-based approval (context sent with the approval), of an
 /// output-based turn and of a native turn (context from the host at the
@@ -1545,7 +1545,7 @@ async fn context_after_a_results_message_comes_without_the_details_again() {
 }
 
 /// An output-based batch of a tool that can't be batched (not
-/// parallel-safe): none of its calls runs, and the turn's message tells the
+/// parallel-safe). None of its calls runs, and the turn's message tells the
 /// model why. The task then completes.
 #[tokio::test(start_paused = true)]
 async fn an_output_based_batch_of_a_tool_that_cannot_be_batched() {
@@ -1567,9 +1567,9 @@ async fn an_output_based_batch_of_a_tool_that_cannot_be_batched() {
     golden.check();
 }
 
-/// Output-based results messages: the first carries the tool's image after
+/// Output-based results messages. The first carries the tool's image after
 /// its text, and each gets the reminder due with its number (every second
-/// user message after the task prompt: the third message has it, the
+/// user message after the task prompt, so the third message has it, the
 /// second doesn't).
 #[tokio::test(start_paused = true)]
 async fn output_based_results_carry_the_images_and_the_reminder_due() {
@@ -1594,8 +1594,8 @@ async fn output_based_results_carry_the_images_and_the_reminder_due() {
     golden.check();
 }
 
-/// Paths under the path-safety policy: with `AutoApprove`, a path outside
-/// the workspace runs without approval in both modes; a path that can't be
+/// Paths under the path-safety policy. With `AutoApprove`, a path outside
+/// the workspace runs without approval in both modes, and a path that can't be
 /// judged (it holds a NUL) is an output-based call's tool error.
 #[tokio::test(start_paused = true)]
 async fn paths_outside_the_workspace_auto_approved_and_one_that_cannot_be_judged() {
@@ -1635,7 +1635,7 @@ async fn paths_outside_the_workspace_auto_approved_and_one_that_cannot_be_judged
     golden.check();
 }
 
-/// Output-based turns the loop can't use: one without a tool call, and one
+/// Output-based turns the loop can't use, namely one without a tool call, and one
 /// whose batch mixes tools (it can't be read). Each gets a note, and the
 /// task goes on to complete.
 #[tokio::test(start_paused = true)]
@@ -1665,7 +1665,7 @@ async fn output_based_turns_without_a_usable_call_get_a_note_and_go_on() {
     golden.check();
 }
 
-/// An approved `complete_task`, in both modes: the task completes, reported
+/// An approved `complete_task`, in both modes. The task completes, reported
 /// once, right after the call's result.
 #[tokio::test(start_paused = true)]
 async fn an_approved_complete_task_reports_the_completion_once() {
@@ -1704,7 +1704,7 @@ async fn an_approved_complete_task_reports_the_completion_once() {
 
 /// Output-based calls the parser announced (`ToolCallInitiated`, with
 /// granular events) in a turn that can't run them are rejected with the
-/// error the model is given: a turn of two tool calls, and a batch that
+/// error the model is given, namely a turn of two tool calls, and a batch that
 /// mixes tools (it can't be read). Then the task completes.
 #[tokio::test(start_paused = true)]
 async fn output_based_announced_calls_a_turn_cannot_run_are_rejected() {
@@ -1735,9 +1735,9 @@ async fn output_based_announced_calls_a_turn_cannot_run_are_rejected() {
 
 /// Output-based batches a stop leaves unfinished answer every other call
 /// once, as native mode does, with `ToolRejected` and a line in the turn's
-/// message: a suspension while the first call of an auto-approved batch
+/// message. A suspension while the first call of an auto-approved batch
 /// runs, and while the first call of an approved batch runs (each task then
-/// runs again to completion); and a call that fails the task
+/// runs again to completion), and a call that fails the task
 /// (`ToolErrorPolicy::FailTask`) after a call that awaits approval and
 /// before one it doesn't reach.
 #[tokio::test(start_paused = true)]

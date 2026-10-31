@@ -1,4 +1,4 @@
-//! `ModelRequestStarted`: each model request is reported as it goes out,
+//! `ModelRequestStarted` reports each model request as it goes out,
 //! with its size by section and the bytes per token its predecessors
 //! calibrated.
 
@@ -39,7 +39,7 @@ fn with_calls(calls: Vec<ai::ToolCall>) -> ai::Message {
     message
 }
 
-/// Reported before each request, in order with the responses: the first
+/// Reported before each request, in order with the responses, the first
 /// at the default ratio, the next at the ratio the first one's reported
 /// input calibrated. Sizes count what each request holds.
 #[tokio::test]
@@ -125,7 +125,7 @@ async fn each_request_is_reported_as_it_goes_out() {
 }
 
 /// The provider counts a request's images in its input tokens, and the
-/// text bytes don't hold them: the ratio is calibrated from what the
+/// text bytes don't hold them, so the ratio is calibrated from what the
 /// images' estimated tokens leave of the input.
 #[tokio::test]
 async fn the_ratio_leaves_the_images_out() {
@@ -135,7 +135,7 @@ async fn the_ratio_leaves_the_images_out() {
         std::env::temp_dir(),
         None,
     );
-    // A PNG header of 1,500 × 750 pixels: 47 × 24 patches of 32 pixels,
+    // A PNG header of 1,500 × 750 pixels gives 47 × 24 patches of 32 pixels,
     // times 1.2, for the test's OpenAI model.
     let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     png.extend(1_500u32.to_be_bytes());

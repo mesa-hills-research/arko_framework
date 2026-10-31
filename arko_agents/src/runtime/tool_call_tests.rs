@@ -137,7 +137,7 @@ pub(super) fn complete() -> ScriptedStreamResult {
     )])
 }
 
-/// An output-based turn: the response text streamed, then the response.
+/// An output-based turn, with the response text streamed, then the response.
 pub(super) fn text_turn(text: &str) -> ScriptedStreamResult {
     let Ok(end) = response(ai::Message::new_assistant(text)) else {
         unreachable!()
@@ -316,7 +316,7 @@ async fn native_paths_outside_the_workspace_are_judged_as_the_tools_open_them() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// `edit_file`'s path is checked as `write_file`'s: outside the workspace
+/// `edit_file`'s path is checked as `write_file`'s. Outside the workspace
 /// the path-safety policy decides, by default refusing the call, which
 /// changes nothing. A policy that allows it lets the edit through.
 #[tokio::test]
@@ -727,7 +727,7 @@ async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native
         let (agent, mut events, commands) =
             agent_for(task, ToolRegistry::new(), Arc::clone(&client));
         let run = tokio::spawn(agent.run());
-        // read_file ran; write_file, in the same turn, waits.
+        // read_file ran, and write_file, in the same turn, waits.
         loop {
             match timeout(Duration::from_secs(30), events.recv())
                 .await
@@ -800,8 +800,8 @@ async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native
 
 #[tokio::test]
 async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run() {
-    // Saved by a version that dropped the approval wait on a timeout: the
-    // turn's auto-approved result and the undecided call are still pending,
+    // Saved by a version that dropped the approval wait on a timeout.
+    // The turn's auto-approved result and the undecided call are still pending,
     // and a call the turn never reached has nothing at all.
     let workspace = workspace();
     let (mut agent, _events, _commands) = agent(
@@ -1006,7 +1006,7 @@ async fn a_failed_call_in_a_native_batch_gets_its_own_error_result_and_the_other
 
 #[tokio::test]
 async fn under_pause_a_native_batch_finishes_before_pausing_once() {
-    // write_file waits for approval; the reads after it need none but wait
+    // write_file waits for approval, and the reads after it need none but wait
     // for it (they come after a call that isn't parallel-safe), and the
     // missing file's read fails.
     for timed_out in [false, true] {
@@ -1055,7 +1055,7 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            // The wait ended without a decision: no pause follows.
+            // The wait ended without a decision, so no pause follows.
             assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
             assert!(task.deferred_tool_errors.is_empty());
             assert_calls_paired(&task.conversation);
@@ -1118,7 +1118,7 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
         assert!(result_for(&task.conversation, "missing")[0].is_error);
         let read = &result_for(&task.conversation, "c")[0];
         if timed_out {
-            // The wait ended before the write was decided: the reads held
+            // The wait ended before the write was decided. The reads held
             // behind it didn't run, and say why.
             assert_eq!(read.output, HELD_CALL_NOT_RUN);
             assert_eq!(
@@ -1390,7 +1390,7 @@ impl ToolExecutionMiddleware for PauseAtB {
 }
 
 /// A middleware's `PauseTask` answers its call with its message without
-/// running it; the batch's other calls run, and then the task awaits the
+/// running it, and the batch's other calls run, and then the task awaits the
 /// host's decision with the cause `Middleware`. Continuing with a note goes
 /// on with the results and the note.
 #[tokio::test]
@@ -1708,7 +1708,7 @@ async fn rejecting_recovery_records_the_turn_and_a_pause_names_every_failure() {
 #[tokio::test]
 async fn an_output_based_error_under_pause_keeps_its_result_when_the_wait_ends() {
     // The missing file's read fails and pauses the task once the read
-    // outside the workspace is decided; the approval wait times out first.
+    // outside the workspace is decided, and the approval wait times out first.
     let root = workspace();
     let workspace = root.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -1913,7 +1913,7 @@ async fn ask_user_asks_without_an_approval_step_by_default() {
 
 #[tokio::test]
 async fn output_based_batch_results_wait_for_the_calls_awaiting_approval() {
-    // The read inside the workspace runs at once; the one outside waits
+    // The read inside the workspace runs at once, and the one outside waits
     // for approval (`RequireApproval`).
     for ending in ["approve", "suspend", "timeout"] {
         let root = workspace();
@@ -2240,7 +2240,7 @@ fn the_summary_override_applies_in_both_tool_calling_modes() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A call awaiting approval says why: the agent's configuration doesn't
+/// A call awaiting approval says why, which is that the agent's configuration doesn't
 /// auto-approve the tool, a path it names is outside the workspace under
 /// `PathSafetyPolicy::RequireApproval`, or both.
 #[tokio::test]

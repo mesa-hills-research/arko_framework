@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// What probes record: each call's start and end, and how many ran at once.
+/// What probes record, namely each call's start and end, and how many ran at once.
 #[derive(Debug, Default)]
 struct Record {
     log: Mutex<Vec<String>>,
@@ -116,7 +116,7 @@ fn probes(record: &Arc<Record>) -> ToolRegistry {
     registry
 }
 
-/// Reads, a write, a read, a write: a turn whose calls mix parallel-safe
+/// Reads, a write, a read, a write. A turn whose calls mix parallel-safe
 /// tools and others.
 fn mixed_turn() -> ScriptedStreamResult {
     turn(vec![
@@ -134,7 +134,7 @@ fn position(log: &[String], entry: &str) -> usize {
         .unwrap_or_else(|| panic!("{entry} missing from {log:?}"))
 }
 
-/// A response's calls all run and each gets its result: parallel-safe
+/// A response's calls all run and each gets its result, with parallel-safe
 /// neighbours at the same time, any other call alone, in call order.
 #[tokio::test]
 async fn every_call_of_a_response_runs_parallel_safe_ones_together() {
@@ -170,7 +170,7 @@ async fn every_call_of_a_response_runs_parallel_safe_ones_together() {
         .collect();
     assert_eq!(order, ["r1", "r2", "w1", "r3", "w2"]);
     let log = record.log.lock().unwrap().clone();
-    // The two reads overlap; each write runs alone, between its neighbours.
+    // The two reads overlap, and each write runs alone, between its neighbours.
     assert!(
         position(&log, "start r2") < position(&log, "end r1"),
         "{log:?}"
@@ -188,7 +188,7 @@ async fn every_call_of_a_response_runs_parallel_safe_ones_together() {
 }
 
 /// A call waiting for approval counts as not finished, as the calls held
-/// behind it do: a call that isn't parallel-safe waits for every earlier
+/// behind it do. A call that isn't parallel-safe waits for every earlier
 /// call, and a parallel-safe one for every earlier call that isn't, also
 /// across a suspension and a save. Parallel-safe calls before it, or behind
 /// only parallel-safe calls, run at once. Every call gets one result.
@@ -211,7 +211,7 @@ async fn calls_after_a_call_awaiting_approval_keep_call_order() {
             },
         );
         let (mut agent, mut events, commands) = agent(config, registry, &workspace);
-        // A read before the gate runs at once; the write and the read after
+        // A read before the gate runs at once, and the write and the read after
         // the gate wait for it.
         agent
             .scripted_responses
@@ -310,7 +310,7 @@ async fn calls_after_a_call_awaiting_approval_keep_call_order() {
     }
 }
 
-/// `[write needing approval, read]`: the read waits for the write to be
+/// `[write needing approval, read]`. The read waits for the write to be
 /// decided and to run, or to be rejected.
 #[tokio::test]
 async fn a_read_after_a_write_awaiting_approval_waits_for_it() {
@@ -380,7 +380,7 @@ async fn a_read_after_a_write_awaiting_approval_waits_for_it() {
     }
 }
 
-/// Without approvals too, a read after a write waits for it: `[read, write,
+/// Without approvals too, a read after a write waits for it, so `[read, write,
 /// read]` runs read, write, read.
 #[tokio::test]
 async fn read_write_read_runs_in_call_order() {
@@ -413,7 +413,7 @@ async fn read_write_read_runs_in_call_order() {
 }
 
 /// `complete_task` after an earlier call of its turn was rejected or failed
-/// doesn't complete the task: its result says why, and the agent goes on.
+/// doesn't complete the task. Its result says why, and the agent goes on.
 #[tokio::test]
 async fn complete_task_after_a_failed_or_rejected_call_does_not_complete() {
     for reject in [false, true] {
@@ -433,7 +433,7 @@ async fn complete_task_after_a_failed_or_rejected_call_does_not_complete() {
         let first = if reject {
             probe_call("w1", "probe_write")
         } else {
-            // Fails: the file doesn't exist.
+            // Fails because the file doesn't exist.
             native_call(
                 "w1",
                 "read_file",
@@ -577,7 +577,7 @@ async fn complete_task_after_a_known_failure_is_not_put_to_approval() {
 }
 
 /// A call held behind a call awaiting approval gets its one result when the
-/// wait ends another way: a cancellation answers both as not run.
+/// wait ends another way. A cancellation answers both as not run.
 #[tokio::test]
 async fn a_held_call_is_answered_when_the_approval_wait_is_cancelled() {
     let workspace = workspace();
@@ -628,7 +628,7 @@ async fn a_held_call_is_answered_when_the_approval_wait_is_cancelled() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A tool whose calls differ decides each call's parallel safety: its
+/// A tool whose calls differ decides each call's parallel safety. Its
 /// reads run together, and its writes alone, in call order. A per-tool
 /// override still decides for every call.
 #[tokio::test]
@@ -712,7 +712,7 @@ async fn a_per_tool_override_decides_parallel_safety() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// One call per turn: the request asks for it where the provider can (not
+/// One call per turn. The request asks for it where the provider can (not
 /// Gemini), the prompt says so, and a response's calls still all run, one
 /// at a time in order. `parallel_tool_calls: false` in the model's
 /// configured tool settings means the same.
@@ -781,7 +781,7 @@ async fn one_call_per_turn_disables_parallel_calls_and_runs_calls_one_at_a_time(
 }
 
 /// A configured tool choice is sent with the agent's tools, and by default
-/// tool use is optional: no tool choice is sent, and the prompt doesn't
+/// tool use is optional, so no tool choice is sent, and the prompt doesn't
 /// demand a tool call in every response.
 #[test]
 fn native_requests_honour_a_configured_tool_choice() {
@@ -817,8 +817,8 @@ fn native_requests_honour_a_configured_tool_choice() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A call that runs past the host's time limit is stopped; its result says
-/// so and the tool-error policy applies (by default the agent is told and
+/// A call that runs past the host's time limit is stopped, its result says
+/// so, and the tool-error policy applies (by default the agent is told and
 /// the task goes on). Exempt tools have no limit unless their own setting
 /// gives one, and `None` turns the limit off.
 #[tokio::test(start_paused = true)]
@@ -942,7 +942,7 @@ impl Tool for Waits {
     }
 }
 
-/// `CancelTask` and `SuspendTask` stop a call that is running: the call is
+/// `CancelTask` and `SuspendTask` stop a call that is running. The call is
 /// answered as stopped, the calls after it as not run, and context sent
 /// while it ran is kept. A suspended task can run again.
 #[tokio::test]
@@ -1080,7 +1080,7 @@ impl Tool for WaitsTogether {
 }
 
 /// When a stop ends a group of parallel calls, a call that had already
-/// finished keeps its result; only the calls still running are stopped.
+/// finished keeps its result, and only the calls still running are stopped.
 #[tokio::test]
 async fn a_call_that_finished_before_a_stop_keeps_its_result() {
     let workspace = workspace();
@@ -1282,7 +1282,7 @@ impl Tool for WindsDown {
 }
 
 /// A call that isn't interruptible runs to its end when the task is
-/// cancelled; the cancellation then takes effect, and later calls don't run.
+/// cancelled, the cancellation then takes effect, and later calls don't run.
 #[tokio::test]
 async fn a_cancellation_waits_for_a_call_that_is_not_interruptible() {
     let workspace = workspace();
@@ -1431,7 +1431,7 @@ impl Tool for SavesOnStop {
 }
 
 /// A call the runtime waits for when its task is cancelled sees its stop
-/// signal fire, saves and returns; its result is kept.
+/// signal fire, saves and returns, and its result is kept.
 #[tokio::test]
 async fn a_cancelled_call_that_is_waited_for_sees_its_stop_signal() {
     let workspace = workspace();
@@ -1478,7 +1478,7 @@ async fn a_cancelled_call_that_is_waited_for_sees_its_stop_signal() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// The host's stop signal reaches a running call, which returns; the task
+/// The host's stop signal reaches a running call, which returns, and the task
 /// goes on (only the host's cancellation would end it).
 #[tokio::test]
 async fn the_hosts_stop_signal_reaches_a_running_call() {
@@ -1522,7 +1522,7 @@ async fn the_hosts_stop_signal_reaches_a_running_call() {
 }
 
 /// Configurations saved with the removed batching settings still load, and
-/// none of them makes calls run at the same time: `allow_batched_tool_calls`
+/// none of them makes calls run at the same time. `allow_batched_tool_calls`
 /// is ignored, a tool's `allow_batched_calls: false` keeps it one at a time
 /// and `true` is ignored. Tool time limits round-trip, `null` included.
 #[test]

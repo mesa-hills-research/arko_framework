@@ -30,7 +30,7 @@
 //! acknowledged. The worst outcome is a repeat.
 //!
 //! [`Delivery`] keeps only what means nothing after the run, by item
-//! number: the hooks in flight, the typed items sent as the user's message,
+//! number, namely the hooks in flight, the typed items sent as the user's message,
 //! and the denials' rests waiting for their call's result. Nothing in the
 //! list ever moves.
 
@@ -97,7 +97,7 @@ struct Sent {
 /// is done.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Delivered {
-    /// The record's text: the hook's, then the typed item sent with it.
+    /// The record's text, which is the hook's, then the typed item sent with it.
     pub text: String,
     /// The items, or parts of them, the text holds.
     pub parts: Vec<RecordedPart>,
@@ -160,7 +160,7 @@ pub(super) fn cut_denial(text: String) -> (String, Option<String>) {
     )
 }
 
-/// What the model reads of `item` from `from` on: a part after the first
+/// What the model reads of `item` from `from` on. A part after the first
 /// starts with [`CONTINUED`], and a denial's rest with [`DENIAL_REST`].
 pub(super) fn shown_from(item: &PendingContext, from: usize) -> String {
     let rest = &item.text[from.min(item.text.len())..];
@@ -199,7 +199,7 @@ impl Delivery {
         item.kind == PendingKind::Typed && !self.as_context.contains(&item.id)
     }
 
-    /// Whether `item` is all in a hook already: its last part, or as a typed
+    /// Whether `item` is all in a hook already, by its last part, or as a typed
     /// item sent.
     fn gone(&self, item: &PendingContext) -> bool {
         self.in_flight_end(item.id) == Some(item.text.len())
@@ -214,7 +214,7 @@ impl Delivery {
             && heading().len() + shown_from(item, item.given).len() > HOOK_MAX_BYTES
     }
 
-    /// Every item is in a hook already, or waits for the next input: the
+    /// Every item is in a hook already, or waits for the next input. The
     /// turn context source may be asked for its update.
     pub(super) fn caught_up(&self, list: &[PendingContext]) -> bool {
         list.iter()
@@ -222,7 +222,7 @@ impl Delivery {
             .is_none_or(|item| self.waits_for_input(item))
     }
 
-    /// Where a denial's rest joins the list: behind the items in hooks, an
+    /// Where a denial's rest joins the list, behind the items in hooks, an
     /// item whose first part the model has read, and the rests already at
     /// the front, ahead of what waits.
     pub(super) fn rest_place(&self, list: &[PendingContext]) -> usize {
@@ -241,7 +241,7 @@ impl Delivery {
         self.held.push((call.to_string(), item));
     }
 
-    /// The context of call `call`'s PostToolUse hook: the list's items from
+    /// The context of call `call`'s PostToolUse hook, the list's items from
     /// the first one not all in a hook, by the rules in the
     /// [module](self). A typed item, a part in flight and a rest still
     /// held stop it there. `None` when it carries nothing.
@@ -343,7 +343,7 @@ impl Delivery {
         });
     }
 
-    /// The due typed item couldn't be sent: from now on it goes in hooks
+    /// The due typed item couldn't be sent, so from now on it goes in hooks
     /// as context, where it is.
     pub(super) fn note_unsent(&mut self) {
         if let Some(item) = self.sending.take() {
@@ -356,7 +356,7 @@ impl Delivery {
         self.sent.iter().any(|sent| !sent.completed)
     }
 
-    /// The typed item `id` is done: it leaves `list` for the record.
+    /// The typed item `id` is done, so it leaves `list` for the record.
     fn note_done(&mut self, list: &mut Vec<PendingContext>, id: u64) -> Option<PendingContext> {
         self.sent.retain(|sent| sent.item != id);
         let index = list.iter().position(|item| item.id == id)?;
@@ -472,8 +472,8 @@ impl Delivery {
         (delivered, released)
     }
 
-    /// The session's hooks end (a stop, a turn's end, or the next input):
-    /// those not acknowledged are dropped, the typed items sent and the rests
+    /// The session's hooks end (a stop, a turn's end, or the next input).
+    /// Those not acknowledged are dropped, the typed items sent and the rests
     /// held wait again, and nothing in the list moves.
     pub(super) fn settle(&mut self) {
         self.in_flight.clear();

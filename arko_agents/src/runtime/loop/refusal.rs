@@ -1,4 +1,4 @@
-//! Refused turns: reporting the refused input, the opt-in fallback model's
+//! Refused turns. It covers reporting the refused input, the opt-in fallback model's
 //! answer to it, and OpenAI reasoning that can't be replayed to another model.
 
 use super::*;
@@ -22,7 +22,7 @@ pub(super) fn openai_reasoning_replays(from: &ai::Model, to: &ai::Model) -> bool
 
 /// Drops an assistant message's OpenAI reasoning (for a model that can't read
 /// it, see [`openai_reasoning_replays`]). The response's other items then
-/// lose their ids too: the Responses API rejects an item with an id (such as
+/// lose their ids too, because the Responses API rejects an item with an id (such as
 /// `fc_…`) sent without the reasoning item that preceded it ("provided
 /// without its required 'reasoning' item"), while ids are optional on input.
 /// Codex never hits this, since it compacts rather than strip on such a
@@ -61,7 +61,7 @@ pub(super) fn strip_openai_reasoning(message: &mut ai::Message) {
 }
 
 impl AgentLoop {
-    /// Reports a refusal and stops recovery: the same input is expected to be
+    /// Reports a refusal and stops recovery, since the same input is expected to be
     /// refused again, so it is never retried unchanged. With the opt-in
     /// [`AgentConfig::refusal_fallback`], a refusal from the configured model
     /// instead sends the same input to the fallback model once. A failure
@@ -76,7 +76,7 @@ impl AgentLoop {
     /// either (a call without a result would invalidate the history, OpenAI
     /// output items stored with the turn replay only the calls it still
     /// holds), and a turn with no text at all is not kept. In output-based
-    /// tool mode the turn's text holds tool-call markup that was never run:
+    /// tool mode the turn's text holds tool-call markup that was never run.
     /// `plain_text` is the text without it, and only the refusal explanation
     /// (or else that plain text) is kept. Classifier and content-filter
     /// refusals are removed from history.
@@ -122,7 +122,7 @@ impl AgentLoop {
                     message.content.insert(0, ai::Content::Text(text));
                 }
                 // OpenAI message items would replay the original text,
-                // markup included; the message's own text replaces them.
+                // markup included, and the message's own text replaces them.
                 if let Some(ai::ReasoningArtifact::OpenAIOutputItems { items }) =
                     &mut message.reasoning_artifact
                 {
@@ -157,7 +157,7 @@ impl AgentLoop {
             })
             .await?;
             self.task.fallback_for = Some(refusal);
-            // The refusal was a response: the fallback's request starts a
+            // The refusal was a response, so the fallback's request starts a
             // recovery of its own.
             self.reset_llm_recovery();
             return Ok(());
@@ -167,7 +167,7 @@ impl AgentLoop {
     }
 
     /// A fallback model's response joins the configured model's
-    /// conversation: its ChatGPT turn-state token is not kept (it routed the
+    /// conversation. Its ChatGPT turn-state token is not kept (it routed the
     /// fallback's request, not the configured model's turn), OpenAI
     /// reasoning items are dropped unless the configured model can read them
     /// (see [`openai_reasoning_replays`]), and the cache monitor skips the

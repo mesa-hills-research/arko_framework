@@ -1,5 +1,5 @@
 //! The runtime against a local OpenAI-compatible server on a real clock (a
-//! paused clock doesn't mix well with real sockets): stream idle timeouts
+//! paused clock doesn't mix well with real sockets), covering stream idle timeouts
 //! and failed requests.
 
 use super::*;
@@ -19,7 +19,7 @@ enum Answer {
     RefuseCap,
 }
 
-/// Serves `answers` to consecutive requests; returns the base URL and the
+/// Serves `answers` to consecutive requests and returns the base URL and the
 /// request bodies received.
 async fn serve(answers: Vec<Answer>) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -163,7 +163,7 @@ fn agent(
     (agent, receiver, sender)
 }
 
-/// The opt-in stream idle timeout reaches the agent's requests: a stream
+/// The opt-in stream idle timeout reaches the agent's requests. A stream
 /// that goes quiet is cut off and sent again, instead of waiting forever.
 #[tokio::test]
 async fn a_stream_idle_timeout_cuts_a_quiet_stream_off_and_it_is_sent_again() {
@@ -299,7 +299,7 @@ async fn a_refused_output_limit_is_raised_once_and_reported() {
     assert_eq!(bodies[1]["input"], bodies[0]["input"]);
 }
 
-/// Serves an Anthropic-style API: a streamed request gets a response that
+/// Serves an Anthropic-style API. A streamed request gets a response that
 /// calls `complete_task`, a whole one a one-word reply read from the cache.
 /// Returns the base URL and the request bodies received.
 async fn serve_anthropic(requests: usize) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
@@ -460,7 +460,7 @@ async fn an_anthropic_cache_refresh_shares_the_continuation_s_prefix() {
 }
 
 /// On the ChatGPT backend, which takes no output limit, a run waiting with
-/// calls that have no results yet isn't refreshed: its last request would
+/// calls that have no results yet isn't refreshed, because its last request would
 /// have the model write its whole turn again. Nothing is sent.
 #[tokio::test]
 async fn a_paused_run_on_a_chatgpt_login_is_not_refreshed() {

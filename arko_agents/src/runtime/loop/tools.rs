@@ -1,4 +1,4 @@
-//! Running tool calls, in either tool calling mode: their runs and groups,
+//! Running tool calls, in either tool calling mode, with their runs and groups,
 //! stops while they run, the execution middleware's decisions, tool errors
 //! under the tool-error policy and the batch's pause, path checks, result
 //! events, and the wait for calls' approval.
@@ -14,7 +14,7 @@ pub(super) enum ToolsStopped {
 
 /// How a group of calls ended. See [`AgentLoop::run_group`].
 pub(super) struct GroupRun {
-    /// Each call's outcome, in order: `None` for a call a stop ended before
+    /// Each call's outcome, in order, with `None` for a call a stop ended before
     /// it finished.
     pub(super) outcomes: Vec<Option<Result<RunOutcome, crate::tool::ToolError>>>,
     /// A cancellation or suspension that arrived while the calls ran.
@@ -77,7 +77,7 @@ impl AgentLoop {
         })
     }
 
-    /// How a tool's results are intercepted: by the configured interceptor,
+    /// How a tool's results are intercepted, by the configured interceptor,
     /// unless the tool opts out or its results carry meaning the runtime
     /// uses (`complete_task`, `ask_user`). `load_skill` results only when
     /// the skills configuration opts in, with its own failure policy.
@@ -107,7 +107,7 @@ impl AgentLoop {
     }
 
     /// Whether a call to `tool` with `params` may run beside other
-    /// parallel-safe calls: the agent's per-tool override says so, or else
+    /// parallel-safe calls. The agent's per-tool override says so, or else
     /// the call ([`Tool::parallel_safe_for`]) or else the tool's definition,
     /// and the agent doesn't ask for one call per turn.
     pub(super) fn runs_in_parallel(
@@ -167,7 +167,7 @@ impl AgentLoop {
     }
 
     /// The message a finished call to `tool_name` sends the user, given its
-    /// `message` argument: only a call of the built-in `message_user` sends
+    /// `message` argument. Only a call of the built-in `message_user` sends
     /// one (see [`message_user::message_to_user`]).
     ///
     /// [`message_user::message_to_user`]: crate::tool::builtins::message_user::message_to_user
@@ -180,8 +180,8 @@ impl AgentLoop {
         crate::tool::builtins::message_user::message_to_user(tool_name, tool.as_ref(), message)
     }
 
-    /// Runs `runs` at the same time while watching the command channel:
-    /// context sent meanwhile is kept for the next boundary, and
+    /// Runs `runs` at the same time while watching the command channel.
+    /// Context sent meanwhile is kept for the next boundary, and
     /// `CancelTask` or `SuspendTask` stops the calls (dropping them, which
     /// kills a command they started) and is returned. Each call's outcome is
     /// returned in order otherwise. An error is a middleware's own failure.
@@ -189,16 +189,16 @@ impl AgentLoop {
     /// runs to its end, and a stop that arrived meanwhile is returned with
     /// the outcomes. Either way the calls' stop signal fires
     /// ([`TaskContext::stop`](crate::tool::TaskContext::stop)), so such a
-    /// call can wind down. A closed channel doesn't stop the calls: the
+    /// call can wind down. A closed channel doesn't stop the calls. The
     /// boundary after them handles it.
     ///
     /// Before any call starts, the calls are recorded as running
     /// ([`Task::running_tool_calls`]) and the task is reported to the
     /// snapshot sink, which saves it before this returns (the write-ahead
-    /// point): a task that stops while its calls run knows which ones may
+    /// point). A task that stops while its calls run knows which ones may
     /// have run. A group of calls that recovery simply runs again
     /// ([`ToolRecovery::Rerun`], without the host's own output) doesn't wait
-    /// for the save: if the task stops before it is saved, those calls are
+    /// for the save. If the task stops before it is saved, those calls are
     /// run again, or asked for again, which is harmless.
     pub(super) async fn run_group(&mut self, runs: Vec<ToolRun>) -> GroupRun {
         use futures::StreamExt;
@@ -264,11 +264,11 @@ impl AgentLoop {
                     };
                     if let Some(stopped) = stopped {
                         if interruptible {
-                            // The calls still running are dropped; those
+                            // The calls still running are dropped, and those
                             // that finished keep their outcomes.
                             return GroupRun { outcomes, stop: Some(stopped) };
                         }
-                        // Taken after the calls return; later commands
+                        // Taken after the calls return, and later commands
                         // wait in the channel.
                         stop = Some(stopped);
                         listening = false;
@@ -286,7 +286,7 @@ impl AgentLoop {
     }
 
     /// Applies a command that stopped running tool calls, once the calls
-    /// that finished are handled: a cancellation ends the task (unless one
+    /// that finished are handled. A cancellation ends the task (unless one
     /// of the calls already ended it), and a suspension stops the loop after
     /// the turn (the task keeps its state, reported as it stops).
     pub(super) async fn stop_after_calls(
@@ -315,7 +315,7 @@ impl AgentLoop {
         }
     }
 
-    /// A middleware stopped the task at a call: it fails, or with `cancel`
+    /// A middleware stopped the task at a call. It fails, or with `cancel`
     /// is cancelled, unless it already ended (another call of the same
     /// group stopped it first). The call is reported rejected either way.
     pub(super) async fn stop_by_middleware(
@@ -351,7 +351,7 @@ impl AgentLoop {
     }
 
     /// A middleware paused the task at a call, which it answered with
-    /// `message`: the call is reported rejected, and the task awaits
+    /// `message`. The call is reported rejected, and the task awaits
     /// error-recovery approval with `reason` once the other calls of its
     /// batch have run (at once outside a batch), unless it already ended.
     pub(super) async fn pause_by_middleware(
@@ -502,7 +502,7 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Waits for the approval of a turn's calls: one call alone, or the
+    /// Waits for the approval of a turn's calls, either one call alone, or the
     /// calls of a turn of several as a batch (`TaskStateChanged`, then
     /// `ToolCallAwaitingApproval` or `BatchToolCallAwaitingApproval`).
     pub(super) async fn await_approvals(
@@ -578,7 +578,7 @@ impl AgentLoop {
     }
 
     /// Why a call of the turn was not run once the task stopped at an
-    /// earlier call: it failed on a tool error, a middleware failed or
+    /// earlier call, because it failed on a tool error, a middleware failed or
     /// cancelled it (a workflow's cancellation gives "This call was not run:
     /// Workflow cancelled."), it was cancelled or suspended while calls ran,
     /// or the turn otherwise ended.
@@ -598,16 +598,16 @@ impl AgentLoop {
         }
     }
 
-    /// Starts running a batch of tool calls (a turn's, or an approval's):
-    /// under `ToolErrorPolicy::PauseAndAwaitApproval` a failed call no longer
+    /// Starts running a batch of tool calls (a turn's, or an approval's).
+    /// Under `ToolErrorPolicy::PauseAndAwaitApproval` a failed call no longer
     /// pauses the task at once, so the batch's other calls run first, and
     /// [`end_tool_batch`](Self::end_tool_batch) pauses once.
     pub(super) fn begin_tool_batch(&mut self) {
         self.deferring_tool_errors = true;
     }
 
-    /// Ends a batch begun with [`begin_tool_batch`](Self::begin_tool_batch):
-    /// pauses once on its tool errors, with any a batch of the same turn
+    /// Ends a batch begun with [`begin_tool_batch`](Self::begin_tool_batch).
+    /// It pauses once on its tool errors, with any a batch of the same turn
     /// left while calls awaited approval. While calls of the turn still
     /// await approval the pause waits for their decisions. A task that
     /// stopped doesn't pause.
@@ -644,7 +644,7 @@ impl AgentLoop {
             self.task.current_state.clone(),
         ))
         .await?;
-        // The message lists every failure; one call is named only when it
+        // The message lists every failure, and one call is named only when it
         // is the only one.
         let tool_call_id = match errors.as_slice() {
             [error] => error.tool_call_id,
@@ -689,9 +689,9 @@ impl AgentLoop {
                 .await?;
                 Ok(error_message_for_llm)
             }
-            // The batch's other calls run first; `end_tool_batch` pauses.
+            // The batch's other calls run first, and `end_tool_batch` pauses.
             // The call's own result reports the error in place (output-based
-            // mode; a native call's error result carries it already).
+            // mode, while a native call's error result carries it already).
             ToolErrorPolicy::PauseAndAwaitApproval if self.deferring_tool_errors => {
                 self.task.deferred_tool_errors.push(DeferredToolError {
                     message: error_message_for_event,

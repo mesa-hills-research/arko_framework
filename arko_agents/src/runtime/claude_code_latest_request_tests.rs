@@ -1,5 +1,5 @@
 //! The task's latest request (`Task::latest_request`) in the Claude Code
-//! runtime: the conversation's own requests, timed from their first
+//! runtime, covering the conversation's own requests, timed from their first
 //! streamed token, with the cache lifetime Claude Code's writes show, and
 //! none after a compaction until the next request.
 
@@ -7,7 +7,7 @@ use super::*;
 use crate::task::RequestRecord;
 
 /// The conversation's requests set it as each one's usage is recorded,
-/// with their input and cache counts. The lifetime follows the writes: an
+/// with their input and cache counts. The lifetime follows the writes. An
 /// hour's write gives an hour, a request that only reads keeps the
 /// conversation's, and one that wrote both lifetimes gives the shorter. A
 /// subagent's request, flushed last here, leaves it. A request is timed
@@ -155,7 +155,7 @@ async fn run_turn(turn: Value, before: &RequestRecord) -> (Task, Vec<Task>) {
 }
 
 /// A response that fails while it streams was never completed, so it
-/// counts for its usage alone: whether the turn then fails or the CLI
+/// counts for its usage alone. Whether the turn then fails or the CLI
 /// exits, the task's latest request stays what it was, none or an older
 /// one, in the task and in every snapshot saved.
 #[tokio::test]
@@ -181,7 +181,7 @@ async fn a_request_that_failed_while_it_streamed_is_not_the_latest() {
     }
 }
 
-/// The response that takes a failed one's place is the latest: a retry
+/// The response that takes a failed one's place is the latest, as with a retry
 /// that streams, and a response Claude Code asks for again without
 /// streaming after it gave up on one's stream. No snapshot holds the one
 /// that didn't finish.

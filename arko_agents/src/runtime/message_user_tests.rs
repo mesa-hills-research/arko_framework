@@ -1,4 +1,4 @@
-//! Messages to the user without ending the turn: the built-in
+//! Messages to the user without ending the turn, covering the built-in
 //! `message_user` tool, a host's own tool under its name, and the opt-in
 //! `text_reply_as_message`.
 
@@ -71,7 +71,7 @@ fn texts(task: &Task) -> Vec<String> {
 
 /// In either tool calling mode, `message_user` sends its message to the
 /// host between the call's `ToolCallFormatted` and its `ToolResult`, and
-/// the task carries on without a state change; the model's result says the
+/// the task carries on without a state change, and the model's result says the
 /// message was sent.
 #[tokio::test]
 async fn message_user_sends_the_message_and_the_task_carries_on() {
@@ -164,7 +164,7 @@ async fn message_user_sends_the_message_and_the_task_carries_on() {
 }
 
 /// An empty message is a tool error (handled under the tool-error policy,
-/// which by default tells the agent and continues): nothing is sent.
+/// which by default tells the agent and continues), so nothing is sent.
 #[tokio::test]
 async fn an_empty_message_is_not_sent() {
     let workspace = workspace();
@@ -227,7 +227,7 @@ impl Tool for HostMessageUser {
     }
 }
 
-/// A host's tool registered as `message_user` replaces the built-in: the
+/// A host's tool registered as `message_user` replaces the built-in. The
 /// model is offered the host's definition, its calls run the host's tool,
 /// and the runtime sends no `MessageToUser` for them.
 #[tokio::test]
@@ -295,7 +295,7 @@ fn message_user_is_a_built_in_offered_when_listed() {
 }
 
 /// By default a reply in plain text is a response the runtime can't use
-/// (see `a_response_without_a_tool_call_gets_a_note`); nothing is sent to
+/// (see `a_response_without_a_tool_call_gets_a_note`), and nothing is sent to
 /// the user, and the system prompt doesn't say text reaches the user.
 #[tokio::test]
 async fn text_replies_are_not_messages_by_default() {
@@ -329,7 +329,7 @@ async fn text_replies_are_not_messages_by_default() {
 /// With `text_reply_as_message`, a reply in plain text is sent to the user
 /// as `MessageToUser` (without a call ID), and the run carries on after a
 /// note, without an error. Another reply in plain text right after it is a
-/// response without a tool call, as with the setting off; after a tool
+/// response without a tool call, as with the setting off, and after a tool
 /// call, a reply in plain text is a message again.
 #[tokio::test]
 async fn text_replies_become_messages_when_the_agent_opts_in() {
@@ -401,7 +401,7 @@ async fn text_replies_become_messages_when_the_agent_opts_in() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A response with neither text nor a tool call has nothing to send: it is
+/// A response with neither text nor a tool call has nothing to send. It is
 /// a response without a tool call even with the setting on.
 #[tokio::test]
 async fn an_empty_reply_is_not_a_message() {

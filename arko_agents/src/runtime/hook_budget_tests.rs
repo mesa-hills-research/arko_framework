@@ -77,7 +77,7 @@ fn an_item_that_fits_an_empty_hook_waits_whole() {
     let mut list = List::of(&[&"a".repeat(6_000), &"b".repeat(6_000)]);
     let first = delivery.fill(&list.items, "c1").unwrap();
     assert_eq!(body(&first), "a".repeat(6_000));
-    // Not acknowledged yet: a parallel call's hook carries what isn't in
+    // Not acknowledged yet, so a parallel call's hook carries what isn't in
     // flight.
     let second = delivery.fill(&list.items, "c2").unwrap();
     assert_eq!(body(&second), "b".repeat(6_000));
@@ -515,7 +515,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                     }
                 }
                 6 if random.below(4) == 0 => {
-                    // The session ends: what is in flight goes again.
+                    // The session ends, so what is in flight goes again.
                     delivery.settle();
                     unreported.clear();
                     sent.clear();
@@ -577,7 +577,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
 }
 
 /// What a task holds of host item `id`, counted from its records and its
-/// pending list directly: the records' last parts and the items that wait.
+/// pending list directly, namely the records' last parts and the items that wait.
 fn holdings(task: &crate::task::Task, id: &str) -> (usize, usize) {
     let names = |ids: &[String]| ids.iter().any(|named| named == id);
     let recorded = task
@@ -648,7 +648,7 @@ fn a_task_restored_from_any_saved_state_holds_every_item_once() {
                       shown: &mut Vec<String>,
                       typed: &mut Vec<(String, String)>,
                       done: Delivered| {
-            // The record is what went out: a hook's text, then the typed
+            // The record is what went out, a hook's text, then the typed
             // item sent with it, or the typed item alone.
             let hook = match typed
                 .iter()
@@ -715,7 +715,7 @@ fn a_task_restored_from_any_saved_state_holds_every_item_once() {
                 }
                 5 => saved.push(serde_json::to_string(&task).unwrap()),
                 6 if random.below(3) == 0 => {
-                    // A crash: the task as one of the states saved, the
+                    // A crash, with the task as one of the states saved, the
                     // delivery fresh, and what the source handed out past
                     // the task's mark given again.
                     restores += 1;
@@ -731,7 +731,7 @@ fn a_task_restored_from_any_saved_state_holds_every_item_once() {
                     }
                 }
                 7 if random.below(3) == 0 => {
-                    // The turn ends: the next input carries what waits.
+                    // The turn ends, so the next input carries what waits.
                     delivery.settle();
                     (shown, typed, unreported) = (Vec::new(), Vec::new(), Vec::new());
                     let items = std::mem::take(&mut task.pending_context_injections);

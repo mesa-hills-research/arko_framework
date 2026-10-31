@@ -37,7 +37,7 @@ impl Tool for DumpTool {
     }
 }
 
-/// About `bytes` bytes of numbered lines: "line 1", "line 2", ...
+/// About `bytes` bytes of numbered lines ("line 1", "line 2", ...)
 fn lines(bytes: usize) -> String {
     let mut text = String::new();
     let mut n = 1;
@@ -230,7 +230,7 @@ fn workspace() -> std::path::PathBuf {
 }
 
 /// A turn whose results would certainly put the next request over the
-/// model's input limit: the largest is shortened to a head-and-tail preview with a
+/// model's input limit. The largest is shortened to a head-and-tail preview with a
 /// notice, only as far as needed, and the parallel results that fit are
 /// left exactly as they were.
 #[tokio::test]
@@ -254,7 +254,7 @@ async fn the_guard_shortens_the_largest_results_only_as_far_as_needed() {
     let (task, events) = run(agent, &mut events).await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let results = results(&task);
-    // 20,000 tokens, less the 4,000-token margin: the huge result (about
+    // 20,000 tokens, less the 4,000-token margin. The huge result (about
     // 50,000 tokens) keeps a 4,000-token preview, about 16,000 bytes.
     let huge = &results["huge"];
     assert!(huge.len() > 15_000 && huge.len() < 17_500, "{}", huge.len());
@@ -286,7 +286,7 @@ async fn the_guard_shortens_the_largest_results_only_as_far_as_needed() {
 }
 
 /// A task saved after its reply asked for a tool is estimated from its
-/// saved usage: its latest request is the conversation before the reply,
+/// saved usage. Its latest request is the conversation before the reply,
 /// and the turn's results are guarded against what that request reported.
 #[tokio::test]
 async fn a_saved_request_estimates_the_next_one() {
@@ -301,7 +301,7 @@ async fn a_saved_request_estimates_the_next_one() {
     let mark = agent.saved_request_mark().unwrap();
     assert_eq!(mark.messages, 1);
     agent.answered_request = Some(mark);
-    // 15,000 of 20,000 tokens used: a result of 60,000 bytes (at least
+    // 15,000 of 20,000 tokens used, so a result of 60,000 bytes (at least
     // 6,000 tokens) certainly doesn't fit.
     agent
         .task
@@ -340,7 +340,7 @@ fn call_reply(id: &str) -> ai::Message {
 
 /// A task run again (saved with a turn's results added, before its next
 /// request) estimates that request from its saved usage, as the run that
-/// made it would: the saved request reported 15,000 tokens for few bytes
+/// made it would. The saved request reported 15,000 tokens for few bytes
 /// (images, replayed reasoning), so the 30,000 bytes of results added
 /// since take the conversation over the handover threshold.
 #[tokio::test]
@@ -381,8 +381,8 @@ async fn a_task_run_again_estimates_from_its_saved_usage() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Results that may fit are sent as they are, however full the context:
-/// a small result in a nearly full context (it was once replaced by a
+/// Results that may fit are sent as they are, however full the context.
+/// A small result in a nearly full context (it was once replaced by a
 /// larger notice), and a large file that fits by the provider's count
 /// though a calibrated estimate says it doesn't (365,873 bytes of Rust,
 /// about 76,000 o200k tokens, after a request of 184,944 tokens, under the
@@ -442,7 +442,7 @@ async fn the_handover_check_counts_the_models_reply() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Line ranges passed to `read_file` while they are off are ignored: the
+/// Line ranges passed to `read_file` while they are off are ignored, so the
 /// call reads the whole file. On, they read only those lines.
 #[tokio::test]
 async fn read_file_line_ranges_passed_while_off_are_ignored() {
@@ -510,7 +510,7 @@ async fn overflow_recovery_shortens_the_largest_new_result() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// "Twice in a row": an answered request starts the count again, so a
+/// "Twice in a row". An answered request starts the count again, so a
 /// later turn's overflow gets its own two resends.
 #[tokio::test]
 async fn the_overflow_count_starts_again_after_an_answer() {
@@ -540,7 +540,7 @@ async fn the_overflow_count_starts_again_after_an_answer() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Overflow resends are not ordinary retry attempts: a failure after them
+/// Overflow resends are not ordinary retry attempts. A failure after them
 /// still has the policy's attempts.
 #[tokio::test]
 async fn overflow_resends_dont_use_retry_attempts() {
@@ -650,7 +650,7 @@ async fn the_notice_points_to_the_terminal_or_to_line_ranges_or_asks_for_less() 
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Opt-in caps: the agent's cap applies to every tool unless a tool's own
+/// Opt-in caps. The agent's cap applies to every tool unless a tool's own
 /// setting replaces it (null for none), whatever the input limit.
 #[tokio::test]
 async fn caps_shorten_results_over_them_with_the_tools_own_setting_first() {
@@ -693,7 +693,7 @@ async fn caps_shorten_results_over_them_with_the_tools_own_setting_first() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// The handover check estimates the request about to be sent: a turn
+/// The handover check estimates the request about to be sent. A turn
 /// whose results take the conversation over the threshold hands over
 /// before that request, though the latest request was under it. A turn
 /// with small results doesn't.
@@ -731,10 +731,10 @@ async fn the_handover_check_counts_the_turns_results() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// The provider still finds the request over the model's input limit: the
+/// The provider still finds the request over the model's input limit. The
 /// largest result added since the last answered request is shortened and
 /// the request sent again, twice at most (a preview, then the notice
-/// alone); then the task pauses on the error, its kind recorded, and a
+/// alone), then the task pauses on the error, its kind recorded, and a
 /// rejected recovery fails it with that kind.
 #[tokio::test]
 async fn an_overflow_is_recovered_from_twice_at_most_then_fails_with_its_kind() {
@@ -864,7 +864,7 @@ async fn an_overflow_shortening_cant_fix_hands_over_without_the_step() {
     assert_eq!(task.handovers.len(), 1);
     assert_eq!(task.handovers[0].report, "REPORT: I was dumping the data.");
     // Two shortenings, then the handover, each reported as an error that
-    // needs no decision; the handover at the last answered request's input.
+    // needs no decision, and the handover at the last answered request's input.
     assert_eq!(shortened(&events).len(), 2);
     let errors = events
         .iter()
@@ -912,7 +912,7 @@ async fn an_overflow_shortening_cant_fix_hands_over_without_the_step() {
 }
 
 /// One shortening is enough when the provider then accepts the request.
-/// With the guard off, the overflow is not recovered from: the task pauses
+/// With the guard off, the overflow is not recovered from. The task pauses
 /// at once, with the error's kind.
 #[tokio::test]
 async fn an_overflow_recovered_once_continues_and_none_without_the_guard() {

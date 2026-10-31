@@ -1,4 +1,4 @@
-//! Recovery from a failed model request under the error policy: the attempts
+//! Recovery from a failed model request under the error policy, covering the attempts
 //! and their limits, the waits between them (backoff, capacity and rate-limit
 //! waits, usage limits), and the pause or interruption that ends recovery.
 
@@ -9,7 +9,7 @@ use super::*;
 const USAGE_LIMIT_RESET_MARGIN: Duration = Duration::from_secs(1);
 const USAGE_LIMIT_RESET_JITTER: Duration = Duration::from_secs(30);
 
-/// A recovery episode from failed model requests: its attempts and
+/// A recovery episode from failed model requests, with its attempts and
 /// clocks, kept until a decision or a usable turn resets them (see
 /// [`AgentLoop::reset_llm_recovery`]).
 #[derive(Default)]
@@ -28,8 +28,8 @@ pub(super) struct RecoveryState {
     pub(super) rate_limit_waited: Duration,
     /// A reply in plain text was sent to the user as a message since the
     /// last tool call or new message
-    /// ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)):
-    /// another one is a response without a tool call.
+    /// ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)).
+    /// Another one is a response without a tool call.
     pub(super) text_reply_sent: bool,
 }
 
@@ -62,7 +62,7 @@ fn recovery_max_attempts(policy: LLMErrorPolicy, model_output: bool) -> u32 {
     }
 }
 
-/// What a failed request's recovery reports: the error, the attempt,
+/// What a failed request's recovery reports, namely the error, the attempt,
 /// and how it waits.
 fn recovery_message(
     wait: &RecoveryWait,
@@ -100,7 +100,7 @@ fn recovery_message(
     }
 }
 
-/// Why recovery stops at this attempt, with the pause's cause: an error
+/// Why recovery stops at this attempt, with the pause's cause, either an error
 /// that retrying can't fix, or the attempts used up (not for a wait that
 /// doesn't count them).
 fn recovery_stop(
@@ -135,7 +135,7 @@ fn recovery_stop(
     }
 }
 
-/// The delay before the next attempt: none for a response the runtime
+/// The delay before the next attempt, none for a response the runtime
 /// can't use, otherwise the backoff (from the provider's delay when it
 /// gives one).
 fn retry_delay_for(
@@ -146,7 +146,7 @@ fn retry_delay_for(
     model_output: bool,
 ) -> Duration {
     // A rate limit's own delay is followed as given (plus jitter) rather
-    // than grown by backoff; backoff applies when there is none.
+    // than grown by backoff, and backoff applies when there is none.
     let backoff_attempt = match wait {
         RecoveryWait::RateLimit(_) if error.retry_after().is_some() => 1,
         _ => attempt,
@@ -209,7 +209,7 @@ impl AgentLoop {
         self.recovery = RecoveryState::default();
     }
 
-    /// Ordinary recovery attempts in this episode: requests made, less those
+    /// Ordinary recovery attempts in this episode, meaning requests made, less those
     /// that ended in a wait that doesn't count against the ordinary limits.
     pub(super) fn ordinary_attempts(&self) -> u32 {
         self.recovery
@@ -248,7 +248,7 @@ impl AgentLoop {
         })
     }
 
-    /// Ends recovery: the task pauses for error-recovery approval, with
+    /// Ends recovery. The task pauses for error-recovery approval, with
     /// `cause`, under the pausing error policies and while a report asked
     /// for alone is due, or is interrupted.
     pub(super) async fn finish_llm_recovery(
@@ -258,7 +258,7 @@ impl AgentLoop {
         cause: ErrorRecoveryCause,
         error_kind: Option<ai::ErrorKind>,
     ) -> Result<(), ArkoAgentsError> {
-        // A pending fallback stays pending: continuing sends its request
+        // A pending fallback stays pending. Continuing sends its request
         // again, and resolving the refusal drops it.
         self.task.monitor_pause = false;
         // A report asked for alone pauses whatever the policy, so its host
@@ -340,7 +340,7 @@ impl AgentLoop {
     /// When a usage limit is waited out under
     /// [`UsageLimitPolicy::WaitUntilReset`], the delay before the retry.
     fn usage_limit_wait(&self, error: &ai::Error) -> Option<Duration> {
-        // A report asked for alone doesn't wait: its host goes on without it.
+        // A report asked for alone doesn't wait, as its host goes on without it.
         if self.task.report_only() {
             return None;
         }
@@ -372,7 +372,7 @@ impl AgentLoop {
     }
 
     /// Recovers from a failed model request (a connection failure, a server
-    /// error, a truncated stream, a refusal, ...): under the error policy, the
+    /// error, a truncated stream, a refusal, ...). Under the error policy, the
     /// request is sent again unchanged, without a note in the conversation,
     /// since the model had no part in the failure, or recovery ends.
     pub(super) async fn handle_llm_error(
@@ -386,7 +386,7 @@ impl AgentLoop {
     /// Recovers from a response the runtime can't use (no tool call, or an
     /// output-based call it can't read) under the error policy, like a
     /// failed request, but with `note` added to the conversation before the
-    /// next request, so the model can do better. It isn't an outage: the
+    /// next request, so the model can do better. It isn't an outage. The
     /// request is made again at once, without backoff, and the elapsed
     /// recovery budget neither starts nor applies. The attempt limit bounds
     /// it.
@@ -409,7 +409,7 @@ impl AgentLoop {
         model_output: bool,
     ) -> (u32, tokio::time::Instant) {
         if indefinite {
-            // These waits neither consume nor reset ordinary recovery: its
+            // These waits neither consume nor reset ordinary recovery. Its
             // elapsed clock stops while they last, and the requests they
             // make are not counted as its attempts.
             self.pause_ordinary_recovery_clock();
@@ -423,7 +423,7 @@ impl AgentLoop {
                 self.recovery.capacity_retry_attempts.saturating_add(1);
             (self.recovery.capacity_retry_attempts, started)
         } else {
-            // A response the runtime can't use isn't an outage: the elapsed
+            // A response the runtime can't use isn't an outage, so the elapsed
             // budget stays as it was (paused while the response ran).
             if !model_output {
                 self.resume_ordinary_recovery_clock();
@@ -456,7 +456,7 @@ impl AgentLoop {
         // Recorded with the pause or error that ends recovery.
         let error_kind = Some(error.kind()).filter(|kind| *kind != ai::ErrorKind::Unknown);
         // A failed fallback request (the refusal fallback answering a refused
-        // turn) is recovered from like any request, by its own error: a
+        // turn) is recovered from like any request, by its own error. A
         // transient failure is retried, to the fallback model, and a pause
         // keeps the fallback pending, so continuing sends it again. Only the
         // fallback's own refusal (see `handle_refusal`) makes the refusal
@@ -548,7 +548,7 @@ impl AgentLoop {
         let waiting_since = tokio::time::Instant::now();
         let waited = self.wait_before_retry(retry_at, tool_call_id).await;
         if counts_toward_budget {
-            // The time actually waited: a command may have cut it short.
+            // The time actually waited, as a command may have cut it short.
             self.recovery.rate_limit_waited = self
                 .recovery
                 .rate_limit_waited
@@ -558,8 +558,8 @@ impl AgentLoop {
     }
 
     /// Handles a plan usage limit under
-    /// [`LLMRetryConfig::usage_limit_policy`](crate::agent_config::LLMRetryConfig::usage_limit_policy):
-    /// waits for the reset and retries unchanged (opt-in), or stops
+    /// [`LLMRetryConfig::usage_limit_policy`](crate::agent_config::LLMRetryConfig::usage_limit_policy).
+    /// It waits for the reset and retries unchanged (opt-in), or stops
     /// retrying.
     async fn handle_usage_limit(
         &mut self,
@@ -620,7 +620,7 @@ impl AgentLoop {
 
     /// Waits until `retry_at` before a retry, handling commands. The task is
     /// then in progress again. An ordinary recovery deadline that passes
-    /// first ends recovery: the elapsed budget limits the waits between
+    /// first ends recovery. The elapsed budget limits the waits between
     /// attempts and the decision to make another, never a request in flight.
     async fn wait_before_retry(
         &mut self,

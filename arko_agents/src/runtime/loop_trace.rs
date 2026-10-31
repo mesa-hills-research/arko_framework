@@ -1,15 +1,15 @@
-//! A test-only trace of the agent loop: every event it emits and every task
+//! A test-only trace of the agent loop, with every event it emits and every task
 //! it reports at a safe point, one line each, normalized so that two runs of
 //! a test give the same lines. It pins the order of events and snapshots,
 //! and the task at each snapshot, for changes to the loop that must keep its
 //! behaviour.
 //!
-//! A loop is traced when its test is: a test that calls [`record`], or
+//! A loop is traced when its test is, which means a test that calls [`record`], or
 //! every test when one of these variables is set:
 //!
-//! - `ARKO_LOOP_TRACE_DIR=<dir>`: each test's trace goes to
+//! - `ARKO_LOOP_TRACE_DIR=<dir>` sends each test's trace to
 //!   `<dir>/<test>.trace`, appended line by line (clear the folder first).
-//! - `ARKO_LOOP_TRACE_STDOUT=1`: each line goes to standard output as
+//! - `ARKO_LOOP_TRACE_STDOUT=1` sends each line to standard output as
 //!   `@@looptrace <test> <line>`, past libtest's capture, for a run whose
 //!   files stay on another machine.
 //!
@@ -29,7 +29,7 @@
 //! `{:?}` (its maps print in a different order each run), and shortens
 //! strings over [`LONG_STRING`] characters to their head and a hash.
 //!
-//! The test is the thread the loop is created on: libtest runs each test on
+//! The test is the thread the loop is created on, because libtest runs each test on
 //! a thread named after it, and the loop's tests use tokio's current-thread
 //! runtime. The loops a test creates share its trace (and its UUID labels).
 
@@ -61,8 +61,8 @@ static DATETIME: LazyLock<Regex> = LazyLock::new(|| {
 /// A usage-limit reset, given relative to the wall clock.
 static RESETS_IN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"resets in about (\d+[dhms] ?)+").unwrap());
-/// The fields of the awaiting state a command timeout prints with `{:?}`:
-/// its maps print in a different order each run. The state's name stays.
+/// The fields of the awaiting state a command timeout prints with `{:?}`.
+/// Its maps print in a different order each run. The state's name stays.
 static TIMEOUT_STATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)(waiting for user command in state \w+) \{.*\}\.").unwrap());
 
@@ -71,14 +71,14 @@ fn is_time_key(key: &str) -> bool {
     key.ends_with("_unix_ms") || ["start_time", "end_time", "sent_at"].contains(&key)
 }
 
-/// Object keys whose values are durations measured on tokio's clock: the
+/// Object keys whose values are durations measured on tokio's clock. The values are the
 /// same each run when the test pauses the clock, and not otherwise.
 fn is_duration_key(key: &str) -> bool {
     key == "elapsed_ms" || key == "retry_after_ms"
 }
 
-/// Whether tokio's clock is paused (`start_paused`, or `tokio::time::pause`):
-/// it then stands still between the runtime's turns, while the real clock
+/// Whether tokio's clock is paused (`start_paused`, or `tokio::time::pause`).
+/// It then stands still between the runtime's turns, while the real clock
 /// moves on.
 fn clock_paused() -> bool {
     let paused_at = tokio::time::Instant::now();
@@ -112,7 +112,7 @@ fn current_test() -> String {
 pub(super) struct LoopTrace(Option<Arc<TestTrace>>);
 
 impl LoopTrace {
-    /// The trace of the test running on this thread: on when the test
+    /// The trace of the test running on this thread, on when the test
     /// called [`record`] or a trace variable is set, off otherwise.
     pub(super) fn for_current_test() -> Self {
         let name = current_test();
@@ -174,7 +174,7 @@ impl TestTrace {
     }
 
     /// Replaces `literal` with `replacement` in every string from now on
-    /// (before UUIDs are labelled): a temporary path, say.
+    /// (before UUIDs are labelled). A temporary path, say.
     pub(super) fn mask(&self, literal: &str, replacement: &str) {
         self.state
             .lock()
@@ -228,7 +228,7 @@ impl TestTrace {
         self.push(&mut state, line);
     }
 
-    /// A model request as the loop makes it: the conversation's message
+    /// A model request as the loop makes it, with the conversation's message
     /// count and model, and a hash of the conversation and generation
     /// settings sent (the model named by id).
     fn request(&self, conversation: &ai::Conversation, config: &ai::GenerationConfig) {
@@ -254,8 +254,8 @@ impl TestTrace {
         self.push(&mut state, line);
     }
 
-    /// A line a test adds to its trace, among the loop's: what a tool
-    /// observed, say. Normalized as the loop's strings are.
+    /// A line a test adds to its trace, among the loop's, such as what a tool
+    /// observed. Normalized as the loop's strings are.
     pub(super) fn note(&self, text: &str) {
         let mut state = self.state.lock().unwrap();
         let line = format!("N {}", state.string(text, longest()));
@@ -285,7 +285,7 @@ fn file_name(test: &str) -> String {
     test.replace("::", ".")
 }
 
-/// What a snapshot's hash covers: the task without its agent configuration,
+/// What a snapshot's hash covers, the task without its agent configuration,
 /// which a run doesn't change, and with its conversation's model named by
 /// id (model data such as prices changes between versions).
 fn task_digest(task: &Task) -> Value {
@@ -330,7 +330,7 @@ fn canonical(value: &Value) -> String {
     sorted(value).to_string()
 }
 
-/// FNV-1a, 64 bits: a hash that is the same in every run and on every
+/// FNV-1a, 64 bits, a hash that is the same in every run and on every
 /// platform.
 pub(super) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -344,11 +344,11 @@ struct Normalizer {
     /// The label of each UUID seen (lowercase), given in the order first
     /// seen.
     labels: HashMap<String, String>,
-    /// The test runs on the real clock: durations measured on it are
+    /// The test runs on the real clock, so durations measured on it are
     /// masked.
     real_time: bool,
     /// Normalizing map entries that nothing tells apart (see
-    /// [`object`](Self::object)): UUIDs not labelled yet stay `<uuid>`.
+    /// [`object`](Self::object)). UUIDs not labelled yet stay `<uuid>`.
     unlabelled: bool,
     literals: Vec<(String, String)>,
     lines: Vec<String>,
@@ -374,7 +374,7 @@ impl Normalizer {
     /// order that doesn't depend on UUIDs not labelled yet (a map keyed by
     /// call ids, say), so that labels are given in the same order each run.
     /// Entries that nothing tells apart (keyed by such UUIDs, with the same
-    /// value) come in any order: their UUIDs stay unlabelled, and their
+    /// value) come in any order. Their UUIDs stay unlabelled, and their
     /// keys are numbered (`<uuid>#0`, `<uuid>#1`).
     fn object(&mut self, map: Map<String, Value>, longest: Option<usize>) -> Map<String, Value> {
         let mut entries: Vec<((String, String), String, Value)> = map
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(normalizer.string(&long, None), long);
     }
 
-    /// The sizes a change to the loop watches: the run future, which
+    /// The sizes a change to the loop watches, namely the run future, which
     /// `tokio::spawn` boxes once, and the loop. Run with `--ignored
     /// --nocapture`, in debug and release builds.
     #[test]
