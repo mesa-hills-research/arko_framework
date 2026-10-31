@@ -5404,45 +5404,7 @@ impl ClaudeCodeRun {
             return Ok(false);
         };
         let start = answered.messages;
-        let in_step = |message: &ai::Message| {
-            message.role == ai::Role::Assistant
-                || message
-                    .content
-                    .iter()
-                    .any(|content| content.as_tool_result().is_some())
-        };
-        let added = self.task.conversation.messages.split_off(start);
-        let runtime = &self.task.runtime_messages;
-        // A message that holds context the task recorded stays, so the
-        // record keeps what it says.
-        let recorded: std::collections::HashSet<usize> = self
-            .task
-            .context_records
-            .iter()
-            .map(|record| record.message)
-            .collect();
-        let mut moved = std::collections::HashMap::new();
-        let mut kept: Vec<ai::Message> = Vec::new();
-        for (offset, message) in added.into_iter().enumerate() {
-            let index = start + offset;
-            if recorded.contains(&index) || (!in_step(&message) && !runtime.contains(&index)) {
-                moved.insert(index, start + kept.len());
-                kept.push(message);
-            }
-        }
-        self.task.conversation.messages.extend(kept);
-        self.task.move_context_records(|index| {
-            if index < start {
-                Some(index)
-            } else {
-                moved.get(&index).copied()
-            }
-        });
-        // The messages kept after `start` are the host's, not the runtime's.
-        self.task.runtime_messages.retain(|index| *index < start);
-        self.task
-            .runtime_text_messages
-            .retain(|index| *index < start);
+        self.task.leave_out_step(start);
         // The resumed session has what came before `start`; the rest goes
         // with the report request.
         self.task.claude_code_synced = start;
