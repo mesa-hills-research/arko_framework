@@ -680,6 +680,9 @@ impl cc::ClaudeTool for ServedTool {
 /// A response's usage, until the response is complete.
 struct PendingUsage {
     key: String,
+    /// When the runtime first saw the request: its first streamed token, or
+    /// its response for one that wasn't streamed.
+    seen_at: chrono::DateTime<chrono::Utc>,
     usage: Value,
     model: Option<String>,
     /// Why the response stopped, and the details (a refusal's category
@@ -829,9 +832,6 @@ pub(super) struct ClaudeCodeRun {
     usage_reply: Option<oneshot::Receiver<Result<Value, String>>>,
     usage_asked: Option<std::time::Instant>,
     usage_read: Option<ai::ExtraUsage>,
-    /// The main conversation's prompt-cache lifetime, as Claude Code's cache
-    /// writes show it (1 hour or 5 minutes).
-    cache_lifetime: Option<Duration>,
     /// The tools served to Claude Code as arko's MCP server, for the
     /// request sizes `ModelRequestStarted` reports.
     served_tools: Option<ai::ToolConfig>,
@@ -1006,7 +1006,6 @@ impl ClaudeCodeRun {
             usage_reply: None,
             usage_asked: None,
             usage_read: None,
-            cache_lifetime: None,
             served_tools: None,
             bytes_per_token: super::result_budget::DEFAULT_BYTES_PER_TOKEN,
             slow_down: None,
@@ -4007,6 +4006,7 @@ impl ClaudeCodeRun {
                     parent,
                     PendingUsage {
                         key,
+                        seen_at: chrono::Utc::now(),
                         usage,
                         model,
                         stop_reason: None,
@@ -4195,18 +4195,26 @@ impl ClaudeCodeRun {
             .pointer("/cache_creation/ephemeral_5m_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if thread.is_none() {
-            // The cache lifetime Claude Code chose, as its writes show.
-            if written_1h.is_some_and(|tokens| tokens > 0) {
-                self.cache_lifetime =
-                    Some(ai::prompt_cache::ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME);
-            } else if written_5m > 0 {
-                self.cache_lifetime = Some(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME);
-            }
-        }
         let info = self.usage_info(&pending.usage, &model);
         if thread.is_some() {
             self.subagent_calls.push(self.task.usage_history.len());
+        } else {
+            // The cache lifetime Claude Code chose, as its writes show (the
+            // shorter when it wrote both), else as the conversation's last.
+            let lifetime = if written_5m > 0 {
+                Some(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
+            } else if written_1h.is_some_and(|tokens| tokens > 0) {
+                Some(ai::prompt_cache::ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME)
+            } else {
+                self.task
+                    .latest_request
+                    .latest()
+                    .and_then(crate::task::LatestRequest::cache_lifetime)
+            };
+            self.task.latest_request = crate::task::RequestRecord::Latest(
+                crate::task::LatestRequest::new(pending.seen_at, &info)
+                    .with_cache_lifetime(lifetime),
+            );
         }
         self.task.record_usage(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
@@ -4402,7 +4410,11 @@ impl ClaudeCodeRun {
                             .generation_config
                             .claude_cache_ttl()
                             .map(ai::AnthropicCacheTtl::duration)
-                            .or(self.cache_lifetime)
+                            .or(self
+                                .task
+                                .latest_request
+                                .latest()
+                                .and_then(crate::task::LatestRequest::cache_lifetime))
                             .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
                     };
                     super::monitor::warn_if_slow_down_outlasts_cache(
@@ -5149,6 +5161,7 @@ impl ClaudeCodeRun {
         self.flush_usage().await?;
         self.task.conversation_usage_start = self.task.usage_history.len();
         self.task.conversation_model_call_start = self.task.model_call_usage_history.len();
+        self.task.latest_request = crate::task::RequestRecord::NoRequest;
         self.context_size = None;
         self.first_context_size = None;
         self.cache_warned = false;

@@ -394,6 +394,11 @@ impl AgentLoop {
             self.prepare_fallback_response(&mut generation_response);
         }
         self.task.record_usage(generation_response.usage.clone());
+        if let Some(sent_at) = self.request_sent_at.take() {
+            self.task.latest_request = crate::task::RequestRecord::Latest(
+                crate::task::LatestRequest::new(sent_at, &generation_response.usage),
+            );
+        }
         // The request was answered: its usage calibrates the estimate of
         // the next one. Its text's share of the input is what its images'
         // estimated tokens leave.

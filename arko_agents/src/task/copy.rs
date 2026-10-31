@@ -54,6 +54,7 @@ impl Task {
             conversation_usage_start,
             conversation_model_call_start,
             context_size_unknown,
+            latest_request,
             cache_window_start,
             claude_code_session,
             claude_code_directory,
@@ -111,6 +112,7 @@ impl Task {
         copy.conversation_usage_start = *conversation_usage_start;
         copy.conversation_model_call_start = *conversation_model_call_start;
         copy.context_size_unknown = *context_size_unknown;
+        copy.latest_request.clone_from(latest_request);
         copy.cache_window_start = *cache_window_start;
         copy.claude_code_session.clone_from(claude_code_session);
         copy.claude_code_directory.clone_from(claude_code_directory);

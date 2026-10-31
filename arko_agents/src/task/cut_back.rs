@@ -5,7 +5,7 @@ use arko_ai::{Content, Message, Role};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Task, TaskState};
+use super::{RequestRecord, Task, TaskState};
 use crate::agent_config::ToolCallingMode;
 use crate::error::ArkoAgentsError;
 
@@ -267,6 +267,8 @@ impl Task {
         // its conversation again.
         self.context_marks.clear();
         self.handover_requested = None;
+        // Its latest request isn't the shorter conversation's.
+        self.latest_request = RequestRecord::NoRequest;
         if index == 0 {
             // A new conversation: its usage starts here.
             self.conversation_usage_start = self.usage_history.len();
@@ -425,13 +427,24 @@ mod tests {
         );
     }
 
+    /// A request of the conversation before a cut, which the shorter one
+    /// doesn't have.
+    fn latest() -> RequestRecord {
+        RequestRecord::Latest(crate::task::LatestRequest::new(
+            chrono::Utc::now(),
+            &arko_ai::UsageInfo::new(4_000, 10),
+        ))
+    }
+
     /// The cut leaves what came before the message, and the task ready for
-    /// a follow-up. The usage stays, and the context size starts over.
+    /// a follow-up. The usage stays, and the context size starts over, as
+    /// its latest request does (known to be none, never unrecorded).
     #[test]
     fn a_cut_leaves_the_conversation_before_the_message() {
         let mut task = task();
         conversation(&mut task);
         task.usage_history.push(Default::default());
+        task.latest_request = latest();
         task.pending_context_injections.push("Later.".into());
         task.handover_requested = Some(crate::handover::HandoverRequest::new(10));
         task.cut_back(2).unwrap();
@@ -447,6 +460,7 @@ mod tests {
         assert!(task.handover_requested.is_none());
         assert_eq!(task.usage_history.len(), 1);
         assert_eq!(task.current_conversation_context_size(), None);
+        assert_eq!(task.latest_request, RequestRecord::NoRequest);
         assert_eq!(task.user_message_count, 1);
         task.prepare_for_resumption_from_completed("Porto instead.".into())
             .unwrap();
@@ -588,6 +602,7 @@ mod tests {
         let mut task = task();
         conversation(&mut task);
         task.usage_history.push(Default::default());
+        task.latest_request = latest();
         task.claude_code_session = Some("s1".into());
         task.claude_code_entries.insert(1, "a1".into());
         task.claude_code_entries.insert(6, "a6".into());
@@ -595,6 +610,7 @@ mod tests {
         assert_ne!(branch.id, task.id);
         assert_eq!(branch.conversation.messages.len(), 2);
         assert!(branch.usage_history.is_empty());
+        assert_eq!(branch.latest_request, RequestRecord::NoRequest);
         assert_eq!(branch.claude_code_fork_of.as_deref(), Some("s1"));
         assert_ne!(branch.claude_code_session.as_deref(), Some("s1"));
         assert_eq!(branch.claude_code_resume_at.as_deref(), Some("a1"));
@@ -612,6 +628,7 @@ mod tests {
         task.runtime_messages.clear();
         let whole = task.branch(7).unwrap();
         assert_eq!(whole.conversation.messages.len(), 7);
+        assert_eq!(whole.latest_request, RequestRecord::NoRequest);
         assert_eq!(whole.claude_code_resume_at.as_deref(), Some("a6"));
         // A branch of a branch that hasn't run forks the same session.
         let again = whole.branch(7).unwrap();

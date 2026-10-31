@@ -1,15 +1,15 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":1000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=89fdd36c73993842
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a71bda0be70ce342
 E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"step"}}
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=d38e36b576b6f61d
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=3873990159cacf1d
 E {"ToolResult":{"output":"step ran one","tool_call_id":"id2","tool_name":"step"}}
-S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e0b12c3a5a1d18b3
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=df7a12d5e7856286
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=24d4812d06c3e1b3
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=053ba8ebdf408740
 R msgs=3 model=gpt-5.6-luna request=3f2bff3bc9193e4c
 E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":18,"tool_definitions":605,"tool_results":16,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":2000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
@@ -17,32 +17,32 @@ E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"inp
 E {"PlanUsageReported":{"plan_type":"pro","primary":{"resets_at":4102444800,"used_percent":95.0,"window_minutes":300}}}
 E {"CacheEfficiencyReported":{"call_efficiency":0.0,"calls":1,"rolling_efficiency":0.0}}
 E {"CacheEfficiencyLow":{"pausing":true,"rolling_efficiency":0.0,"threshold":0.5}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9e84a0cc295bb7f5
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=78d5a49291270252
 E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"step"}}
-S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6b38c5cbd537d45c
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6cf9020287741051
 E {"ToolResult":{"output":"step ran two","tool_call_id":"id3","tool_name":"step"}}
-S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5c6f39e66cc916d7
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b2ca1dddd6cb813c
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=45213213b6eb4a06
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=6720ef1e490c131b
 E {"PlanUsageThresholdReached":{"action":"Pause","resets_at_unix_ms":"<time>","threshold_percent":90.0,"used_percent":95.0,"window":"primary"}}
 E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Plan usage reached 95.0% of the primary usage-limit window (threshold 90.0%)."}}}
 E {"ErrorEncountered":{"error_message":"Plan usage reached 95.0% of the primary usage-limit window (threshold 90.0%).","requires_approval_to_retry":true,"tool_call_id":null}}
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Plan usage reached 95.0% of the primary usage-limit window (threshold 90.0%)."}} task=fef5f73d76da965e
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Plan usage reached 95.0% of the primary usage-limit window (threshold 90.0%)."}} task=52c11afba5ec23d5
 E {"TaskStateChanged":"InProgress"}
 E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 0.0% over the last 1 calls (threshold 50.0%)."}}}
 E {"ErrorEncountered":{"error_message":"Prompt cache efficiency fell to 0.0% over the last 1 calls (threshold 50.0%).","requires_approval_to_retry":true,"tool_call_id":null}}
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 0.0% over the last 1 calls (threshold 50.0%)."}} task=0b2db5b60f36bbf5
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 0.0% over the last 1 calls (threshold 50.0%)."}} task=7456cf44f94bf1f8
 E {"TaskStateChanged":"InProgress"}
 R msgs=5 model=gpt-5.6-luna request=6794ced7da2d98c8
 E {"ModelRequestStarted":{"bytes_per_token":2.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":36,"tool_definitions":605,"tool_results":32,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f3a2ac7af5bc886f
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=22e9e87be4a31e48
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id4","tool_name":"complete_task"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=3b4f1f1a332c2a3a
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=0eb63cc0fd5d4cbf
 E {"ToolResult":{"output":"done","tool_call_id":"id4","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=6 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=2db8139ba361c32a
-S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=055990d63c39c739
+S durable=0 msgs=6 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=1d08e2c8412660bb
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=c4e9b1ea6bf67e56
 E "TaskStreamEnd"
 --- conversation: 7 messages, system prompt d1669b0441bd8242
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

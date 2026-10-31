@@ -203,7 +203,7 @@ impl AgentLoop {
         let request = async move {
             #[cfg(test)]
             if let Some(response) = scripted_response {
-                return response;
+                return response.map(|stream| (chrono::Utc::now(), stream));
             }
             if conversation.model.provider == ai::Provider::OpenAI {
                 // Decided under the credential lock, so tasks sharing a
@@ -214,11 +214,17 @@ impl AgentLoop {
                     ))
                     .await?;
             }
-            llm_client.generate_stream(&conversation, gen_config).await
+            // The provider uses the cache as it reads the request.
+            let sent_at = chrono::Utc::now();
+            let stream = llm_client
+                .generate_stream(&conversation, gen_config)
+                .await?;
+            Ok((sent_at, stream))
         };
-        let Some(response_stream) = self.run_llm_attempt(request).await? else {
+        let Some((sent_at, response_stream)) = self.run_llm_attempt(request).await? else {
             return Ok(ModelTurn::Ended(Flow::NextPass));
         };
+        self.request_sent_at = (!self.current_request_is_fallback).then_some(sent_at);
         // The provider accepted the request: the elapsed budget stops
         // counting while the response runs, however long that is, and
         // resumes if it fails (the waits between attempts still count,

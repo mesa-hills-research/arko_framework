@@ -1,39 +1,39 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ccf2dc73a7df0c2f
 R msgs=1 model=gpt-5.6-luna request=32fd5c3155dfe482
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=cb195254ecf7a358
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ab9b985cafb8a8b5
 E {"ToolCallFormatted":{"parameters":{"what":"hang"},"tool_call_id":"id2","tool_name":"gate"}}
 E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
 E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}
-S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=0b774c078dc356d1
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=8ed911fe06680f7c
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=568687f8154e6996
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=64cf0068f4ad8ca1
 E {"ToolRejected":{"reason":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.","tool_call_id":"id2","tool_name":"gate"}}
-S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=df9f88d8d9afaebc
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4e0b4895d00aeec9
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=6e88907a11df3ea9
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f5f9142e1d635420
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=6e88907a11df3ea9
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f5f9142e1d635420
 E "TaskStreamEnd"
 --- conversation: 3 messages, system prompt d1669b0441bd8242
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"hang"},"id":"g","name":"gate"}]}
 M {"content":[{"ToolResult":{"call_id":"g","is_error":true,"name":"gate","output":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed."}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=6e88907a11df3ea9
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f5f9142e1d635420
 R msgs=3 model=gpt-5.6-luna request=33a7f8bb559af450
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":436,"tool_calls":19,"tool_definitions":605,"tool_results":136,"user_text":11}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=090f5d81ef18956c
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2f2ac64fdda6cad1
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id3","tool_name":"complete_task"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=faac7faaa37d1870
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=5569db8d2f3338c3
 E {"ToolResult":{"output":"done","tool_call_id":"id3","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=404d4ad241feb4f3
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=254b25806f51e93a
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=9310d5ffc85ae1f8
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=036c9208d7c0d18b
 E "TaskStreamEnd"
 --- conversation: 5 messages, system prompt d1669b0441bd8242
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

@@ -1,42 +1,42 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=56755fc64819ae89
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=07dc8de47d34a38f
 R msgs=1 model=gpt-5.6-luna request=ac03a5ab4712586b
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":0,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":39}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=50dfdd42d5df29b3
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1d1a23b0720e8c22
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"image"},"tool_call_id":"id2","tool_name":"step"}}
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=49f1f6011092b61e
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=780fddd016d0d60d
 E {"ToolResult":{"output":"step looked at picture.png","tool_call_id":"id2","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=3ee2f693a6475818
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4053414996e4229b
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=5075832de16951ff
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5eddf0aa6bdea716
 R msgs=3 model=gpt-5.6-luna request=a706c15eb54c3c3d
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":33,"image_tokens":3000,"images":1,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":195}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8d532c5098dc55bd
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a81f347610a724c8
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"step"}}
-S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dbbf37d79c869f42
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6ccdfcbd4b523879
 E {"ToolResult":{"output":"step ran two","tool_call_id":"id3","tool_name":"step"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=24847501dccac0c0
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=516496afede8277c
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=71487b858ece9dc5
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=49dd2e326c05a3b9
 R msgs=5 model=gpt-5.6-luna request=bc693cc033411347
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":64,"image_tokens":3000,"images":1,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":281}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4d5c9ca3fe1c9424
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7d9b67e3a4cd027d
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id4","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id4","tool_name":"complete_task"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=8513c94fce4e5bc5
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=632432bf6a4c8eac
 E {"ToolResult":{"output":"done","tool_call_id":"id4","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=abd3aa0226b10380
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=da1efed10561253d
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=cc5312a9c4a0deab
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=2079cd219ce498ec
 E "TaskStreamEnd"
 --- conversation: 6 messages, system prompt 08c6670afdf61d85
 M {"content":[{"Text":"Do the task\n\n# Reminder\nCheck the plan."}],"id":null,"reasoning_artifact":null,"role":"User"}

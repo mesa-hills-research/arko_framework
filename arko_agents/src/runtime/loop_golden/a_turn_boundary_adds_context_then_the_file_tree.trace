@@ -1,17 +1,17 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=1 handovers=0 state="InProgress" task=963639d12d90b269
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=1 handovers=0 state="InProgress" task=eb9e2dfe39e2a9bf
 E {"ContextInjected":{"bytes":40}}
 R msgs=4 model=gpt-5.6-luna request=287b3d7c6c250566
 E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sizes":{"assistant_text":30,"image_tokens":0,"images":0,"system_prompt":18,"tool_calls":0,"tool_definitions":605,"tool_results":0,"user_text":195}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=0f6e2a85f7dc0de0
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9a6e9750c1d1481f
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id3","tool_name":"complete_task"}}
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=870076d592a16efc
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c95110d0bd1fbee1
 E {"ToolResult":{"output":"done","tool_call_id":"id3","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=5 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=9ff9b79c25b12383
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=79a7ee3978da8714
+S durable=0 msgs=5 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=ceafa9e6a7fc17ae
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=aa683a05c35f289b
 E "TaskStreamEnd"
 --- conversation: 6 messages, system prompt 3d34e5f8139235b9
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

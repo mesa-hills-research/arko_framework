@@ -1510,6 +1510,23 @@ Claude subscription within its usage limits and 5 minutes on an API key. Claude 
 subagents (its `Agent` tool) and helper requests cache for 5 minutes whatever the main
 conversation's TTL, so a stop of more than about 4½ minutes loses their caches.
 
+### When a conversation's cache expires
+
+`Task::latest_request`, a `RequestRecord` saved with the task, holds the current
+conversation's latest completed request. A host times and prices the conversation's prompt
+cache by it, also for a task read back or a run that ended. `RequestRecord::Latest` holds a
+`LatestRequest` with its send time (`sent_at`), its input (`input_tokens`, with
+`cached_tokens` and `cache_write_tokens`) and, for a Claude Code model, the lifetime its latest
+cache write showed (`cache_lifetime()`). The cache expires about `sent_at` plus the lifetime.
+In arko's own runtime `sent_at` is just before the provider call. Claude Code sends a Claude
+Code model's requests itself, so there it is the response's first streamed token, a few
+seconds late, and a host takes a margin off. A request to the refusal fallback's model, a
+Claude Code subagent's request and a request that failed leave the record as it was.
+`RequestRecord::NoRequest` means nothing of the conversation is cached, as in a new task, and
+after a handover, a compaction, a cut back or a branch until the next request is answered. A
+task saved before the record existed reads as `RequestRecord::Unrecorded`, whose cache isn't
+known. arko_workflows' `TaskInfo::latest_request` has the same without reading the task.
+
 ### Keeping a cache warm
 
 `AgentRuntime::refresh_prompt_cache(task, registry,
