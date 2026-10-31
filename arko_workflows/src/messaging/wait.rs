@@ -326,11 +326,10 @@ impl Tool for WaitForMessageTool {
         arko_agents::ToolBackground::Own
     }
 
-    fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message) {
-        self.context
-            .messages
-            .observe_context(&self.agent_name, task_id, message);
-        // The runtime reports new messages just before each model request.
+    fn observe_context(&self, task_id: uuid::Uuid, _message: &arko_ai::Message) {
+        // (The messages it holds count as seen as the runtime reports them,
+        // `MessageBus::seen`.) The runtime reports new messages just before
+        // each model request.
         self.last_request.lock().insert(task_id, Instant::now());
     }
 

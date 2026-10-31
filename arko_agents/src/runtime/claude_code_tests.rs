@@ -193,6 +193,17 @@ fn texts(task: &Task) -> Vec<String> {
         .collect()
 }
 
+/// Waits, for up to 20 seconds, until `done`.
+async fn until(done: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("not in time");
+}
+
 fn complete(summary: &str) -> Value {
     json!({"tool": "mcp__arko__complete_task", "input": {"summary": summary}})
 }
@@ -576,6 +587,7 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "main.rs".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -762,6 +774,7 @@ async fn a_relaunch_s_replies_reach_the_host_whatever_their_ids() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "Blue.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -901,13 +914,16 @@ async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() 
         .unwrap();
     assert!(hooked.contains("skip vendor/"), "{hooked}");
     assert!(!hooked.contains("Use tabs."), "{hooked}");
-    let recorded = texts(&task)
+    // The hook's record first. The note's follows once the CLI completed
+    // its message too, which the fake does as the turn ends.
+    let updates = texts(&task)
         .into_iter()
-        .find(|text| text.starts_with("# Workflow context update"))
-        .unwrap();
-    assert!(
-        recorded.ends_with(&format!("skip vendor/.\n\n{TYPED_NOTE}")),
-        "{recorded}"
+        .filter(|text| text.starts_with("# Workflow context update"))
+        .collect::<Vec<_>>();
+    assert!(updates[0].ends_with("skip vendor/."), "{updates:?}");
+    assert_eq!(
+        updates[1],
+        format!("# Workflow context update\n\n{TYPED_NOTE}")
     );
     let injected: Vec<_> = events
         .iter()
@@ -952,9 +968,9 @@ async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
             asked: Default::default(),
         }),
     );
-    let mut run = start_with(task, runtime);
-    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
-        .await;
+    let run = start_with(task, runtime);
+    // Suspended once the note went as the user's message.
+    until(|| fake.logged("midturn").len() == 1).await;
     run.commands.send(UserCommand::SuspendTask).await.unwrap();
     let (task, _) = run.finish().await;
     assert_eq!(fake.logged("midturn").len(), 1);
@@ -1002,17 +1018,22 @@ fn with_typed_note(task: &Task) -> Vec<String> {
 
 /// A note the CLI reports cancelled before the result it went with never
 /// reached the model. The record of that result leaves it out, and the
-/// note goes with the next call's result, recorded once.
+/// note waits where it was, so it goes again as the user's message with the
+/// next call's hook, recorded once.
 #[tokio::test]
 async fn a_note_cancelled_before_its_result_is_left_out_of_the_record() {
     let (fake, task) = run_with_note_cancelled_before_its_result("").await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    assert_eq!(fake.logged("midturn").len(), 1);
+    let sent = fake.logged("midturn");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["text"], TYPED_NOTE);
     let posts = fake.logged("post");
-    let hooked = posts[1]["answer"]["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(hooked.contains("Use tabs."), "{hooked}");
+    assert!(
+        posts
+            .iter()
+            .all(|post| !post.to_string().contains("Use tabs.")),
+        "never in a hook"
+    );
     let recorded = with_typed_note(&task);
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert!(task.pending_context_injections.is_empty());
@@ -1089,7 +1110,7 @@ async fn a_note_the_cli_took_before_it_exited_goes_back_with_its_mark() {
     let holds = |task: &Task| {
         task.pending_context_injections
             .iter()
-            .any(|text| text.contains("Use tabs."))
+            .any(|item| item.text.contains("Use tabs."))
             || texts(task).iter().any(|text| text.contains("Use tabs."))
     };
     let snapshots = recorder.snapshots();
@@ -1141,9 +1162,9 @@ async fn a_cancelled_note_goes_back_with_its_mark() {
     task.context_marks.insert("notes".into(), 2);
     let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
         .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
-    let mut run = start_with(task, runtime);
-    run.events_until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
-        .await;
+    let run = start_with(task, runtime);
+    // Suspended once the note went as the user's message.
+    until(|| fake.logged("midturn").len() == 1).await;
     run.commands.send(UserCommand::SuspendTask).await.unwrap();
     let (task, _) = run.finish().await;
     assert_eq!(fake.logged("midturn").len(), 1);
@@ -1167,7 +1188,8 @@ async fn a_note_cancelled_before_its_result_keeps_its_mark() {
     let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
         .with_turn_context(Arc::new(MarkedTypedNote(Default::default())));
     let (task, _) = start_with(task, runtime).finish().await;
-    assert_eq!(fake.logged("midturn").len(), 1);
+    // Sent again with the next call's hook.
+    assert_eq!(fake.logged("midturn").len(), 2);
     assert_eq!(task.context_marks.get("notes"), Some(&3));
     assert_eq!(with_typed_note(&task).len(), 1);
     assert!(task.pending_context_injections.is_empty());
@@ -2199,6 +2221,14 @@ async fn context_with_images_sends_its_text_at_once_and_the_images_next() {
     let blocks = sent
         .as_array()
         .expect("an input with an image is sent as blocks");
+    // The runtime's note on the open turn, then the update.
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Your turn ended")
+    );
+    let blocks = &blocks[1..];
     let text = blocks[0]["text"].as_str().unwrap();
     assert!(
         text.contains(
@@ -2268,6 +2298,13 @@ async fn a_note_the_user_typed_with_an_image_sends_its_text_at_once_and_the_imag
     let blocks = next
         .as_array()
         .expect("an input with an image is sent as blocks");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Your turn ended")
+    );
+    let blocks = &blocks[1..];
     assert!(
         blocks[0]["text"]
             .as_str()
@@ -4781,6 +4818,7 @@ async fn calls_that_ended_normally_are_not_reported_again() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "The first.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -4983,6 +5021,7 @@ async fn a_compaction_after_a_partial_answer_restates_the_rest() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -5674,6 +5713,7 @@ async fn the_turn_after_ask_user_is_not_the_final_reply() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "main.rs".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -5833,6 +5873,7 @@ async fn questions_answered_while_the_turn_goes_on_are_not_waited_for() {
         run.commands
             .send(UserCommand::SubmitUserResponse {
                 response: "The user answered q2.".into(),
+                ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -6206,7 +6247,11 @@ fn held(task: &Task) -> String {
     texts(task)
         .into_iter()
         .filter_map(|text| text.strip_prefix(heading).map(str::to_string))
-        .chain(task.pending_context_injections.iter().cloned())
+        .chain(
+            task.pending_context_injections
+                .iter()
+                .map(|item| crate::runtime::hook_budget::shown_from(item, item.given)),
+        )
         .collect::<Vec<_>>()
         .join("\n\n")
         .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "")
@@ -6231,7 +6276,7 @@ async fn saved_once(recorder: &Recorder, pick: impl Fn(&Task) -> bool) -> Task {
         .map(|(task, _)| {
             task.pending_context_injections
                 .iter()
-                .map(|item| item.len())
+                .map(|item| item.text.len())
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -6329,11 +6374,11 @@ async fn an_acknowledged_part_leaves_its_rest_and_the_note_behind_it_pending() {
     assert!(snapshots.iter().any(|(task, _)| {
         task.pending_context_injections
             .first()
-            .is_some_and(|rest| rest.starts_with(CONTINUED))
+            .is_some_and(|rest| rest.given > 0)
             && texts(task).iter().any(|text| text.ends_with(GOES_ON))
     }));
     assert_eq!(saved.pending_context_injections.len(), 2);
-    assert!(saved.pending_context_injections[0].starts_with(CONTINUED));
+    assert!(saved.pending_context_injections[0].given > 0);
     assert_eq!(saved.pending_context_injections[1], TYPED_NOTE);
     assert_eq!(saved.context_marks.get("notes"), Some(&3));
     assert_eq!(fake.logged("midturn").len(), 1, "sent with the rest's hook");
@@ -6529,23 +6574,31 @@ async fn a_long_output_for_a_built_in_is_cut_and_its_rest_comes_next() {
         .as_str()
         .unwrap()
         .to_string();
+    use crate::runtime::hook_budget::{DENIAL_GOES_ON, DENIAL_REST};
     assert!(
-        answer.len() <= 9_500 && answer.ends_with(GOES_ON),
+        answer.len() <= 9_500 && answer.ends_with(DENIAL_GOES_ON),
         "{}",
         answer.len()
     );
-    // The rest, longer than a hook holds itself, takes the next two.
+    // The rest, longer than a hook holds itself, takes the next two, under
+    // its own words first.
     let hooks = hooked(&fake);
     assert_eq!(hooks.len(), 2);
-    let mut parts = vec![answer];
-    for hook in &hooks {
+    let mut parts = Vec::new();
+    for (index, hook) in hooks.iter().enumerate() {
         let rest = hook.strip_prefix("# Workflow context update\n\n").unwrap();
-        assert!(hook.len() <= 9_500 && rest.starts_with(CONTINUED));
+        let start = if index == 0 { DENIAL_REST } else { CONTINUED };
+        assert!(hook.len() <= 9_500 && rest.starts_with(start), "{index}");
         parts.push(rest.to_string());
     }
-    let rejoined = parts
-        .join("\n\n")
-        .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "");
+    parts[0] = parts[0].strip_prefix(DENIAL_REST).unwrap().to_string();
+    let rejoined = format!(
+        "{}{}",
+        answer.strip_suffix(DENIAL_GOES_ON).unwrap(),
+        parts
+            .join("\n\n")
+            .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "")
+    );
     assert!(
         rejoined == output,
         "{} of {} bytes",
@@ -6553,6 +6606,270 @@ async fn a_long_output_for_a_built_in_is_cut_and_its_rest_comes_next() {
         output.len()
     );
     assert!(task.pending_context_injections.is_empty());
+}
+
+/// The CLI completes the user's message before it reports the call's
+/// result, so the note is done as its hook is acknowledged, and joins the
+/// same record. (The order the other way round, a verdict after the result,
+/// is `a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook`.)
+#[tokio::test]
+async fn a_note_completed_before_its_result_joins_its_hooks_record() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "complete_notes": true},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let recorder = Arc::new(Recorder::default());
+    let runtime = with_updates(
+        &recorder,
+        vec![noted("A message: skip vendor/.", TYPED_NOTE)],
+    );
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let updates = texts(&task)
+        .into_iter()
+        .filter(|text| text.starts_with("# Workflow context update"))
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert!(updates[0].ends_with(&format!("skip vendor/.\n\n{TYPED_NOTE}")));
+    assert!(task.pending_context_injections.is_empty());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+            .count(),
+        1
+    );
+}
+
+/// An update's content and the part the user typed each carry their own
+/// ids: the task records each with its item, and each is reported as its
+/// item reaches the model.
+#[tokio::test]
+async fn an_updates_ids_go_with_their_own_items() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let recorder = Arc::new(Recorder::default());
+    let update = crate::runtime::TurnContext {
+        content: "A message: skip vendor/.".into(),
+        user_content: TYPED_NOTE.into(),
+        ids: vec!["mail:1".into()],
+        user_ids: vec!["note:2".into()],
+        ..Default::default()
+    };
+    let (task, events) = start_with(task, with_updates(&recorder, vec![update]))
+        .finish()
+        .await;
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, .. } => Some(ids.clone()),
+            _ => None,
+        })
+        .filter(|ids| !ids.is_empty())
+        .collect();
+    assert_eq!(
+        injected,
+        [vec!["mail:1".to_string()], vec!["note:2".to_string()]]
+    );
+    // Each record holds its message's items with their ids.
+    let texts = texts(&task);
+    let recorded: Vec<(String, Vec<String>)> = task
+        .context_records
+        .iter()
+        .flat_map(|record| {
+            record
+                .parts
+                .iter()
+                .map(|part| (texts[record.message].clone(), part.host_ids.clone()))
+        })
+        .collect();
+    assert!(
+        recorded
+            .iter()
+            .any(|(text, ids)| text.contains("skip vendor/") && ids == &["mail:1"])
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(text, ids)| text.contains("Use tabs.") && ids == &["note:2"])
+    );
+}
+
+/// A snapshot sink that takes a while over a durable save, and notes, at
+/// each durable save holding a denial's rest, how many permission answers
+/// the fake CLI had received by then.
+struct SlowSaves {
+    log: PathBuf,
+    answered: std::sync::Mutex<Vec<usize>>,
+}
+
+#[async_trait::async_trait]
+impl crate::snapshot::TaskSnapshotSink for SlowSaves {
+    async fn task_changed(&self, task: &Task, durable: bool) -> Result<(), String> {
+        let rest = task
+            .pending_context_injections
+            .iter()
+            .any(|item| matches!(item.kind, crate::task::PendingKind::DenialRest { .. }));
+        if durable && rest {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let answers = std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains(r#""event": "permission""#))
+                .count();
+            self.answered.lock().unwrap().push(answers);
+        }
+        Ok(())
+    }
+}
+
+/// The host's output for a built-in, too long for its answer, can't be
+/// given again, so the task is saved with its rest before the answer goes
+/// out: no answer has reached the CLI when that save ends.
+#[tokio::test]
+async fn a_denials_rest_is_saved_before_the_denial_goes_out() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "cargo test"}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Tested"),
+    ]]));
+    let mut config = config(&fake, &["Grep", "Bash"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Bash".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let sink = Arc::new(SlowSaves {
+        log: fake.dir.join("log.jsonl"),
+        answered: Default::default(),
+    });
+    let task = Task::new(config, "Test.".into(), fake.workspace(), None);
+    let runtime =
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_task_snapshots(sink.clone());
+    let mut run = start_with(task, runtime);
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+        .await;
+    let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: *tool_call_id,
+            custom_tool_output: Some(long_note()),
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let answered = sink.answered.lock().unwrap().clone();
+    assert_eq!(answered.first(), Some(&0), "{answered:?}");
+}
+
+/// A long note's first part goes in a hook, and its rest with the next
+/// input after the open turn, as a context message of its own after the
+/// runtime's note. The next turn goes over the input limit, so the step is
+/// left out and the report asked for: the context messages the task
+/// recorded stay, their records following them, so every record points at
+/// the context it holds.
+#[tokio::test]
+async fn a_step_left_out_keeps_the_context_the_task_recorded() {
+    let fake = Fake::new(json!([
+        [{"tool": "Grep", "input": {"pattern": "a"}}, {"text": "Reading."}],
+        [
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 400, "output": "b is here"},
+            {"tool": "Grep", "input": {"pattern": "c"}, "input_tokens": 500, "output": "HUGE RESULT"},
+            too_long(),
+        ],
+        [{"text": "REPORT: b is here."}],
+        [complete("Found them")],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(100_000));
+    let task = Task::new(config, "Search.".into(), fake.workspace(), None);
+    let recorder = Arc::new(Recorder::default());
+    let note = long_note();
+    let updates = vec![
+        noted(&note, ""),
+        // (With the next input.)
+        Default::default(),
+        "Mail M for the agent.".to_string().into(),
+        "Mail P for the agent.".to_string().into(),
+    ];
+    let (task, _) = start_with(task, with_updates(&recorder, updates))
+        .finish()
+        .await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    // The rest went as a message of its own after the runtime's note.
+    let before =
+        recorder.latest(|task| task.handover_requested.is_none() && task.handovers.is_empty());
+    let texts_before = texts(&before);
+    let rest = texts_before
+        .iter()
+        .position(|text| text.starts_with(&format!("# Workflow context update\n\n{CONTINUED}")))
+        .expect("the rest's message");
+    assert!(texts_before[rest - 1].starts_with("Your turn ended"));
+    assert!(before.runtime_messages.contains(&(rest - 1)));
+    assert!(!before.runtime_messages.contains(&rest));
+    // With the step left out, before the fresh conversation: every record
+    // points at a context message, and they hold all the context.
+    let left_out = recorder.latest(|task| task.handover_requested.is_some());
+    let texts = texts(&left_out);
+    let mut held = Vec::new();
+    for record in &left_out.context_records {
+        let text = &texts[record.message];
+        if record.message > 0 {
+            assert!(text.starts_with("# Workflow context update"), "{text}");
+            held.push(
+                text.strip_prefix("# Workflow context update\n\n")
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+    }
+    let held = held
+        .join("\n\n")
+        .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "");
+    for expected in [
+        note.as_str(),
+        "Mail M for the agent.",
+        "Mail P for the agent.",
+    ] {
+        assert!(
+            held.contains(expected),
+            "{}",
+            &expected[..20.min(expected.len())]
+        );
+    }
+    // The fresh conversation holds nothing of the old one's context.
+    assert!(
+        task.context_records
+            .iter()
+            .all(|record| record.message < task.conversation.messages.len())
+    );
 }
 
 /// A tool that returns whether its call says the task runs in Claude Code.
@@ -6857,6 +7174,7 @@ async fn an_ask_with_a_supplied_result_is_numbered_and_recorded_by_the_host() {
     run.commands
         .send(UserCommand::SubmitUserResponse {
             response: "main".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();

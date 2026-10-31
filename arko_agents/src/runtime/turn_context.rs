@@ -20,10 +20,14 @@ pub struct TurnContext {
     /// before it. Every other agent gets it after `content` in the same
     /// update. May be empty.
     pub user_content: String,
-    /// The host's identifiers of the items in `content` and `user_content`
-    /// (such as note numbers or message ids), in any form it chooses. May be
-    /// empty.
+    /// The host's identifiers of the items in `content` (such as note
+    /// numbers or message ids), in any form it chooses. The task records
+    /// them with the content ([`Task::holding`](crate::Task::holding)). May
+    /// be empty.
     pub ids: Vec<String>,
+    /// The identifiers of the items in `user_content`, as `ids` are of
+    /// `content`. May be empty.
+    pub user_ids: Vec<String>,
     /// Images that go with `content`, each after its label, following the
     /// text in the same message. A Claude Code agent gets them with its
     /// next input. An update with images that arrives during a turn waits
@@ -43,6 +47,7 @@ impl From<String> for TurnContext {
             content,
             user_content: String::new(),
             ids: Vec::new(),
+            user_ids: Vec::new(),
             images: Vec::new(),
             marks: Default::default(),
         }

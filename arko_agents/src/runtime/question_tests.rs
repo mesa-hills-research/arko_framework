@@ -256,6 +256,7 @@ async fn wait_holds_the_task_until_the_answer() {
         commands
             .send(UserCommand::SubmitUserResponse {
                 response: "The user answered q1.\nq1 Which file? README.md".into(),
+                ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -455,6 +456,7 @@ async fn a_partial_answer_to_a_waited_batch_leaves_the_rest_open() {
     commands
         .send(UserCommand::SubmitUserResponse {
             response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -699,6 +701,7 @@ async fn an_answer_that_lands_before_the_wait_follows_the_reply() {
     commands
         .send(UserCommand::SubmitUserResponse {
             response: REPLIED.into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();

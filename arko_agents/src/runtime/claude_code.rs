@@ -43,7 +43,8 @@ use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
 use crate::snapshot::TaskSnapshots;
 use crate::task::{
-    ApprovalReason, CONTEXT_UPDATE, ErrorRecoveryCause, RunningToolCall, Task, TaskState,
+    ApprovalReason, CONTEXT_UPDATE, ErrorRecoveryCause, PendingContext, PendingKind,
+    RunningToolCall, Task, TaskState,
 };
 use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME, message_user};
 use crate::tool::{
@@ -783,8 +784,10 @@ pub(super) struct ClaudeCodeRun {
     /// it is sent.
     context_receipts: Vec<AgentEvent>,
     /// How the task's pending context goes out in hooks: the hooks in
-    /// flight, the user's typed notes waiting, and the rests of denials.
+    /// flight, the user's typed notes sent, and the denials' rests held.
     delivery: Delivery,
+    /// The ids of an update of images alone, which go with the next input.
+    image_ids: Vec<String>,
     pub(super) host_decisions: super::HostDecisions,
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// The host's handover threshold, in place of the configuration's.
@@ -956,6 +959,7 @@ impl ClaudeCodeRun {
             turn_context: None,
             context_receipts: Vec::new(),
             delivery: Delivery::default(),
+            image_ids: Vec::new(),
             host_decisions: super::HostDecisions::default(),
             handover_hook: None,
             handover_threshold: Default::default(),
@@ -1141,6 +1145,7 @@ impl ClaudeCodeRun {
             let reasons = std::mem::take(&mut self.task.unavailable_images);
             self.emit(AgentEvent::ImagesUnavailable { reasons }).await?;
         }
+        self.task.number_context();
         if self.task.conversation.messages.is_empty() {
             let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
             let first =
@@ -1152,6 +1157,7 @@ impl ClaudeCodeRun {
                 .conversation
                 .add_user_message_with_contents(content);
             self.task.increment_user_message_count();
+            self.task.record_initial_prompt();
         }
         // A call's approval can't outlive its session: a task saved while
         // one waited continues without it.
@@ -1492,12 +1498,15 @@ impl ClaudeCodeRun {
                 (_, UserCommand::SuspendTask) => return Ok(false),
                 (
                     TaskState::AwaitingUserResponse { .. },
-                    UserCommand::SubmitUserResponse { response },
+                    UserCommand::SubmitUserResponse { response, ids },
                 ) => {
                     // (Those the host still has open stay open.)
                     crate::handover::settle_waited(self.handover_hook.as_deref(), &mut self.task);
                     self.task
                         .prepare_for_resumption_with_user_response(response)?;
+                    // The answer's message presents what the host delivers.
+                    let last = self.task.conversation.messages.len().saturating_sub(1);
+                    self.task.record_held_ids(last, ids);
                     self.emit(AgentEvent::TaskStateChanged(
                         self.task.current_state.clone(),
                     ))
@@ -1628,23 +1637,47 @@ impl ClaudeCodeRun {
         }
     }
 
-    /// Keeps `content` for the agent until it is handed over. Context the
-    /// host sent (`from_host`) fires the arko calls' signal only when its
-    /// turn context source says so.
+    /// Keeps `content` for the agent until it is handed over, identified by
+    /// the turn context source when the host sent it (`from_host`).
     fn queue_context(&mut self, content: String, from_host: bool) {
-        if !content.trim().is_empty() {
-            let wakes = !from_host
-                || self
-                    .turn_context
-                    .as_ref()
-                    .is_none_or(|source| source.wakes_calls(&content));
-            self.task.pending_context_injections.push(content);
-            // An arko call that waits can end, so the agent reads it with
-            // that call's result.
-            if wakes {
-                self.context_arrivals.notify();
-            }
+        let ids = self
+            .turn_context
+            .as_ref()
+            .filter(|_| from_host)
+            .and_then(|source| source.identify(&content))
+            .into_iter()
+            .collect();
+        self.queue_item(
+            None,
+            PendingContext::new(PendingKind::Context, content, ids),
+            from_host,
+        );
+    }
+
+    /// Puts `item` in the task's pending context, at `at` or its end, and
+    /// tells the arko calls that wait, so the agent reads it with that call's
+    /// result. Context the host sent (`from_host`) wakes them only when the
+    /// turn context source says so. Every item joins the list here. Returns
+    /// its number, `None` for text that is only white space.
+    fn queue_item(
+        &mut self,
+        at: Option<usize>,
+        item: PendingContext,
+        from_host: bool,
+    ) -> Option<u64> {
+        let wakes = !from_host
+            || self
+                .turn_context
+                .as_ref()
+                .is_none_or(|source| source.wakes_calls(&item.text));
+        let id = match at {
+            Some(at) => self.task.insert_context(at, item),
+            None => self.task.queue_context(item),
+        }?;
+        if wakes {
+            self.context_arrivals.notify();
         }
+        Some(id)
     }
 
     async fn note_handover_request(&mut self) -> Result<(), ArkoAgentsError> {
@@ -1739,11 +1772,13 @@ impl ClaudeCodeRun {
         waits
     }
 
-    /// The turn context source's update joins the task's queue, its images
-    /// the task's pending images. During a turn (`in_turn`), where a hook's
-    /// context is text, the update says that its images come with the next
-    /// input, and the part the user typed ([`TurnContext::user_content`])
-    /// waits to go as their message (see [`Delivery`]).
+    /// The turn context source's update joins the task's pending context,
+    /// its content and the part the user typed ([`TurnContext::user_content`])
+    /// each an item with its own ids, and its marks rise in the same step.
+    /// Its images join the task's pending images. During a turn (`in_turn`),
+    /// where a hook's context is text, the update says that its images come
+    /// with the next input, and the typed part goes as the user's message
+    /// (see [`Delivery`]).
     fn take_update(&mut self, in_turn: bool) {
         let Some(update) = self
             .turn_context
@@ -1756,9 +1791,17 @@ impl ClaudeCodeRun {
             mut content,
             mut user_content,
             ids,
+            user_ids,
             images,
             marks,
         } = update;
+        // A source that gives an update of typed notes alone may give their
+        // ids as the update's.
+        let (ids, user_ids) = if content.trim().is_empty() && user_ids.is_empty() {
+            (Vec::new(), ids)
+        } else {
+            (ids, user_ids)
+        };
         if in_turn && !images.is_empty() {
             let said = match images.len() {
                 1 => "\n\n(The image of this update can't come during a turn. It comes with your next input.)".to_string(),
@@ -1771,40 +1814,60 @@ impl ClaudeCodeRun {
                 content.push_str(&said);
             }
         }
-        let holds =
-            !content.trim().is_empty() || !user_content.trim().is_empty() || !images.is_empty();
-        let ids = if holds { ids } else { Vec::new() };
-        let wakes = !content.trim().is_empty();
-        self.task.pending_context_images.extend(images);
-        let marks = self.delivery.take_update(
-            &mut self.task.pending_context_injections,
-            content,
-            user_content,
-            ids,
-            marks,
-            in_turn,
-        );
-        self.task.raise_context_marks(&marks);
-        if wakes {
-            self.context_arrivals.notify();
+        let image_ids = [ids.clone(), user_ids.clone()].concat();
+        let held = self
+            .queue_item(
+                None,
+                PendingContext::new(PendingKind::Context, content, ids),
+                false,
+            )
+            .is_some();
+        let typed = self
+            .queue_item(
+                None,
+                PendingContext::new(PendingKind::Typed, user_content, user_ids),
+                false,
+            )
+            .is_some();
+        if !held && !typed && !images.is_empty() {
+            // Images alone: they and their ids wait for the next input.
+            self.image_ids.extend(image_ids);
         }
+        self.task.pending_context_images.extend(images);
+        self.task.raise_context_marks(&marks);
     }
 
     /// Every text a hook gives the model, measured as it goes out, within the
     /// budget of [`hook_budget`](super::hook_budget): call `call`'s denial in
     /// a PreToolUse hook or a permission answer (`denial`), or else a
-    /// PostToolUse hook's context. A denial too long for the budget is cut,
-    /// and its rest waits for the call's result. A PostToolUse hook carries
-    /// the task's queue from the first item not in a hook already, as much
-    /// as fits, and the source is asked for its update only once nothing
-    /// waits outside a hook. `None` when a PostToolUse hook carries nothing.
-    fn hook_text(&mut self, call: Option<&str>, denial: Option<String>) -> Option<String> {
+    /// PostToolUse hook's context. A PostToolUse hook carries the task's
+    /// pending context from the first item not in a hook already, as much as
+    /// fits, and the source is asked for its update only once nothing waits
+    /// outside a hook. A denial too long for the budget is cut, and its rest
+    /// joins the pending context, held until the call's result. The task is
+    /// saved with the rest before the denial goes out, since nothing could
+    /// give it again. `None` when a PostToolUse hook carries nothing.
+    async fn hook_text(&mut self, call: Option<&str>, denial: Option<String>) -> Option<String> {
         let text = match denial {
-            Some(denial) => Some(self.delivery.deny(
-                &mut self.task.pending_context_injections,
-                call,
-                denial,
-            )),
+            Some(denial) => {
+                let (text, rest) = super::hook_budget::cut_denial(denial);
+                if let Some(rest) = rest {
+                    let at = self
+                        .delivery
+                        .rest_place(&self.task.pending_context_injections);
+                    let kind = PendingKind::DenialRest {
+                        call: call.unwrap_or_default().to_string(),
+                    };
+                    let item = PendingContext::new(kind, rest, Vec::new());
+                    if let Some(id) = self.queue_item(Some(at), item, false)
+                        && let Some(call) = call
+                    {
+                        self.delivery.hold_rest(call, id);
+                    }
+                    self.report(true).await;
+                }
+                Some(text)
+            }
             None if self.context_waits() => None,
             None => {
                 if self
@@ -1826,20 +1889,18 @@ impl ClaudeCodeRun {
         text
     }
 
-    /// The context waiting for the model, as the next input's update with
-    /// its images: the whole queue, a split item's rest included, and the
-    /// source's update. The hooks Claude Code didn't acknowledge are
-    /// dropped first, their items still queued, so they go now. `None` when
+    /// Adds the context waiting for the model to the conversation as the next
+    /// input's update, with its images, and records what it holds: every
+    /// item, from what earlier parts gave, and the source's update. The hooks
+    /// Claude Code didn't acknowledge are dropped first, their items still
+    /// pending, so they go now. Returns the update's text, `None` when
     /// nothing waits, and while context waits for a later input (see
     /// [`context_waits`](Self::context_waits)).
-    fn take_all_context(&mut self) -> Option<(String, Vec<ContextImage>)> {
+    fn add_all_context(&mut self) -> Option<String> {
         if self.context_waits() {
             return None;
         }
-        let marks = self
-            .delivery
-            .settle(&mut self.task.pending_context_injections);
-        self.task.raise_context_marks(&marks);
+        self.delivery.settle();
         self.take_update(false);
         // Claude Code has it all, so arko calls that start from now on
         // count newer context.
@@ -1849,12 +1910,25 @@ impl ClaudeCodeRun {
         {
             return None;
         }
-        let source = self.turn_context.clone();
-        let identify = |content: &str| source.as_ref().and_then(|source| source.identify(content));
-        let ids = self
-            .delivery
-            .all_ids(&self.task.pending_context_injections, &identify);
-        let mut content = std::mem::take(&mut self.task.pending_context_injections).join("\n\n");
+        let items = std::mem::take(&mut self.task.pending_context_injections);
+        let mut ids = Vec::new();
+        let mut parts = Vec::new();
+        for item in &items {
+            if item.given == 0 {
+                ids.extend(item.host_ids.iter().cloned());
+            }
+            parts.push(crate::task::RecordedPart::of(item, true));
+        }
+        let images_ids = std::mem::take(&mut self.image_ids);
+        ids.extend(images_ids.iter().cloned());
+        if !images_ids.is_empty() {
+            parts.push(crate::task::RecordedPart::presented(images_ids));
+        }
+        let mut content = items
+            .iter()
+            .map(|item| super::hook_budget::shown_from(item, item.given))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         if content.is_empty() {
             content = "The images an earlier update said would follow.".to_string();
         }
@@ -1863,7 +1937,17 @@ impl ClaudeCodeRun {
             ids,
             bytes: content.len(),
         });
-        Some((format!("{CONTEXT_UPDATE}\n\n{content}"), images))
+        let context = format!("{CONTEXT_UPDATE}\n\n{content}");
+        self.task
+            .conversation
+            .add_user_message_with_contents(crate::task::with_context_images(
+                context.clone(),
+                images,
+            ));
+        self.task.increment_user_message_count();
+        let message = self.task.conversation.messages.len() - 1;
+        self.task.record_context(message, parts);
+        Some(context)
     }
 
     /// Reports the context updates taken (and now sent) since the last call.
@@ -2133,11 +2217,7 @@ impl ClaudeCodeRun {
                     .unwrap_or_default(),
             );
         }
-        if let Some((context, images)) = self.take_all_context() {
-            self.task.conversation.add_user_message_with_contents(
-                crate::task::with_context_images(context.clone(), images),
-            );
-            self.task.increment_user_message_count();
+        if let Some(context) = self.add_all_context() {
             parts.push(context);
         }
         let messages = &self.task.conversation.messages[synced..];
@@ -2369,7 +2449,7 @@ impl ClaudeCodeRun {
                         break self.session_failed("Claude Code exited during the turn.".into()).await?;
                     }
                     Some(cc::Message::Result(result)) => {
-                        if let Some(end) = self.turn_ended(&result, &session).await? {
+                        if let Some(end) = self.turn_ended(&result, &mut session).await? {
                             break end;
                         }
                     }
@@ -2393,20 +2473,10 @@ impl ClaudeCodeRun {
         }
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
-        while self.delivery.notes_unsettled()
-            && let Ok(Some(message)) =
-                tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
-        {
-            if let cc::Message::Other(raw) = message {
-                self.note_settled(&raw);
-            }
-        }
-        // The hooks Claude Code didn't acknowledge are dropped, their items
-        // still queued for the next input, and what waits joins the queue.
-        let marks = self
-            .delivery
-            .session_ended(&mut self.task.pending_context_injections);
-        self.task.raise_context_marks(&marks);
+        self.await_note_verdicts(&mut session).await?;
+        // The hooks Claude Code didn't acknowledge are dropped, and every
+        // item they carried waits where it is for the next input.
+        self.delivery.settle();
         match session.close().await {
             // Claude Code saved the session as it closed: its transcript
             // holds every call's outcome.
@@ -2539,6 +2609,7 @@ impl ClaudeCodeRun {
                 {
                     *reason = Value::String(
                         self.hook_text(tool_use_id.as_deref(), Some(denial))
+                            .await
                             .unwrap_or_default(),
                     );
                 }
@@ -2969,10 +3040,12 @@ impl ClaudeCodeRun {
             .map(|call| (call.id, call.name.clone(), call.built_in));
         let Some((id, name, built_in)) = known else {
             // Not gated (an unexpected request): refused.
-            let reason = self.hook_text(
-                request.tool_use_id.as_deref(),
-                Some("This call did not pass the host's checks, so it was not run.".into()),
-            );
+            let reason = self
+                .hook_text(
+                    request.tool_use_id.as_deref(),
+                    Some("This call did not pass the host's checks, so it was not run.".into()),
+                )
+                .await;
             let _ = reply.send(cc::PermissionDecision::deny(reason.unwrap_or_default()));
             return Ok(());
         };
@@ -3076,16 +3149,22 @@ impl ClaudeCodeRun {
             .await?;
             let reason = self
                 .hook_text(call.as_deref(), Some(reason))
+                .await
                 .unwrap_or_default();
             let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
             return Ok(());
         }
-        // It waits in the queue, so it can't overtake what waits there, and
-        // usually goes in its call's hook.
+        // It waits in the pending context, so it can't overtake what waits
+        // there, and usually goes in its call's hook. Nothing could give it
+        // again, so the task is saved with it before the call goes on.
         if let Some(message) = message_to_agent.filter(|message| !message.trim().is_empty()) {
-            self.task
-                .pending_context_injections
-                .push(format!("Message from user on approval:\n{message}"));
+            let text = format!("Message from user on approval:\n{message}");
+            self.queue_item(
+                None,
+                PendingContext::new(PendingKind::Context, text, Vec::new()),
+                false,
+            );
+            self.report(true).await;
         }
         let built_in = self
             .calls
@@ -3096,6 +3175,7 @@ impl ClaudeCodeRun {
             match custom_output {
                 Some(output) => cc::PermissionDecision::deny(
                     self.hook_text(call.as_deref(), Some(output))
+                        .await
                         .unwrap_or_default(),
                 ),
                 None => {
@@ -3151,6 +3231,7 @@ impl ClaudeCodeRun {
         .await?;
         let reason = self
             .hook_text(approval.tool_use_id.as_deref(), Some(reason))
+            .await
             .unwrap_or_default();
         let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
         self.set_state(TaskState::InProgress).await
@@ -3196,13 +3277,13 @@ impl ClaudeCodeRun {
             }
         }
         let call = tool_use_id.as_deref();
-        let text = self.hook_text(call, None);
-        // What the user typed goes as their own message once everything
-        // queued ahead of it has gone in a hook. Its hook's record holds it
-        // once the CLI reports the call's results, and a note the CLI
-        // cancels goes back to its place (see `note_settled`).
+        let text = self.hook_text(call, None).await;
+        // What the user typed goes as their own message once the hooks carry
+        // everything ahead of it. It stays pending until both its hook is
+        // acknowledged and the CLI completed the message (see
+        // `note_settled`).
         if let Some(call) = call
-            && let Some(typed) = self
+            && let Some((_, typed)) = self
                 .delivery
                 .due_note(&self.task.pending_context_injections)
         {
@@ -3210,13 +3291,11 @@ impl ClaudeCodeRun {
                 Ok(uuid) => self.delivery.note_sent(call, uuid),
                 Err(error) => {
                     log::warn!(
-                        "Task {}: could not send the user's notes as a message ({error}). They wait for the next hook.",
+                        "Task {}: could not send the user's notes as a message ({error}). They go in the next hook.",
                         self.task.id
                     );
-                    let marks = self
-                        .delivery
-                        .note_unsent(&mut self.task.pending_context_injections);
-                    self.task.raise_context_marks(&marks);
+                    self.delivery.note_unsent();
+                    self.context_arrivals.notify();
                 }
             }
         }
@@ -3233,22 +3312,69 @@ impl ClaudeCodeRun {
 
     /// The CLI reports each message it is sent by its UUID, from `queued` to
     /// `completed`, or `cancelled` when the turn stopped before the model's
-    /// next request. A note it cancelled never reached the model, so it goes
-    /// back to its place in the queue, and the record of the results it went
-    /// with, when they are still to come, leaves it out.
-    fn note_settled(&mut self, raw: &Value) {
+    /// next request. A typed item whose hook was acknowledged too is done,
+    /// and joins the conversation now. One the CLI cancelled never reached
+    /// the model: it waits again where it is, and the record of the results
+    /// it went with, when they are still to come, leaves it out.
+    async fn note_settled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
         let state = raw["state"].as_str();
-        if raw["type"] == "command_lifecycle"
-            && matches!(state, Some("completed" | "cancelled"))
-            && let Some(uuid) = raw["command_uuid"].as_str()
-            && let Some(marks) = self.delivery.note_settled(
-                &mut self.task.pending_context_injections,
-                uuid,
-                state == Some("cancelled"),
-            )
+        if raw["type"] != "command_lifecycle" || !matches!(state, Some("completed" | "cancelled")) {
+            return Ok(());
+        }
+        let Some(uuid) = raw["command_uuid"].as_str() else {
+            return Ok(());
+        };
+        let verdict = self.delivery.note_settled(
+            &mut self.task.pending_context_injections,
+            uuid,
+            state == Some("cancelled"),
+        );
+        match verdict {
+            super::hook_budget::Verdict::Done(delivered) => {
+                let receipt = self.record_delivered(delivered);
+                self.report(false).await;
+                self.emit(receipt).await?;
+            }
+            super::hook_budget::Verdict::Waiting => self.context_arrivals.notify(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Waits a moment for the CLI's word on the typed notes sent, which can
+    /// come after a turn's result, so a note it completed isn't sent again
+    /// with the next input.
+    async fn await_note_verdicts(
+        &mut self,
+        session: &mut cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        while self.delivery.notes_unsettled()
+            && let Ok(Some(message)) =
+                tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
         {
-            self.task.raise_context_marks(&marks);
-            self.context_arrivals.notify();
+            if let cc::Message::Other(raw) = message {
+                self.note_settled(&raw).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds `delivered`, what an acknowledged hook (or a typed item done)
+    /// gave the model, to the conversation with its record. Returns its
+    /// `ContextInjected` event.
+    fn record_delivered(&mut self, delivered: super::hook_budget::Delivered) -> AgentEvent {
+        let message = self.task.conversation.messages.len();
+        self.task.conversation.add_user_message(&delivered.text);
+        self.task.increment_user_message_count();
+        // The session has it already, so the next input doesn't send it.
+        if self.task.claude_code_synced >= message {
+            self.task.claude_code_synced = message + 1;
+        }
+        self.task.record_context(message, delivered.parts);
+        self.observe_last();
+        AgentEvent::ContextInjected {
+            ids: delivered.ids,
+            bytes: delivered.bytes,
         }
     }
 
@@ -3464,27 +3590,21 @@ impl ClaudeCodeRun {
                     self.observe_last();
                     recorded += 1;
                     // The hooks acknowledged follow the results in the order
-                    // they were given, and their items leave the queue in the
-                    // same step, so the task holds each either way.
-                    let source = self.turn_context.clone();
-                    let identify =
-                        |content: &str| source.as_ref().and_then(|source| source.identify(content));
+                    // they were given, with their records, and their items
+                    // leave the pending context (or move on to their next
+                    // part) in the same step, so the task holds each either
+                    // way.
                     let mut receipts = Vec::new();
                     for call in &reported {
-                        let delivered = self.delivery.reported(
-                            &mut self.task.pending_context_injections,
-                            call,
-                            &identify,
-                        );
+                        let (delivered, released) = self
+                            .delivery
+                            .reported(&mut self.task.pending_context_injections, call);
                         for delivered in delivered {
-                            self.task.conversation.add_user_message(&delivered.text);
-                            self.task.increment_user_message_count();
-                            self.observe_last();
-                            self.task.raise_context_marks(&delivered.marks);
-                            receipts.push(AgentEvent::ContextInjected {
-                                ids: delivered.ids,
-                                bytes: delivered.bytes,
-                            });
+                            receipts.push(self.record_delivered(delivered));
+                        }
+                        // A denial's rest may go now.
+                        if released {
+                            self.context_arrivals.notify();
                         }
                     }
                     self.task.claude_code_synced = self.task.conversation.messages.len();
@@ -3614,7 +3734,7 @@ impl ClaudeCodeRun {
                 _ => {}
             },
             cc::Message::RateLimit { info, .. } => self.plan_usage_reported(&info, session).await?,
-            cc::Message::Other(raw) => self.note_settled(&raw),
+            cc::Message::Other(raw) => self.note_settled(&raw).await?,
             cc::Message::System(system) if system.subtype == "model_refusal_fallback" => {
                 // Claude Code retried the refused request on its fallback
                 // model.
@@ -4141,7 +4261,10 @@ impl ClaudeCodeRun {
                 },
                 Some(request) = host_requests.recv() => match request {
                     HostRequest::PreToolUse { tool_name, reply, .. } => {
-                        let _ = reply.send(refused(&tool_name, "it refreshes the cache only."));
+                        let _ = tool_name;
+                        let _ = reply.send(cc::Hook::deny_tool(
+                            "arko did not run this call because it refreshes the cache only.",
+                        ));
                     }
                     HostRequest::Permission { reply, .. } => {
                         let _ = reply.send(cc::PermissionDecision::deny(
@@ -4559,9 +4682,11 @@ impl ClaudeCodeRun {
     async fn turn_ended(
         &mut self,
         result: &cc::ResultMessage,
-        session: &cc::ClaudeSession,
+        session: &mut cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
+        // The CLI's word on the notes sent may follow the result.
+        self.await_note_verdicts(session).await?;
         // The amounts of extra usage after this turn are asked for as it
         // ends, so the plan usage is current once the turn is over. A task
         // that already ended has no reader for a report, and without a plan
@@ -4858,19 +4983,11 @@ impl ClaudeCodeRun {
             .await?;
             note = OPEN_TURN_MESSAGE_NOTE.to_string();
         }
-        let mut images = Vec::new();
-        if let Some((context, context_images)) = self.take_all_context() {
-            note.push_str("\n\n");
-            note.push_str(&context);
-            images = context_images;
-        }
-        // The task records the message as it is sent.
-        let sent = self.send_with_images(session, &note, images).await;
-        if let Err(error) = sent {
-            return self.session_failed(error.to_string()).await.map(Some);
-        }
-        self.emit_context_receipts().await?;
-        Ok(None)
+        // The note is the runtime's message, and the context waiting is a
+        // message of its own after it, with its record, so a step left out
+        // later keeps it. Both go as one input.
+        self.add_user_message(&note)?;
+        self.send_unsent(session).await
     }
 
     /// Whether the turn's last response called no tool: the conversation
@@ -5290,13 +5407,31 @@ impl ClaudeCodeRun {
         };
         let added = self.task.conversation.messages.split_off(start);
         let runtime = &self.task.runtime_messages;
-        let kept: Vec<ai::Message> = added
-            .into_iter()
-            .enumerate()
-            .filter(|(offset, message)| !in_step(message) && !runtime.contains(&(start + offset)))
-            .map(|(_, message)| message)
+        // A message that holds context the task recorded stays, so the
+        // record keeps what it says.
+        let recorded: std::collections::HashSet<usize> = self
+            .task
+            .context_records
+            .iter()
+            .map(|record| record.message)
             .collect();
+        let mut moved = std::collections::HashMap::new();
+        let mut kept: Vec<ai::Message> = Vec::new();
+        for (offset, message) in added.into_iter().enumerate() {
+            let index = start + offset;
+            if recorded.contains(&index) || (!in_step(&message) && !runtime.contains(&index)) {
+                moved.insert(index, start + kept.len());
+                kept.push(message);
+            }
+        }
         self.task.conversation.messages.extend(kept);
+        self.task.move_context_records(|index| {
+            if index < start {
+                Some(index)
+            } else {
+                moved.get(&index).copied()
+            }
+        });
         // The messages kept after `start` are the host's, not the runtime's.
         self.task.runtime_messages.retain(|index| *index < start);
         self.task
@@ -5480,6 +5615,7 @@ impl ClaudeCodeRun {
             .conversation
             .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
+        self.task.record_held_ids(0, seed.ids.clone());
         // The next session is a new Claude Code conversation, which records
         // the current prompt.
         self.task.claude_code_session = None;

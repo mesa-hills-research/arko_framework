@@ -884,6 +884,7 @@ async fn mismatched_decisions_are_ignored_or_answered_with_the_state() {
             },
             UserCommand::SubmitUserResponse {
                 response: "An answer nobody asked for.".into(),
+                ids: Vec::new(),
             },
             UserCommand::ApproveToolUse {
                 tool_call_id: *tool_call_id,

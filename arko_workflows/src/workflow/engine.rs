@@ -337,6 +337,10 @@ async fn publish_event(
     ctx.event_hub.publish(&event);
     let _ = ctx.event_tx.send(event.clone());
     let event = &event.event;
+    // The agent messages a context update holds are seen.
+    if let AgentEvent::ContextInjected { ids, .. } = event {
+        ctx.messages.seen(agent_name, agent_run_id, ids);
+    }
     if let Some(persistence) = persistence {
         // Never fails: a failed write is logged and retried.
         persistence
@@ -930,14 +934,8 @@ impl ReportInFlight {
             );
         }
         if let Ok(task) = restored.task() {
-            ctx.messages.settle_run(
-                &self.previous.agent_name,
-                id,
-                &task.conversation,
-                &[],
-                &task.pending_context_injections,
-                false,
-            );
+            ctx.messages
+                .settle_run(&self.previous.agent_name, task, &[], false);
         }
     }
 
@@ -1004,14 +1002,7 @@ impl ReportCommit {
         let ctx = &self.context;
         let result = &self.result;
         if let Ok(task) = result.task() {
-            ctx.messages.settle_run(
-                &result.agent_name,
-                result.agent_run_id,
-                &task.conversation,
-                &[],
-                &task.pending_context_injections,
-                true,
-            );
+            ctx.messages.settle_run(&result.agent_name, task, &[], true);
             ctx.subagents.settle_run(ctx, task);
         }
         ctx.registry.report_came(&result.agent_name);
@@ -1043,8 +1034,17 @@ impl Drop for ReportCommit {
 /// given, with the marks of what it took. A Claude Code session is the one
 /// the run had, since the report was written in a copy of it. Its latest
 /// request (`Task::latest_request`) is the one before too, as its
-/// conversation is.
+/// conversation is. The report run recorded none of its context in its
+/// conversation (`Task::context_records`), so its pending context is all
+/// of it, and the records stay the ones from before.
 pub(crate) fn report_rollback(before: Task, attempt: &Task) -> Task {
+    debug_assert!(
+        attempt
+            .context_records
+            .iter()
+            .all(|record| before.context_records.contains(record)),
+        "a report run recorded context"
+    );
     let mut task = before;
     let calls = task.usage_history.len();
     task.usage_history
@@ -1058,9 +1058,17 @@ pub(crate) fn report_rollback(before: Task, attempt: &Task) -> Task {
             .cloned(),
     );
     task.pending_context_injections = attempt.pending_context_injections.clone();
+    task.next_context_item = task.next_context_item.max(attempt.next_context_item);
     task.pending_context_images = attempt.pending_context_images.clone();
     task.raise_context_marks(&attempt.context_marks);
     task
+}
+
+/// The ids a task records the agent messages `ids` under.
+fn message_ids(ids: &[uuid::Uuid]) -> Vec<String> {
+    ids.iter()
+        .map(|id| crate::messaging::message_id(*id))
+        .collect()
 }
 
 /// Answers `error`, reported at an error-recovery pause, under the
@@ -1590,9 +1598,9 @@ async fn answer_questions(
         .is_some_and(|config| config.questions_to_lead)
         && ctx.subagents.is_subagent(agent_run_id)
     {
-        let response = ctx.subagents.ask(ctx, agent_run_id, &questions).await?;
+        let (response, ids) = ctx.subagents.ask(ctx, agent_run_id, &questions).await?;
         return cmd_tx
-            .send(UserCommand::SubmitUserResponse { response })
+            .send(UserCommand::SubmitUserResponse { response, ids })
             .await
             .map_err(|error| WorkflowError::Channel(error.to_string()));
     }
@@ -1613,7 +1621,10 @@ async fn answer_questions(
         }
         .map_err(WorkflowError::Channel)?;
         cmd_tx
-            .send(UserCommand::SubmitUserResponse { response })
+            .send(UserCommand::SubmitUserResponse {
+                response,
+                ids: Vec::new(),
+            })
             .await
             .map_err(|error| WorkflowError::Channel(error.to_string()))
     } else if nested {
@@ -2329,12 +2340,8 @@ impl WorkflowHandover {
 impl HandoverHook for WorkflowHandover {
     fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
         let ctx = &self.context;
-        ctx.messages.hand_over(
-            &self.agent_name,
-            task.id,
-            &task.conversation,
-            &self.prompt_message_ids,
-        );
+        ctx.messages
+            .hand_over(&self.agent_name, task, &self.prompt_message_ids);
         if let Some(tracker) = &ctx.resource_tracker {
             tracker.clear_actor(&ActorId::new(task.id, &self.agent_name));
         }
@@ -2367,9 +2374,12 @@ impl HandoverHook for WorkflowHandover {
         } else {
             task_part(prompt).to_string()
         };
+        // Its messages count as read at the handover (`hand_over`), and its
+        // notes by their mark, so the seed presents nothing by id.
         HandoverSeed {
             task_prompt,
             context: (!context.is_empty()).then_some(context),
+            ids: Vec::new(),
         }
     }
 
@@ -3182,10 +3192,8 @@ pub(crate) async fn finalize_agent_task(
         // with the task.
         ctx.messages.settle_run(
             &agent_name,
-            agent_run_id,
-            &task.conversation,
+            &task,
             prompt_ids,
-            &task.pending_context_injections,
             matches!(task.current_state, TaskState::Completed { .. }),
         );
         // Its subagent mail too: what it holds leaves the mailbox, the rest
@@ -3760,6 +3768,7 @@ impl WorkflowEngine {
             .initial_section(ctx, agent_name, task.id, options.review);
         let roster = roster_section(ctx, agent_name, &task, options.roster);
         task.initial_task_prompt = format!("{prompt}{messages}{notes}{roster}");
+        task.initial_prompt_ids = message_ids(&pending_message_ids);
         Ok(self.launch(
             agent_name,
             task,
@@ -4327,14 +4336,7 @@ impl WorkflowEngine {
         let mut in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
-        ctx.messages.settle_run(
-            agent_name,
-            task.id,
-            &task.conversation,
-            &[],
-            &task.pending_context_injections,
-            false,
-        );
+        ctx.messages.settle_run(agent_name, &task, &[], false);
         let run = self.launch(
             agent_name,
             task,
@@ -4475,14 +4477,7 @@ impl WorkflowEngine {
         }
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
-        ctx.messages.settle_run(
-            agent_name,
-            task.id,
-            &task.conversation,
-            &[],
-            &task.pending_context_injections,
-            false,
-        );
+        ctx.messages.settle_run(agent_name, &task, &[], false);
         // Cut back: the standing notes the removed messages gave it are
         // given again (one-time notes went with them, and a cut to the first
         // message gets its notes in its prompt). The subagents it started in
@@ -4503,10 +4498,11 @@ impl WorkflowEngine {
         // saved before holding was recorded may still have taken one it
         // stopped before adding (`Task::pending_context_injections`): it
         // doesn't get it twice.
-        task.pending_context_injections.retain(|content| {
-            !pending_message_ids
-                .iter()
-                .any(|id| crate::messaging::is_injection_of(content, *id))
+        task.pending_context_injections.retain(|item| {
+            !pending_message_ids.iter().any(|id| {
+                item.host_ids.contains(&crate::messaging::message_id(*id))
+                    || (item.unidentified && crate::messaging::is_injection_of(&item.text, *id))
+            })
         });
         // The resources it read that changed since, when freshness is on.
         // It counts as finished (no notices) until it is registered below.
@@ -4537,6 +4533,7 @@ impl WorkflowEngine {
                 let roster = roster_section(ctx, agent_name, &task, true);
                 task.initial_task_prompt =
                     format!("{continuation_prompt}{messages}{notes}{roster}{changed_notice}");
+                task.initial_prompt_ids = message_ids(&pending_message_ids);
                 task.initial_task_images = input.images;
                 Ok(())
             }
@@ -4553,6 +4550,12 @@ impl WorkflowEngine {
         if let Err(error) = prepared {
             ctx.registry.abandon(task.id);
             return Err(error.into());
+        }
+        // The continuation presents the messages it doesn't hold, which the
+        // task records with it.
+        if input.cut_back_to != Some(0) {
+            let last = task.conversation.messages.len().saturating_sub(1);
+            task.record_held_ids(last, message_ids(&pending_message_ids));
         }
         for event in &lifecycle {
             publish_event(agent_name, task.id, event, ctx, self.persistence.as_ref()).await;
@@ -4707,14 +4710,7 @@ impl WorkflowEngine {
         }
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
-        ctx.messages.settle_run(
-            agent_name,
-            task.id,
-            &task.conversation,
-            &[],
-            &task.pending_context_injections,
-            false,
-        );
+        ctx.messages.settle_run(agent_name, &task, &[], false);
         let mut registry =
             self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
         Self::restore_embedded_skills(&mut task, ctx, agent_name);
@@ -5070,14 +5066,7 @@ impl WorkflowEngine {
         self.supersede_children(&task, Some(&resumed), ctx).await;
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
-        ctx.messages.settle_run(
-            agent_name,
-            task.id,
-            &task.conversation,
-            &[],
-            &task.pending_context_injections,
-            false,
-        );
+        ctx.messages.settle_run(agent_name, &task, &[], false);
         // The notes it was given after its task was saved, given again (it
         // is launched as an ordinary run, below).
         ctx.notes.recovered(agent_name, &task, false);
@@ -5090,7 +5079,11 @@ impl WorkflowEngine {
             .message
             .filter(|message| !message.trim().is_empty())
         {
-            task.pending_context_injections.push(message.to_string());
+            task.queue_context(arko_agents::PendingContext::new(
+                arko_agents::PendingKind::Context,
+                message.to_string(),
+                Vec::new(),
+            ));
         }
         task.pending_context_images
             .extend(recovery.images.iter().enumerate().map(|(index, image)| {

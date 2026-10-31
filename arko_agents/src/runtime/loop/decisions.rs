@@ -15,6 +15,8 @@ pub(super) struct FollowUp {
     pub(super) next_message_is_runtime: bool,
     /// The decision needs no follow-up message (it added what it had to).
     pub(super) follow_up_done: bool,
+    /// The host's ids of what the message delivers, recorded with it.
+    pub(super) held_ids: Vec<String>,
 }
 
 /// How a command applied to the state a task waits in.
@@ -437,8 +439,13 @@ impl AgentLoop {
     ) -> Result<Decision, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
         let mut follow_up_done = false;
+        let mut held_ids = Vec::new();
         match *cmd {
-            UserCommand::SubmitUserResponse { ref response } => {
+            UserCommand::SubmitUserResponse {
+                ref response,
+                ref ids,
+            } => {
+                held_ids.clone_from(ids);
                 log::info!("Task {}: User response received.", self.task.id);
                 // The answer settles the questions waited for, except those
                 // the host still has open. An agent whose questions can be
@@ -455,6 +462,10 @@ impl AgentLoop {
                 if self.is_native_mode() {
                     self.flush_native_results_to_conversation(Some(&formatted))
                         .await?;
+                    // The answer's message presents what the host delivers.
+                    let last = self.task.conversation.messages.len().saturating_sub(1);
+                    self.task
+                        .record_held_ids(last, std::mem::take(&mut held_ids));
                     follow_up_done = true;
                 } else {
                     next_user_message_from_command = formatted;
@@ -477,6 +488,7 @@ impl AgentLoop {
         Ok(Decision::Decided(FollowUp {
             next_user_message_from_command,
             follow_up_done,
+            held_ids,
             ..Default::default()
         }))
     }
@@ -626,6 +638,7 @@ impl AgentLoop {
             next_user_message_from_command,
             next_message_is_runtime,
             follow_up_done,
+            held_ids: Vec::new(),
         })
     }
 
@@ -709,6 +722,7 @@ impl AgentLoop {
             next_user_message_from_command,
             next_message_is_runtime,
             follow_up_done,
+            held_ids: Vec::new(),
         })
     }
 }

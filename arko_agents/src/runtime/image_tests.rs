@@ -598,6 +598,7 @@ async fn native_user_answer_is_kept_after_ask_user_results_were_already_flushed(
     commands
         .send(UserCommand::SubmitUserResponse {
             response: "Remove the entire image browser.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();

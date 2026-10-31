@@ -114,6 +114,20 @@ async fn call(
         .await
 }
 
+/// The runtime reports that run `run`'s conversation holds `payload`, an
+/// agent message's injection (`AgentEvent::ContextInjected`).
+fn seen(workflow: &Workflow, agent: &str, run: uuid::Uuid, payload: &str) {
+    let id = payload
+        .strip_prefix("Message ")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(id, _)| uuid::Uuid::parse_str(id).ok())
+        .expect("an agent message's injection");
+    workflow
+        .context()
+        .messages
+        .seen(agent, run, &[crate::messaging::message_id(id)]);
+}
+
 async fn wait(workflow: &Workflow, agent: &str, run: uuid::Uuid) -> String {
     call(workflow, agent, run, WAIT_FOR_MESSAGE_TOOL_NAME, &[])
         .await
@@ -141,11 +155,6 @@ async fn until_status(workflow: &Workflow, agent: &str, status: AgentStatus) {
     })
     .await
     .unwrap_or_else(|_| panic!("{agent} never became {status:?}"));
-}
-
-/// A context update as the runtime commits it.
-fn update(content: &str) -> arko_ai::Message {
-    arko_ai::Message::new_user(&format!("# Workflow context update\n\n{content}"))
 }
 
 #[test]
@@ -531,7 +540,7 @@ async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
     while polls.load(Ordering::SeqCst) == 0 {
         tokio::task::yield_now().await;
     }
-    tool.observe_context(lead, &update(&payload));
+    seen(&workflow, "lead", lead, &payload);
     let before = polls.load(Ordering::SeqCst);
     for _ in 0..40 {
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -804,9 +813,7 @@ async fn only_undelivered_agent_messages_end_a_wait() {
     let Ok(UserCommand::InjectContext { content }) = lead.commands.try_recv() else {
         panic!("the message is in the channel");
     };
-    tool(&workflow, "lead", WAIT_FOR_MESSAGE_TOOL_NAME)
-        .unwrap()
-        .observe_context(lead.id, &update(&content));
+    seen(&workflow, "lead", lead.id, &content);
     assert_eq!(context.messages.pending("lead").len(), 1);
     let (result, ()) = tokio::join!(wait(&workflow, "lead", lead.id), async {
         until_status(&workflow, "lead", WAITING).await;

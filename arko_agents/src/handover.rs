@@ -491,6 +491,10 @@ pub struct HandoverSeed {
     /// Context the host adds after the report, such as the agents the task
     /// can message.
     pub context: Option<String>,
+    /// The host's ids of what the message presents, which the task records
+    /// with the fresh conversation's first message
+    /// ([`Task::holding`](crate::Task::holding)).
+    pub ids: Vec<String>,
 }
 
 impl HandoverSeed {
@@ -499,6 +503,7 @@ impl HandoverSeed {
         Self {
             task_prompt: task.initial_task_prompt.clone(),
             context: None,
+            ids: Vec::new(),
         }
     }
 
@@ -532,6 +537,7 @@ impl HandoverSeed {
         Self {
             task_prompt: text,
             context: None,
+            ids: Vec::new(),
         }
     }
 
@@ -1090,6 +1096,7 @@ mod tests {
         let seed = HandoverSeed {
             task_prompt: "Fix the parser.\n".into(),
             context: Some("# Agents you can message\n- `lead`".into()),
+            ids: Vec::new(),
         };
         let message = seed.message("  Done: lexer. Next: parser.  ");
         assert!(message.starts_with("Fix the parser.\n\n# Handover report\n\n"));

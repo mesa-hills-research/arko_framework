@@ -1,6 +1,6 @@
 //! The budget of a Claude Code hook's text, and how the context that waits
 //! for the model ([`Task::pending_context_injections`](crate::Task::pending_context_injections),
-//! the task's queue) goes out in hooks.
+//! the task's list) goes out in hooks.
 //!
 //! Claude Code replaces a hook's text of over 10,000 characters with a
 //! preview of 2 KB and the name of a file. So no text the runtime gives the
@@ -9,31 +9,32 @@
 //! the producers give. Bytes are never fewer than UTF-16 units or
 //! characters, so the budget holds whichever unit Claude Code counts.
 //!
-//! The queue is the only place context waits, and it is saved with the
-//! task. A hook carries the queue's items in order, by three rules.
+//! The task's list is the only place context waits, and it is saved with
+//! the task. A hook carries its items in order, by three rules.
 //! 1. Whole items go while they fit.
 //! 2. An item that would fit an empty hook but not the room left waits
 //!    whole for the next hook.
 //! 3. An item longer than an empty hook is split when it is first in line.
 //!    The part that fits goes now, cut at a line break in its last fifth
-//!    when there is one, and ends with [`GOES_ON`]. The rest starts with
-//!    [`CONTINUED`].
+//!    when there is one, and ends with [`GOES_ON`]. The next part starts
+//!    with [`CONTINUED`].
 //!
-//! A hook leaves the queue as it was. Its items leave it, and its text joins
-//! the conversation, in one step, once Claude Code reports its call's
-//! results, in the order the hooks were given. A stop or a crash in between
-//! leaves the queue whole, so the next input carries what wasn't
-//! acknowledged. The worst outcome is a repeat, when Claude Code kept a
-//! hook's text and the runtime never read the results.
+//! A hook leaves the list as it was. Once Claude Code reports its call's
+//! results, in the order the hooks were given, the hook's text joins the
+//! conversation with a record of the items it held, and in the same step a
+//! whole item (or its last part) leaves the list and a part moves the
+//! item's [`given`](crate::PendingContext::given). A stop or a crash in
+//! between leaves the list as it was, so the next input carries what wasn't
+//! acknowledged. The worst outcome is a repeat.
 //!
-//! The user's typed notes ([`TurnContext::user_content`](super::TurnContext::user_content))
-//! go as their own message, once everything queued ahead of them has gone
-//! in a hook. Until then they wait here with their marks, and they join the
-//! queue at their place when they can't go that way.
+//! [`Delivery`] keeps only what means nothing after the run, by item
+//! number: the hooks in flight, the typed items sent as the user's message,
+//! and the denials' rests waiting for their call's result. Nothing in the
+//! list ever moves.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
-use crate::task::CONTEXT_UPDATE;
+use crate::task::{CONTEXT_UPDATE, PendingContext, PendingKind, RecordedPart};
 
 /// The most bytes of text a hook gives the model.
 pub(super) const HOOK_MAX_BYTES: usize = 9_500;
@@ -41,16 +42,27 @@ pub(super) const HOOK_MAX_BYTES: usize = 9_500;
 /// Ends the part of an item that goes on in the next hook.
 pub(super) const GOES_ON: &str = "\n(This update goes on in the next one.)";
 
-/// Starts the rest of an item whose first part went in a hook.
+/// Starts the next part of an item whose first part went in a hook.
 pub(super) const CONTINUED: &str = "(Continued from the previous update.)\n";
 
-type Marks = BTreeMap<String, u64>;
+/// Ends a denial cut to the budget, whose rest comes in a context update.
+pub(super) const DENIAL_GOES_ON: &str = "\n(This answer goes on in the next context update.)";
+
+/// Starts a denial's rest.
+pub(super) const DENIAL_REST: &str = "(The rest of arko's answer to your call.)\n";
 
 /// Where a split item's part ends, in bytes, and where its rest starts.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Part {
+struct Cut {
     end: usize,
-    rest: usize,
+}
+
+/// A part of an item a hook carried, up to `end` (a byte offset of its
+/// text).
+#[derive(Debug, Clone, Copy)]
+struct Carried {
+    item: u64,
+    end: usize,
 }
 
 /// A hook given out whose call's results Claude Code hasn't reported.
@@ -58,89 +70,103 @@ struct Part {
 struct Hook {
     /// The call (its `tool_use_id`) whose results acknowledge it.
     call: String,
-    /// The queue items it carried whole, after those of the hooks before it.
-    whole: usize,
-    /// The part it carried of the item after those, when it split one.
-    part: Option<Part>,
-    /// Its text, heading included. Empty when it carried a typed note only.
+    parts: Vec<Carried>,
+    /// Its text, heading included. Empty when it carried a typed item only.
     text: String,
-    /// The typed note sent with it, by the UUID of its message.
-    note: Option<String>,
+    /// The typed item sent as the user's message with it.
+    note: Option<u64>,
     /// Claude Code reported the call's results, and the hook waits for an
     /// earlier one.
     reported: bool,
 }
 
-/// Typed notes from one update.
-#[derive(Debug, Clone)]
-struct Note {
-    text: String,
-    marks: Marks,
-    /// The update's identifiers, when it had no other text.
-    ids: Vec<String>,
-    /// Where it belongs in the queue, after this many of its items.
-    place: usize,
-    /// Its hook's text joined the conversation with it.
-    recorded: bool,
-    /// The CLI said it completed it.
+/// A typed item sent as the user's message.
+#[derive(Debug)]
+struct Sent {
+    uuid: String,
+    item: u64,
+    /// Its hook was acknowledged.
+    acked: bool,
+    /// The CLI said it completed the message.
     completed: bool,
 }
 
-/// What joins the conversation once a hook is acknowledged.
+/// What joins the conversation once a hook is acknowledged, or a typed item
+/// is done.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Delivered {
-    /// The record's text: the hook's, then the typed note sent with it.
+    /// The record's text: the hook's, then the typed item sent with it.
     pub text: String,
-    /// The host's identifiers of the items whose first part it carried.
+    /// The items, or parts of them, the text holds.
+    pub parts: Vec<RecordedPart>,
+    /// The host's ids of the items whose first part it holds.
     pub ids: Vec<String>,
-    /// The marks the task keeps from now on (a typed note's).
-    pub marks: Marks,
     /// Its size in bytes, without its heading.
     pub bytes: usize,
 }
 
-/// The state of the queue's delivery the runtime keeps beside the task: the
-/// hooks in flight, a typed note waiting, the notes sent and the rests of
-/// denials too long for their hook.
+/// What the CLI's word on a typed item's message did.
+#[derive(Debug, PartialEq)]
+pub(super) enum Verdict {
+    /// Nothing the runtime knows of.
+    None,
+    /// The item is done, and joins the conversation.
+    Done(Delivered),
+    /// It waits for its hook's acknowledgement too.
+    Completed,
+    /// Cancelled, it waits again where it is.
+    Waiting,
+}
+
+/// The state of the list's delivery the runtime keeps beside the task. See
+/// the [module](self).
 #[derive(Debug, Default)]
 pub(super) struct Delivery {
     in_flight: VecDeque<Hook>,
-    /// The typed notes of the latest update, until they can go as a message.
-    waiting: Option<Note>,
-    /// The note just chosen to go, until its message is sent.
-    sending: Option<Note>,
-    /// Notes sent as messages, by UUID, until the CLI says what became of them.
-    sent: HashMap<String, Note>,
-    /// The rests of denials too long for their hook, by call, until the
-    /// call's result is reported.
-    denied: Vec<(String, String)>,
-    /// The identifiers of the source's updates that wait in the queue, by
-    /// the update's text (empty for an update of images alone).
-    update_ids: Vec<(String, Vec<String>)>,
+    /// The typed item chosen to go, until its message is sent.
+    sending: Option<u64>,
+    sent: Vec<Sent>,
+    /// Typed items whose message couldn't be sent, which go in hooks as
+    /// context instead.
+    as_context: HashSet<u64>,
+    /// Denials' rests waiting for their call's result, by call.
+    held: Vec<(String, u64)>,
 }
 
-/// Where `text`, longer than `room` bytes, is cut so its part fits `room`.
-fn cut(text: &str, room: usize) -> Part {
+/// Where `text`, longer than `room` bytes, is cut so its start fits `room`.
+fn cut(text: &str, room: usize) -> Cut {
     let mut end = room.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     let from = room - room / 5;
     match text[..end].rfind('\n') {
-        Some(newline) if newline >= from => Part {
-            end: newline,
-            rest: newline,
-        },
-        _ => Part { end, rest: end },
+        Some(newline) if newline >= from => Cut { end: newline },
+        _ => Cut { end },
     }
 }
 
-/// `text` as its part and its rest, each with its marker.
-fn split(text: &str, part: Part) -> (String, String) {
+/// `text`, a denial longer than the budget, cut to fit, and its rest.
+pub(super) fn cut_denial(text: String) -> (String, Option<String>) {
+    if text.len() <= HOOK_MAX_BYTES {
+        return (text, None);
+    }
+    let at = cut(&text, HOOK_MAX_BYTES - DENIAL_GOES_ON.len());
     (
-        format!("{}{GOES_ON}", &text[..part.end]),
-        format!("{CONTINUED}{}", &text[part.rest..]),
+        format!("{}{DENIAL_GOES_ON}", &text[..at.end]),
+        Some(text[at.end..].to_string()),
     )
+}
+
+/// What the model reads of `item` from `from` on: a part after the first
+/// starts with [`CONTINUED`], and a denial's rest with [`DENIAL_REST`].
+pub(super) fn shown_from(item: &PendingContext, from: usize) -> String {
+    let rest = &item.text[from.min(item.text.len())..];
+    match (&item.kind, from) {
+        (_, 1..) => format!("{CONTINUED}{rest}"),
+        (PendingKind::DenialRest { .. }, 0) => format!("{DENIAL_REST}{rest}"),
+        _ => rest.to_string(),
+    }
 }
 
 fn heading() -> String {
@@ -148,158 +174,110 @@ fn heading() -> String {
 }
 
 impl Delivery {
-    /// The queue's items in hooks, and whether a hook may carry more: not
-    /// while a split item's part is in flight, whose rest comes first.
-    fn covered(&self) -> (usize, bool) {
-        let whole = self.in_flight.iter().map(|hook| hook.whole).sum::<usize>();
-        if self.in_flight.iter().any(|hook| hook.part.is_some()) {
-            (whole + 1, false)
-        } else {
-            (whole, true)
-        }
+    /// Where item `id`'s part in a hook ends, when a hook carries one.
+    fn in_flight_end(&self, id: u64) -> Option<usize> {
+        self.in_flight
+            .iter()
+            .flat_map(|hook| &hook.parts)
+            .filter(|part| part.item == id)
+            .map(|part| part.end)
+            .max()
     }
 
-    /// Nothing in the queue waits outside a hook, and no typed note waits:
-    /// the turn context source may be asked for its update.
-    pub(super) fn caught_up(&self, queue: &[String]) -> bool {
-        let (covered, open) = self.covered();
-        open && covered >= queue.len() && self.waiting.is_none()
+    fn sent(&self, id: u64) -> bool {
+        self.sent.iter().any(|sent| sent.item == id) || self.sending == Some(id)
     }
 
-    /// Puts `text` in the queue at `index`, behind the hooks in flight. The
-    /// notes' places after it move with it.
-    fn insert(&mut self, queue: &mut Vec<String>, index: usize, text: String) {
-        let index = index.max(self.covered().0).min(queue.len());
-        queue.insert(index, text);
-        let notes = self.waiting.iter_mut().chain(self.sent.values_mut());
-        for note in notes {
-            if note.place >= index {
-                note.place += 1;
-            }
-        }
+    fn held(&self, id: u64) -> bool {
+        self.held.iter().any(|(_, held)| *held == id)
     }
 
-    /// A typed note joins the queue at its place. Returns its marks, which
-    /// the task keeps from now on.
-    fn queue_note(&mut self, queue: &mut Vec<String>, note: Note) -> Marks {
-        self.update_ids.push((note.text.clone(), note.ids));
-        self.insert(queue, note.place, note.text);
-        note.marks
+    /// Whether `item` goes as a typed note, apart from the hook's text.
+    fn typed(&self, item: &PendingContext) -> bool {
+        item.kind == PendingKind::Typed && !self.as_context.contains(&item.id)
     }
 
-    /// The turn context source's update joins the queue. During a turn
-    /// (`in_turn`), its typed notes wait to go as a message once what is
-    /// ahead of them has gone. Returns the marks the task keeps now, which
-    /// for an update with typed notes come with the notes.
-    pub(super) fn take_update(
-        &mut self,
-        queue: &mut Vec<String>,
-        content: String,
-        typed: String,
-        ids: Vec<String>,
-        marks: Marks,
-        in_turn: bool,
-    ) -> Marks {
-        let content = Some(content).filter(|content| !content.trim().is_empty());
-        let typed = Some(typed).filter(|typed| !typed.trim().is_empty());
-        let (content_ids, note_ids) = match (&content, &typed) {
-            (Some(_), _) => (ids, Vec::new()),
-            (None, Some(_)) => (Vec::new(), ids),
-            (None, None) => {
-                // Images alone, which wait for the next input with the ids.
-                if !ids.is_empty() {
-                    self.update_ids.push((String::new(), ids));
-                }
-                return marks;
-            }
-        };
-        if let Some(content) = content {
-            self.update_ids.push((content.clone(), content_ids));
-            queue.push(content);
-        }
-        let Some(text) = typed else {
-            return marks;
-        };
-        let note = Note {
-            text,
-            marks,
-            ids: note_ids,
-            place: queue.len(),
-            recorded: false,
-            completed: false,
-        };
-        if in_turn {
-            self.waiting = Some(note);
-            return Marks::new();
-        }
-        self.queue_note(queue, note)
+    /// Whether `item` is all in a hook already: its last part, or as a typed
+    /// item sent.
+    fn gone(&self, item: &PendingContext) -> bool {
+        self.in_flight_end(item.id) == Some(item.text.len())
+            || (self.typed(item) && self.sent(item.id))
     }
 
-    /// The text of a denial (a PreToolUse hook's or a permission answer's)
-    /// for call `call`, within the budget. The rest of a longer one joins
-    /// the queue when the call's result is reported, or at once without a
-    /// call.
-    pub(super) fn deny(
-        &mut self,
-        queue: &mut Vec<String>,
-        call: Option<&str>,
-        text: String,
-    ) -> String {
-        if text.len() <= HOOK_MAX_BYTES {
-            return text;
-        }
-        let (part, rest) = split(&text, cut(&text, HOOK_MAX_BYTES - GOES_ON.len()));
-        match call {
-            Some(call) => self.denied.push((call.to_string(), rest)),
-            None => {
-                let at = self.covered().0;
-                self.insert(queue, at, rest);
-            }
-        }
-        part
+    /// Every item is in a hook already: the turn context source may be
+    /// asked for its update.
+    pub(super) fn caught_up(&self, list: &[PendingContext]) -> bool {
+        list.iter().all(|item| self.gone(item))
     }
 
-    /// The context of call `call`'s PostToolUse hook: the queue's items from
-    /// the first one not in flight, up to the typed note waiting, by the
-    /// rules in the [module](self). `None` when it carries none.
-    pub(super) fn fill(&mut self, queue: &[String], call: &str) -> Option<String> {
-        let (start, open) = self.covered();
-        if !open || start >= queue.len() {
-            return None;
-        }
-        let end = self
-            .waiting
-            .as_ref()
-            .map_or(queue.len(), |note| note.place.min(queue.len()));
+    /// Where a denial's rest joins the list: behind the items in hooks, an
+    /// item whose first part the model has read, and the rests already at
+    /// the front, ahead of what waits.
+    pub(super) fn rest_place(&self, list: &[PendingContext]) -> usize {
+        list.iter()
+            .position(|item| {
+                self.in_flight_end(item.id).is_none()
+                    && item.given == 0
+                    && !self.sent(item.id)
+                    && !matches!(item.kind, PendingKind::DenialRest { .. })
+            })
+            .unwrap_or(list.len())
+    }
+
+    /// Denial rest `item` waits for call `call`'s result.
+    pub(super) fn hold_rest(&mut self, call: &str, item: u64) {
+        self.held.push((call.to_string(), item));
+    }
+
+    /// The context of call `call`'s PostToolUse hook: the list's items from
+    /// the first one not all in a hook, by the rules in the
+    /// [module](self). A typed item, a part in flight and a rest still
+    /// held stop it there. `None` when it carries nothing.
+    pub(super) fn fill(&mut self, list: &[PendingContext], call: &str) -> Option<String> {
         let mut text = heading();
         let empty = text.len();
-        let (mut whole, mut part) = (0, None);
-        for item in queue.get(start..end).unwrap_or_default() {
-            let separator = if whole == 0 { "" } else { "\n\n" };
-            if text.len() + separator.len() + item.len() <= HOOK_MAX_BYTES {
+        let mut parts = Vec::new();
+        for item in list {
+            let end = self.in_flight_end(item.id);
+            if end == Some(item.text.len()) {
+                continue;
+            }
+            if end.is_some() || self.held(item.id) || self.typed(item) {
+                break;
+            }
+            let shown = shown_from(item, item.given);
+            let separator = if parts.is_empty() { "" } else { "\n\n" };
+            if text.len() + separator.len() + shown.len() <= HOOK_MAX_BYTES {
                 text.push_str(separator);
-                text.push_str(item);
-                whole += 1;
+                text.push_str(&shown);
+                parts.push(Carried {
+                    item: item.id,
+                    end: item.text.len(),
+                });
                 continue;
             }
             // It waits whole for a hook it fits, or it is split once it is
             // first in line.
-            if whole > 0 || empty + item.len() <= HOOK_MAX_BYTES {
+            if !parts.is_empty() || empty + shown.len() <= HOOK_MAX_BYTES {
                 break;
             }
-            let at = cut(item, HOOK_MAX_BYTES - empty - GOES_ON.len());
-            text.push_str(&split(item, at).0);
-            part = Some(at);
+            let marker = shown.len() - (item.text.len() - item.given);
+            let at = cut(&shown, HOOK_MAX_BYTES - empty - GOES_ON.len());
+            text.push_str(&shown[..at.end]);
+            text.push_str(GOES_ON);
+            parts.push(Carried {
+                item: item.id,
+                end: item.given + at.end.saturating_sub(marker),
+            });
             break;
         }
-        if whole == 0 && part.is_none() {
+        if parts.is_empty() {
             return None;
         }
         debug_assert!(text.len() <= HOOK_MAX_BYTES, "{}", text.len());
         self.in_flight.push_back(Hook {
             call: call.to_string(),
-            whole,
-            part,
+            parts,
             text: text.clone(),
             note: None,
             reported: false,
@@ -307,119 +285,121 @@ impl Delivery {
         Some(text)
     }
 
-    /// The typed note that goes now as the user's message, once a hook
-    /// carried everything ahead of it. It is sent with
-    /// [`note_sent`](Self::note_sent) or put back with
+    /// The typed item that goes now as the user's message, once the hooks
+    /// carry everything ahead of it, with its text. It is sent with
+    /// [`note_sent`](Self::note_sent) or goes as context with
     /// [`note_unsent`](Self::note_unsent).
-    pub(super) fn due_note(&mut self, queue: &[String]) -> Option<String> {
-        let (covered, open) = self.covered();
-        let note = self.waiting.as_ref()?;
-        if !open || covered < note.place.min(queue.len()) {
+    pub(super) fn due_note(&mut self, list: &[PendingContext]) -> Option<(u64, String)> {
+        // Behind a typed item sent, nothing goes until it is done.
+        let item = list
+            .iter()
+            .find(|item| self.in_flight_end(item.id) != Some(item.text.len()))?;
+        if !self.typed(item) || self.sent(item.id) {
             return None;
         }
-        let note = self.waiting.take()?;
-        let text = note.text.clone();
-        self.sending = Some(note);
-        Some(text)
+        self.sending = Some(item.id);
+        Some((item.id, item.text.clone()))
     }
 
-    /// The due note went as message `uuid`, with call `call`'s hook.
+    /// The due typed item went as message `uuid`, with call `call`'s hook.
     pub(super) fn note_sent(&mut self, call: &str, uuid: String) {
-        let Some(mut note) = self.sending.take() else {
+        let Some(item) = self.sending.take() else {
             return;
         };
-        // Behind what was ahead of it, all in hooks now.
-        note.place = self.covered().0;
         match self
             .in_flight
             .iter_mut()
             .rev()
             .find(|hook| hook.call == call)
         {
-            Some(hook) => hook.note = Some(uuid.clone()),
+            Some(hook) => hook.note = Some(item),
             None => self.in_flight.push_back(Hook {
                 call: call.to_string(),
-                whole: 0,
-                part: None,
+                parts: Vec::new(),
                 text: String::new(),
-                note: Some(uuid.clone()),
+                note: Some(item),
                 reported: false,
             }),
         }
-        self.sent.insert(uuid, note);
+        self.sent.push(Sent {
+            uuid,
+            item,
+            acked: false,
+            completed: false,
+        });
     }
 
-    /// The due note couldn't be sent: it joins the queue at its place.
-    /// Returns its marks.
-    pub(super) fn note_unsent(&mut self, queue: &mut Vec<String>) -> Marks {
-        match self.sending.take() {
-            Some(note) => self.queue_note(queue, note),
-            None => Marks::new(),
+    /// The due typed item couldn't be sent: from now on it goes in hooks
+    /// as context, where it is.
+    pub(super) fn note_unsent(&mut self) {
+        if let Some(item) = self.sending.take() {
+            self.as_context.insert(item);
         }
     }
 
-    /// The CLI said what became of note message `uuid`. One it cancelled
-    /// never reached the model, so it goes back to its place in the queue,
-    /// left out of its hook's record when that is still to come. One it
-    /// completed is done with once its hook's record holds it (see
-    /// [`session_ended`](Self::session_ended)). Returns the marks the task
-    /// keeps now, when the note went back.
+    /// Whether a typed item sent waits for the CLI's word on it.
+    pub(super) fn notes_unsettled(&self) -> bool {
+        self.sent.iter().any(|sent| !sent.completed)
+    }
+
+    /// The typed item `id` is done: it leaves `list` for the record.
+    fn note_done(&mut self, list: &mut Vec<PendingContext>, id: u64) -> Option<PendingContext> {
+        self.sent.retain(|sent| sent.item != id);
+        let index = list.iter().position(|item| item.id == id)?;
+        Some(list.remove(index))
+    }
+
+    /// The CLI said what became of message `uuid`. A typed item is done
+    /// once its hook is acknowledged and the CLI completed its message, in
+    /// either order. One it cancelled never reached the model, and waits
+    /// again where it is, left out of its hook's record.
     pub(super) fn note_settled(
         &mut self,
-        queue: &mut Vec<String>,
+        list: &mut Vec<PendingContext>,
         uuid: &str,
         cancelled: bool,
-    ) -> Option<Marks> {
-        if !cancelled {
-            let note = self.sent.get_mut(uuid)?;
-            note.completed = true;
-            if note.recorded {
-                self.sent.remove(uuid);
+    ) -> Verdict {
+        let Some(sent) = self.sent.iter_mut().find(|sent| sent.uuid == uuid) else {
+            return Verdict::None;
+        };
+        let item = sent.item;
+        if cancelled {
+            self.sent.retain(|sent| sent.uuid != uuid);
+            for hook in &mut self.in_flight {
+                if hook.note == Some(item) {
+                    hook.note = None;
+                }
             }
-            return None;
+            return Verdict::Waiting;
         }
-        let note = self.sent.remove(uuid)?;
-        for hook in &mut self.in_flight {
-            if hook.note.as_deref() == Some(uuid) {
-                hook.note = None;
-            }
+        sent.completed = true;
+        if !sent.acked {
+            return Verdict::Completed;
         }
-        Some(self.queue_note(queue, note))
-    }
-
-    /// Whether a note sent waits for the CLI's word on it.
-    pub(super) fn notes_unsettled(&self) -> bool {
-        self.sent.values().any(|note| !note.completed)
-    }
-
-    /// The identifiers of `item` as it first goes: the source's, else the
-    /// host's (`identify`). A rest has none.
-    fn ids_of(&mut self, item: &str, identify: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
-        if item.starts_with(CONTINUED) {
-            return Vec::new();
-        }
-        match self.update_ids.iter().position(|(text, _)| text == item) {
-            Some(index) => self.update_ids.remove(index).1,
-            None => identify(item).into_iter().collect(),
+        match self.note_done(list, item) {
+            Some(note) => Verdict::Done(Delivered {
+                text: format!("{}{}", heading(), note.text),
+                bytes: note.text.len(),
+                ids: note.host_ids.clone(),
+                parts: vec![RecordedPart::of(&note, true)],
+            }),
+            None => Verdict::None,
         }
     }
 
-    /// Claude Code reported call `call`'s result. A denial's rest joins the
-    /// queue ahead of what waits, and the call's hook is acknowledged. The
-    /// hooks acknowledged, from the first given, leave the queue in order,
-    /// and are returned for the conversation. A hook reported before an
+    /// Claude Code reported call `call`'s result. A denial's rest held for
+    /// it may go now, which the returned flag says, and the call's hook is
+    /// acknowledged. The hooks acknowledged, from the first given, are
+    /// returned for the conversation in order. A hook reported before an
     /// earlier one waits for it.
     pub(super) fn reported(
         &mut self,
-        queue: &mut Vec<String>,
+        list: &mut Vec<PendingContext>,
         call: &str,
-        identify: &dyn Fn(&str) -> Option<String>,
-    ) -> Vec<Delivered> {
-        if let Some(index) = self.denied.iter().position(|(denied, _)| denied == call) {
-            let (_, rest) = self.denied.remove(index);
-            let at = self.covered().0;
-            self.insert(queue, at, rest);
-        }
+    ) -> (Vec<Delivered>, bool) {
+        let held = self.held.len();
+        self.held.retain(|(denied, _)| denied != call);
+        let released = self.held.len() < held;
         for hook in &mut self.in_flight {
             if hook.call == call {
                 hook.reported = true;
@@ -428,104 +408,65 @@ impl Delivery {
         let mut delivered = Vec::new();
         while self.in_flight.front().is_some_and(|hook| hook.reported) {
             let hook = self.in_flight.pop_front().expect("checked");
-            let firsts = hook.whole + usize::from(hook.part.is_some());
+            let mut parts = Vec::new();
             let mut ids = Vec::new();
-            for item in queue.iter().take(firsts) {
-                ids.extend(self.ids_of(item, identify));
-            }
-            let removed = hook.whole.min(queue.len());
-            queue.drain(..removed);
-            if let (Some(part), Some(item)) = (hook.part, queue.first_mut()) {
-                *item = split(item, part).1;
-            }
-            for note in self.waiting.iter_mut().chain(self.sent.values_mut()) {
-                note.place = note.place.saturating_sub(removed);
+            for carried in &hook.parts {
+                let Some(index) = list.iter().position(|item| item.id == carried.item) else {
+                    continue;
+                };
+                let item = &mut list[index];
+                if item.given == 0 {
+                    ids.extend(item.host_ids.iter().cloned());
+                }
+                let last = carried.end >= item.text.len();
+                parts.push(RecordedPart::of(item, last));
+                if last {
+                    list.remove(index);
+                } else {
+                    item.given = carried.end;
+                }
             }
             let mut text = hook.text;
             let mut bytes = text.len().saturating_sub(heading().len());
-            let mut marks = Marks::new();
-            let note = hook.note.as_ref().and_then(|uuid| self.sent.get_mut(uuid));
-            let mut done = None;
-            if let Some(note) = note {
-                note.recorded = true;
-                bytes += note.text.len();
-                if text.is_empty() {
-                    // A note alone has the update's heading in the record.
-                    text = format!("{}{}", heading(), note.text);
-                } else {
-                    text = format!("{text}\n\n{}", note.text);
+            if let Some(id) = hook.note
+                && let Some(sent) = self.sent.iter_mut().find(|sent| sent.item == id)
+            {
+                sent.acked = true;
+                if sent.completed
+                    && let Some(note) = self.note_done(list, id)
+                {
+                    bytes += note.text.len();
+                    text = if text.is_empty() {
+                        // A note alone has the update's heading in the record.
+                        format!("{}{}", heading(), note.text)
+                    } else {
+                        format!("{text}\n\n{}", note.text)
+                    };
+                    ids.extend(note.host_ids.iter().cloned());
+                    parts.push(RecordedPart::of(&note, true));
                 }
-                ids.extend(note.ids.iter().cloned());
-                marks = note.marks.clone();
-                done = hook.note.as_ref().filter(|_| note.completed);
             }
-            if let Some(uuid) = done {
-                self.sent.remove(uuid);
+            if !text.is_empty() {
+                delivered.push(Delivered {
+                    text,
+                    parts,
+                    ids,
+                    bytes,
+                });
             }
-            if text.is_empty() {
-                continue;
-            }
-            delivered.push(Delivered {
-                text,
-                ids,
-                marks,
-                bytes,
-            });
         }
-        delivered
+        (delivered, released)
     }
 
     /// The session's hooks end (a stop, a turn's end, or the next input):
-    /// those not acknowledged are dropped, their items still in the queue,
-    /// and the typed note waiting and the denials' rests join it at their
-    /// places. Returns the marks the task keeps now.
-    pub(super) fn settle(&mut self, queue: &mut Vec<String>) -> Marks {
+    /// those not acknowledged are dropped, the typed items sent and the rests
+    /// held wait again, and nothing in the list moves.
+    pub(super) fn settle(&mut self) {
         self.in_flight.clear();
-        for (_, rest) in std::mem::take(&mut self.denied).into_iter().rev() {
-            self.insert(queue, 0, rest);
-        }
-        let mut marks = Marks::new();
-        for note in [self.sending.take(), self.waiting.take()]
-            .into_iter()
-            .flatten()
-        {
-            marks.extend(self.queue_note(queue, note));
-        }
-        marks
-    }
-
-    /// The session ended: a note sent goes back to its place unless its
-    /// hook's record holds it, also one the CLI said it completed, since the
-    /// results it went with never came. The worst outcome is a repeat.
-    /// Returns the marks the task keeps now.
-    pub(super) fn session_ended(&mut self, queue: &mut Vec<String>) -> Marks {
-        let mut marks = self.settle(queue);
-        let mut notes = std::mem::take(&mut self.sent)
-            .into_values()
-            .filter(|note| !note.recorded)
-            .collect::<Vec<_>>();
-        notes.sort_by_key(|note| note.place);
-        for note in notes.into_iter().rev() {
-            marks.extend(self.queue_note(queue, note));
-        }
-        marks
-    }
-
-    /// The identifiers of everything in the queue, as the next input
-    /// carries it all: each item's, then those of updates of images alone.
-    pub(super) fn all_ids(
-        &mut self,
-        queue: &[String],
-        identify: &dyn Fn(&str) -> Option<String>,
-    ) -> Vec<String> {
-        let mut ids = Vec::new();
-        for item in queue {
-            ids.extend(self.ids_of(item, identify));
-        }
-        for (_, rest) in std::mem::take(&mut self.update_ids) {
-            ids.extend(rest);
-        }
-        ids
+        self.sending = None;
+        self.sent.clear();
+        self.held.clear();
+        self.as_context.clear();
     }
 }
 

@@ -1178,7 +1178,11 @@ async fn a_subagents_question_goes_to_its_lead() {
         "{}",
         result_of(&lead[3], "lead", 2)
     );
-    assert!(result_of(&lead[4], "lead", 3).contains("Deleted it."));
+    assert!(
+        result_of(&lead[4], "lead", 3).contains("Deleted it."),
+        "{}",
+        result_of(&lead[4], "lead", 3)
+    );
     let worker = bodies_of(&server, "r1");
     assert!(worker.last().unwrap().contains("Yes, go ahead."));
 }

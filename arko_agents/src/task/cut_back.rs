@@ -264,8 +264,9 @@ impl Task {
         self.pending_context_injections.clear();
         self.pending_context_images.clear();
         // What it took may have gone with the messages cut, so a host reads
-        // its conversation again.
+        // what the records of the messages kept say.
         self.context_marks.clear();
+        self.cut_context_records(index);
         self.handover_requested = None;
         // Its latest request isn't the shorter conversation's.
         self.latest_request = RequestRecord::NoRequest;

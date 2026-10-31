@@ -148,6 +148,7 @@ async fn ignored_commands_do_not_extend_the_wait() {
         let _ = commands
             .send(UserCommand::SubmitUserResponse {
                 response: "Not asked.".into(),
+                ids: Vec::new(),
             })
             .await;
         sleep_until(start, 120).await;

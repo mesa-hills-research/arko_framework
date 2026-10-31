@@ -2,8 +2,38 @@
 
 use super::*;
 
-fn no_ids(_: &str) -> Option<String> {
-    None
+/// A list of items, numbered as a task numbers them.
+#[derive(Default)]
+struct List {
+    items: Vec<PendingContext>,
+    next: u64,
+}
+
+impl List {
+    fn of(texts: &[&str]) -> Self {
+        let mut list = Self::default();
+        for text in texts {
+            list.push(PendingKind::Context, text, &[]);
+        }
+        list
+    }
+
+    fn insert(&mut self, at: usize, kind: PendingKind, text: &str, ids: &[&str]) -> u64 {
+        self.next += 1;
+        let mut item =
+            PendingContext::new(kind, text, ids.iter().map(|id| id.to_string()).collect());
+        item.id = self.next;
+        self.items.insert(at.min(self.items.len()), item);
+        self.next
+    }
+
+    fn push(&mut self, kind: PendingKind, text: &str, ids: &[&str]) -> u64 {
+        self.insert(self.items.len(), kind, text, ids)
+    }
+
+    fn texts(&self) -> Vec<&str> {
+        self.items.iter().map(|item| item.text.as_str()).collect()
+    }
 }
 
 /// A hook's items, its heading taken out.
@@ -11,8 +41,8 @@ fn body(hook: &str) -> String {
     hook.strip_prefix(&heading()).unwrap_or(hook).to_string()
 }
 
-/// Texts the model was given in order, joined as the items they carry,
-/// each split item's markers taken out.
+/// Texts the model was given in order, joined as the items they carry, each
+/// split item's markers taken out.
 fn stream(texts: &[String]) -> String {
     texts
         .iter()
@@ -22,21 +52,21 @@ fn stream(texts: &[String]) -> String {
         .replace(&format!("{GOES_ON}\n\n{CONTINUED}"), "")
 }
 
-/// Hooks for calls `c1`, `c2`, … each reported at once, until the queue
-/// is empty. Returns their texts.
-fn drain(delivery: &mut Delivery, queue: &mut Vec<String>) -> Vec<String> {
+/// Hooks for calls `c1`, `c2`, … each reported at once, until the list is
+/// empty. Returns their texts.
+fn drain(delivery: &mut Delivery, list: &mut List) -> Vec<String> {
     let mut texts = Vec::new();
     for call in 1.. {
-        if queue.is_empty() {
+        if list.items.is_empty() {
             break;
         }
         let call = format!("c{call}");
         let text = delivery
-            .fill(queue, &call)
+            .fill(&list.items, &call)
             .expect("a hook carries something");
         assert!(text.len() <= HOOK_MAX_BYTES, "{}", text.len());
         texts.push(text);
-        delivery.reported(queue, &call, &no_ids);
+        delivery.reported(&mut list.items, &call);
     }
     texts
 }
@@ -44,47 +74,53 @@ fn drain(delivery: &mut Delivery, queue: &mut Vec<String>) -> Vec<String> {
 #[test]
 fn an_item_that_fits_an_empty_hook_waits_whole() {
     let mut delivery = Delivery::default();
-    let mut queue = vec!["a".repeat(6_000), "b".repeat(6_000)];
-    let first = delivery.fill(&queue, "c1").unwrap();
+    let mut list = List::of(&[&"a".repeat(6_000), &"b".repeat(6_000)]);
+    let first = delivery.fill(&list.items, "c1").unwrap();
     assert_eq!(body(&first), "a".repeat(6_000));
     // Not acknowledged yet: a parallel call's hook carries what isn't in
     // flight.
-    let second = delivery.fill(&queue, "c2").unwrap();
+    let second = delivery.fill(&list.items, "c2").unwrap();
     assert_eq!(body(&second), "b".repeat(6_000));
-    assert!(delivery.fill(&queue, "c3").is_none());
-    assert_eq!(queue.len(), 2);
-    let done = delivery.reported(&mut queue, "c1", &no_ids);
+    assert!(delivery.fill(&list.items, "c3").is_none());
+    assert_eq!(list.items.len(), 2);
+    let (done, _) = delivery.reported(&mut list.items, "c1");
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].bytes, 6_000);
-    assert_eq!(queue, ["b".repeat(6_000)]);
+    assert_eq!(
+        done[0]
+            .parts
+            .iter()
+            .map(|part| (part.item, part.last))
+            .collect::<Vec<_>>(),
+        [(1, true)]
+    );
+    assert_eq!(list.texts(), ["b".repeat(6_000)]);
 }
 
 #[test]
-fn a_long_item_is_split_at_a_line_break_near_the_cut() {
+fn a_long_item_moves_its_cursor_and_stays_whole_in_the_list() {
     let mut delivery = Delivery::default();
     let lines = (0..1_000)
         .map(|line| format!("line {line:04} of the update"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut queue = vec![lines.clone()];
-    let first = delivery.fill(&queue, "c1").unwrap();
+    let mut list = List::of(&[&lines]);
+    let first = delivery.fill(&list.items, "c1").unwrap();
     assert!(first.len() <= HOOK_MAX_BYTES);
     assert!(
         first.ends_with(&format!("of the update{GOES_ON}")),
         "{first}"
     );
-    // The whole item stays queued until the part is acknowledged, and a
-    // parallel call's hook carries nothing of it meanwhile.
-    assert!(delivery.fill(&queue, "c2").is_none());
-    assert_eq!(queue, std::slice::from_ref(&lines));
-    delivery.reported(&mut queue, "c1", &no_ids);
-    assert!(
-        queue[0].starts_with(&format!("{CONTINUED}\nline ")),
-        "{}",
-        &queue[0][..80]
-    );
+    // A parallel call's hook carries nothing of it meanwhile.
+    assert!(delivery.fill(&list.items, "c2").is_none());
+    let (done, _) = delivery.reported(&mut list.items, "c1");
+    assert!(!done[0].parts[0].last);
+    // The item keeps its whole text, and its cursor says what went.
+    assert_eq!(list.texts(), [lines.as_str()]);
+    let given = list.items[0].given;
+    assert!(given > 0 && lines[given..].starts_with("\nline "));
     let mut texts = vec![first];
-    texts.extend(drain(&mut delivery, &mut queue));
+    texts.extend(drain(&mut delivery, &mut list));
     assert_eq!(texts.len(), 3);
     assert_eq!(stream(&texts), lines);
 }
@@ -93,162 +129,225 @@ fn a_long_item_is_split_at_a_line_break_near_the_cut() {
 fn an_item_without_a_line_break_is_cut_on_a_character() {
     let mut delivery = Delivery::default();
     let text = "😀é".repeat(4_000);
-    let mut queue = vec![text.clone()];
-    let texts = drain(&mut delivery, &mut queue);
+    let mut list = List::of(&[&text]);
+    let texts = drain(&mut delivery, &mut list);
     assert_eq!(texts.len(), 3);
     assert_eq!(stream(&texts), text);
 }
 
 #[test]
-fn hooks_reported_out_of_order_leave_the_queue_in_order() {
+fn hooks_reported_out_of_order_leave_the_list_in_order() {
     let mut delivery = Delivery::default();
-    let mut queue = vec!["a".repeat(6_000), "b".repeat(6_000), "c".into()];
-    delivery.fill(&queue, "c1").unwrap();
-    delivery.fill(&queue, "c2").unwrap();
-    assert!(delivery.reported(&mut queue, "c2", &no_ids).is_empty());
-    assert_eq!(queue.len(), 3);
-    let done = delivery.reported(&mut queue, "c1", &no_ids);
+    let mut list = List::of(&[&"a".repeat(6_000), &"b".repeat(6_000), "c"]);
+    delivery.fill(&list.items, "c1").unwrap();
+    delivery.fill(&list.items, "c2").unwrap();
+    assert!(delivery.reported(&mut list.items, "c2").0.is_empty());
+    assert_eq!(list.items.len(), 3);
+    let (done, _) = delivery.reported(&mut list.items, "c1");
     let texts = done.iter().map(|done| body(&done.text)).collect::<Vec<_>>();
     assert_eq!(
         texts,
         ["a".repeat(6_000), format!("{}\n\nc", "b".repeat(6_000))]
     );
-    assert!(queue.is_empty());
+    assert!(list.items.is_empty());
 }
 
 #[test]
-fn a_typed_note_waits_for_what_is_ahead_of_it() {
+fn a_typed_item_waits_until_the_hooks_carry_what_is_ahead_of_it() {
     let mut delivery = Delivery::default();
-    let mut queue = vec!["x".repeat(16_000)];
-    let marks = Marks::from([("notes".to_string(), 3)]);
-    let kept = delivery.take_update(
-        &mut queue,
-        String::new(),
-        "Use tabs.".into(),
-        vec!["note:3".into()],
-        marks.clone(),
-        true,
+    let mut list = List::default();
+    list.push(PendingKind::Context, &"x".repeat(16_000), &["note:2"]);
+    list.push(PendingKind::Typed, "Use tabs.", &["note:3"]);
+    list.push(PendingKind::Context, "Later mail.", &["mail:1"]);
+    delivery.fill(&list.items, "c1").unwrap();
+    assert!(
+        delivery.due_note(&list.items).is_none(),
+        "a rest is ahead of it"
     );
-    assert!(kept.is_empty(), "the note keeps them");
-    assert!(!delivery.caught_up(&queue));
-    delivery.fill(&queue, "c1").unwrap();
-    assert!(delivery.due_note(&queue).is_none(), "a rest is ahead of it");
-    delivery.reported(&mut queue, "c1", &no_ids);
-    let rest = delivery.fill(&queue, "c2").unwrap();
+    delivery.reported(&mut list.items, "c1");
+    let rest = delivery.fill(&list.items, "c2").unwrap();
     assert!(rest.contains(CONTINUED));
-    assert_eq!(delivery.due_note(&queue).as_deref(), Some("Use tabs."));
+    assert!(
+        !rest.contains("Later mail."),
+        "nothing behind the note goes"
+    );
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((2, "Use tabs.".to_string()))
+    );
     delivery.note_sent("c2", "u1".into());
-    let done = delivery.reported(&mut queue, "c2", &no_ids);
+    // Behind a note sent, nothing goes until it is done.
+    assert!(delivery.fill(&list.items, "c3").is_none());
+    assert!(delivery.due_note(&list.items).is_none());
+    assert_eq!(
+        delivery.note_settled(&mut list.items, "u1", false),
+        Verdict::Completed
+    );
+    let (done, _) = delivery.reported(&mut list.items, "c2");
     assert!(done[0].text.ends_with("\n\nUse tabs."));
     assert_eq!(done[0].ids, ["note:3"]);
-    assert_eq!(done[0].marks, marks);
-    assert!(queue.is_empty());
+    assert_eq!(list.texts(), ["Later mail."]);
 }
 
 #[test]
-fn a_typed_note_alone_goes_at_once() {
+fn a_typed_item_is_done_when_both_its_ack_and_its_verdict_came() {
+    for verdict_first in [true, false] {
+        let mut delivery = Delivery::default();
+        let mut list = List::default();
+        list.push(PendingKind::Typed, "Use tabs.", &["note:3"]);
+        list.push(PendingKind::Context, "Later.", &[]);
+        assert!(delivery.fill(&list.items, "c1").is_none());
+        delivery.due_note(&list.items).unwrap();
+        delivery.note_sent("c1", "u1".into());
+        let mut recorded = Vec::new();
+        if verdict_first {
+            assert_eq!(
+                delivery.note_settled(&mut list.items, "u1", false),
+                Verdict::Completed
+            );
+            assert_eq!(
+                list.items.len(),
+                2,
+                "pending until its hook is acknowledged"
+            );
+            recorded.extend(delivery.reported(&mut list.items, "c1").0);
+        } else {
+            assert!(delivery.reported(&mut list.items, "c1").0.is_empty());
+            assert_eq!(list.items.len(), 2, "pending until the CLI completed it");
+            assert!(
+                delivery.fill(&list.items, "c2").is_none(),
+                "its barrier stays"
+            );
+            match delivery.note_settled(&mut list.items, "u1", false) {
+                Verdict::Done(done) => recorded.push(done),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].text, format!("{CONTEXT_UPDATE}\n\nUse tabs."));
+        assert_eq!(recorded[0].ids, ["note:3"]);
+        assert_eq!(list.texts(), ["Later."]);
+    }
+}
+
+#[test]
+fn a_cancelled_typed_item_waits_where_it_is() {
     let mut delivery = Delivery::default();
-    let mut queue = Vec::new();
-    delivery.take_update(
-        &mut queue,
-        String::new(),
-        "Use tabs.".into(),
-        Vec::new(),
-        Marks::new(),
-        true,
-    );
-    assert!(delivery.fill(&queue, "c1").is_none());
-    assert_eq!(delivery.due_note(&queue).as_deref(), Some("Use tabs."));
+    let mut list = List::default();
+    list.push(PendingKind::Context, "First.", &[]);
+    list.push(PendingKind::Typed, "Use tabs.", &[]);
+    delivery.fill(&list.items, "c1").unwrap();
+    delivery.due_note(&list.items).unwrap();
     delivery.note_sent("c1", "u1".into());
-    let done = delivery.reported(&mut queue, "c1", &no_ids);
-    assert_eq!(done[0].text, format!("{CONTEXT_UPDATE}\n\nUse tabs."));
-}
-
-#[test]
-fn a_stop_puts_a_waiting_note_at_its_place() {
-    let mut delivery = Delivery::default();
-    let mut queue = vec!["x".repeat(16_000)];
-    delivery.take_update(
-        &mut queue,
-        String::new(),
-        "Use tabs.".into(),
-        Vec::new(),
-        Marks::from([("notes".to_string(), 3)]),
-        true,
-    );
-    queue.push("Later mail.".into());
-    delivery.fill(&queue, "c1").unwrap();
-    let marks = delivery.session_ended(&mut queue);
+    list.push(PendingKind::Context, "Later.", &[]);
+    // A parallel call's hook carries nothing behind the note sent.
+    assert!(delivery.fill(&list.items, "c2").is_none());
     assert_eq!(
-        queue,
-        ["x".repeat(16_000), "Use tabs.".into(), "Later mail.".into()]
+        delivery.note_settled(&mut list.items, "u1", true),
+        Verdict::Waiting
     );
-    assert_eq!(marks.get("notes"), Some(&3));
-}
-
-#[test]
-fn a_cancelled_note_goes_back_behind_what_was_ahead_of_it() {
-    let mut delivery = Delivery::default();
-    let mut queue = vec!["First.".to_string()];
-    delivery.take_update(
-        &mut queue,
-        String::new(),
-        "Use tabs.".into(),
-        Vec::new(),
-        Marks::new(),
-        true,
-    );
-    delivery.fill(&queue, "c1").unwrap();
-    delivery.due_note(&queue).unwrap();
-    delivery.note_sent("c1", "u1".into());
-    queue.push("Later.".into());
-    delivery.note_settled(&mut queue, "u1", true);
-    assert_eq!(queue, ["First.", "Use tabs.", "Later."]);
-    // Its hook's record leaves it out.
-    let done = delivery.reported(&mut queue, "c1", &no_ids);
+    assert_eq!(list.texts(), ["First.", "Use tabs.", "Later."]);
+    // Its hook's record leaves it out, and it goes again before what came
+    // after it.
+    let (done, _) = delivery.reported(&mut list.items, "c1");
     assert_eq!(body(&done[0].text), "First.");
-    assert_eq!(queue, ["Use tabs.", "Later."]);
+    assert!(delivery.fill(&list.items, "c3").is_none());
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((2, "Use tabs.".to_string()))
+    );
 }
 
 #[test]
-fn a_long_denial_is_cut_and_its_rest_comes_first() {
+fn nothing_moves_when_the_session_ends() {
     let mut delivery = Delivery::default();
-    let mut queue = vec!["Older context.".to_string()];
-    let denial = format!("arko did not run this call: {}", "y".repeat(12_000));
-    let cut = delivery.deny(&mut queue, Some("c1"), denial.clone());
-    assert!(cut.len() <= HOOK_MAX_BYTES);
-    assert!(cut.ends_with(GOES_ON));
-    assert_eq!(queue.len(), 1, "the rest waits for the call's result");
-    delivery.reported(&mut queue, "c1", &no_ids);
-    assert_eq!(queue.len(), 2);
-    assert!(queue[0].starts_with(CONTINUED));
-    assert_eq!(stream(&[cut, queue[0].clone()]), denial);
+    let mut list = List::default();
+    list.push(PendingKind::Context, &"x".repeat(16_000), &[]);
+    list.push(PendingKind::Typed, "Use tabs.", &[]);
+    list.push(PendingKind::Typed, "And spaces.", &[]);
+    delivery.fill(&list.items, "c1").unwrap();
+    delivery.reported(&mut list.items, "c1");
+    delivery.fill(&list.items, "c2").unwrap();
+    delivery.due_note(&list.items).unwrap();
+    delivery.note_sent("c2", "u1".into());
+    let before = list.items.clone();
+    delivery.settle();
+    assert_eq!(list.items, before);
+    // Whatever was in flight goes again.
+    let again = delivery.fill(&list.items, "c3").unwrap();
+    assert!(again.starts_with(&format!("{CONTEXT_UPDATE}\n\n{CONTINUED}")));
+}
+
+#[test]
+fn a_long_denial_is_cut_and_its_rest_waits_for_the_calls_result() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    list.push(PendingKind::Context, &"a".repeat(9_450), &[]);
+    list.push(PendingKind::Context, "Older waiting context.", &[]);
+    delivery.fill(&list.items, "c1").unwrap();
+    let mut rests = Vec::new();
+    for (call, letter) in [("d1", "y"), ("d2", "z")] {
+        let denial = format!("arko did not run this call: {}", letter.repeat(12_000));
+        let (cut, rest) = cut_denial(denial.clone());
+        assert!(cut.len() <= HOOK_MAX_BYTES && cut.ends_with(DENIAL_GOES_ON));
+        let rest = rest.unwrap();
+        assert_eq!(
+            format!("{}{rest}", cut.strip_suffix(DENIAL_GOES_ON).unwrap()),
+            denial
+        );
+        let at = delivery.rest_place(&list.items);
+        let id = list.insert(
+            at,
+            PendingKind::DenialRest { call: call.into() },
+            &rest,
+            &[],
+        );
+        delivery.hold_rest(call, id);
+        rests.push(rest);
+    }
+    // Behind what is in flight, ahead of what waits, in the order given.
+    assert_eq!(
+        list.texts()[1..],
+        [
+            rests[0].as_str(),
+            rests[1].as_str(),
+            "Older waiting context."
+        ]
+    );
+    delivery.reported(&mut list.items, "c1");
+    assert!(
+        delivery.fill(&list.items, "c2").is_none(),
+        "held for its call"
+    );
+    assert!(delivery.reported(&mut list.items, "d1").1, "released");
+    let next = delivery.fill(&list.items, "c3").unwrap();
+    assert!(next.starts_with(&format!("{CONTEXT_UPDATE}\n\n{DENIAL_REST}")));
 }
 
 #[test]
 fn ids_are_reported_with_an_items_first_part() {
     let mut delivery = Delivery::default();
-    let mut queue = Vec::new();
-    let mail = "m".repeat(12_000);
-    delivery.take_update(
-        &mut queue,
-        mail,
-        String::new(),
-        vec!["mail:1".into()],
-        Marks::new(),
-        true,
+    let mut list = List::default();
+    list.push(PendingKind::Context, &"m".repeat(12_000), &["mail:1"]);
+    list.push(
+        PendingKind::Context,
+        "Message 7 from the host.",
+        &["message:7"],
     );
-    queue.push("Message 7 from the host.".into());
-    let identify = |text: &str| {
-        text.starts_with("Message 7")
-            .then(|| "message:7".to_string())
-    };
-    delivery.fill(&queue, "c1").unwrap();
-    let first = delivery.reported(&mut queue, "c1", &identify);
+    delivery.fill(&list.items, "c1").unwrap();
+    let (first, _) = delivery.reported(&mut list.items, "c1");
     assert_eq!(first[0].ids, ["mail:1"]);
-    delivery.fill(&queue, "c2").unwrap();
-    let second = delivery.reported(&mut queue, "c2", &identify);
+    delivery.fill(&list.items, "c2").unwrap();
+    let (second, _) = delivery.reported(&mut list.items, "c2");
     assert_eq!(second[0].ids, ["message:7"], "the rest has none of its own");
+    assert_eq!(
+        second[0]
+            .parts
+            .iter()
+            .map(|part| (part.item, part.last))
+            .collect::<Vec<_>>(),
+        [(1, true), (2, true)]
+    );
 }
 
 /// A small random generator, so the property test needs no crate.
@@ -266,14 +365,14 @@ impl Random {
         (self.next() % bound as u64) as usize
     }
 
-    /// Text of up to `max` bytes (any size from empty), with line breaks
-    /// and multi-byte and astral characters.
+    /// Text of up to `max` bytes, with line breaks and multi-byte and astral
+    /// characters, never only white space.
     fn text(&mut self, max: usize) -> String {
         let target = match self.below(4) {
             0 => self.below(200),
             _ => self.below(max + 1),
         };
-        let mut text = String::new();
+        let mut text = String::from("t");
         while text.len() < target {
             text.push(match self.below(14) {
                 0 | 1 => '\n',
@@ -288,122 +387,163 @@ impl Random {
     }
 }
 
-/// Random sequences of injections, updates with typed notes, approval
-/// messages and denials, from empty to 40,000 bytes, with calls reported
-/// out of order. Every hook and denial stays within the budget, and the
-/// hooks, then the next input, give back every item once and in order,
+/// Random sequences of context, updates with typed items, denials' rests,
+/// hooks reported out of order, the CLI's verdicts in either order and
+/// sessions that end, from small to 40,000 bytes. Every hook stays within
+/// the budget, nothing in the list moves, and the records, then the next
+/// input, give back every item exactly once and in the list's order,
 /// markers taken out.
 #[test]
 fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
-    // What the runs exercised: split items, typed notes sent and calls
-    // reported after a later one.
-    let (mut splits, mut notes, mut late) = (0, 0, 0);
+    // What the runs exercised.
+    let (mut splits, mut notes, mut late, mut rests) = (0, 0, 0, 0);
     for seed in 1..=400u64 {
         let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut delivery = Delivery::default();
-        let mut queue: Vec<String> = Vec::new();
-        // What the model is given in order, and what was queued or typed
-        // in the order it should come.
+        let mut list = List::default();
+        // The items as the model should read them, in the list's order.
+        let mut expected: Vec<(u64, String)> = Vec::new();
         let mut given: Vec<String> = Vec::new();
-        let mut expected: Vec<String> = Vec::new();
+        // The items the records hold, part by part, in order.
+        let mut order: Vec<u64> = Vec::new();
         let mut unreported: Vec<String> = Vec::new();
+        let mut sent: Vec<String> = Vec::new();
         let mut calls = 0;
-        let steps = random.below(40) + 1;
-        for _ in 0..steps {
+        for step in 0..random.below(50) + 1 {
+            // The items recorded left the list from its front, and nothing
+            // in it moved.
+            let recorded = expected.len() - list.items.len();
+            let tail = expected[recorded..]
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            let ids = list.items.iter().map(|item| item.id).collect::<Vec<_>>();
+            assert_eq!(tail, ids, "seed {seed}, step {step}");
+            let mut seen = order.clone();
+            seen.dedup();
+            let first = expected
+                .iter()
+                .map(|(id, _)| *id)
+                .take(seen.len())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                seen, first,
+                "seed {seed}, step {step}: recorded out of order"
+            );
             calls += 1;
             let call = format!("c{calls}");
-            match random.below(7) {
-                // An injection, or an approval message, joins the back.
+            let op = random.below(9);
+            match op {
                 0 | 1 => {
                     let text = random.text(40_000);
-                    if !text.trim().is_empty() {
-                        expected.push(text.clone());
-                        queue.push(text);
-                    }
+                    let id = list.push(PendingKind::Context, &text, &[]);
+                    expected.push((id, text));
                 }
-                // The source's update, with typed notes or not, once
-                // nothing waits outside a hook.
-                2 if delivery.caught_up(&queue) => {
-                    let content = random.text(40_000);
-                    let typed = match random.below(2) {
-                        0 => random.text(20_000),
-                        _ => String::new(),
-                    };
-                    for text in [&content, &typed] {
-                        if !text.trim().is_empty() {
-                            expected.push(text.clone());
+                2 => {
+                    for kind in [PendingKind::Context, PendingKind::Typed] {
+                        if random.below(2) == 0 {
+                            let text = random.text(20_000);
+                            let id = list.push(kind, &text, &[]);
+                            expected.push((id, text));
                         }
                     }
-                    delivery.take_update(
-                        &mut queue,
-                        content,
-                        typed,
-                        Vec::new(),
-                        Marks::new(),
-                        true,
-                    );
                 }
-                // A denied call, when nothing waits or is in flight, so
-                // that its rest comes next.
-                3 if delivery.caught_up(&queue)
-                    && delivery.in_flight.is_empty()
-                    && queue.is_empty() =>
-                {
-                    let text = random.text(40_000);
-                    let denial = delivery.deny(&mut queue, Some(&call), text.clone());
-                    assert!(denial.len() <= HOOK_MAX_BYTES, "{}", denial.len());
-                    expected.push(text);
-                    given.push(denial);
-                    delivery.reported(&mut queue, &call, &no_ids);
+                3 => {
+                    let (cut, rest) = cut_denial(random.text(40_000));
+                    assert!(cut.len() <= HOOK_MAX_BYTES);
+                    if let Some(rest) = rest {
+                        rests += 1;
+                        let at = delivery.rest_place(&list.items);
+                        // The items recorded so far left the list from its
+                        // front, so the list's place is after them.
+                        let place = expected.len() - list.items.len() + at;
+                        let id = list.insert(
+                            at,
+                            PendingKind::DenialRest { call: call.clone() },
+                            &rest,
+                            &[],
+                        );
+                        delivery.hold_rest(&call, id);
+                        expected.insert(place, (id, format!("{DENIAL_REST}{rest}")));
+                        unreported.push(call);
+                    }
                 }
-                // A call reported late.
                 4 if !unreported.is_empty() => {
                     late += 1;
                     let late = unreported.remove(random.below(unreported.len()));
-                    for done in delivery.reported(&mut queue, &late, &no_ids) {
+                    for done in delivery.reported(&mut list.items, &late).0 {
+                        order.extend(done.parts.iter().map(|part| part.item));
                         given.push(done.text);
                     }
                 }
-                // A call's hook, reported now or later.
+                5 if !sent.is_empty() => {
+                    let uuid = sent.remove(random.below(sent.len()));
+                    let cancel = random.below(4) == 0;
+                    if let Verdict::Done(done) =
+                        delivery.note_settled(&mut list.items, &uuid, cancel)
+                    {
+                        order.extend(done.parts.iter().map(|part| part.item));
+                        given.push(done.text);
+                    }
+                }
+                6 if random.below(4) == 0 => {
+                    // The session ends: what is in flight goes again.
+                    delivery.settle();
+                    unreported.clear();
+                    sent.clear();
+                }
                 _ => {
-                    if let Some(text) = delivery.fill(&queue, &call) {
+                    let before = list.texts().join("\u{0}");
+                    if let Some(text) = delivery.fill(&list.items, &call) {
                         assert!(text.len() <= HOOK_MAX_BYTES, "{}", text.len());
                         splits += usize::from(text.ends_with(GOES_ON));
                     }
-                    if delivery.due_note(&queue).is_some() {
+                    if delivery.due_note(&list.items).is_some() {
                         notes += 1;
-                        delivery.note_sent(&call, format!("u{calls}"));
+                        let uuid = format!("u{calls}");
+                        delivery.note_sent(&call, uuid.clone());
+                        sent.push(uuid);
                     }
-                    if random.below(3) == 0 {
-                        unreported.push(call);
-                    } else {
-                        for done in delivery.reported(&mut queue, &call, &no_ids) {
-                            given.push(done.text);
-                        }
-                    }
+                    assert_eq!(list.texts().join("\u{0}"), before, "a hook moves nothing");
+                    unreported.push(call);
                 }
             }
         }
-        // Every call is reported, and the turn ends: the next input
-        // carries the rest whole.
-        while !unreported.is_empty() {
-            let late = unreported.remove(random.below(unreported.len()));
-            for done in delivery.reported(&mut queue, &late, &no_ids) {
+        // Every call is reported and every message completed, then the turn
+        // ends and the next input carries the rest.
+        while !unreported.is_empty() || !sent.is_empty() {
+            if let Some(call) = unreported.pop() {
+                given.extend(
+                    delivery
+                        .reported(&mut list.items, &call)
+                        .0
+                        .into_iter()
+                        .map(|done| done.text),
+                );
+            }
+            if let Some(uuid) = sent.pop()
+                && let Verdict::Done(done) = delivery.note_settled(&mut list.items, &uuid, false)
+            {
                 given.push(done.text);
             }
         }
-        delivery.session_ended(&mut queue);
-        given.extend(queue.iter().cloned());
-        let expected = expected.join("\n\n");
+        delivery.settle();
+        given.extend(list.items.iter().map(|item| shown_from(item, item.given)));
+        let expected = expected
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let got = stream(&given);
         assert!(
-            stream(&given) == expected,
+            got == expected,
             "seed {seed}: given {} bytes, expected {}",
-            stream(&given).len(),
+            got.len(),
             expected.len()
         );
     }
     assert!(
-        splits > 100 && notes > 50 && late > 100,
-        "{splits} {notes} {late}"
+        splits > 100 && notes > 50 && late > 50 && rests > 50,
+        "{splits} {notes} {late} {rests}"
     );
 }

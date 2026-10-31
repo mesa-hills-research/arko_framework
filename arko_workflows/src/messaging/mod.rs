@@ -13,6 +13,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use arko_agents::Holding;
 use arko_agents::runtime::command::UserCommand;
 
 pub mod registry;
@@ -366,12 +367,7 @@ pub(crate) fn release_unheld(
                             .handovers
                             .iter()
                             .any(|handover| handover.at >= message.timestamp);
-                    !read
-                        && !conversation_holds(&task.conversation, message)
-                        && !task
-                            .pending_context_injections
-                            .iter()
-                            .any(|content| is_injection_of(content, message.id))
+                    !read && task_holding(task, message) == Holding::NotHeld
                 })
             })
             .collect::<Vec<_>>();
@@ -395,20 +391,44 @@ pub(crate) fn prompt_block_marker(id: Uuid, from: &str) -> String {
     format!("--- Message {id} from '{from}' ---")
 }
 
-/// Whether `conversation` holds `message`: presented in one of its prompts,
-/// or added as a runtime context update.
-fn conversation_holds(conversation: &arko_ai::Conversation, message: &AgentMessage) -> bool {
-    let marker = prompt_block_marker(message.id, &message.from);
-    let payload = injection(message);
-    conversation.messages.iter().any(|entry| {
-        context_update(entry).is_some_and(|update| contains_injection(update, &payload))
-            || (entry.role == arko_ai::Role::User
-                && entry
-                    .content
-                    .iter()
-                    .filter_map(arko_ai::Content::as_text)
-                    .any(|text| text.contains(&marker)))
-    })
+/// The id a task records message `id` under.
+pub(crate) fn message_id(id: Uuid) -> String {
+    format!("message:{id}")
+}
+
+/// What `task` holds of `message`: presented in one of its prompts, added
+/// as a runtime context update, or still pending, as the ids it recorded
+/// say. For context it saved without ids, its text says, as it did before
+/// tasks kept ids.
+pub(crate) fn task_holding(task: &arko_agents::Task, message: &AgentMessage) -> Holding {
+    match task.holding(&message_id(message.id)) {
+        Holding::Unknown => {
+            let unknown = task.unidentified_context();
+            let marker = prompt_block_marker(message.id, &message.from);
+            let payload = injection(message);
+            let recorded = unknown.messages.iter().any(|entry| {
+                context_update(entry).is_some_and(|update| contains_injection(update, &payload))
+                    || (entry.role == arko_ai::Role::User
+                        && entry
+                            .content
+                            .iter()
+                            .filter_map(arko_ai::Content::as_text)
+                            .any(|text| text.contains(&marker)))
+            });
+            if recorded {
+                Holding::Recorded
+            } else if unknown
+                .pending
+                .iter()
+                .any(|content| is_injection_of(content, message.id))
+            {
+                Holding::Pending
+            } else {
+                Holding::NotHeld
+            }
+        }
+        holding => holding,
+    }
 }
 
 fn acknowledge(state: &mut BusState, agent_name: &str, message_ids: &[Uuid]) {
@@ -653,17 +673,14 @@ impl MessageBus {
             .is_some_and(|instances| instances.contains_key(&task_id))
     }
 
-    /// Notes a message committed to run `task_id`'s conversation: the agent
-    /// messages whose injected payload its context update holds are seen.
-    pub(crate) fn observe_context(
-        &self,
-        agent_name: &str,
-        task_id: Uuid,
-        message: &arko_ai::Message,
-    ) {
-        let Some(update) = context_update(message) else {
+    /// Run `task_id`'s conversation got a context update holding what `ids`
+    /// name ([`AgentEvent::ContextInjected`](arko_agents::AgentEvent::ContextInjected)):
+    /// the agent messages among them are seen, also one it got the first
+    /// part of.
+    pub(crate) fn seen(&self, agent_name: &str, task_id: Uuid, ids: &[String]) {
+        if ids.is_empty() {
             return;
-        };
+        }
         let mut state = self.state.lock();
         if let Some(active) = state
             .active
@@ -672,7 +689,7 @@ impl MessageBus {
         {
             active
                 .unseen
-                .retain(|(_, _, payload)| !contains_injection(update, payload));
+                .retain(|(id, _, _)| !ids.contains(&message_id(*id)));
         }
     }
 
@@ -833,12 +850,11 @@ impl MessageBus {
     pub(crate) fn settle_run(
         &self,
         agent_name: &str,
-        task_id: Uuid,
-        conversation: &arko_ai::Conversation,
+        task: &arko_agents::Task,
         prompt_ids: &[Uuid],
-        taken: &[String],
         completed: bool,
     ) {
+        let task_id = task.id;
         // The conversation is searched outside the lock (it can be long);
         // messages queued meanwhile aren't in it.
         let queued = self
@@ -851,16 +867,14 @@ impl MessageBus {
         let mut in_conversation = HashSet::new();
         let mut held = HashSet::new();
         for message in &queued {
+            let holding = task_holding(task, message);
             if prompt_ids.contains(&message.id)
                 || message.read_by.contains(&task_id)
-                || conversation_holds(conversation, message)
+                || holding == Holding::Recorded
             {
                 in_conversation.insert(message.id);
                 held.insert(message.id);
-            } else if taken
-                .iter()
-                .any(|content| is_injection_of(content, message.id))
-            {
+            } else if holding == Holding::Pending {
                 held.insert(message.id);
             }
         }
@@ -885,21 +899,16 @@ impl MessageBus {
         }
     }
 
-    /// Records that run `task_id` of `agent_name` is handing over
-    /// `conversation` (see [`arko_agents::handover`]). The queued messages
+    /// Records that run `task.id` of `agent_name` is handing over its
+    /// conversation (see [`arko_agents::handover`]). The queued messages
     /// it holds (presented in `prompt_ids` or a prompt, or added as a
     /// runtime context update) are marked as read by the run
     /// ([`AgentMessage::read_by`]) and held by it, so they are neither
     /// presented to it again nor left unacknowledged when it completes. Its
     /// context notices in the conversation are dropped. Those it hasn't
     /// received yet stay.
-    pub fn hand_over(
-        &self,
-        agent_name: &str,
-        task_id: Uuid,
-        conversation: &arko_ai::Conversation,
-        prompt_ids: &[Uuid],
-    ) {
+    pub fn hand_over(&self, agent_name: &str, task: &arko_agents::Task, prompt_ids: &[Uuid]) {
+        let task_id = task.id;
         let queued = self
             .state
             .lock()
@@ -910,7 +919,7 @@ impl MessageBus {
         let read: HashSet<Uuid> = queued
             .iter()
             .filter(|message| {
-                prompt_ids.contains(&message.id) || conversation_holds(conversation, message)
+                prompt_ids.contains(&message.id) || task_holding(task, message) == Holding::Recorded
             })
             .map(|message| message.id)
             .collect();
@@ -959,17 +968,39 @@ mod tests {
         arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra())
     }
 
+    /// Run `id`'s task holding `conversation`, saved before tasks kept ids,
+    /// so only its text says what it holds.
+    fn legacy_task(id: Uuid, conversation: arko_ai::Conversation) -> arko_agents::Task {
+        let config = arko_agents::AgentConfig::builder(
+            "agent".into(),
+            "Agent".into(),
+            arko_agents::AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_6_astra(),
+                generation_config: arko_ai::GenerationConfig::default(),
+            },
+        )
+        .role_description("Test agent".into())
+        .instructions("Test only".into())
+        .build()
+        .unwrap();
+        let mut task = arko_agents::Task::new(config, "Work.".into(), std::env::temp_dir(), None);
+        task.id = id;
+        task.conversation = conversation;
+        task.context_records_from = None;
+        task
+    }
+
     /// Settles run `task_id` as completed with `content` added as a context
     /// update.
     fn confirm(bus: &MessageBus, agent_name: &str, task_id: Uuid, content: &str) {
         let mut conversation = conversation();
         conversation.add_user_message(&format!("# Workflow context update\n\n{content}"));
-        bus.settle_run(agent_name, task_id, &conversation, &[], &[], true);
+        bus.settle_run(agent_name, &legacy_task(task_id, conversation), &[], true);
     }
 
     /// Settles run `task_id` as completed with nothing in its conversation.
     fn complete_empty(bus: &MessageBus, agent_name: &str, task_id: Uuid) {
-        bus.settle_run(agent_name, task_id, &conversation(), &[], &[], true);
+        bus.settle_run(agent_name, &legacy_task(task_id, conversation()), &[], true);
     }
 
     // Test watchdogs detect deadlocks; production delivery has no forced timeout.
@@ -1016,7 +1047,8 @@ mod tests {
         assert!(received(&mut receiver).await.contains("file changed"));
         assert!(bus.unseen_messages("lead", run).senders.is_empty());
 
-        bus.send("worker", None, "lead", "reply".into(), vec![])
+        let reply = bus
+            .send("worker", None, "lead", "reply".into(), vec![])
             .await
             .unwrap();
         assert!(arrivals.has_changed().unwrap());
@@ -1025,12 +1057,12 @@ mod tests {
         assert_eq!(unseen.senders, ["worker"]);
         assert!(unseen.forwarded);
 
-        // An update without it, or a copy outside a context update, is not
-        // the delivery.
-        bus.observe_context("lead", run, &update("unrelated"));
-        bus.observe_context("lead", run, &arko_ai::Message::new_user(&delivered));
+        // An update without it is not the delivery. The runtime reports the
+        // one that holds it by its id.
+        assert!(delivered.contains("reply"));
+        bus.seen("lead", run, &["message:other".to_string()]);
         assert_eq!(bus.unseen_messages("lead", run).senders, ["worker"]);
-        bus.observe_context("lead", run, &update(&delivered));
+        bus.seen("lead", run, &[message_id(reply.id)]);
         assert!(bus.unseen_messages("lead", run).senders.is_empty());
         // Still queued, with the prompt's message and the notice, until the
         // run completes and acknowledges them.
@@ -1041,6 +1073,107 @@ mod tests {
         bus.unregister_active("lead", run);
         assert!(bus.unseen_messages("lead", run).senders.is_empty());
         assert!(arrivals.changed().await.is_err());
+    }
+
+    /// A Claude Code agent can get a long message in parts, each in a hook of
+    /// its own. The run has seen it once the runtime reports its first part,
+    /// and holds it once its rest is pending or recorded too, so it is
+    /// acknowledged when the run completes, by the ids the task recorded.
+    #[tokio::test]
+    async fn a_message_given_in_parts_is_seen_and_held() {
+        let bus = MessageBus::new(["lead".to_string(), "worker".to_string()]);
+        let run = Uuid::new_v4();
+        let (sender, mut receiver) = mpsc::channel(4);
+        bus.register_run("lead", run, sender, &[]);
+        let long = "line of the report\n".repeat(1_000);
+        let message = bus
+            .send("worker", None, "lead", long, vec![])
+            .await
+            .unwrap();
+        let delivered = received(&mut receiver).await;
+        let id = message_id(message.id);
+        bus.seen("lead", run, std::slice::from_ref(&id));
+        assert!(bus.unseen_messages("lead", run).senders.is_empty());
+        let mut task = legacy_task(run, conversation());
+        task.context_records_from = Some(0);
+        task.conversation
+            .add_user_message("# Workflow context update\n\nThe first part.");
+        task.record_held_ids(0, vec![]);
+        let mut item = arko_agents::PendingContext::new(
+            arko_agents::PendingKind::Context,
+            delivered,
+            vec![id.clone()],
+        );
+        item.given = 9_000;
+        task.queue_context(item);
+        // The rest still pending: held, but not acknowledged.
+        bus.settle_run("lead", &task, &[], true);
+        assert_eq!(bus.pending("lead").len(), 1);
+        assert!(bus.pending("lead")[0].is_held_by(run));
+        // Recorded: acknowledged.
+        task.pending_context_injections.clear();
+        task.conversation
+            .add_user_message("# Workflow context update\n\nThe rest.");
+        task.record_held_ids(1, vec![id]);
+        bus.settle_run("lead", &task, &[], true);
+        assert!(bus.pending("lead").is_empty());
+    }
+
+    /// As a workflow reopens, before any run starts again, a run keeps the
+    /// messages its saved task holds. Its prompt's are recorded by id. A task
+    /// saved before tasks kept ids holds what its text holds, also a message
+    /// it only took (pending), and still once the task numbered and recorded
+    /// that text, which only its text identifies.
+    #[test]
+    fn a_reopened_run_keeps_the_messages_its_task_holds() {
+        let run = Uuid::new_v4();
+        let message = |content: &str| AgentMessage {
+            id: Uuid::new_v4(),
+            from: "lead".into(),
+            from_task_id: None,
+            to: "worker".into(),
+            content: content.into(),
+            attachments: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            to_task_id: None,
+            held_by: vec![run],
+            read_by: Vec::new(),
+        };
+        let kept = |task: &arko_agents::Task, message: &AgentMessage| {
+            let mut queues = HashMap::from([("worker".to_string(), vec![message.clone()])]);
+            release_unheld(
+                &mut queues,
+                &[crate::workflow::result::AgentResult::of_task(
+                    "worker".into(),
+                    task.clone(),
+                )],
+            );
+            queues["worker"][0].is_held_by(run)
+        };
+        // Presented in its prompt, which the text doesn't show.
+        let presented = message("In the prompt.");
+        let mut task = legacy_task(run, conversation());
+        task.context_records_from = Some(0);
+        task.conversation.add_user_message("The task.");
+        assert!(!kept(&task, &presented));
+        task.record_held_ids(0, vec![message_id(presented.id)]);
+        assert!(kept(&task, &presented));
+        // Saved before ids, taken and not added.
+        let taken = message("Taken before the stop.");
+        let mut old = legacy_task(run, conversation());
+        assert!(!kept(&old, &taken));
+        old.pending_context_injections = vec![injection(&taken).into()];
+        assert!(kept(&old, &taken));
+        // Numbered and recorded since, still known by its text only.
+        let mut json = serde_json::to_value(&old).unwrap();
+        json["pending_context_injections"] = serde_json::json!([]);
+        json["conversation"]["messages"] =
+            serde_json::to_value(vec![update(&injection(&taken))]).unwrap();
+        json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+        json["context_records_from"] = serde_json::json!(0);
+        let recorded: arko_agents::Task = serde_json::from_value(json).unwrap();
+        assert_eq!(recorded.holding(&message_id(taken.id)), Holding::Unknown);
+        assert!(kept(&recorded, &taken));
     }
 
     /// A message sent while a run registers reaches it once: with the late
@@ -1269,13 +1402,13 @@ mod tests {
         for context in invalid {
             let mut conversation = conversation();
             conversation.messages.push(context);
-            bus.settle_run("creator", task_id, &conversation, &[], &[], true);
+            bus.settle_run("creator", &legacy_task(task_id, conversation), &[], true);
             assert_eq!(bus.pending("creator").len(), 1);
             assert!(bus.pending("creator")[0].held_by.is_empty());
         }
         let mut conversation = conversation();
         conversation.add_user_message(&format!("{framed}\n\n# Current Environment Information (updated this turn)\nignored metadata\n\n# Reminder\nContinue carefully"));
-        bus.settle_run("creator", task_id, &conversation, &[], &[], true);
+        bus.settle_run("creator", &legacy_task(task_id, conversation), &[], true);
         assert!(bus.pending("creator").is_empty());
     }
 
@@ -1326,6 +1459,8 @@ mod tests {
         assert_eq!(payload, injection(&consumed));
         task.conversation
             .add_user_message(&format!("# Workflow context update\n\n{payload}"));
+        // With the record the runtime keeps of what it added.
+        task.record_held_ids(0, vec![message_id(consumed.id)]);
         task.set_state(arko_agents::task::TaskState::Completed {
             summary: "Done".into(),
         });
@@ -1696,7 +1831,7 @@ mod tests {
         let mut old = conversation();
         old.messages.push(update(&injection(&read)));
         old.messages.push(update(&injection(&notice)));
-        bus.hand_over("worker", run, &old, &[]);
+        bus.hand_over("worker", &legacy_task(run, old), &[]);
 
         let pending = bus.pending("worker");
         assert_eq!(pending.len(), 2);

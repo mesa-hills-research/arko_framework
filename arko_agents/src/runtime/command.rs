@@ -64,6 +64,10 @@ pub enum UserCommand {
     SubmitUserResponse {
         /// The user's response to the questions.
         response: String,
+        /// The host's ids of what the response delivers (such as an agent's
+        /// message), which the task records with it ([`Task::holding`](crate::Task::holding)).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ids: Vec<String>,
     },
 
     /// Approve recovery after an error (e.g., retry a failed tool execution or LLM call).

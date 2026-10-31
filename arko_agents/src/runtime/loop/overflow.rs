@@ -480,13 +480,31 @@ impl AgentLoop {
         }
         let added = self.task.conversation.messages.split_off(start);
         let runtime = &self.task.runtime_messages;
-        let kept: Vec<ai::Message> = added
-            .into_iter()
-            .enumerate()
-            .filter(|(offset, message)| !in_step(message) && !runtime.contains(&(start + offset)))
-            .map(|(_, message)| message)
+        // A message that holds context the task recorded stays, so the
+        // record keeps what it says.
+        let recorded: std::collections::HashSet<usize> = self
+            .task
+            .context_records
+            .iter()
+            .map(|record| record.message)
             .collect();
+        let mut moved = std::collections::HashMap::new();
+        let mut kept: Vec<ai::Message> = Vec::new();
+        for (offset, message) in added.into_iter().enumerate() {
+            let index = start + offset;
+            if recorded.contains(&index) || (!in_step(&message) && !runtime.contains(&index)) {
+                moved.insert(index, start + kept.len());
+                kept.push(message);
+            }
+        }
         self.task.conversation.messages.extend(kept);
+        self.task.move_context_records(|index| {
+            if index < start {
+                Some(index)
+            } else {
+                moved.get(&index).copied()
+            }
+        });
         // The messages kept after `start` are the host's, not the runtime's.
         self.task.runtime_messages.retain(|index| *index < start);
         self.task

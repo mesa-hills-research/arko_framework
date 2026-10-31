@@ -655,10 +655,11 @@ impl NoteBoard {
                     .map(|config| config.model)
             };
             let (images, lost) = self.context_images(&with_images, model.as_ref());
-            let seqs = taken.iter().map(|posted| posted.seq).collect();
             let (operator, others): (Vec<_>, Vec<_>) = taken
                 .iter()
                 .partition(|posted| posted.note.source == NoteSource::Operator);
+            let operator_seqs = operator.iter().map(|posted| posted.seq).collect();
+            let other_seqs = others.iter().map(|posted| posted.seq).collect();
             // The count of notes that follow and the host's reply hint end
             // the operator's update, which comes last, or the only one.
             let (others, operator) = if operator.is_empty() {
@@ -678,7 +679,8 @@ impl NoteBoard {
             NotesUpdate {
                 others,
                 operator,
-                seqs,
+                other_seqs,
+                operator_seqs,
                 given,
                 images,
             }
@@ -706,8 +708,10 @@ impl NoteBoard {
         self.held_in_conversation(agent, task, review);
     }
 
-    /// [`recovered`](Self::recovered) by the notes `task`'s conversation
-    /// holds: the newest one it holds tells what it was given.
+    /// [`recovered`](Self::recovered) by the notes `task` holds, in its
+    /// conversation or pending: it was given every note up to the first one
+    /// it lacks. A note it holds after one it lacks doesn't count, since the
+    /// one it lacks would never come again.
     fn held_in_conversation(&self, agent: &str, task: &arko_agents::Task, review: bool) {
         let (started, given) = {
             let state = self.state.lock();
@@ -715,7 +719,6 @@ impl NoteBoard {
             let given = state
                 .notes
                 .iter()
-                .rev()
                 .filter(|posted| {
                     posted.seq > started
                         && self.receives(&posted.note, agent, review)
@@ -725,13 +728,11 @@ impl NoteBoard {
                 .collect::<Vec<_>>();
             (started, given)
         };
-        // Notes are given oldest first, each update starting after the last
-        // one shown, so the newest one the task holds tells what it was
-        // given. The conversation is searched outside the lock (it can be
-        // long).
+        // Searched outside the lock (a conversation can be long).
         let held = given
             .iter()
-            .find(|posted| holds(task, &item_head(posted)))
+            .take_while(|posted| holds(task, posted))
+            .last()
             .map_or(started, |posted| posted.seq);
         let mut state = self.state.lock();
         if state.seen.get(&task.id).is_some_and(|seen| *seen > held) {
@@ -1037,20 +1038,31 @@ fn insert(
     posted
 }
 
-/// Whether `task` holds `text` in a user message of its conversation, or in
-/// context it took and hasn't added yet.
-fn holds(task: &arko_agents::Task, text: &str) -> bool {
-    task.pending_context_injections
-        .iter()
-        .any(|content| content.contains(text))
-        || task.conversation.messages.iter().any(|message| {
-            message.role == arko_ai::Role::User
-                && message
-                    .content
-                    .iter()
-                    .filter_map(arko_ai::Content::as_text)
-                    .any(|part| part.contains(text))
-        })
+/// Whether `task` holds note `posted`, in its conversation or pending, as
+/// its records say by the note's id. For context it saved without ids, its
+/// text says: a user message, or context it took and hasn't added, with the
+/// note's item whole.
+fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
+    match task.holding(&format!("note:{}", posted.seq)) {
+        arko_agents::Holding::Recorded | arko_agents::Holding::Pending => true,
+        arko_agents::Holding::Unknown => {
+            let text = item_head(posted);
+            let unknown = task.unidentified_context();
+            unknown
+                .pending
+                .iter()
+                .any(|content| content.contains(&text))
+                || unknown.messages.iter().any(|message| {
+                    message.role == arko_ai::Role::User
+                        && message
+                            .content
+                            .iter()
+                            .filter_map(arko_ai::Content::as_text)
+                            .any(|part| part.contains(&text))
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Whether `note` may reach run `task_id`: a note for one run reaches
@@ -1381,8 +1393,10 @@ pub(crate) struct NotesUpdate {
     pub others: String,
     /// The update of the operator's notes, empty without one.
     pub operator: String,
-    /// The numbers of the notes shown.
-    pub seqs: Vec<u64>,
+    /// The numbers of the notes `others` shows.
+    pub other_seqs: Vec<u64>,
+    /// The numbers of the notes `operator` shows.
+    pub operator_seqs: Vec<u64>,
     /// The number of the newest note the run counts as given now.
     pub given: u64,
     pub images: Vec<arko_agents::ContextImage>,
@@ -1411,17 +1425,20 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
     }
 
     /// The inner source's context, the notes the run hasn't been given
-    /// (`note:<number>`), and its subagent mail (`mail:<id>`).
+    /// (`note:<number>`), and its subagent mail (`mail:<id>`). The operator's
+    /// notes are the part the user typed, with their own ids.
     fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
         let mut parts = Vec::new();
         let mut user_content = String::new();
         let mut ids = Vec::new();
+        let mut user_ids = Vec::new();
         let mut images = Vec::new();
         let mut marks = std::collections::BTreeMap::new();
         if let Some(inner) = self.inner.context_update(task_id) {
             parts.push(inner.content);
             user_content = inner.user_content;
             ids.extend(inner.ids);
+            user_ids.extend(inner.user_ids);
             images.extend(inner.images);
             marks.extend(inner.marks);
         }
@@ -1440,7 +1457,18 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
                 }
                 user_content.push_str(&notes.operator);
             }
-            ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
+            ids.extend(
+                notes
+                    .other_seqs
+                    .into_iter()
+                    .map(|seq| format!("note:{seq}")),
+            );
+            user_ids.extend(
+                notes
+                    .operator_seqs
+                    .into_iter()
+                    .map(|seq| format!("note:{seq}")),
+            );
             images.extend(notes.images);
             marks.insert(NOTES_MARK.to_string(), notes.given);
         }
@@ -1454,6 +1482,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             content: parts.join("\n\n"),
             user_content,
             ids,
+            user_ids,
             images,
             marks,
         })

@@ -698,7 +698,7 @@ async fn a_continued_run_gets_the_context_its_task_kept_once() {
         .unwrap();
     let mut task = lead.task().unwrap().clone();
     task.pending_context_injections = vec![
-        crate::messaging::injection(&message),
+        crate::messaging::injection(&message).into(),
         "Terminal 3 finished.".into(),
     ];
     let lead = AgentResult::of_task(lead.agent_name, task);
@@ -1210,21 +1210,24 @@ async fn a_message_read_before_a_handover_the_checkpoint_lacks_is_given_again() 
             .await
             .unwrap();
         // Read in a conversation the run hands over.
-        let mut read = first.task().unwrap().conversation.clone();
-        read.messages.push(arko_ai::Message::new_user(&format!(
-            "{}\nUse British spelling.",
-            crate::messaging::prompt_block_marker(message.id, "lead")
-        )));
-        context
+        let mut read = first.task().unwrap().clone();
+        read.conversation
             .messages
-            .hand_over("writer", first.agent_run_id, &read, &[]);
+            .push(arko_ai::Message::new_user(&format!(
+                "{}\nUse British spelling.",
+                crate::messaging::prompt_block_marker(message.id, "lead")
+            )));
+        // The host's continuation prompt presents it, as the task records.
+        let last = read.conversation.messages.len() - 1;
+        read.record_held_ids(last, vec![crate::messaging::message_id(message.id)]);
+        context.messages.hand_over("writer", &read, &[]);
         assert!(context.messages.pending("writer")[0].is_held_by(first.agent_run_id));
         if saved_handover {
             let mut handed = first.task().unwrap().clone();
             handed.handovers.push(arko_agents::HandoverRecord {
                 at: chrono::Utc::now(),
                 input_tokens: 0,
-                replaced_messages: read.messages.len(),
+                replaced_messages: read.conversation.messages.len(),
                 report: "REPORT: drafted it.".into(),
             });
             workflow

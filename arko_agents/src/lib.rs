@@ -70,9 +70,10 @@ pub use stop::{
     kill_stop_aware_commands,
 };
 pub use task::{
-    ApprovalReason, DeferredToolError, ErrorRecoveryCause, LatestRequest, PendingToolCallInfo,
-    PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult,
-    RequestRecord, RunningToolCall, Task, TaskParent, TaskState, UserTurn, UserTurnKind,
+    ApprovalReason, ContextRecord, DeferredToolError, ErrorRecoveryCause, Holding, LatestRequest,
+    PendingContext, PendingKind, PendingToolCallInfo, PlanUsageWindowMark, RecordedPart,
+    RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult, RequestRecord,
+    RunningToolCall, Task, TaskParent, TaskState, UnidentifiedContext, UserTurn, UserTurnKind,
 };
 pub use tool::{
     ContextSignal, ContextSource, ImageRoom, InterceptedResult, InterceptionFailurePolicy,

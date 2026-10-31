@@ -387,8 +387,9 @@ fn an_item_says_which_images_can_be_shown() {
     assert_eq!(line(0, 0), "See these.");
 }
 
-/// A saved conversation holds a note whose image was lost, whichever
-/// version of its item the agent was given.
+/// A conversation saved before tasks kept ids holds a note whose image was
+/// lost, whichever version of its item the agent was given, by its text. A
+/// task that keeps ids holds the notes its records name.
 #[test]
 fn a_conversation_holds_a_note_whose_image_was_lost() {
     let mut note = posted(3, "See this.");
@@ -400,15 +401,45 @@ fn a_conversation_holds_a_note_whose_image_was_lost() {
         std::env::temp_dir(),
         None,
     );
-    assert!(!holds(&task, &item_head(&note)));
+    task.context_records_from = None;
+    assert!(!holds(&task, &note));
     task.conversation
         .messages
         .push(arko_ai::Message::new_user(&format!(
             "# Workflow context update\n\nA new note on your task.{}",
             item_with(&note, 1)
         )));
-    assert!(holds(&task, &item_head(&note)));
-    assert!(!holds(&task, &item(&note)));
+    assert!(holds(&task, &note));
+    let mut longer = note.clone();
+    longer.note.text = format!("{} And more.", note.note.text);
+    assert!(!holds(&task, &longer));
+    let mut task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    task.conversation
+        .add_user_message("# Workflow context update\n\nAny text.");
+    assert!(!holds(&task, &note));
+    task.record_held_ids(0, vec![format!("note:{}", note.seq)]);
+    assert!(holds(&task, &note));
+}
+
+/// Whether `task`'s conversation or pending context has `text` in a user
+/// message, read directly rather than through its records.
+fn holds_text(task: &arko_agents::Task, text: &str) -> bool {
+    task.pending_context_injections
+        .iter()
+        .any(|item| item.text.contains(text))
+        || task.conversation.messages.iter().any(|message| {
+            message.role == arko_ai::Role::User
+                && message
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .any(|part| part.contains(text))
+        })
 }
 
 /// Only a one-time note carries images, and only to agents whose models
@@ -1443,7 +1474,10 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         .unwrap();
     let saved = state.agent_results_in(&run_dir(&workspace)).unwrap();
     assert_eq!(saved[0].status, AgentRunStatus::Interrupted);
-    assert!(!holds(saved[0].task().unwrap(), "Prefer the orbit method."));
+    assert!(!holds_text(
+        saved[0].task().unwrap(),
+        "Prefer the orbit method."
+    ));
     assert_eq!(
         state.notes.unwrap().seen.get(&saved[0].agent_run_id),
         Some(&1)
@@ -1465,7 +1499,10 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         "{resent}"
     );
     // Given once: the task holds it now.
-    assert!(holds(result.task().unwrap(), "Prefer the orbit method."));
+    assert!(holds_text(
+        result.task().unwrap(),
+        "Prefer the orbit method."
+    ));
 }
 
 /// A note written to the control folder by another process while an agent
@@ -1832,7 +1869,8 @@ async fn new_notes_past_an_updates_cap_come_at_the_next_boundary() {
     assert_eq!(count(&requests[2], "OLDER-NOTE"), 1);
     assert_eq!(count(&requests[2], "NEWER-NOTE"), 1);
     assert!(
-        holds(result.task().unwrap(), "OLDER-NOTE") && holds(result.task().unwrap(), "NEWER-NOTE")
+        holds_text(result.task().unwrap(), "OLDER-NOTE")
+            && holds_text(result.task().unwrap(), "NEWER-NOTE")
     );
     let snapshot = workflow.context().notes.snapshot().unwrap();
     assert_eq!(snapshot.seen.get(&result.agent_run_id), Some(&2));

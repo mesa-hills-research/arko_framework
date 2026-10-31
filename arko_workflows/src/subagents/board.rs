@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
-use arko_agents::{AgentConfig, Task};
+use arko_agents::{AgentConfig, Holding, Task};
 
 use super::{
     MailItem, MailKind, MailSender, PendingLaunch, StartRequest, SubagentEvent, SubagentEventKind,
@@ -2091,7 +2091,7 @@ impl Board {
         ctx: &Arc<SharedContext>,
         me: Uuid,
         questions: &str,
-    ) -> Result<String, WorkflowError> {
+    ) -> Result<(String, Vec<String>), WorkflowError> {
         let Some(record) = self.record(me) else {
             return Err(WorkflowError::Channel("not a subagent".to_string()));
         };
@@ -2160,7 +2160,7 @@ impl Board {
             };
             if let Some(answer) = answer {
                 self.delivered(me, std::slice::from_ref(&answer));
-                return Ok(answer.text());
+                return Ok((answer.text(), vec![format!("mail:{}", answer.id)]));
             }
             tokio::select! {
                 biased;
@@ -2169,9 +2169,12 @@ impl Board {
                 }
                 _ = version.changed() => {}
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(format!(
-                        "Your lead didn't answer within {} minutes. Decide yourself, and say what you decided in your report.",
-                        QUESTION_TIMEOUT.as_secs() / 60
+                    return Ok((
+                        format!(
+                            "Your lead didn't answer within {} minutes. Decide yourself, and say what you decided in your report.",
+                            QUESTION_TIMEOUT.as_secs() / 60
+                        ),
+                        Vec::new(),
                     ));
                 }
             }
@@ -3198,40 +3201,39 @@ fn holds_start(messages: &[arko_ai::Message], handle: &str) -> bool {
 
 /// Whether `task` holds `item`: in its conversation (a context update, a
 /// prompt or a tool result), in context it took and hasn't added, or given
-/// before its latest handover (its report covers it). A Claude Code agent
-/// can get an item in parts over several hooks, each part a context update
-/// of its own, recorded or pending, so the item's marker and its end marker
-/// may be in different updates.
+/// before its latest handover (its report covers it). The task's records say
+/// by the item's id. For context it saved without ids, its text says, as it
+/// did before tasks kept ids, and so does a tool result (`wait_for_agents`),
+/// which only holds the item with both its markers, so one cut short
+/// doesn't count.
 fn task_holds(task: &Task, item: &MailItem) -> bool {
     if let (Some(handover), Some(delivered)) = (task.handovers.last(), item.delivered_at)
         && handover.at >= delivered
     {
         return true;
     }
-    let updates = task
-        .pending_context_injections
-        .iter()
-        .map(String::as_str)
-        .chain(
-            task.conversation
-                .messages
-                .iter()
-                .filter(|message| message.role == arko_ai::Role::User)
-                .flat_map(|message| message.content.iter())
-                .filter_map(arko_ai::Content::as_text),
-        );
-    let (marker, end_marker) = (item.marker(), item.end_marker());
-    let (mut starts, mut ends) = (false, false);
-    for text in updates {
-        starts |= text.contains(&marker);
-        ends |= text.contains(&end_marker);
+    let holding = task.holding(&format!("mail:{}", item.id));
+    if matches!(holding, Holding::Recorded | Holding::Pending) {
+        return true;
     }
-    (starts && ends)
-        || task.conversation.messages.iter().any(|message| {
-            message.content.iter().any(|content| match content {
-                arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
-                _ => false,
-            })
+    let in_results = task.conversation.messages.iter().any(|message| {
+        message.content.iter().any(|content| match content {
+            arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
+            _ => false,
+        })
+    });
+    if in_results || holding != Holding::Unknown {
+        return in_results;
+    }
+    let unknown = task.unidentified_context();
+    unknown.pending.iter().any(|text| item.held_in(text))
+        || unknown.messages.iter().any(|message| {
+            message.role == arko_ai::Role::User
+                && message
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .any(|text| item.held_in(text))
         })
 }
 
@@ -3788,19 +3790,19 @@ mod update_tests {
         assert!(board.update(run).is_none());
     }
 
-    /// A Claude Code agent can get an item in parts, each in a hook of its
-    /// own. The task holds it once its first part is in the conversation
-    /// and its rest is pending, or in the conversation too.
+    /// The task's records say whether it holds an item, by its id: one whose
+    /// rest is pending, or recorded too. A task saved before tasks kept ids
+    /// holds what its text holds whole, and a tool result holds an item only
+    /// with both its markers.
     #[test]
-    fn an_item_given_in_parts_is_held() {
+    fn a_task_holds_an_item_by_its_records_or_its_old_text() {
         let run = Uuid::new_v4();
         let item = board_with(&["x".repeat(12_000)], run)
             .snapshot()
             .unwrap()
             .mail[0]
             .clone();
-        let text = item.excerpt();
-        let (first, rest) = text.split_at(text.len() / 2);
+        let id = format!("mail:{}", item.id);
         let config = arko_agents::AgentConfig::builder(
             "worker".into(),
             "Worker".into(),
@@ -3815,13 +3817,45 @@ mod update_tests {
         .unwrap();
         let mut task = Task::new(config, "Work.".into(), std::env::temp_dir(), None);
         task.conversation
-            .add_user_message(&format!("# Workflow context update\n\n{first}"));
+            .add_user_message("# Workflow context update\n\nThe first part.");
         assert!(!task_holds(&task, &item));
-        task.pending_context_injections.push(rest.to_string());
+        let mut rest = arko_agents::PendingContext::new(
+            arko_agents::PendingKind::Context,
+            item.excerpt(),
+            vec![id.clone()],
+        );
+        rest.given = 100;
+        task.queue_context(rest);
         assert!(task_holds(&task, &item));
         task.pending_context_injections.clear();
-        task.conversation.add_user_message(rest);
+        assert!(!task_holds(&task, &item), "its first part alone");
+        task.conversation
+            .add_user_message("# Workflow context update\n\nThe rest.");
+        task.record_held_ids(1, vec![id]);
         assert!(task_holds(&task, &item));
+        // Saved before ids: its text, whole.
+        let mut old = task.clone();
+        old.context_records.clear();
+        old.context_records_from = None;
+        assert!(!task_holds(&old, &item));
+        old.conversation.add_user_message(&format!(
+            "# Workflow context update\n\n- {}",
+            item.excerpt()
+        ));
+        assert!(task_holds(&old, &item));
+        // A result cut short doesn't hold it.
+        let mut cut = task.clone();
+        cut.context_records.clear();
+        cut.conversation
+            .messages
+            .push(arko_ai::Message::new_user_with_contents(vec![
+                arko_ai::Content::ToolResult(arko_ai::ToolResult::new(
+                    None,
+                    "wait_for_agents",
+                    &item.excerpt()[..200],
+                )),
+            ]));
+        assert!(!task_holds(&cut, &item));
     }
 }
 

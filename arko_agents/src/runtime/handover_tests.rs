@@ -496,6 +496,7 @@ impl HandoverHook for RosterHook {
         HandoverSeed {
             task_prompt: "Restated task".into(),
             context: Some("# Agents you can message\n- `lead`".into()),
+            ids: Vec::new(),
         }
     }
 }

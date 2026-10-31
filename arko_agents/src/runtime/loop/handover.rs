@@ -352,6 +352,7 @@ impl AgentLoop {
             .conversation
             .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
+        self.task.record_held_ids(0, seed.ids.clone());
 
         // What the loop keeps about the replaced conversation: tools that
         // track what the conversation holds start over (see
