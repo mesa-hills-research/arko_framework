@@ -1,5 +1,5 @@
 //! Two agents running in the installed Claude Code CLI (under its login)
-//! work together through workflow messaging: a lead that reads files and
+//! work together through workflow messaging, with a lead that reads files and
 //! hands its conversation over at a low threshold, and a worker that
 //! answers the lead's question. It prints each agent's tool calls, its
 //! messages, and the lead's handovers.

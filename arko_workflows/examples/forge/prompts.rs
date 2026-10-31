@@ -135,7 +135,7 @@ pub const TRIALS: &str = r#"
   budget flag in `arguments`. Be generous: a trial that stops at its cap is wasted, so give it
   comfortably more than you expect it to use."#;
 
-/// Involvement: no questions.
+/// Involvement, no questions.
 pub const INVOLVEMENT_NONE: &str = r#"
 ## Working alone
 
@@ -143,7 +143,7 @@ The user isn't available during this run. Don't ask questions: where the use cas
 open, pick what fits it best, and list each assumption in DESIGN.md and your summary.
 "#;
 
-/// Involvement: questions at the start.
+/// Involvement, questions at the start.
 pub const INVOLVEMENT_CLARIFY: &str = r#"
 ## Questions for the user
 

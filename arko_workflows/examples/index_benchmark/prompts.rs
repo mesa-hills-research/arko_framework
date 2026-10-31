@@ -2,7 +2,7 @@
 //! the end of this file.
 //!
 //! The role markers (`[index-benchmark role: ...]`) at the start of each
-//! role description tell the mock model which role it plays; a real model
+//! role description tell the mock model which role it plays, and a real model
 //! reads them as a heading.
 
 /// The solver's role, the same in every arm.
@@ -55,7 +55,7 @@ pub const TOOLS_INDEX: &str = r#"The usual command-line tools are installed{rg},
 - `arko_index outline PATH` lists the chunks of a file, or of every file under a directory,
   as `path:start-end<TAB>kind<TAB>symbol` (paths relative to PATH): a quick table of contents."#;
 
-/// The tool section of a variant arm whose index embeds: arm B's, with
+/// The tool section of a variant arm whose index embeds, arm B's, with
 /// `search2` ranking by meaning too (hybrid search).
 pub const TOOLS_INDEX_HYBRID: &str = r#"The usual command-line tools are installed{rg}, and also
 `arko_index`, a code search engine with a prebuilt index of this checkout:
@@ -74,9 +74,9 @@ pub const TOOLS_DENSE: &str = r#"
   (embeddings) and prints the 10 best in the same JSON format, so it finds code that does what
   you describe even when it uses other words."#;
 
-/// The guided tool section (a variant's `"prompt": "guided"`): which tool to use when,
+/// The guided tool section (a variant's `"prompt": "guided"`), which tool to use when,
 /// with worked examples. `{rg}` is the note on ripgrep, filled like the other
-/// sections; [`guided_tools`] fills the rest: `{ranking}` and `{ranks}` say how
+/// sections, and [`guided_tools`] fills the rest: `{ranking}` and `{ranks}` say how
 /// `search2` ranks (lexically, or hybrid when the index embeds), `{dense_use}` and
 /// `{dense_example}` add arm C's `arko_index_dense`.
 pub const TOOLS_GUIDED: &str = r#"The usual command-line tools are installed{rg}, and also
@@ -109,7 +109,7 @@ pub const GUIDED_DENSE_EXAMPLE: &str = r#"
 $ arko_index_dense 'wait longer after each failed attempt'
 {"end_line":58,"kind":"function_item","language":"rust","path":"src/net/retry.rs","score":0.612,"start_line":40,"symbol_path":"RetryPolicy::backoff"}"#;
 
-/// The guided tool section, `{rg}` still to fill: hybrid when the index embeds, with
+/// The guided tool section, `{rg}` still to fill, hybrid when the index embeds, with
 /// `arko_index_dense` when the arm has it.
 pub fn guided_tools(hybrid: bool, dense_tool: bool) -> String {
     let (ranking, ranks) = if hybrid {
@@ -272,7 +272,7 @@ one JSON object as its summary, and nothing else:
 - "ambiguous": the question allows more than one reasonable answer, or its scope is unclear.
 "#;
 
-/// The first message to the verifier: the question, as a solver gets it.
+/// The first message to the verifier, the question, as a solver gets it.
 pub fn verifier_question(repo: &str, kind: &str, question: &str, scope: Option<&str>) -> String {
     format!(
         "Repository: {repo}\nQuestion ({kind}): {question}\n{}{}",
@@ -281,7 +281,7 @@ pub fn verifier_question(repo: &str, kind: &str, question: &str, scope: Option<&
     )
 }
 
-/// The second message to the verifier: the key.
+/// The second message to the verifier, the key.
 pub fn verifier_key(key_text: &str) -> String {
     format!(
         "ANSWER KEY to check (written by another engineer):\n{key_text}\n\nCompare it with your answer, check each difference in the code, and give your verdict as the JSON object described in your instructions."

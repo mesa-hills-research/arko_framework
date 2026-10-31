@@ -1,4 +1,4 @@
-//! The forge: a workflow that builds workflows.
+//! The forge, a workflow that builds workflows.
 //!
 //! Describe a use case, and an architect agent (Claude Opus 5.5 at xhigh
 //! effort by default) designs and writes an arko_workflows binary crate for
@@ -50,7 +50,7 @@ const EXPLORER: &str = "explorer";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
 enum Involvement {
-    /// Build without asking anything; report at the end.
+    /// Build without asking anything, and report at the end.
     None,
     /// Ask a batch of questions at the start, then work alone.
     Clarify,
@@ -108,9 +108,9 @@ impl From<Effort> for GeminiThinkingLevel {
 }
 
 /// A model and its reasoning effort, written `id` or `id:effort`
-/// (`gpt-6.1-sol:xhigh`); the effort is `xhigh` when omitted. Anthropic
-/// models run on the `--backend`; OpenAI models through the ChatGPT login
-/// (or `OPENAI_API_KEY`); Google models with `GEMINI_API_KEY`.
+/// (`gpt-6.1-sol:xhigh`). The effort is `xhigh` when omitted. Anthropic
+/// models run on the `--backend`, OpenAI models through the ChatGPT login
+/// (or `OPENAI_API_KEY`), Google models with `GEMINI_API_KEY`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ModelSpec {
     id: String,
@@ -173,29 +173,29 @@ struct Args {
     #[arg(long)]
     use_case_file: Option<PathBuf>,
 
-    /// Where to create the workflow's crate: a new or empty directory.
+    /// Where to create the workflow's crate, a new or empty directory.
     #[arg(long, required_unless_present_any = ["resume", "update"])]
     output: Option<PathBuf>,
 
-    /// Change the existing workflow crate in this directory instead: the use
+    /// Change the existing workflow crate in this directory instead. The use
     /// case is then the change to make.
     #[arg(long, conflicts_with_all = ["output", "name"])]
     update: Option<PathBuf>,
 
-    /// The crate's name; the output directory's name when omitted.
+    /// The crate's name, or the output directory's name when omitted.
     #[arg(long)]
     name: Option<String>,
 
-    /// The arko checkout; this repository when omitted.
+    /// The arko checkout, or this repository when omitted.
     #[arg(long)]
     arko: Option<PathBuf>,
 
-    /// The Cargo target directory builds share; the checkout's `target`
+    /// The Cargo target directory builds share, or the checkout's `target`
     /// when omitted.
     #[arg(long)]
     target_dir: Option<PathBuf>,
 
-    /// The run's state directory; one under `~/.arko/forge/runs` when omitted.
+    /// The run's state directory, or one under `~/.arko/forge/runs` when omitted.
     #[arg(long)]
     state_dir: Option<PathBuf>,
 
@@ -235,7 +235,7 @@ struct Settings {
     #[arg(long, value_enum, default_value_t = Effort::High)]
     explorer_effort: Effort,
 
-    /// Don't offer explorer agents: the architect looks everything up itself.
+    /// Don't offer explorer agents. The architect looks everything up itself.
     #[arg(long)]
     no_explorers: bool,
 
@@ -253,7 +253,7 @@ struct Settings {
     trial_minutes: u64,
 
     /// The most all trial runs together may spend, in dollars at list
-    /// prices. Each run reserves its cap in full; without this, trials draw
+    /// prices. Each run reserves its cap in full. Without this, trials draw
     /// on `--budget`.
     #[arg(long)]
     #[serde(default)]
@@ -264,14 +264,14 @@ struct Settings {
     handover_at: usize,
 
     /// Deliberation agents hand their conversations over at this many input
-    /// tokens (at most `--handover-at`); 200,000 when omitted.
+    /// tokens (at most `--handover-at`), or 200,000 when omitted.
     #[arg(long, value_name = "TOKENS")]
     #[serde(default)]
     deliberation_handover_at: Option<usize>,
 
     /// Agents on OpenAI models hand their conversations over at this many
     /// input tokens, in place of the thresholds above (at most the ChatGPT
-    /// login's input limit); three quarters of that limit, or less when the
+    /// login's input limit), three quarters of that limit, or less when the
     /// thresholds above are lower, when omitted.
     #[arg(long, value_name = "TOKENS")]
     #[serde(default)]
@@ -281,7 +281,7 @@ struct Settings {
     #[arg(long, default_value_t = 3)]
     max_repairs: u32,
 
-    /// The lessons file; `~/.arko/forge/lessons.md` when omitted.
+    /// The lessons file, or `~/.arko/forge/lessons.md` when omitted.
     #[arg(long)]
     lessons: Option<PathBuf>,
 
@@ -289,7 +289,7 @@ struct Settings {
     #[arg(long)]
     no_lessons: bool,
 
-    /// Stop spending at this many dollars: the API backend, or a Claude
+    /// Stop spending at this many dollars on the API backend, or a Claude
     /// Code CLI billed per token (`--metered`). A plan subscription isn't
     /// billed per token.
     #[arg(long)]
@@ -297,7 +297,7 @@ struct Settings {
 
     /// Stop at this many percentage points of a subscription plan's
     /// five-hour usage window (Claude Code, ChatGPT sign-in), counted from
-    /// its level when the run started; each plan's window is counted on its
+    /// its level when the run started. Each plan's window is counted on its
     /// own. Other use of the same plan meanwhile counts too.
     #[arg(long, value_name = "POINTS")]
     #[serde(default)]
@@ -308,7 +308,7 @@ struct Settings {
     #[serde(default)]
     plan_budget_7d: Option<f64>,
 
-    /// The Claude Code plan's own five-hour limit, in points; replaces
+    /// The Claude Code plan's own five-hour limit, in points, replaces
     /// `--plan-budget-5h` for that plan.
     #[arg(long, value_name = "POINTS")]
     #[serde(default)]
@@ -330,7 +330,7 @@ struct Settings {
     chatgpt_budget_7d: Option<f64>,
 
     /// The Claude Code CLI is billed per token (an API key, cloud credits, a
-    /// host-managed provider), not covered by a plan: count its usage in
+    /// host-managed provider), not covered by a plan. Count its usage in
     /// costs and budgets.
     #[arg(long)]
     #[serde(default)]
@@ -342,7 +342,7 @@ struct Settings {
 }
 
 impl Settings {
-    /// The budgets: dollars, then the plan limits, in the order of
+    /// The budgets, namely dollars, then the plan limits, in the order of
     /// [`budgets_mut`](Self::budgets_mut).
     fn budgets(&self) -> [Option<f64>; 7] {
         [
@@ -368,7 +368,7 @@ impl Settings {
         ]
     }
 
-    /// The plan budget: the general limits apply to each plan's windows, a
+    /// The plan budget. The general limits apply to each plan's windows, a
     /// plan's own replace them.
     fn plan_budget(&self) -> PlanBudget {
         let limits = |five_hour, seven_day| PlanLimits {
@@ -396,7 +396,7 @@ struct RunManifest {
     settings: Settings,
     architect_instructions: String,
     explorer_instructions: String,
-    /// The crate existed: the run changes it (`--update`).
+    /// The crate existed, so the run changes it (`--update`).
     #[serde(default)]
     update: bool,
     /// Deliberation, resolved from the flags when the run started.
@@ -412,7 +412,7 @@ async fn main() -> ForgeResult<()> {
     env_logger::init();
     let args = Args::parse();
 
-    // A new run scaffolds its crate; a resumed one finds it in its manifest.
+    // A new run scaffolds its crate, and a resumed one finds it in its manifest.
     let (state_dir, manifest, use_case) = match &args.resume {
         Some(state_dir) => {
             let state_dir = std::fs::canonicalize(state_dir)?;
@@ -423,7 +423,7 @@ async fn main() -> ForgeResult<()> {
                 manifest.deliberation.as_ref(),
             ));
             // A budget given with --resume (dollars or plan points) replaces
-            // the saved one (to raise a budget the run stopped at); the other
+            // the saved one (to raise a budget the run stopped at), and the other
             // settings stay.
             let saved = manifest.settings.budgets();
             let settings = &mut manifest.settings;
@@ -598,7 +598,7 @@ async fn main() -> ForgeResult<()> {
         }
         configs.push((EXPLORER.to_string(), explorer));
     }
-    // Deliberation: its agents, the tools they submit their parts with, and
+    // Deliberation, its agents, the tools they submit their parts with, and
     // the architect's request (and, when it rules, its ruling).
     let ledger = match &manifest.deliberation {
         Some(_) => Some(Arc::new(deliberation::Store::open(&state_dir, &workspace)?)),
@@ -668,7 +668,7 @@ async fn main() -> ForgeResult<()> {
     }
 
     // Version control and publishing stay with the user, whatever the
-    // agents' shells are asked to run: the command rules let git and gh
+    // agents' shells are asked to run. The command rules let git and gh
     // only read (spikes may use git fully in their scratch crates).
     let shell = |spike_root: Option<&Path>| {
         Arc::new(tools::RunShell::new(
@@ -763,7 +763,7 @@ async fn main() -> ForgeResult<()> {
     }
     let workflow = builder.build()?;
     let _ = trial_ledger.set(workflow.context().clone());
-    // The architect's run calls: after a login failure, one fresh architect
+    // The architect's run calls. After a login failure, one fresh architect
     // run per process continues from the crate, then the forge stops.
     let restarted = Arc::new(AtomicBool::new(false));
     let architect = |restarted: &Arc<AtomicBool>| Architect {
@@ -816,7 +816,7 @@ async fn main() -> ForgeResult<()> {
         .into_iter()
         .rfind(|result| result.agent_name == ARCHITECT);
     // An architect that was running when the forge stopped continues where
-    // it was saved, its explorers with it; if that fails, it continues from
+    // it was saved, its explorers with it, and if that fails, it continues from
     // the crate as below.
     let recovered = match workflow
         .interrupted_runs()
@@ -838,8 +838,8 @@ async fn main() -> ForgeResult<()> {
     };
     let mut result = match recovered.or(earlier) {
         Some(earlier) if earlier.status == AgentRunStatus::Completed => earlier,
-        // Paused by the budget (or an error the forge doesn't wait out):
-        // it continues with its held request.
+        // Paused by the budget (or an error the forge doesn't wait out).
+        // It continues with its held request.
         Some(earlier) if earlier.status == AgentRunStatus::Paused => {
             eprintln!("forge: continuing the paused architect");
             let resume = AgentResume::ContinueAfterError { note: None };
@@ -847,7 +847,7 @@ async fn main() -> ForgeResult<()> {
                 .call(workflow.resume_agent(&earlier, resume))
                 .await?
         }
-        // A run that failed can't be continued: a fresh architect continues
+        // A run that failed can't be continued. A fresh architect continues
         // from the crate (after a login failure, that is its one fresh
         // start in this process).
         Some(earlier) if earlier.status == AgentRunStatus::Failed => {
@@ -887,7 +887,7 @@ async fn main() -> ForgeResult<()> {
         None => architect.call(workflow.run_agent(ARCHITECT, &task)).await?,
     };
     // Deliberations the architect requested run now, and it continues with
-    // their records (also after a restart: finished stages aren't run again).
+    // their records (also after a restart, finished stages aren't run again).
     result = settle(&deliberator, result).await?;
     // Explorers the architect was running when the forge stopped and that it
     // didn't resume itself finish their work too (their results are in the
@@ -912,7 +912,7 @@ async fn main() -> ForgeResult<()> {
         }
     }
 
-    // The forge's own checks; failures go back to the architect.
+    // The forge's own checks, and failures go back to the architect.
     let mut repairs = 0;
     let checks = loop {
         if result.status != AgentRunStatus::Completed {
@@ -995,7 +995,7 @@ async fn settle(
     }
 }
 
-/// Runs a workflow call, unless the budget stops the forge first: when the
+/// Runs a workflow call, unless the budget stops the forge first. When the
 /// budget holds the whole run (an explorer waits for a raise while the
 /// architect waits for it) or the call returns paused by the budget, the
 /// forge saves a checkpoint and exits, telling how to continue.
@@ -1034,7 +1034,7 @@ async fn within_budget<T>(
 /// The architect's run calls. When the architect's run fails because its
 /// model request needs a new credential or a configuration change (an
 /// expired login), a fresh architect run continues from the crate, once per
-/// process; when that fails the same way, the forge stops, saved, with
+/// process, and when that fails the same way, the forge stops, saved, with
 /// status 3.
 pub(crate) struct Architect<'a> {
     pub workflow: &'a Workflow,
@@ -1060,7 +1060,7 @@ impl Architect<'_> {
         }
     }
 
-    /// The call's outcome, or why the forge stops: the architect can't reach
+    /// The call's outcome, or why the forge stops. The architect can't reach
     /// its model, also when started afresh.
     pub(crate) async fn attempt(
         &self,
@@ -1121,8 +1121,8 @@ impl Architect<'_> {
 }
 
 /// An explorer whose model request needs a new credential or a configuration
-/// change (an expired login): the architect may ask again once (a fresh
-/// explorer run); a second such failure in this process stops the run, which
+/// change (an expired login). The architect may ask again once (a fresh
+/// explorer run), and a second such failure in this process stops the run, which
 /// [`within_budget`] turns into the forge's saved stop (status 3).
 fn explorer_failed(
     failed_once: &AtomicBool,
@@ -1149,7 +1149,7 @@ fn explorer_failed(
     HookResult::Abort(deliberation::login_reason(EXPLORER, Some(model), &error))
 }
 
-/// The budget is used up: saves the paused agents and exits with status 2.
+/// Saves the paused agents and exits with status 2 when the budget is used up.
 async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
     if let Err(error) = workflow.checkpoint().await {
         eprintln!("forge: couldn't save a checkpoint ({error}). The latest one is kept");
@@ -1179,7 +1179,7 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
                 window.label(),
                 spent.get(window).unwrap_or_default()
             ));
-            // The flag that set it: the plan's own, or the general one.
+            // The flag that set it, the plan's own, or the general one.
             let own = match subscription {
                 SubscriptionPlan::ClaudeCode => plan.claude_code.limit(window),
                 SubscriptionPlan::ChatGpt => plan.chatgpt.limit(window),
@@ -1203,7 +1203,7 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
         }
     }
     // A run resumed from a checkpoint written before plans were counted
-    // apart counts without a plan until one reports: while no plan has
+    // apart counts without a plan until one reports. While no plan has
     // counting of its own, the run's counting is that.
     let spent = workflow.plan_usage_spent();
     for (window, flag) in [
@@ -1227,7 +1227,7 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
         }
     }
     if used_up.is_empty() {
-        // An agent's own budget; the forge sets none, but say something.
+        // An agent's own budget, and the forge sets none, but say something.
         used_up.push("a budget".to_string());
         flags.push("--budget <dollars>".to_string());
     }
@@ -1377,7 +1377,7 @@ fn deliberation_role(role: &str) -> (&'static str, &'static str, Access) {
     }
 }
 
-/// The architect's time limit for a `trial_run` call: a trial may take
+/// The architect's time limit for a `trial_run` call. A trial may take
 /// `--trial-minutes`, past the runtime's default tool time limit (20
 /// minutes), and the call waits for it, with ten minutes to spare.
 fn trial_run_time_limit(trial_minutes: u64) -> PerToolConfigOverride {
@@ -1387,7 +1387,7 @@ fn trial_run_time_limit(trial_minutes: u64) -> PerToolConfigOverride {
     }
 }
 
-/// The handover threshold for an agent on `model`: `wanted`, kept under the
+/// The handover threshold for an agent on `model`, `wanted`, kept under the
 /// ChatGPT login's input limit for OpenAI models, or `openai` in its place
 /// (`--openai-handover-at`) for them.
 fn handover_at(model: &ModelSpec, wanted: usize, openai: Option<usize>) -> usize {
@@ -1407,7 +1407,7 @@ fn var(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Whether OpenAI models can be reached: a ChatGPT login (Codex's
+/// Whether OpenAI models can be reached, a ChatGPT login (Codex's
 /// `auth.json`, or `OPENAI_OAUTH_ACCESS_TOKEN` with `OPENAI_OAUTH_ACCOUNT_ID`)
 /// or `OPENAI_API_KEY`, as [`client`] reaches them.
 fn openai_access() -> bool {
@@ -1461,9 +1461,9 @@ fn client(backend: Backend, configs: &[(String, AgentConfig)]) -> ForgeResult<LL
     Ok(client)
 }
 
-/// The forge's metadata: the programs it needs (`cargo`, and `claude` when
+/// The forge's metadata, the programs it needs (`cargo`, and `claude` when
 /// an agent runs in Claude Code) and the ones that help (`rg`). Logins and
-/// API keys aren't programs; the README lists them.
+/// API keys aren't programs, and the README lists them.
 fn forge_metadata(
     settings: &Settings,
     deliberation: Option<&deliberation::Config>,
@@ -1533,7 +1533,7 @@ fn forge_metadata(
     }
 }
 
-/// Checks the programs the forge needs before anything starts: a missing
+/// Checks the programs the forge needs before anything starts. A missing
 /// required one stops the forge (status 1), a missing optional one is a
 /// warning.
 fn check_dependencies(metadata: &WorkflowMetadata) {
@@ -1573,10 +1573,10 @@ fn check_dependencies(metadata: &WorkflowMetadata) {
 enum Access {
     /// Read the crate and the arko checkout.
     Read,
-    /// Also write files, outside the crate too, and run commands: spikes in
+    /// Also write files, outside the crate too, and run commands, for spikes in
     /// their scratch crates.
     Experiment,
-    /// Edit the crate, run commands, and fetch from the web: the architect.
+    /// Edit the crate, run commands, and fetch from the web, for the architect.
     Build,
 }
 
@@ -1663,7 +1663,7 @@ impl Agents {
         let generation_config = GenerationConfig::default()
             .with_reasoning(reasoning)
             .with_prompt_caching(true);
-        // Reading may reach the arko checkout; writing stays in the crate,
+        // Reading may reach the arko checkout, and writing stays in the crate,
         // except for spikes, which write in their scratch crates.
         let reads = ["Read", "Glob", "Grep", "read_file", "list_files"];
         let writes = ["Edit", "Write", "NotebookEdit", "write_file", "apply_diff"];
@@ -1911,7 +1911,7 @@ async fn print_events(
     }
 }
 
-/// A reported plan window's name: by its length when reported (plans differ:
+/// A reported plan window's name, by its length when reported (plans differ, since
 /// some have no five-hour window), otherwise by its position.
 fn window_name(minutes: Option<u64>, primary: bool) -> String {
     match minutes {
@@ -1923,7 +1923,7 @@ fn window_name(minutes: Option<u64>, primary: bool) -> String {
     }
 }
 
-/// A tool call's parameters, briefly: the path or command when it has one.
+/// A tool call's parameters, briefly, the path or command when it has one.
 fn brief(tool: &str, parameters: &HashMap<String, serde_json::Value>) -> String {
     for field in ["file_path", "path", "command", "pattern", "url", "agent"] {
         if let Some(value) = parameters.get(field).and_then(|value| value.as_str()) {
@@ -1994,7 +1994,7 @@ fn report(
             "| {agent} | {runs} | {requests} | {input} | {output} | ${cost:.2} |\n"
         ));
     }
-    // A trial is a separate program: the forge sees only what it reserved
+    // A trial is a separate program. The forge sees only what it reserved
     // for it, not what it spent.
     text.push_str(&format!(
         "\nBilled for the forge's agents: ${:.2}",
@@ -2104,12 +2104,12 @@ mod tests {
             HookResult::Continue
         ));
         assert!(matches!(hook(EXPLORER, "refusal"), HookResult::Continue));
-        // The first: the architect may ask again (a fresh explorer run).
+        // The first. The architect may ask again (a fresh explorer run).
         assert!(matches!(
             hook(EXPLORER, "non_retryable"),
             HookResult::Continue
         ));
-        // The second stops the run; `within_budget` makes it the saved stop.
+        // The second stops the run, and `within_budget` makes it the saved stop.
         match hook(EXPLORER, "non_retryable") {
             HookResult::Abort(reason) => {
                 assert!(

@@ -1,4 +1,4 @@
-//! The repositories: the pinned manifest, the output directory's layout,
+//! The repositories, the pinned manifest, the output directory's layout,
 //! and `prepare` (checkouts, read-only, and the arko_index indexes, timed).
 
 use std::collections::{BTreeMap, HashMap};
@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::BenchResult;
 
-/// The default manifest: seven repositories in seven languages.
+/// The default manifest, seven repositories in seven languages.
 pub const DEFAULT_MANIFEST: &str = include_str!("repos.json");
 
 /// A repository pinned to a tag or commit.
@@ -22,10 +22,10 @@ pub struct RepoSpec {
     pub url: String,
     /// The tag (or commit) to check out.
     pub rev: String,
-    /// The commit `rev` must resolve to; checked after the fetch.
+    /// The commit `rev` must resolve to, checked after the fetch.
     #[serde(default)]
     pub commit: Option<String>,
-    /// The main language: rust, c, cpp, go, java, python, typescript, ...
+    /// The main language, rust, c, cpp, go, java, python, typescript, ...
     pub language: String,
     #[serde(default)]
     pub description: String,
@@ -133,7 +133,7 @@ pub struct PreparedRepo {
     pub files: usize,
     pub bytes: u64,
     pub files_by_language: BTreeMap<String, usize>,
-    /// The arko_index build: wall time and its summary lines.
+    /// The arko_index build, wall time and its summary lines.
     pub index_build_ms: u64,
     pub index_summary: String,
     /// SHA-256 of the arko_index CLI binary that built the index.
@@ -162,7 +162,7 @@ pub fn save_prepared(
     )
 }
 
-/// The arko_index CLI: `--index-cli`, else `arko_index_cli` next to this
+/// The arko_index CLI, `--index-cli`, else `arko_index_cli` next to this
 /// binary (both are cargo examples, so a shared target directory puts them
 /// side by side).
 pub fn find_index_cli(explicit: Option<&Path>) -> BenchResult<PathBuf> {
@@ -315,7 +315,7 @@ pub async fn prepare(options: PrepareOptions<'_>) -> BenchResult<BTreeMap<String
 }
 
 /// Fetches `rev` from `source` into a fresh `dir` (depth 1) and checks it
-/// out; returns the commit.
+/// out, and returns the commit.
 fn checkout_repo(dir: &Path, source: &str, rev: &str) -> BenchResult<String> {
     if dir.exists() {
         set_writable(dir, true);
@@ -323,7 +323,7 @@ fn checkout_repo(dir: &Path, source: &str, rev: &str) -> BenchResult<String> {
     }
     std::fs::create_dir_all(dir)?;
     git(dir, &["init", "-q"])?;
-    // A local source is fetched by path: `git fetch` then reads it as a
+    // A local source is fetched by path. `git fetch` then reads it as a
     // repository (or a bundle).
     git(dir, &["fetch", "-q", "--depth", "1", source, rev])?;
     git(
@@ -467,7 +467,7 @@ pub fn language_of(path: &Path) -> Option<&'static str> {
 
 /// Makes `path` and everything below it read-only, or writable again (for
 /// the owner). The agents' checkouts are read-only, so no agent can change
-/// what another reads. Errors are ignored: a missing path has nothing to do.
+/// what another reads. Errors are ignored, because a missing path has nothing to do.
 pub fn set_writable(path: &Path, writable: bool) {
     #[cfg(unix)]
     {
@@ -513,14 +513,14 @@ pub fn set_writable(path: &Path, writable: bool) {
     }
 }
 
-/// The programs an arm may not have: stubs of these names, first on its
+/// The programs an arm may not have, stubs of these names, first on its
 /// `PATH`, answer "command not found", whatever else the machine has
 /// installed.
 const INDEX_PROGRAMS: [&str; 3] = ["arko_index", "arko_index_cli", "arko_index_dense"];
 
-/// Sets up each arm's tool directory, first on its shell's `PATH`: arm A
-/// gets stubs for every arko_index program; arm B the arko_index CLI as
-/// `arko_index` and a stub for `arko_index_dense`; arm C also
+/// Sets up each arm's tool directory, first on its shell's `PATH`. Arm A
+/// gets stubs for every arko_index program, arm B the arko_index CLI as
+/// `arko_index` and a stub for `arko_index_dense`, arm C also
 /// `arko_index_dense`, which asks this process's dense search service. A
 /// variant arm gets B's, with `arko_index` adding the variant's search flags
 /// or asking the search service when its index embeds
@@ -607,7 +607,7 @@ fn ensure_script(path: &Path, text: &str) -> BenchResult<()> {
     Ok(())
 }
 
-/// Points `link` at `target` (a symbolic link; a copy on Windows), through
+/// Points `link` at `target` (a symbolic link, or a copy on Windows), through
 /// a temporary link and a rename, unless it already does.
 fn ensure_link(target: &Path, link: &Path) -> BenchResult<()> {
     #[cfg(unix)]

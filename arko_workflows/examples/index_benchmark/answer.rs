@@ -1,4 +1,4 @@
-//! Answers: parsing what a solver returns, the deterministic checks, and
+//! Answers, covering parsing what a solver returns, the deterministic checks, and
 //! the grader's and verifier's JSON replies.
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ pub struct ParsedAnswer {
     pub mentioned: Vec<Location>,
 }
 
-/// Splits `text` into its ANSWER and LOCATIONS sections. Lenient: headings
+/// Splits `text` into its ANSWER and LOCATIONS sections. Lenient. Headings
 /// may carry markdown (`**ANSWER:**`, `## Locations`), and locations may be
 /// list items with descriptions after them.
 pub fn parse_answer(text: &str) -> ParsedAnswer {
@@ -127,7 +127,7 @@ pub fn locations_in(text: &str) -> Vec<Location> {
     found
 }
 
-/// The deterministic part of grading: the key's location and file items
+/// The deterministic part of grading, the key's location and file items
 /// checked against the answer's locations and text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeterministicCheck {
@@ -137,9 +137,9 @@ pub struct DeterministicCheck {
     pub met: usize,
     /// `met / items`, or `None` when the key has no checkable items.
     pub score: Option<f64>,
-    /// For list questions: cited locations that match no key item.
+    /// For list questions, cited locations that match no key item.
     pub unmatched_locations: usize,
-    /// For list questions: matched cited locations / cited locations.
+    /// For list questions, matched cited locations / cited locations.
     pub precision: Option<f64>,
     /// The first cited location is a known wrong answer.
     pub distractor_first: bool,
@@ -147,7 +147,7 @@ pub struct DeterministicCheck {
     pub pass: bool,
 }
 
-/// Whether a cited location identifies a key location: they overlap (with
+/// Whether a cited location identifies a key location. They overlap (with
 /// [`LINE_TOLERANCE`] lines of slack), and the citation is at most three
 /// times as long as the key's range plus 30 lines, so citing a whole file
 /// or a large chunk doesn't meet every item inside it.
@@ -241,7 +241,7 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
     }
 }
 
-/// Search programs: a line that runs one of these is a command, not an
+/// Search programs. A line that runs one of these is a command, not an
 /// answer.
 const SEARCH_PROGRAMS: [&str; 9] = [
     "arko_index",
@@ -255,7 +255,7 @@ const SEARCH_PROGRAMS: [&str; 9] = [
     "ack",
 ];
 
-/// Whether `line` is a search command: after a prompt or list marker
+/// Whether `line` is a search command, after a prompt or list marker
 /// (`$`, `>`, `-`, `*`, `1.`), the whole line (or the whole code span it
 /// is) runs a search program (or `git grep`) with arguments. A code span
 /// followed by prose (`` `rg` is fast ``) is not a command.
@@ -405,7 +405,7 @@ impl GraderVerdict {
     }
 }
 
-/// Parses the grader's reply: the first JSON object in `text` with the
+/// Parses the grader's reply, the first JSON object in `text` with the
 /// expected fields. Checks that every key item is judged.
 pub fn parse_grader_verdict(text: &str, key: &AnswerKey) -> Result<GraderVerdict, String> {
     let mut verdict: GraderVerdict = first_json_object(text)?;

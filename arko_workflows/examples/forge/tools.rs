@@ -1,4 +1,4 @@
-//! The forge's own tools: lessons, trial runs, and a shell for the API
+//! The forge's own tools, covering lessons, trial runs, and a shell for the API
 //! backend (agents in Claude Code use its `Bash`), with the command rules
 //! every agent's shell follows.
 
@@ -124,7 +124,7 @@ pub struct TrialRun {
     pub max_minutes: u64,
     /// The most all trials together may reserve (`--trial-budget`).
     pub trial_budget: Option<f64>,
-    /// The workflow, once built: trials reserve against its budget ledger,
+    /// The workflow, once built. Trials reserve against its budget ledger,
     /// so they count toward the forge's own `--budget`.
     pub workflow: Arc<OnceLock<Arc<SharedContext>>>,
 }
@@ -133,7 +133,7 @@ pub struct TrialRun {
 pub const TRIAL_RESERVATION: &str = "trial run reservation";
 
 impl TrialRun {
-    /// What the next trial may still reserve: the trial budget less what
+    /// What the next trial may still reserve, the trial budget less what
     /// earlier trials reserved, and the forge's budget less what it has
     /// spent. `None` when neither is set.
     fn reservable(&self) -> Option<f64> {
@@ -168,7 +168,7 @@ impl TrialRun {
     }
 }
 
-/// Whether `arguments` pass `budget` to the workflow: some number in them
+/// Whether `arguments` pass `budget` to the workflow. Some number in them
 /// equals it.
 fn passes_budget(arguments: &str, budget: f64) -> bool {
     arguments
@@ -270,7 +270,7 @@ impl Tool for TrialRun {
             )));
         }
         if let (Some(budget), Some(context)) = (budget, self.workflow.get()) {
-            // Reserved in full: the trial's own spend isn't visible here.
+            // Reserved in full, so the trial's own spend isn't visible here.
             context.budget.add_manual_cost(
                 budget,
                 TRIAL_RESERVATION,
@@ -359,7 +359,7 @@ fn collect(
     })
 }
 
-/// What [`collect`] read: all of it once the stream has ended, or, when
+/// What [`collect`] read, all of it once the stream has ended, or, when
 /// something the trial started still holds the stream open a few seconds
 /// after it stopped, nothing (the log says so).
 async fn collected(reader: tokio::task::JoinHandle<Vec<u8>>) -> String {
@@ -417,7 +417,7 @@ impl RunShell {
     }
 }
 
-/// The environment of a spike's shell: git looks for a repository no higher
+/// The environment of a spike's shell. Git looks for a repository no higher
 /// than the spikes' folder, so a git command outside a scratch crate's toy
 /// repository fails rather than acting on a repository around the state
 /// directory (`--state-dir` can put it inside the user's). git never looks
@@ -484,7 +484,7 @@ impl Tool for RunShell {
 }
 
 /// The command rules of every agent's shell (Claude Code's `Bash` and
-/// `run_shell`): version control and publishing are the user's, so git and
+/// `run_shell`). Version control and publishing are the user's, so git and
 /// gh may only read, and cargo doesn't publish. A spike (`spike_root`, its
 /// scratch crates' folder) may also use git fully there, to test claims
 /// about git in toy repositories.
@@ -507,7 +507,7 @@ pub fn command_rules(spike_root: Option<&Path>) -> Vec<CommandRule> {
         "git describe *",
         "git shortlog *",
         "git grep *",
-        // Only these forms: `git branch <name>` creates a branch.
+        // Only these forms, because `git branch <name>` creates a branch.
         "git branch",
         "git branch -a",
         "git branch -r",

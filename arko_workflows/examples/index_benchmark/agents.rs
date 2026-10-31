@@ -75,8 +75,8 @@ impl ModelSettings {
     }
 
     /// The API list price of a call's tokens for this model and tier, in
-    /// dollars: what the benchmark reports as cost. ChatGPT OAuth bills
-    /// nothing per call; this is the API-equivalent cost.
+    /// dollars, what the benchmark reports as cost. ChatGPT OAuth bills
+    /// nothing per call, so this is the API-equivalent cost.
     pub fn api_cost(&self, input: usize, cached: usize, output: usize) -> f64 {
         let Ok(model) = self.model() else {
             return 0.0;
@@ -100,7 +100,7 @@ impl ModelSettings {
     }
 }
 
-/// The Codex home whose `auth.json` holds the ChatGPT login: `--codex-home`,
+/// The Codex home whose `auth.json` holds the ChatGPT login, `--codex-home`,
 /// else `$CODEX_HOME`, else `~/.codex`.
 pub fn codex_auth_path(codex_home: Option<&Path>) -> BenchResult<PathBuf> {
     if let Some(home) = codex_home {
@@ -110,11 +110,11 @@ pub fn codex_auth_path(codex_home: Option<&Path>) -> BenchResult<PathBuf> {
         .ok_or_else(|| "no home directory to find ~/.codex/auth.json. Pass --codex-home".into())
 }
 
-/// The client for every agent: ChatGPT OAuth from a Codex `auth.json`
+/// The client for every agent, ChatGPT OAuth from a Codex `auth.json`
 /// (tokens are refreshed in step with the file), or the mock model.
 ///
 /// Several `--codex-home`s become a list of ChatGPT accounts with failover,
-/// first preferred (`LLMClient::with_codex_auth_files`): a request an
+/// first preferred (`LLMClient::with_codex_auth_files`). A request an
 /// account's usage limit refuses goes to the next account, and requests move
 /// back once the first is usable again.
 pub fn build_client(
@@ -157,7 +157,7 @@ pub fn build_client(
     )?))
 }
 
-/// An account's label: the name of its Codex home (`~/.codex-200` is
+/// An account's label, the name of its Codex home (`~/.codex-200` is
 /// `codex-200`).
 fn account_label(auth_path: &Path) -> String {
     auth_path

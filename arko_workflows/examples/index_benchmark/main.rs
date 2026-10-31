@@ -1,11 +1,11 @@
-//! The arko_index agent benchmark: does giving coding agents arko_index make
+//! The arko_index agent benchmark. Does giving coding agents arko_index make
 //! them better or cheaper at real code-understanding tasks than a terminal
 //! alone?
 //!
 //! Every agent runs in an arko workflow on the same model and settings
 //! (`gpt-6-astra:xhigh`, Fast mode, ChatGPT OAuth). Solvers answer questions
-//! about pinned repositories in one of three arms: (A) a terminal; (B) a
-//! terminal with the arko_index CLI and a prebuilt index; (C, opt-in) B
+//! about pinned repositories in one of three arms: (A) a terminal, (B) a
+//! terminal with the arko_index CLI and a prebuilt index, (C, opt-in) B
 //! plus dense search. A grader that doesn't know the arm scores each answer
 //! against a verified key, beside a deterministic check of its locations.
 //! Variant arms (`prepare-variants`) compare arko_index options on the same
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 pub type BenchResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// A benchmark arm: what the solver has besides its terminal. Serialized as its
+/// A benchmark arm, what the solver has besides its terminal. Serialized as its
 /// name (`"A"`, `"B"`, `"C"`, or a variant's name).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Arm {
@@ -44,7 +44,7 @@ pub enum Arm {
     B,
     /// B plus dense (embedding) search.
     C,
-    /// A variant arm (`prepare-variants`): B's tools over an index built, or
+    /// A variant arm (`prepare-variants`), B's tools over an index built, or
     /// searched, with other arko_index options. Holds the variant's name.
     Variant(&'static str),
 }
@@ -70,7 +70,7 @@ impl Arm {
         }
     }
 
-    /// The arm named `name`: A, B or C (any case), else a variant. A variant's
+    /// The arm named `name`, A, B or C (any case), else a variant. A variant's
     /// name is 1 to 32 letters, digits, `-` or `_`.
     pub fn parse(name: &str) -> BenchResult<Arm> {
         let name = name.trim();
@@ -190,7 +190,7 @@ enum Command {
     /// Fetch the pinned repositories, make them read-only, and build their
     /// arko_index indexes (timed, outside the benchmark).
     Prepare(PrepareArgs),
-    /// Build the indexes of variant arms from a variants file: arm B's tools
+    /// Build the indexes of variant arms from a variants file, arm B's tools
     /// over an index built, or searched, with other arko_index options. Runs
     /// beside `generate`.
     PrepareVariants(PrepareVariantsArgs),
@@ -203,8 +203,8 @@ enum Command {
     Assemble(AssembleArgs),
     /// Check a task set against the checkouts and print its counts.
     Validate(ValidateArgs),
-    /// Run the benchmark: every task in every arm, graded as answers come
-    /// in. Resumable; stops gracefully on Ctrl-C, SIGTERM or a STOP file.
+    /// Run the benchmark, every task in every arm, graded as answers come
+    /// in. Resumable. Stops gracefully on Ctrl-C, SIGTERM or a STOP file.
     Run(RunArgs),
     /// Write the report of a run (report.md, report.json, attempts.csv).
     Report(ReportArgs),
@@ -220,7 +220,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct OutArgs {
-    /// The benchmark's directory: checkouts, indexes, tasks and runs.
+    /// The benchmark's directory, checkouts, indexes, tasks and runs.
     #[arg(long)]
     out: PathBuf,
 }
@@ -233,12 +233,12 @@ struct ModelArgs {
     /// Standard processing instead of Fast mode.
     #[arg(long)]
     no_fast: bool,
-    /// The Codex home whose `auth.json` holds the ChatGPT login (default:
+    /// The Codex home whose `auth.json` holds the ChatGPT login (defaults to
     /// `$CODEX_HOME`, else `~/.codex`). Repeat it for failover between
     /// ChatGPT accounts, first preferred.
     #[arg(long)]
     codex_home: Vec<PathBuf>,
-    /// Dry run: a local mock model answers instead (no model calls). Tool
+    /// Dry run, a local mock model answers instead (no model calls). Tool
     /// calls run for real.
     #[arg(long)]
     mock: bool,
@@ -258,7 +258,7 @@ struct ModelArgs {
 struct PrepareArgs {
     #[command(flatten)]
     out: OutArgs,
-    /// A repository manifest (default: the built-in one, repos.json).
+    /// A repository manifest (defaults to the built-in one, repos.json).
     #[arg(long)]
     repos: Option<PathBuf>,
     /// Only these repository ids (comma-separated).
@@ -268,13 +268,13 @@ struct PrepareArgs {
     /// for example `--source arko=/home/me/arko_framework`.
     #[arg(long)]
     source: Vec<String>,
-    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    /// The arko_index CLI (defaults to `arko_index_cli` next to this binary).
     #[arg(long)]
     index_cli: Option<PathBuf>,
     /// Fetch and index again even when prepared.
     #[arg(long)]
     force: bool,
-    /// Also build arm C's dense index (Voyage `voyage-code-4`; needs
+    /// Also build arm C's dense index (Voyage `voyage-code-4`, which needs
     /// VOYAGE_API_KEY, or --mock-embeddings).
     #[arg(long)]
     dense: bool,
@@ -297,7 +297,7 @@ struct GenerateArgs {
     /// Only these repository ids (comma-separated).
     #[arg(long)]
     only: Option<String>,
-    /// Only these kinds (comma-separated: definition, callers, behaviour,
+    /// Only these kinds (comma-separated list of definition, callers, behaviour,
     /// impact).
     #[arg(long)]
     kinds: Option<String>,
@@ -310,15 +310,15 @@ struct GenerateArgs {
     /// Agents running at once.
     #[arg(long, default_value_t = 24)]
     concurrency: usize,
-    /// The task set to write (default: OUT/tasks.json).
+    /// The task set to write (defaults to OUT/tasks.json).
     #[arg(long)]
     tasks: Option<PathBuf>,
-    /// The writer's and verifier's tools: `terminal` (arm A's) or `index`
+    /// The writer's and verifier's tools, either `terminal` (arm A's) or `index`
     /// (arm B's, with arko_index). Terminal by default, so the questions
     /// aren't shaped by the tool under test.
     #[arg(long, default_value = "terminal")]
     writer_tools: String,
-    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    /// The arko_index CLI (defaults to `arko_index_cli` next to this binary).
     #[arg(long)]
     index_cli: Option<PathBuf>,
     #[command(flatten)]
@@ -339,7 +339,7 @@ struct AssembleArgs {
 struct ValidateArgs {
     #[command(flatten)]
     out: OutArgs,
-    /// The task set (default: OUT/tasks.json; `seed` for the built-in seed
+    /// The task set (defaults to OUT/tasks.json, or `seed` for the built-in seed
     /// tasks).
     #[arg(long)]
     tasks: Option<PathBuf>,
@@ -353,7 +353,7 @@ struct ShellArgs {
     /// Seconds a shell command may run.
     #[arg(long, default_value_t = 120)]
     command_timeout: u64,
-    /// Shell commands per agent run; after that the agent is asked to
+    /// Shell commands per agent run. After that the agent is asked to
     /// answer.
     #[arg(long, default_value_t = 80)]
     max_shell_calls: usize,
@@ -375,15 +375,15 @@ struct RunArgs {
     out: OutArgs,
     #[command(flatten)]
     model: ModelArgs,
-    /// The run's name: its state is OUT/runs/NAME, and running again with
+    /// The run's name. Its state is OUT/runs/NAME, and running again with
     /// the same name resumes it.
     #[arg(long, default_value = "main")]
     name: String,
-    /// The task set (default: OUT/tasks.json; `seed` for the built-in seed
+    /// The task set (defaults to OUT/tasks.json, or `seed` for the built-in seed
     /// tasks).
     #[arg(long)]
     tasks: Option<PathBuf>,
-    /// The arms: A (terminal), B (+ arko_index), C (+ dense; needs
+    /// The arms, A (terminal), B (+ arko_index), C (+ dense, which needs
     /// `prepare --dense`), or variant names (`prepare-variants`).
     #[arg(long, default_value = "A,B")]
     arms: String,
@@ -408,11 +408,11 @@ struct RunArgs {
     /// stopped and counted as failed.
     #[arg(long, default_value_t = 8_000_000)]
     max_input_tokens: usize,
-    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    /// The arko_index CLI (defaults to `arko_index_cli` next to this binary).
     #[arg(long)]
     index_cli: Option<PathBuf>,
     /// Minutes an agent run may work (waits for usage limits excluded)
-    /// before it is stopped and counted as failed; 0 for no limit.
+    /// before it is stopped and counted as failed, or 0 for no limit.
     #[arg(long, default_value_t = 60)]
     attempt_timeout_minutes: u64,
     /// Attempts per task and arm that end for reasons outside the agent (a
@@ -439,7 +439,7 @@ struct ReportArgs {
     out: OutArgs,
     #[arg(long, default_value = "main")]
     name: String,
-    /// The task set (default: the one the run used).
+    /// The task set (defaults to the one the run used).
     #[arg(long)]
     tasks: Option<PathBuf>,
     /// Bootstrap resamples for the confidence intervals.
@@ -451,7 +451,7 @@ struct ReportArgs {
 struct PrepareVariantsArgs {
     #[command(flatten)]
     out: OutArgs,
-    /// The variants file: a JSON list of variants (see README.md).
+    /// The variants file, a JSON list of variants (see README.md).
     #[arg(long)]
     variants: PathBuf,
     /// Only these variants (comma-separated names).
@@ -460,7 +460,7 @@ struct PrepareVariantsArgs {
     /// Only these repository ids (comma-separated).
     #[arg(long)]
     only: Option<String>,
-    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    /// The arko_index CLI (defaults to `arko_index_cli` next to this binary).
     #[arg(long)]
     index_cli: Option<PathBuf>,
     /// Embed with the offline hashing embedder instead of the variants' models
@@ -717,7 +717,7 @@ async fn prepare(args: PrepareArgs) -> BenchResult<()> {
     Ok(())
 }
 
-/// The mock model, when `--mock` is given: its URL for the client.
+/// The mock model, when `--mock` is given, its URL for the client.
 async fn start_mock(args: &ModelArgs) -> BenchResult<Option<mock::MockServer>> {
     if !args.mock {
         return Ok(None);
@@ -760,7 +760,7 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
         let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
         repos::setup_arm_bins(&layout, &[Arm::B], &index_cli, &Default::default())?;
     } else {
-        // Arm A's stubs need no CLI; the path is not used.
+        // Arm A's stubs need no CLI, so the path is not used.
         repos::setup_arm_bins(&layout, &[Arm::A], Path::new(""), &Default::default())?;
     }
     let path = args.tasks.clone().unwrap_or_else(|| layout.default_tasks());

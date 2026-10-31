@@ -1,4 +1,4 @@
-//! Benchmark tasks: code-understanding questions with verified answer keys.
+//! Benchmark tasks, code-understanding questions with verified answer keys.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -61,7 +61,7 @@ impl fmt::Display for TaskKind {
     }
 }
 
-/// A line range in a file of the checkout: 1-based, inclusive.
+/// A line range in a file of the checkout, 1-based, inclusive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Location {
     pub path: String,
@@ -135,7 +135,7 @@ fn leading_number(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// A path as written in the checkout: slashes, no leading `./` or `/`.
+/// A path as written in the checkout, slashes, no leading `./` or `/`.
 pub fn normalize_path(path: &str) -> String {
     let path = path.trim().replace('\\', "/");
     let path = path.strip_prefix("./").unwrap_or(&path);
@@ -146,11 +146,11 @@ pub fn normalize_path(path: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemKind {
-    /// Code the answer must identify; checked deterministically too.
+    /// Code the answer must identify, checked deterministically too.
     Location,
-    /// A file the answer must name; checked deterministically too.
+    /// A file the answer must name, checked deterministically too.
     File,
-    /// A statement the answer must make; checked by the grader only.
+    /// A statement the answer must make, checked by the grader only.
     Fact,
 }
 
@@ -159,9 +159,9 @@ pub enum ItemKind {
 pub struct KeyItem {
     pub id: String,
     pub kind: ItemKind,
-    /// The item in words: what the location is, the fact, why the file.
+    /// The item in words, what the location is, the fact, why the file.
     pub text: String,
-    /// For location items, the range; for file items, the file (lines unused).
+    /// For location items, the range. For file items, the file (lines unused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
 }
@@ -239,7 +239,7 @@ pub struct BenchTask {
     pub verification: Option<serde_json::Value>,
 }
 
-/// A task file: a JSON array, or a `{"tasks": [...]}` object, or JSON lines.
+/// A task file, a JSON array, or a `{"tasks": [...]}` object, or JSON lines.
 pub fn load_tasks(path: &Path) -> BenchResult<Vec<BenchTask>> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
@@ -343,7 +343,7 @@ pub struct ValidationIssue {
 }
 
 /// Checks every location of `tasks` against the checkouts in `repos`
-/// (repo id -> checkout root): the file exists and the lines are in it.
+/// (repo id -> checkout root). The file exists and the lines are in it.
 /// Tasks whose repo has no checkout are reported once each.
 pub fn validate_against_checkout(
     tasks: &[BenchTask],

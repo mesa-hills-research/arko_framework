@@ -1,4 +1,4 @@
-//! Running agents: one arko workflow per agent run, with limits and usage
+//! Running agents, one arko workflow per agent run, with limits and usage
 //! accounting, and the benchmark run itself (solvers in every arm, graders
 //! as answers come in), resumable and gracefully stoppable.
 
@@ -79,7 +79,7 @@ impl JobControl {
         Arc::new(Self::default())
     }
 
-    /// Stops the run because it went over a limit; the first reason stands.
+    /// Stops the run because it went over a limit, and the first reason stands.
     pub fn trip(&self, reason: String) {
         {
             let mut limit = self.limit.lock();
@@ -146,8 +146,8 @@ impl PlanUsageLog {
     }
 }
 
-/// Watches a run's events: counts input tokens against the limit, tracks
-/// waits for usage limits and retries, and checks the time limit.
+/// Watches a run's events, counting input tokens against the limit, tracking
+/// waits for usage limits and retries, and checking the time limit.
 async fn monitor(
     mut events: tokio::sync::broadcast::Receiver<WorkflowEvent>,
     control: Arc<JobControl>,
@@ -217,7 +217,7 @@ pub struct AgentJob {
     pub plan_usage: Arc<PlanUsageLog>,
 }
 
-/// A running agent: its own workflow (one agent, its tools, no messaging),
+/// A running agent, its own workflow (one agent, its tools, no messaging),
 /// and the monitor enforcing its limits.
 pub struct AgentSession {
     workflow: Workflow,
@@ -265,7 +265,7 @@ impl AgentSession {
         })
     }
 
-    /// Runs the agent on `prompt`; the result, when the run recorded one.
+    /// Runs the agent on `prompt` and returns the result, when the run recorded one.
     pub async fn ask(&self, prompt: &str) -> (Option<AgentResult>, Option<String>) {
         let outcome = self.workflow.run_agent(self.agent_name, prompt).await;
         self.settle(outcome)
@@ -294,7 +294,7 @@ impl AgentSession {
         }
     }
 
-    /// Ends the session: wall time and working time.
+    /// Ends the session, wall time and working time.
     pub fn finish(self) -> (Duration, Duration) {
         self.monitor.abort();
         self.active.remove(self.id);
@@ -322,7 +322,7 @@ pub struct UsageSummary {
     /// Output tokens (reasoning included), and the reasoning part.
     pub output_tokens: usize,
     pub reasoning_tokens: usize,
-    /// The largest input of one call: the context the run reached.
+    /// The largest input of one call, the context the run reached.
     pub max_context_tokens: usize,
     /// API list price of the tokens (ChatGPT OAuth bills nothing per call).
     pub api_cost: f64,
@@ -388,13 +388,13 @@ pub enum Outcome {
     /// The agent answered (`complete_task`).
     Answered,
     /// The run failed for a reason of its own (an error the model's requests
-    /// can't get past, a context overflow): counted, scored 0.
+    /// can't get past, a context overflow), counted, scored 0.
     Failed,
-    /// The run went over a limit (tokens, time, shell calls): counted,
+    /// The run went over a limit (tokens, time, shell calls), counted,
     /// scored 0.
     Limit,
     /// The run ended for a reason outside the agent (the benchmark was
-    /// stopped, the login was lost): not counted; it runs again.
+    /// stopped, the login was lost), not counted, and it runs again.
     Infra,
 }
 
@@ -497,7 +497,7 @@ pub struct RunManifest {
     pub arms: Vec<Arm>,
     pub samples: u32,
     pub tasks_file: PathBuf,
-    /// Each start of the run: when, and with which task count.
+    /// Each start of the run, when, and with which task count.
     #[serde(default)]
     pub sessions: Vec<RunSession>,
     /// The variant arms' definitions and indexes (`prepare-variants`).
@@ -626,7 +626,7 @@ pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
     /// Commands of the run named the benchmark's own files (task sets,
-    /// records, transcripts) outside the checkout: its answer may come from
+    /// records, transcripts) outside the checkout. Its answer may come from
     /// a key or another arm's answer. Reported, and to be checked by hand.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub looked_outside: bool,
@@ -671,7 +671,7 @@ pub struct GradeRecord {
     pub failure_kind: Option<String>,
 }
 
-/// Whether a failure kind is a lost login or account problem: every run on
+/// Whether a failure kind is a lost login or account problem. Every run on
 /// the credential fails until a person fixes it.
 pub fn is_login_failure(kind: Option<&str>) -> bool {
     matches!(kind, Some("Authentication" | "Billing" | "Permission"))
@@ -697,7 +697,7 @@ const BENCHMARK_FILES: [&str; 8] = [
     "transcripts/",
 ];
 
-/// Whether a run reached the benchmark's files outside its checkout: a
+/// Whether a run reached the benchmark's files outside its checkout. A
 /// command names one of [`BENCHMARK_FILES`], or a command or its output
 /// names a path under `out` other than the run's checkout, index and tools,
 /// or an output line names one of those files through `..` (a search of
@@ -746,7 +746,7 @@ pub fn looked_outside(task: &arko_agents::Task, out: &Path, repo: &str) -> bool 
         })
 }
 
-/// A task, arm and sample: one cell of the benchmark.
+/// A task, arm and sample, one cell of the benchmark.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobKey {
     pub task_id: String,
@@ -760,7 +760,7 @@ impl std::fmt::Display for JobKey {
     }
 }
 
-/// The work left: solver runs and gradings, in the order to start them.
+/// The work left, solver runs and gradings, in the order to start them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
     pub solve: Vec<JobKey>,
@@ -847,7 +847,7 @@ pub fn plan(
     plan
 }
 
-/// How far the run has to stop: 0 running, 1 no new jobs, 2 cancel the
+/// How far the run has to stop, 0 running, 1 no new jobs, 2 cancel the
 /// running ones.
 #[derive(Default)]
 pub struct StopState {
@@ -875,9 +875,9 @@ impl StopState {
     }
 }
 
-/// On Ctrl-C or SIGTERM: first, start no new agent runs and let the
-/// running ones finish; second, cancel them (they run again on resume);
-/// third, exit at once.
+/// On Ctrl-C or SIGTERM, first start no new agent runs and let the
+/// running ones finish, second cancel them (they run again on resume), and
+/// third exit at once.
 pub fn watch_signals(stop: Arc<StopState>, active: Arc<ActiveRuns>) {
     tokio::spawn(async move {
         loop {
@@ -1377,7 +1377,7 @@ fn shell_environment(
     )
 }
 
-/// What the arms' shells need besides their repository: the run's services
+/// What the arms' shells need besides their repository, the run's services
 /// and its variants.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ArmServices<'a> {
@@ -1542,7 +1542,7 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
     record
 }
 
-/// The grader's prompt: the question, the key and the candidate answer,
+/// The grader's prompt, the question, the key and the candidate answer,
 /// nothing about the arm.
 pub fn grader_prompt(task: &BenchTask, repo: &PreparedRepo, candidate: &str) -> String {
     format!(
@@ -1676,7 +1676,7 @@ async fn grade(context: &RunContext, attempt: AttemptRecord) -> GradeRecord {
         }
     }
     // A grading cancelled by a stop, or failed by a lost login, is not a
-    // failed grading: it runs again on resume.
+    // failed grading. It runs again on resume.
     let not_the_graders = !record.ok
         && (context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
     if !not_the_graders && let Err(error) = context.grades.append(&record) {
@@ -1774,8 +1774,8 @@ mod tests {
         assert_eq!(plan(&tasks, &arms, 1, &[], &[], 3, 7).solve, fresh.solve);
 
         let attempts = vec![
-            // t1/A answered and graded; t1/B answered, its grading failed
-            // once; t2/A failed (final); t2/B stopped twice (infra); t3/A
+            // t1/A answered and graded, t1/B answered and its grading failed
+            // once, t2/A failed (final), t2/B stopped twice (infra), t3/A
             // stopped three times (given up).
             attempt("t1", Arm::A, Outcome::Answered, "a1"),
             attempt("t1", Arm::B, Outcome::Answered, "b1"),
@@ -1882,7 +1882,7 @@ mod tests {
             manifest.incompatible_with(&other),
             vec!["model".to_string(), "shell settings".to_string()]
         );
-        // A variant keeps its definition and indexes; new variants may join.
+        // A variant keeps its definition and indexes, and new variants may join.
         let variant = |flags: &[&str]| crate::variants::PreparedVariant {
             spec: serde_json::from_value(serde_json::json!({ "name": "v", "index": flags }))
                 .unwrap(),
@@ -1931,7 +1931,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Variants: one with the CLI as it is, one that adds search flags, and
+        // Variants, one with the CLI as it is, one that adds search flags, and
         // one with arm C's tools (base C).
         let variant = |name: &str, search: &[&str]| crate::variants::PreparedVariant {
             spec: serde_json::from_value(serde_json::json!({
@@ -2029,7 +2029,7 @@ mod tests {
         assert!(b_dense.starts_with("exit code: 127"), "{b_dense}");
         let c_dense = run(&layout, &repo, &dir, Arm::C, "command -v arko_index_dense").await;
         assert!(c_dense.starts_with("exit code: 0"), "{c_dense}");
-        // Variant arms: B's tools over their own index, with their search flags.
+        // Variant arms, B's tools over their own index, with their search flags.
         let p = run(&layout, &repo, &dir, plain, "arko_index search2 q").await;
         assert!(p.contains("index cli: search2"), "{p}");
         assert!(p.contains("demo@plain"), "{p}");
@@ -2245,7 +2245,7 @@ mod tests {
         .await
         .unwrap();
         assert!(summary.contains("Stopped (login failure)"), "{summary}");
-        // The failed grading isn't recorded: both answers are graded on
+        // The failed grading isn't recorded. Both answers are graded on
         // resume, with all their attempts left.
         let grades: Vec<GradeRecord> = read_jsonl(&run_dir.join("grades.jsonl")).unwrap();
         assert!(grades.is_empty(), "{grades:?}");
