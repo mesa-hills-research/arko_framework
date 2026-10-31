@@ -22,7 +22,7 @@ use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Map, Value, json};
 
-/// What a response is checked against: the requested slug, the model's
+/// What a response is checked against, namely the requested slug, the model's
 /// pricing and limits, and what is known about the model it may be served by.
 #[derive(Debug, Clone)]
 pub(crate) struct ResponseContext {
@@ -53,7 +53,7 @@ impl ResponseContext {
     /// Responses name the model by its dated permaslug, whose name can differ
     /// from the requested slug's (`anthropic/claude-4.5-sonnet-20250929` for
     /// `anthropic/claude-sonnet-4.5`). With the catalog's canonical slug the
-    /// comparison is exact. Without it only changes arko can recognize count:
+    /// comparison is exact. Without it only changes arko can recognize count, namely
     /// routers, `~` aliases and presets, configured fallbacks, or another
     /// vendor. Variant suffixes and trailing dates are ignored.
     fn served_model_changed(&self, served: &str) -> bool {
@@ -144,7 +144,7 @@ fn arguments_text(value: Option<&Value>) -> String {
 /// order is the `index` of its `ToolCallStart` and `ToolCallArgumentsDelta`
 /// events and its position in the final `message.tool_calls` (as with the
 /// other providers' 0-based counters). OpenRouter's raw index is used only
-/// for assembly: it needn't start at 0 or be contiguous.
+/// for assembly, because it needn't start at 0 or be contiguous.
 #[derive(Debug, Default)]
 struct ToolCallAssembler {
     calls: Vec<PendingToolCall>,
@@ -173,7 +173,7 @@ impl ToolCallAssembler {
                     latest => latest,
                 }
             }
-            // Without an index, an id names its call; a delta with neither
+            // Without an index, an id names its call, and a delta with neither
             // continues the latest call.
             None if id.is_some() => self.calls.iter().position(with_id),
             None => self.calls.len().checked_sub(1),
@@ -241,7 +241,7 @@ impl ToolCallAssembler {
 }
 
 /// Merges streamed `reasoning_details` chunks into whole items. Chunks with
-/// the same `index` and `type` are one item: `text`, `summary` and `data`
+/// the same `index` and `type` are one item. `text`, `summary` and `data`
 /// are concatenated and any other non-null field (signature, id, format)
 /// is taken. OpenRouter documents only that chunks "concatenate in order".
 /// This rule is to be confirmed against non-streaming output.
@@ -261,7 +261,7 @@ impl DetailsMerger {
         let index = fields.get("index").and_then(Value::as_u64);
         let kind = fields.get("type").and_then(Value::as_str);
         let target = match index {
-            // A continuation chunk may omit `type`; the index alone decides.
+            // A continuation chunk may omit `type`, and the index alone decides.
             Some(index) => self.items.iter_mut().rev().find(|existing| {
                 existing.get("index").and_then(Value::as_u64) == Some(index)
                     && (kind.is_none() || existing.get("type").and_then(Value::as_str) == kind)
@@ -282,7 +282,7 @@ impl DetailsMerger {
         for (key, value) in fields {
             match (key.as_str(), value) {
                 ("text" | "summary" | "data", Value::String(piece)) => match target.get_mut(key) {
-                    // Streams may show encrypted data as `[REDACTED]`; never
+                    // Streams may show encrypted data as `[REDACTED]`, so never
                     // splice the placeholder into real data.
                     Some(Value::String(existing)) if existing.as_str() == REDACTED => {
                         *existing = piece.clone();
@@ -308,7 +308,7 @@ impl DetailsMerger {
     }
 }
 
-/// Readable reasoning in detail items: `reasoning.text` text and
+/// Readable reasoning in detail items, meaning `reasoning.text` text and
 /// `reasoning.summary` summaries. Encrypted items are never shown.
 fn readable_reasoning(items: &[Value]) -> String {
     items
@@ -366,12 +366,12 @@ impl Turn {
             self.service_tier = Some(tier.to_string());
         }
         if let Some(usage) = value.get("usage").filter(|usage| usage.is_object()) {
-            // Usage arrives once, in the final chunk; a repeat replaces it.
+            // Usage arrives once, in the final chunk, and a repeat replaces it.
             self.usage = Some(usage.clone());
         }
     }
 
-    /// The first finish reason wins: the usage chunk repeats it.
+    /// The first finish reason wins, because the usage chunk repeats it.
     fn record_finish(&mut self, choice: &Value) {
         if self.finish_reason.is_none() {
             self.finish_reason = non_empty(str_field(choice, "finish_reason")).map(String::from);
@@ -397,7 +397,7 @@ fn finish_error(choice: &Value) -> Error {
 }
 
 /// Parses a non-streaming response body. A 200 response can still carry an
-/// error: a top-level `error` without choices, or `choices[0].error` with
+/// error, either a top-level `error` without choices, or `choices[0].error` with
 /// partial output.
 pub(crate) fn parse_response(
     body: &str,
@@ -562,7 +562,7 @@ where
 ///
 /// Under `length`, calls after an unfinished one are dropped even when their
 /// arguments are complete (interleaved streams can finish a later call
-/// first): removing only the unfinished call would shift the later calls
+/// first). Removing only the unfinished call would shift the later calls
 /// away from the positions their `ToolCallStart` events announced. The calls
 /// kept are a prefix, so each keeps its position. A dropped call may have
 /// been announced by a `ToolCallStart` without appearing in the response.
@@ -749,7 +749,7 @@ fn finish(turn: Turn, context: &ResponseContext) -> GenerationResponse {
         model_call_usage.requested_model = Some(context.requested.clone());
     }
     // The model OpenRouter reported serving (`model` falls back to the
-    // requested one when it reported none); a change is reported through
+    // requested one when it reported none), and a change is reported through
     // `requested_model`, so `rerouted` stays false.
     model_call_usage.served_model = reported_model;
     model_call_usage.upstream_provider = turn.upstream_provider;

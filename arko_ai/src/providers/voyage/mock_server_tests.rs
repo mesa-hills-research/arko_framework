@@ -52,7 +52,7 @@ fn with_header(reply: Reply, name: &'static str, value: &str) -> Reply {
     }
 }
 
-/// Voyage's documented 4XX body: `{"detail": "<the error message>"}`.
+/// Voyage's documented 4XX body is `{"detail": "<the error message>"}`.
 fn detail(message: &str) -> String {
     serde_json::json!({ "detail": message }).to_string()
 }
@@ -178,7 +178,7 @@ async fn a_documented_response_comes_back_in_input_order_with_its_usage() {
     assert_eq!(response.usage.input_tokens, 8);
 }
 
-/// 400 Invalid Request, 401 Unauthorized and 403 Forbidden: the request,
+/// 400 Invalid Request, 401 Unauthorized and 403 Forbidden, where the request,
 /// key or IP address must change. The status and Voyage's `detail` are kept.
 #[tokio::test]
 async fn documented_client_errors_keep_their_status_and_detail_and_are_permanent() {
@@ -200,7 +200,7 @@ async fn documented_client_errors_keep_their_status_and_detail_and_are_permanent
 }
 
 /// The 400s that name a limit, with the details Voyage answered with live
-/// (2026-10-04), take the kinds arko's own limit checks give them; other
+/// (2026-10-04), take the kinds arko's own limit checks give them, and other
 /// 400 details stay invalid requests.
 #[tokio::test]
 async fn limit_rejections_take_the_kind_of_the_limit() {
@@ -226,7 +226,7 @@ async fn limit_rejections_take_the_kind_of_the_limit() {
     }
 }
 
-/// A request over the model's total tokens per request: Voyage's
+/// A request over the model's total tokens per request. Voyage's
 /// `error_code` (undocumented, answered live 2026-10-04) is kept as the code.
 #[tokio::test]
 async fn a_request_over_the_total_token_limit_keeps_voyages_error_code() {
@@ -301,7 +301,7 @@ async fn service_unavailable_statuses_are_capacity_signals() {
     assert_eq!(generic.retry_class(), RetryClass::Transient);
 }
 
-/// A connection closed before any response: no status, and whether Voyage
+/// A connection closed before any response has no status, and whether Voyage
 /// processed the request is unknown.
 #[tokio::test]
 async fn a_dropped_connection_is_a_transport_error_without_a_status() {
@@ -314,7 +314,7 @@ async fn a_dropped_connection_is_a_transport_error_without_a_status() {
     assert_eq!(error.kind(), ErrorKind::Unknown, "{error}");
 }
 
-/// A 200 whose body was cut off in transfer: Voyage answered, so the
+/// A 200 whose body was cut off in transfer. Voyage answered, so the
 /// request was processed (and may have been billed). It stays a transport
 /// error, and permanent, so no caller resends it on its own.
 #[tokio::test]
@@ -332,7 +332,7 @@ async fn a_success_cut_off_in_transfer_is_a_permanent_transport_error() {
 
 /// A 200 that isn't the documented embeddings object (it doesn't parse, or
 /// its `index`es or vector lengths don't match the request) is Voyage's
-/// fault, not the caller's invalid request. It is permanent: the request
+/// fault, not the caller's invalid request. It is permanent, because the request
 /// was answered and may have been billed.
 #[tokio::test]
 async fn a_malformed_success_is_not_an_invalid_request() {

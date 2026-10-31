@@ -274,7 +274,7 @@ impl PlanUsage {
             _ => None,
         };
         // As Codex reads them (`parse_credits_snapshot` in
-        // codex-rs/codex-api/src/rate_limits.rs): both flags must be there.
+        // codex-rs/codex-api/src/rate_limits.rs), both flags must be there.
         let credits = flag("x-codex-credits-has-credits").and_then(|has_credits| {
             Some(PlanCredits {
                 has_credits,
@@ -727,7 +727,7 @@ fn add_options<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Opti
     }
 }
 
-/// Token counts add saturating: absurd provider figures must not panic
+/// Token counts add saturating, because absurd provider figures must not panic
 /// (debug builds check overflow), for example inside a caller's lock.
 fn add_counts(a: Option<usize>, b: Option<usize>) -> Option<usize> {
     match (a, b) {
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(usage.credits, None);
         assert_eq!(usage.most_used_window().unwrap().0, "primary");
 
-        // Credits, as Codex reads them: both flags, then the balance.
+        // Credits, as Codex reads them (both flags, then the balance).
         let mut with_credits = headers.clone();
         for (name, value) in [
             ("x-codex-credits-has-credits", "True"),
@@ -942,10 +942,10 @@ mod tests {
     fn short_context_only_tiers_fall_back_to_standard_long_context_rates() {
         let fast = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Fast);
         let model = Model::openai_gpt_5_5();
-        // Short context: Fast is 2.5x ($5 -> $12.50 input, $30 -> $75 output).
+        // Short context, with Fast at 2.5x ($5 -> $12.50 input, $30 -> $75 output).
         let short = priced(&model, UsageInfo::new(100_000, 1_000_000), Some(&fast));
         assert!(close(short.total_cost, 0.1 * 12.5 + 75.0));
-        // Above 272K, GPT-5.5 Fast mode is not offered: standard long-context rates.
+        // Above 272K, GPT-5.5 Fast mode is not offered, so standard long-context rates apply.
         let long = priced(&model, UsageInfo::new(300_000, 1_000_000), Some(&fast));
         assert!(close(long.total_cost, 0.3 * 10.0 + 45.0));
         // GPT-6 Fast applies to long context too.
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn token_classes_without_a_price_are_billed_at_the_input_rate() {
-        // gpt-5.4-pro has no cached-input discount; above 272K input costs $60.
+        // gpt-5.4-pro has no cached-input discount, and above 272K input costs $60.
         let pro = priced(
             &Model::openai_gpt_5_4_pro(),
             UsageInfo::new(1_000_000, 0).with_cached_tokens(400_000),
@@ -974,7 +974,7 @@ mod tests {
             None,
         );
         assert!(close(short_pro.total_cost, 0.2 * 30.0));
-        // Models before GPT-5.6 charge no cache-write premium: writes cost input.
+        // Models before GPT-5.6 charge no cache-write premium, so writes cost input.
         let writes = priced(
             &Model::openai_gpt_5_5(),
             UsageInfo::new(100_000, 0).with_cache_write_tokens(40_000),
@@ -1009,10 +1009,10 @@ mod tests {
     #[test]
     fn haiku_5_5_prices_follow_the_prompt_size() {
         let haiku = Model::anthropic_claude_haiku_5_5();
-        // At the threshold: $0.10 input, $0.50 output.
+        // At the threshold, $0.10 input, $0.50 output.
         let at = priced(&haiku, UsageInfo::new(100_000, 1_000_000), None);
         assert!(close(at.total_cost, 0.1 * 0.10 + 0.50));
-        // Over it, mostly from the cache: $0.50 input, $0.05 reads, $0.625
+        // Over it, mostly from the cache, $0.50 input, $0.05 reads, $0.625
         // 5-minute and $1 1-hour writes, $2.50 output.
         let mut usage = UsageInfo::new(150_000, 1_000_000)
             .with_cached_tokens(100_000)
@@ -1082,7 +1082,7 @@ mod tests {
         let reported = priced(&model, UsageInfo::new(1_000_000, 0), None).with_reported_cost(0.42);
         assert_eq!(reported.billing, BillingKind::ProviderReported);
         assert!(close(reported.billed(), 0.42));
-        // Records saved before billing kinds: billed = total_cost.
+        // Records saved before billing kinds, so billed = total_cost.
         let legacy: UsageInfo = serde_json::from_value(serde_json::json!({
             "input_tokens": 10, "output_tokens": 5, "input_cost": 0.5,
             "output_cost": 0.25, "total_cost": 0.75

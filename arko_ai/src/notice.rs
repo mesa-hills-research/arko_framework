@@ -9,7 +9,7 @@ static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 #[cfg(test)]
 thread_local! {
-    /// Tests run in parallel threads of one process: each test thread gets a
+    /// Tests run in parallel threads of one process, so each test thread gets a
     /// record of its own, as if it were a process of its own.
     static TEST_SCOPE: u64 = {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

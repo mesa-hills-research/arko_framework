@@ -56,14 +56,14 @@ pub enum ErrorKind {
 
 /// Codes that name an error's kind on their own, whatever the HTTP status.
 /// Generic codes (`invalid_request_error`, `INVALID_ARGUMENT`, ...) are not
-/// here: their message or status decides. Sources: OpenAI error codes
+/// here, so their message or status decides. The sources are OpenAI error codes
 /// (https://developers.openai.com/api/docs/guides/error-codes) and the
 /// Codex client (codex-rs/codex-api/src/sse/responses_error.rs,
-/// codex-rs/codex-api/src/api_bridge.rs, codex-rs/login/src/auth/manager.rs);
-/// Anthropic error types (https://platform.claude.com/docs/en/api/errors);
+/// codex-rs/codex-api/src/api_bridge.rs, codex-rs/login/src/auth/manager.rs),
+/// Anthropic error types (https://platform.claude.com/docs/en/api/errors),
 /// the Gemini Interactions API codes
 /// (https://ai.google.dev/gemini-api/docs/api-errors) and Google RPC
-/// statuses; OpenRouter `error.metadata.error_type` values
+/// statuses, and OpenRouter `error.metadata.error_type` values
 /// (https://openrouter.ai/docs/api/reference/errors-and-debugging).
 const KIND_CODES: &[(&str, ErrorKind)] = &[
     // Credentials.
@@ -100,13 +100,13 @@ const KIND_CODES: &[(&str, ErrorKind)] = &[
     ("organization_usage_limit_exceeded", ErrorKind::Billing),
     ("project_spend_limit_exceeded", ErrorKind::Billing),
     ("usage_not_included", ErrorKind::Billing),
-    // Gemini Interactions API: "Billing or account prerequisite".
+    // Gemini Interactions API, "Billing or account prerequisite".
     ("failed_precondition", ErrorKind::Billing),
     ("FAILED_PRECONDITION", ErrorKind::Billing),
     // The input is over the model's limit.
     ("context_length_exceeded", ErrorKind::ContextOverflow),
     ("token_limit_exceeded", ErrorKind::ContextOverflow),
-    // Voyage AI: a request over the model's total tokens per request.
+    // Voyage AI, a request over the model's total tokens per request.
     ("TOO_MANY_TOKENS_IN_BATCH", ErrorKind::ContextOverflow),
     // Size limits on the body or one value in it.
     ("request_too_large", ErrorKind::RequestTooLarge),
@@ -133,7 +133,7 @@ const KIND_CODES: &[(&str, ErrorKind)] = &[
     ("UNIMPLEMENTED", ErrorKind::Unsupported),
 ];
 
-/// Codes of a rejected request that say no more than that: the message or
+/// Codes of a rejected request that say no more than that. The message or
 /// the HTTP status may tell more (Anthropic reports an overlong prompt as
 /// `invalid_request_error`, Gemini an invalid API key as
 /// `INVALID_ARGUMENT`).
@@ -145,7 +145,7 @@ const GENERIC_INVALID_REQUEST_CODES: &[&str] = &[
 ];
 
 /// Documented message phrases, matched in lowercase when the code didn't
-/// decide. Sources:
+/// decide. The sources are:
 /// - OpenAI Responses (and the ChatGPT backend, codex-rs
 ///   `sse/responses.rs`): "Your input exceeds the context window of this
 ///   model.". Chat Completions and OpenRouter: "This model's maximum
@@ -153,7 +153,7 @@ const GENERIC_INVALID_REQUEST_CODES: &[&str] = &[
 ///   is N tokens". OpenAI per-value limits: "string too long. Expected a
 ///   string with maximum length N".
 /// - Anthropic (https://platform.claude.com/docs/en/api/errors): "prompt is
-///   too long: N tokens > M maximum"; "input length and max_tokens exceed
+///   too long: N tokens > M maximum", "input length and max_tokens exceed
 ///   context limit".
 /// - Gemini: "The input token count (N) exceeds the maximum number of
 ///   tokens allowed (M).". An invalid key: "API key not valid", reason
@@ -318,7 +318,7 @@ impl RetryClass {
 
 /// Codes meaning the request itself must change. They take precedence over a
 /// retryable HTTP status. Includes OpenAI/Anthropic error codes and types
-/// (OpenAI Responses `ResponseError.code` values:
+/// (OpenAI Responses `ResponseError.code` values at
 /// https://developers.openai.com/api/reference/resources/responses/streaming-events),
 /// OpenRouter `error.metadata.error_type` values
 /// (https://openrouter.ai/docs/api_reference/errors-and-debugging), Gemini
@@ -354,7 +354,7 @@ const PERMANENT_CODES: &[&str] = &[
     // A 409 conflict that needs resolving, unlike Gemini's retryable `aborted`.
     "already_exists",
     "conflict_error",
-    // A 501: the operation is not supported.
+    // A 501 means the operation is not supported.
     "unimplemented",
     "not_implemented",
     "precondition_failed",
@@ -366,8 +366,8 @@ const PERMANENT_CODES: &[&str] = &[
     "data_residency_mismatch",
     "bio_policy",
     // ChatGPT (Codex backend) `response.failed` codes that the official
-    // Codex client treats as fatal (codex-rs/codex-api/src/sse/responses_error.rs):
-    // quota/spend walls, a plan without API usage, and a policy block.
+    // Codex client treats as fatal (codex-rs/codex-api/src/sse/responses_error.rs).
+    // They are quota/spend walls, a plan without API usage, and a policy block.
     "credit_balance_exhausted",
     "organization_spend_limit_exceeded",
     // A quota wall Codex reports like the ones above when it arrives with an
@@ -375,8 +375,8 @@ const PERMANENT_CODES: &[&str] = &[
     "organization_usage_limit_exceeded",
     "project_spend_limit_exceeded",
     "usage_not_included",
-    // Flex processing has no capacity: Codex does not retry it (its
-    // `ApiError::FlexUnavailable`, also sent with a 429); a request can use
+    // Flex processing has no capacity. Codex does not retry it (its
+    // `ApiError::FlexUnavailable`, also sent with a 429), and a request can use
     // another service tier instead.
     "flex_unavailable",
     "cyber_policy",
@@ -395,10 +395,10 @@ const PERMANENT_CODES: &[&str] = &[
     "unsupported_image_media_type",
     "empty_image_file",
     "failed_to_download_image",
-    // Gemini: the replayed history lacks a required thought signature.
+    // Gemini, when the replayed history lacks a required thought signature.
     "missing_thought_signature",
     // arko's code for OpenRouter's "no available model provider meets your
-    // routing requirements": provider preferences exclude every endpoint.
+    // routing requirements". Provider preferences exclude every endpoint.
     "no_eligible_provider",
     "INVALID_ARGUMENT",
     "FAILED_PRECONDITION",
@@ -421,8 +421,8 @@ const CAPACITY_CODES: &[&str] = &[
 ];
 
 /// HTTP statuses of documented string codes, used to classify errors that
-/// arrive without one: a stream error event or failed interaction reported
-/// after the HTTP 200. Sources: Gemini Interactions API
+/// arrive without one, such as a stream error event or failed interaction reported
+/// after the HTTP 200. The sources are the Gemini Interactions API
 /// (https://ai.google.dev/gemini-api/docs/api-errors, unlisted codes fall back
 /// to the snake_case HTTP status name, e.g. `gateway_timeout`), Anthropic
 /// (https://platform.claude.com/docs/en/api/errors) and Google RPC names.
@@ -515,7 +515,7 @@ const CODE_STATUSES: &[(&str, u16)] = &[
 /// with the reset time in `resets_at`, codex-rs `api_bridge.rs`).
 const USAGE_LIMIT_CODES: &[&str] = &["usage_limit_reached"];
 
-/// Short request-rate limits besides HTTP 429 itself: OpenAI/Codex
+/// Short request-rate limits besides HTTP 429 itself, namely OpenAI/Codex
 /// `rate_limit_exceeded` and `slow_down` (sent with a 503 or on a stream
 /// error), and the 429 names of other providers.
 const RATE_LIMIT_CODES: &[&str] = &[
@@ -627,7 +627,7 @@ impl Error {
             } => {
                 let code = code.as_deref();
                 // OpenRouter reports an exhausted prepaid in-flight budget as a
-                // 402 with Retry-After; any other payment failure is permanent.
+                // 402 with Retry-After, and any other payment failure is permanent.
                 if code == Some("payment_required") {
                     return if retry_after.is_some() {
                         RetryClass::Transient
@@ -653,8 +653,8 @@ impl Error {
                         RetryClass::Transient
                     };
                 }
-                // Any other error reported after the 200 is bounded-transient:
-                // the request was accepted, so an unrecognised code (for
+                // Any other error reported after the 200 is bounded-transient.
+                // The request was accepted, so an unrecognised code (for
                 // example OpenAI `server_error`, a Gemini generation error such
                 // as `malformed_function_call`, or an event with no code) is
                 // most likely a server-side failure. Permanent codes were
@@ -685,7 +685,7 @@ impl Error {
             Self::ApiError(_) | Self::StreamTruncated(_) | Self::InvalidToolArguments { .. } => {
                 RetryClass::Transient
             }
-            // A missing or wrong call may be resampled; a token or context
+            // A missing or wrong call may be resampled, while a token or context
             // limit needs a configuration change.
             Self::UnexpectedToolCalls { stop_reason, .. } if !stop_reason.is_truncated() => {
                 RetryClass::Transient
@@ -822,7 +822,7 @@ impl Error {
             code,
             retry_after: retry_after.or_else(|| retry_after_from_value(&value)),
         };
-        // OpenAI names the wait only in a rate limit's message; Codex reads it
+        // OpenAI names the wait only in a rate limit's message, and Codex reads it
         // from there (codex-rs/codex-api/src/sse/responses_error.rs).
         if provider_error.retry_after().is_none()
             && provider_error.is_rate_limit()
@@ -850,19 +850,19 @@ impl Error {
     }
 }
 
-/// Delay requested by response headers: `Retry-After` (seconds or an HTTP
+/// Delay requested by response headers, `Retry-After` (seconds or an HTTP
 /// date) on any status. On a 429 without it, OpenAI-style
 /// `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` durations such
 /// as `1m2.5s`.
 ///
 /// Those headers are "the time until the rate limit ... resets to its
-/// initial state" (https://developers.openai.com/api/docs/guides/rate-limits):
-/// a full refill, sent on every response, so they say nothing about a
+/// initial state" (https://developers.openai.com/api/docs/guides/rate-limits).
+/// They are a full refill, sent on every response, so they say nothing about a
 /// non-rate-limit failure and overstate the wait for a limit that was not
 /// hit. Only the limits whose `x-ratelimit-remaining-*` is 0 count (the
 /// longest of them, since each must recover). When no remaining count is 0
 /// or none is reported, the limit that was hit is unknown and the shorter
-/// reset is used: it is the earliest point a limit is known to have fully
+/// reset is used, since it is the earliest point a limit is known to have fully
 /// recovered, and callers treat the hint as a minimum under their own
 /// backoff, so underestimating costs one early retry while the longer reset
 /// (often minutes for tokens) could stall a request that would already
@@ -993,7 +993,7 @@ fn find_numeric_field(value: &Value, names: &[&str]) -> Option<f64> {
     }
 }
 
-/// Delay hints anywhere in an error body: `retry_after_ms`/`retryAfterMs`,
+/// Delay hints anywhere in an error body, found as `retry_after_ms`/`retryAfterMs`,
 /// `retry_after`/`retryAfter` (seconds), or a reset time
 /// `resets_at`/`reset_at`/`resetsAt`/`resetAt` (epoch seconds or milliseconds)
 /// or OpenRouter's `error.metadata.headers.X-RateLimit-Reset` (epoch
@@ -1026,7 +1026,7 @@ fn body_delay(value: &Value) -> Option<Duration> {
     ))
 }
 
-/// OpenRouter passes a rate limit's headers along in its error body:
+/// OpenRouter passes a rate limit's headers along in its error body as
 /// `error.metadata.headers."X-RateLimit-Reset"`, in epoch milliseconds
 /// (usually a string).
 fn openrouter_rate_limit_reset(value: &Value) -> Option<f64> {
@@ -1184,7 +1184,7 @@ mod tests {
 
     #[test]
     fn numeric_codes_stand_in_for_a_missing_or_successful_http_status() {
-        // OpenRouter mid-stream error chunk: HTTP 200 already sent.
+        // OpenRouter mid-stream error chunk, with HTTP 200 already sent.
         let error = Error::provider_error(
             "stream",
             Some(200),
@@ -1277,8 +1277,8 @@ mod tests {
     #[test]
     fn gemini_interaction_codes_classify_by_their_documented_status() {
         use RetryClass::{Capacity, Permanent, Transient};
-        // SSE error event shape from https://ai.google.dev/gemini-api/docs/api-errors;
-        // stream errors carry the same codes as HTTP errors.
+        // SSE error event shape from https://ai.google.dev/gemini-api/docs/api-errors,
+        // and stream errors carry the same codes as HTTP errors.
         for (code, class) in [
             ("invalid_request", Permanent),
             ("failed_precondition", Permanent),
@@ -1299,11 +1299,11 @@ mod tests {
             ("unimplemented", Permanent),
             ("service_unavailable", Capacity),
             ("deadline_exceeded", Transient),
-            // Fallback codes: snake_case HTTP status names.
+            // Fallback codes are snake_case HTTP status names.
             ("gateway_timeout", Transient),
             ("bad_gateway", Transient),
             ("unprocessable_entity", Permanent),
-            // Generation errors: resampling may produce a valid output...
+            // Generation errors, where resampling may produce a valid output...
             ("malformed_function_call", Transient),
             ("malformed_tool_call", Transient),
             ("unexpected_tool_call", Transient),
@@ -1317,7 +1317,7 @@ mod tests {
             let error = Error::provider_error("google stream", None, None, &event);
             assert_eq!(error.retry_class(), class, "{code}");
         }
-        // The daily quota wall stays permanent with its HTTP 429; an overload
+        // The daily quota wall stays permanent with its HTTP 429, and an overload
         // is a capacity signal with or without its 503.
         let quota = r#"{"error":{"code":"quota_exceeded","message":"You have exceeded your daily quota."}}"#;
         assert_eq!(
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn unknown_errors_after_a_success_are_bounded_transient_but_permanent_codes_win() {
-        // OpenAI's flat `error` stream event; `code` may be null and `type`
+        // OpenAI's flat `error` stream event, and `code` may be null and `type`
         // is the event name, not an error type.
         let event = r#"{"type":"error","code":null,"message":"An error occurred while processing your request.","param":null,"sequence_number":4}"#;
         let error = Error::provider_error("OpenAI stream error", None, None, event);
@@ -1462,7 +1462,7 @@ mod tests {
             retry_after_from_headers(429, &headers),
             Some(Duration::from_secs(1))
         );
-        // Reset headers accompany every response; they are no delay hint for
+        // Reset headers accompany every response, and they are no delay hint for
         // other failures.
         for status in [500, 503, 529, 400] {
             assert_eq!(retry_after_from_headers(status, &headers), None, "{status}");
@@ -1480,7 +1480,7 @@ mod tests {
             retry_after_from_headers(429, &headers),
             Some(Duration::from_secs(1))
         );
-        // Both exhausted: both must recover.
+        // Both exhausted, so both must recover.
         headers.insert("x-ratelimit-remaining-tokens", "0".parse().unwrap());
         assert_eq!(
             retry_after_from_headers(429, &headers),
@@ -1561,7 +1561,7 @@ mod tests {
 
     #[test]
     fn plan_usage_limits_and_short_rate_limits_are_told_apart() {
-        // The ChatGPT backend's usage limit: a 429 with the reset time.
+        // The ChatGPT backend's usage limit, a 429 with the reset time.
         let resets_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1739,7 +1739,7 @@ mod tests {
                 "{body}"
             );
         }
-        // No number or unit: no hint. A huge one is capped.
+        // No number or unit gives no hint. A huge one is capped.
         for message in [
             "try again in a moment",
             "try again in 5 minutes",

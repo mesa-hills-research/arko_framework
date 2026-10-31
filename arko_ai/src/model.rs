@@ -1835,7 +1835,7 @@ impl Model {
         }
     }
 
-    /// Shared limits for Gemini 3.1+ Flash and Flash-Lite models: 1,048,576 input and
+    /// Shared limits for Gemini 3.1+ Flash and Flash-Lite models, 1,048,576 input and
     /// 65,536 output tokens, image input, implicit caching, no >200K price tier.
     fn google_gemini_flash(id: &str, pricing: ModelPricing) -> Self {
         Self {
@@ -2146,7 +2146,7 @@ impl Model {
     }
 
     /// The registered Claude model an OpenRouter `anthropic/` slug (or a
-    /// catalog alias's target) names, for Anthropic's model rules:
+    /// catalog alias's target) names, for Anthropic's model rules.
     /// `anthropic/claude-sonnet-4.5` is `claude-sonnet-4-5-20250929`.
     fn openrouter_claude_equivalent(&self) -> Option<Model> {
         let slug = self
@@ -2827,7 +2827,7 @@ mod tests {
         assert!(opus.supports_interleaved_thinking());
         assert!(opus.auto_enables_interleaved_thinking());
 
-        // Mythos 5.1 is Fable 5.1 under another id: every rule, limit and
+        // Mythos 5.1 is Fable 5.1 under another id, so every rule, limit and
         // price matches.
         let rules = |model: &Model| {
             [

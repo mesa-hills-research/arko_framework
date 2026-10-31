@@ -1,4 +1,4 @@
-//! Unit tests: request JSON per mapping rule (including what is omitted),
+//! Unit tests for request JSON per mapping rule (including what is omitted),
 //! catalog parsing and validation, response and stream parsing (fixtures
 //! follow OpenRouter's documented examples), errors, usage and cost.
 
@@ -158,7 +158,7 @@ fn minimal_requests_send_only_model_messages_and_cache_routing_keys() {
     let conversation = conversation(GEMINI);
     let (value, betas) = prepare(&client(), &conversation, &GenerationConfig::default()).unwrap();
     // Everything else is omitted so OpenRouter and the provider apply their
-    // defaults; usage/stream_options/transforms are never sent.
+    // defaults, and usage/stream_options/transforms are never sent.
     assert_eq!(
         keys(&value),
         ["messages", "model", "prompt_cache_key", "session_id"]
@@ -220,7 +220,7 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
     }
 
     let ttl = GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
-    // A Claude setting: dropped for other models, an error on Claude with
+    // A Claude setting is dropped for other models, an error on Claude with
     // caching off.
     assert!(body(GPT, &ttl).get("cache_control").is_none());
     assert!(crate::notice::warned(
@@ -523,7 +523,7 @@ fn options_from_other_providers_are_dropped_with_a_warning() {
             "{field}"
         );
     }
-    // Documented no-ops: OpenRouter already summarizes Claude thinking and
+    // Documented no-ops, as OpenRouter already summarizes Claude thinking and
     // enables extended context where the model has it.
     body(
         CLAUDE,
@@ -648,7 +648,7 @@ fn auto_router_settings_apply_only_to_router_slugs_under_their_own_plugin_id() {
 fn auto_exacto_policy_sorts_by_price_only_when_cache_misses_are_costly() {
     let sort = |slug: &str, config: &GenerationConfig| body(slug, config).get("provider").cloned();
     let price = Some(json!({"sort": "price"}));
-    // Without a catalog: anthropic/ and openai/ models bill cache writes.
+    // Without a catalog, anthropic/ and openai/ models bill cache writes.
     assert_eq!(sort(CLAUDE, &with_tools()), price);
     assert_eq!(sort(GPT, &with_tools()), price);
     assert_eq!(sort(GEMINI, &with_tools()), None);
@@ -760,7 +760,7 @@ fn messages_convert_tool_turns_images_and_replay_reasoning_details_verbatim() {
             ]},
             {"role": "assistant", "content": null, "reasoning_details": details, "tool_calls": [
                 {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"a\"}"}},
-                // Claude needs an object: invalid arguments become `{}`.
+                // Claude needs an object, so invalid arguments become `{}`.
                 {"id": "call_2", "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
             ]},
             {"role": "tool", "tool_call_id": "call_1", "content": "A"},
@@ -842,7 +842,7 @@ fn reasoning_effort_updates_use_the_content_less_system_message_form() {
     let mut pro_model = conversation.clone();
     pro_model.model = Model::openrouter("openai/gpt-6-sol-pro");
     assert!(prepare(&client(), &pro_model, &GenerationConfig::default()).is_err());
-    // The pro restriction is OpenAI's; other vendors' "-pro" models pass.
+    // The pro restriction is OpenAI's, and other vendors' "-pro" models pass.
     pro_model.model = Model::openrouter("google/gemini-3-pro");
     prepare(&client(), &pro_model, &GenerationConfig::default()).unwrap();
 
@@ -957,7 +957,7 @@ fn catalog_entries_become_models_with_limits_prices_and_metadata() {
             .mandatory
     );
 
-    // `supported_efforts: null` means every effort; omitted means none selectable.
+    // `supported_efforts: null` means every effort, and omitted means none selectable.
     let deepseek = catalog.get("deepseek/deepseek-v4-flash").unwrap();
     let reasoning = deepseek
         .openrouter_info()
@@ -1004,7 +1004,7 @@ fn catalog_entries_become_models_with_limits_prices_and_metadata() {
 #[test]
 fn only_prompt_size_overrides_become_the_long_context_tier() {
     // Override shapes from https://openrouter.ai/docs/guides/overview/models
-    // ("Pricing Overrides"): an entry applies only when all its conditions
+    // ("Pricing Overrides"). An entry applies only when all its conditions
     // match, and entries with conditions arko doesn't evaluate are skipped.
     let model = |id: &str, pricing: Value| {
         json!({"id": id, "context_length": 1000000, "pricing": pricing,
@@ -1026,7 +1026,7 @@ fn only_prompt_size_overrides_become_the_long_context_tier() {
                 {"utc_start": 30, "utc_end": 1630, "prompt": "0.00000028", "completion": "0.00000042"},
                 {"utc_start": 1630, "utc_end": 30, "prompt": "0.00000014", "completion": "0.00000021"},
             ]})),
-            // Price keys are the base pricing object's keys; the threshold is
+            // Price keys are the base pricing object's keys, and the threshold is
             // a number, possibly written as a double.
             model("test/more-prices", json!({"prompt": "0.000002", "completion": "0.00001", "web_search": "0.01", "overrides": [
                 {"min_prompt_tokens": 150000.0, "prompt": "0.000004", "web_search": "0.02", "input_audio_cache": "0.000001"},
@@ -1149,7 +1149,7 @@ fn a_loaded_catalog_validates_slugs_parameters_images_and_mandatory_reasoning() 
         "{rejected}"
     );
 
-    // The client hands out catalog models; without a catalog, bare ones.
+    // The client hands out catalog models, and without a catalog, bare ones.
     assert_eq!(client.model(CLAUDE).unwrap().max_input_tokens, 1_000_000);
     assert!(client.resolve_model("openai/gpt-7").is_err());
     assert_eq!(
@@ -1200,7 +1200,7 @@ fn forced_tool_choice_follows_anthropic_rules_for_claude_slugs() {
         "anthropic/claude-fable-5.1:floor@preset/agents",
         &default
     ));
-    // Adaptive models: only a manual budget blocks it, on models that take
+    // Adaptive models, where only a manual budget blocks it, on models that take
     // budgets (Sonnet 5 doesn't, so a budget becomes an effort there).
     assert!(forced("anthropic/claude-sonnet-4.6", &effort));
     assert!(!forced("anthropic/claude-sonnet-4.6", &budget));
@@ -1224,7 +1224,7 @@ fn forced_tool_choice_follows_anthropic_rules_for_claude_slugs() {
 
 /// A forced tool choice (`Required` or `Specific`) is rejected before
 /// sending where `Model::supports_forced_tool_choice` says the model won't
-/// take it, as the Anthropic provider does (it was sent); `Auto` and `None`
+/// take it, as the Anthropic provider does (it was sent), while `Auto` and `None`
 /// are sent, and so is a forced choice other models take.
 #[test]
 fn a_forced_tool_choice_the_model_rejects_is_rejected_locally() {
@@ -1397,7 +1397,7 @@ fn finish_reasons_and_refusals_map_to_stop_reasons() {
     };
     let text = |content: &str| json!({"role": "assistant", "content": content});
 
-    // Anthropic classifier refusal: the turn must be dropped from history.
+    // Anthropic classifier refusal, so the turn must be dropped from history.
     let classifier = reply(
         "content_filter",
         Some("refusal"),
@@ -1417,7 +1417,7 @@ fn finish_reasons_and_refusals_map_to_stop_reasons() {
         Some(json!({"native_finish_reason": "refusal", "refusal": "Declined."}))
     );
 
-    // The model's own refusal keeps the turn; the text isn't message text.
+    // The model's own refusal keeps the turn, and the text isn't message text.
     let model = reply(
         "content_filter",
         Some("content_filter"),
@@ -1473,7 +1473,7 @@ fn finish_reasons_and_refusals_map_to_stop_reasons() {
 
 #[test]
 fn errors_in_a_200_response_are_errors() {
-    // No choices: the body holds only an error.
+    // No choices, as the body holds only an error.
     let only_error = json!({"id": "gen-1", "error": {"code": 502, "message": "Provider returned error", "metadata": {"error_type": "provider_unavailable"}}});
     let error = parse(&only_error, CLAUDE).unwrap_err();
     assert!(
@@ -1535,7 +1535,7 @@ fn usage_maps_totals_cache_counts_and_byok_charges() {
     assert_eq!(info.upstream_cost, None);
     assert!(close(info.billed(), 0.95));
 
-    // No reported cost: estimated from catalog prices.
+    // No reported cost, so it is estimated from catalog prices.
     let catalog = OpenRouterCatalog::from_json(&catalog_json()).unwrap();
     let priced = catalog.get(CLAUDE).unwrap();
     let mut no_cost = usage.clone();
@@ -1810,7 +1810,7 @@ async fn mid_stream_error_chunks_are_errors_after_the_text_so_far() {
     );
     assert_eq!(error.retry_class(), RetryClass::Transient);
 
-    // An error can be the first and only event; the streaming guide's string code.
+    // An error can be the first and only event, with the streaming guide's string code.
     let first = json!({"id": "cmpl-abc123", "object": "chat.completion.chunk", "created": 1234567890, "model": "openai/gpt-4o", "provider": "openai",
         "error": {"code": "server_error", "message": "Provider disconnected unexpectedly"},
         "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}]});
@@ -1896,7 +1896,7 @@ async fn interleaved_tool_call_deltas_are_assembled_by_index() {
     );
 }
 
-/// A `delta.tool_calls` chunk; `index` is OpenRouter's raw index.
+/// A `delta.tool_calls` chunk, and `index` is OpenRouter's raw index.
 fn tool_call_chunk(
     index: Option<u64>,
     id: Option<&str>,
@@ -1966,7 +1966,7 @@ fn assert_stream_positions_match_final_calls(events: &[StreamEvent]) {
 
 #[tokio::test]
 async fn a_new_id_at_an_index_in_use_starts_a_new_tool_call() {
-    // Some upstreams number every call 0; the new id marks the next call.
+    // Some upstreams number every call 0, and the new id marks the next call.
     let events = tool_call_stream(
         vec![
             tool_call_chunk(Some(0), Some("call_a"), Some("lookup"), "{\"q\":"),
@@ -2047,7 +2047,7 @@ async fn tool_call_events_carry_the_position_in_the_final_calls() {
 
 #[tokio::test]
 async fn calls_cut_off_by_the_token_limit_leave_the_kept_positions_intact() {
-    // Interleaved calls: the middle one is unfinished when the limit hits.
+    // Interleaved calls, and the middle one is unfinished when the limit hits.
     let events = tool_call_stream(
         vec![
             tool_call_chunk(Some(0), Some("call_a"), Some("lookup"), "{\"q\":\"a\"}"),
@@ -2119,7 +2119,7 @@ async fn streamed_reasoning_details_merge_by_index_and_only_readable_text_is_sho
                 json!([{"type": "reasoning.encrypted", "data": "def", "index": 1}]),
                 None
             ),
-            // Only details, no `reasoning` string: readable text is still streamed.
+            // Only details, no `reasoning` string, so readable text is still streamed.
             details(
                 json!([{"type": "reasoning.summary", "summary": "Summary.", "format": "google-gemini-v1", "index": 2}]),
                 None
@@ -2174,7 +2174,7 @@ fn detail_chunks_without_an_index_continue_the_previous_item() {
         ]
     );
 
-    // Continuations may omit `type`; `[REDACTED]` placeholders never mix
+    // Continuations may omit `type`, and `[REDACTED]` placeholders never mix
     // into real data.
     let mut merger = DetailsMerger::default();
     merger.merge(&json!({"type": "reasoning.text", "text": "a", "index": 0}));
@@ -2338,7 +2338,7 @@ fn routing_requirement_failures_are_permanent_but_outages_are_not() {
     assert_eq!(not_allowed.retry_class(), RetryClass::Permanent);
 
     // "When every attempted provider returned a retry hint, the error
-    // response also carries a Retry-After": the providers are only
+    // response also carries a Retry-After". The providers are only
     // temporarily unavailable, so the hint is honoured.
     let waiting = or_error(Some(503), Some(7), unroutable_body);
     assert_eq!(waiting.retry_class(), RetryClass::Transient, "{waiting}");
@@ -2357,7 +2357,7 @@ fn routing_requirement_failures_are_permanent_but_outages_are_not() {
         assert_eq!(error.retry_class(), RetryClass::Transient, "{error}");
         assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
     }
-    // A 404 stays permanent: the status alone says the request can't succeed.
+    // A 404 stays permanent, because the status alone says the request can't succeed.
     let not_allowed = or_error(
         Some(404),
         Some(7),

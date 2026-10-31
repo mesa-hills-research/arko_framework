@@ -81,7 +81,7 @@ const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 /// (openai/codex `codex-rs/core/src/client.rs`, `build_routing_hint_header`).
 const ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 /// The models whose Codex catalog entry offers Fast mode (`service_tiers`
-/// with id `priority`, "2x speed, increased usage"): the only ones Codex
+/// with id `priority`, "2x speed, increased usage"), the only ones Codex
 /// sends `service_tier: "priority"` for over ChatGPT sign-in
 /// (`ModelInfo::service_tier_for_request` in
 /// `codex-rs/protocol/src/openai_models.rs`). From
@@ -317,7 +317,7 @@ fn refuses_reasoning_summaries(body: &str) -> bool {
 }
 
 /// Retries of a rate-limited OAuth refresh when rate-limit retries are
-/// enabled: about an hour of backoff before the 429 is returned.
+/// enabled, with about an hour of backoff before the 429 is returned.
 const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
 
 /// Timing of the opt-in OAuth refresh rate-limit loop.
@@ -326,7 +326,7 @@ struct OAuthRefreshRetry {
     /// 30 s doubling to a 15-minute cap. A server hint is a minimum.
     backoff: BackoffPolicy,
     /// The longest server hint one wait honors (the backoff's own cap), far
-    /// below [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT):
+    /// below [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT), since
     /// each retry reads the store again, and another program may refresh
     /// meanwhile.
     max_server_hint: Duration,
@@ -363,7 +363,7 @@ fn is_rate_limited_refresh(error: &Error) -> bool {
 /// credentials while it runs, so a stalled token endpoint must not hold them
 /// for long. A timeout is a transient [`Error::HttpError`].
 ///
-/// The trade-off: Codex sets no timeout here. A server that rotates the
+/// The trade-off is that Codex sets no timeout here. A server that rotates the
 /// token but answers after 60 s has its answer dropped, so that rotation is
 /// lost and the next refresh with the old token is refused, just as when the
 /// connection drops mid-answer. The timeout exists so a stalled endpoint
@@ -420,7 +420,7 @@ async fn request_oauth_refresh(
 ) -> Result<OAuthRefreshResult, Error> {
     let resolved_client_id = client_id.unwrap_or(CHATGPT_OAUTH_DEFAULT_CLIENT_ID);
     let resolved_token_url = token_url.unwrap_or(CHATGPT_OAUTH_DEFAULT_TOKEN_URL);
-    // Every refresh request passes here: a token this process knows is spent
+    // Every refresh request passes here, so a token this process knows is spent
     // is never sent again.
     if spent_tokens::is_spent(refresh_token) {
         return Err(crate::codex_auth::spent_refresh_token_error(account_id));
@@ -447,7 +447,7 @@ async fn request_oauth_refresh(
             .text()
             .await
             .unwrap_or_else(|_| "<unavailable error body>".into());
-        // Reused, expired or revoked: the token can never be used again.
+        // Reused, expired or revoked, so the token can never be used again.
         if spent_tokens::refused_for_good(&error_text) {
             spent_tokens::record(refresh_token);
         }
@@ -473,7 +473,7 @@ async fn request_oauth_refresh(
         refresh_token: data["refresh_token"].as_str().map(String::from),
         id_token: data["id_token"].as_str().map(String::from),
     };
-    // The server rotated the refresh token: the one sent is spent. (Without a
+    // The server rotated the refresh token, so the one sent is spent. (Without a
     // new one in the answer, the old one stays in use.)
     if result
         .refresh_token
@@ -499,7 +499,7 @@ pub struct OpenAIClient {
     credential_store: Option<Arc<dyn ChatGptOAuthStore>>,
     /// See [`with_stream_idle_timeout`](Self::with_stream_idle_timeout).
     stream_idle_timeout: Option<Duration>,
-    /// Warn (once) when a refresh rotates tokens that no store keeps: set for
+    /// Warn (once) when a refresh rotates tokens that no store keeps. Set for
     /// credentials taken from the environment by `LLMClient::from_env`.
     warn_unsaved_rotation: bool,
     /// Counts replacements of `auth`, shared by clones. Read before waiting
@@ -512,7 +512,7 @@ pub struct OpenAIClient {
     /// Timing of the opt-in rate-limit retries of a refresh. Tests shorten it.
     oauth_refresh_retry: OAuthRefreshRetry,
     /// The organization refused reasoning summaries (it isn't verified for
-    /// them): requests ask for none from then on. Shared by clones.
+    /// them), so requests ask for none from then on. Shared by clones.
     summaries_refused: Arc<AtomicBool>,
     /// The ChatGPT backend's routing cookies, sent back on later ChatGPT
     /// OAuth requests. Shared by clones.
@@ -523,12 +523,12 @@ pub struct OpenAIClient {
 #[derive(Clone)]
 enum RefreshTarget {
     /// The credentials held when [`auth_epoch`](OpenAIClient::auth_epoch) had
-    /// this value: an explicit refresh.
+    /// this value, an explicit refresh.
     Since(u64),
     /// The credentials a request was rejected with (HTTP 401 `token_expired`).
     Rejected(ChatGptOAuthCredentials),
-    /// The credentials a request was rejected with by any other HTTP 401:
-    /// replaced only by newer ones from the store, never refreshed.
+    /// The credentials a request was rejected with by any other HTTP 401.
+    /// They are replaced only by newer ones from the store, never refreshed.
     Reload(ChatGptOAuthCredentials),
     /// Whatever the client holds, if its access token expires within this
     /// margin (after the store has been read).
@@ -613,7 +613,7 @@ impl OpenAIClient {
     }
 
     /// This client with `signed_in`'s credentials (and what belongs to
-    /// them: its store, its epoch, whether summaries are refused), keeping
+    /// them, namely its store, its epoch, whether summaries are refused), keeping
     /// this client's settings. For an entry of a ChatGPT account list that
     /// signs in as another account.
     pub(crate) fn with_sign_in_of(&self, signed_in: &OpenAIClient) -> OpenAIClient {
@@ -858,7 +858,7 @@ impl OpenAIClient {
         &self,
         retry_rate_limits: bool,
     ) -> Result<OAuthRefreshResult, Error> {
-        // Read before waiting for the refresh locks: a refresh that is under
+        // Read before waiting for the refresh locks. A refresh that is under
         // way now replaces the credentials, and its result is returned
         // instead of refreshing again.
         let since = self.auth_epoch.load(Ordering::SeqCst);
@@ -893,12 +893,12 @@ impl OpenAIClient {
     }
 
     /// After an HTTP 401 other than `token_expired`, as Codex's unauthorized
-    /// recovery does: reads the credential store and adopts newer
+    /// recovery does. Reads the credential store and adopts newer
     /// credentials of the same account from it, without refreshing. Returns
     /// whether the credentials the request was rejected with have been
     /// replaced (from the store, or by another caller meanwhile), so the
     /// request can be sent again. A failure (a store that can't be read, or
-    /// holds another account) is logged: the 401 stands.
+    /// holds another account) is logged, and the 401 stands.
     async fn reload_rejected_auth(&self, rejected: &OpenAIAuth) -> bool {
         let OpenAIAuth::ChatGptOAuth(rejected) = rejected else {
             return false;
@@ -950,7 +950,7 @@ impl OpenAIClient {
 
     /// One refresh attempt. Takes the store's refresh lock (when it has
     /// one), then this client's credential lock (always in this order), and
-    /// runs the rest in a task of its own that holds both: from the store
+    /// runs the rest in a task of its own that holds both. From the store
     /// read to installing and storing new tokens, nothing can be lost to the
     /// caller being dropped (a refresh token rotates when the request
     /// succeeds, whether or not anyone reads the response). Dropping the
@@ -959,7 +959,7 @@ impl OpenAIClient {
     ///
     /// The store's lock comes first so that a client waiting for another
     /// client's refresh of the same credentials does not hold its own
-    /// credentials meanwhile: its requests, which only read them, go on with
+    /// credentials meanwhile. Its requests, which only read them, go on with
     /// the token it holds. Once taken, the credential lock is held until the
     /// refresh has installed and stored the new tokens, so this client's
     /// requests (and [`chatgpt_oauth_credentials`](Self::chatgpt_oauth_credentials))
@@ -996,7 +996,7 @@ impl OpenAIClient {
 
     /// [`refresh_attempt`](Self::refresh_attempt) once the locks are held.
     /// With `rate_limit_retry_follows`, an HTTP 429 is returned without
-    /// reading the store again: the next attempt reads it first anyway.
+    /// reading the store again, because the next attempt reads it first anyway.
     async fn refresh_locked(
         &self,
         mut auth: OwnedRwLockWriteGuard<OpenAIAuth>,
@@ -1038,7 +1038,7 @@ impl OpenAIClient {
         }
 
         // Another program sharing the credentials may have refreshed
-        // already; refreshing again would reuse a rotated refresh token.
+        // already, and refreshing again would reuse a rotated refresh token.
         // Never refresh without reading the store first.
         if let Some(store) = &self.credential_store
             && let Some(newer) = store.before_refresh(&current)?
@@ -1087,7 +1087,7 @@ impl OpenAIClient {
             }
             Err(error) => {
                 // The server rejects a refresh token another program rotated
-                // in the meantime; its new tokens are then in the store.
+                // in the meantime, and its new tokens are then in the store.
                 if let Some(store) = &self.credential_store
                     && let Ok(Some(newer)) = store.before_refresh(&current)
                 {
@@ -1103,7 +1103,7 @@ impl OpenAIClient {
             account_id: current.account_id,
         };
         self.install_auth(&mut auth, OpenAIAuth::ChatGptOAuth(refreshed.clone()));
-        // The previous refresh token no longer works: store the new tokens
+        // The previous refresh token no longer works, so store the new tokens
         // before anything else can fail.
         if let Some(store) = &self.credential_store {
             store.save_refreshed(&refreshed, result.id_token.as_deref())?;
@@ -1169,7 +1169,7 @@ impl OpenAIClient {
     /// Sends `request`, refreshing ChatGPT credentials once on a 401 they
     /// can recover from. A 400 refusing the reasoning summaries it asks for
     /// (an organization not verified for them) sends it once more without
-    /// them, and the client asks for none from then on: the third value is
+    /// them, and the client asks for none from then on, and the third value is
     /// then `true`.
     async fn send_response_request(
         &self,
@@ -1236,7 +1236,7 @@ impl OpenAIClient {
                     .as_mut()
                     .filter(|reasoning| reasoning.summary.is_some())
             {
-                // Nothing was streamed: the same request goes again without
+                // Nothing was streamed, so the same request goes again without
                 // the summaries, and no request asks for them again.
                 log::warn!(
                     "OpenAI refused reasoning summaries for this organization (it isn't verified for them). Requests ask for none from now on."
@@ -1255,7 +1255,7 @@ impl OpenAIClient {
                 && auth.is_chatgpt_oauth();
             let recovered = if recoverable && expired {
                 // A server can reject a token before its embedded expiry.
-                // Refresh once; transient failures return to the agent's bounded
+                // Refresh once, and transient failures return to the agent's bounded
                 // recovery policy. No stream or tool calls have been delivered.
                 let refreshed = self.refresh_oauth_token_for_auth(&auth, false).await;
                 if let Err(refresh_error) = refreshed {
@@ -1266,9 +1266,9 @@ impl OpenAIClient {
                 }
                 true
             } else if recoverable && self.credential_store.is_some() {
-                // Any other 401: another program may have refreshed or signed
+                // Any other 401 means another program may have refreshed or signed
                 // in again (Codex's unauthorized recovery re-reads auth.json
-                // first). Newer stored tokens get one more try; nothing is
+                // first). Newer stored tokens get one more try, and nothing is
                 // refreshed.
                 self.reload_rejected_auth(&auth).await
             } else {
@@ -1362,7 +1362,7 @@ impl OpenAIClient {
 
     /// Headers other than authentication. The application's `originator`
     /// and `User-Agent` go out only when configured. ChatGPT OAuth requests
-    /// carry the conversation's identity as Codex does: `session-id` (the
+    /// carry the conversation's identity as Codex does, with `session-id` (the
     /// backend derives prompt-cache affinity from it), `thread-id` and
     /// `x-client-request-id`, all set to the conversation's
     /// `prompt_cache_key`, plus the turn's `x-codex-turn-state` when one is
@@ -1445,7 +1445,7 @@ impl ProviderClient for OpenAIClient {
 
         let auth = self.snapshot_auth().await;
         if auth.is_chatgpt_oauth() {
-            // Codex always streams on the ChatGPT backend; collect the stream.
+            // Codex always streams on the ChatGPT backend, so collect the stream.
             let mut stream = self.generate_stream(conversation, config).await?;
             while let Some(event) = stream.next().await {
                 if let StreamEvent::End(response) = event? {
@@ -1590,7 +1590,7 @@ impl OpenAIClient {
     /// [`stream_events`](Self::stream_events), recording each event in `trace`.
     ///
     /// The assistant output is assembled from `response.output_item.done`
-    /// events, in stream order, as Codex does: the ChatGPT backend's
+    /// events, in stream order, as Codex does, because the ChatGPT backend's
     /// `response.completed` usually carries no output items. Items only the
     /// terminal event holds are merged in (see [`Self::assemble_output`]).
     fn stream_events_traced<S, B, E>(
@@ -1794,7 +1794,7 @@ impl OpenAIClient {
                     }
                     Some("error" | "response.failed") => {
                         // `error` events are flat (`code` may be null) or wrap
-                        // an `error` object; `response.failed` carries the
+                        // an `error` object, and `response.failed` carries the
                         // error on its response. Classified in `provider_error`.
                         let value = value.get("response").unwrap_or(&value);
                         let message = value
@@ -1843,7 +1843,7 @@ impl OpenAIClient {
         let output = Self::assemble_output(&streamed.items, &response.output);
         let (mut message, mut refusal_texts, mut replay_items) = Self::parse_output(&output);
         let mut usage = Self::calculate_usage(response);
-        // ChatGPT OAuth calls are covered by the subscription: the estimate
+        // ChatGPT OAuth calls are covered by the subscription, so the estimate
         // stays visible while nothing is billed per call.
         if is_chatgpt_oauth {
             usage.billing = BillingKind::Subscription;
@@ -1876,7 +1876,7 @@ impl OpenAIClient {
         }
 
         // A stream whose output items never arrived still delivered its text
-        // and finished calls through delta events; keep them, with output
+        // and finished calls through delta events, so keep them, with output
         // items that replay them.
         let has_message = replay_items
             .iter()
@@ -1964,7 +1964,7 @@ impl OpenAIClient {
             .flatten()
             .filter(|model| !model.is_empty());
         let served = reported.clone().next().map(String::from);
-        // Reported models are untrusted text: only ASCII ids are sliced.
+        // Reported models are untrusted text, so only ASCII ids are sliced.
         fn base(id: &str) -> &str {
             if id.is_ascii() {
                 OpenAIClient::strip_openai_snapshot_suffix(id)
@@ -2091,11 +2091,11 @@ impl OpenAIClient {
 
     /// The `service_tier` sent over ChatGPT OAuth, as Codex sends it there
     /// (`service_tier_for_request` in openai/codex
-    /// `codex-rs/protocol/src/openai_models.rs`): Fast as `priority` for the
+    /// `codex-rs/protocol/src/openai_models.rs`) is Fast as `priority` for the
     /// models whose Codex catalog entry offers it, and `Default`, Codex's
     /// "standard routing" choice, as no tier at all. Fast on another model is
     /// an error rather than Codex's silent omission, as on the API-key path.
-    /// Flex and Auto stay refused: no catalog entry offers them (Codex passes
+    /// Flex and Auto stay refused, because no catalog entry offers them (Codex passes
     /// a configured `flex` through as "an API request option", but whether
     /// the ChatGPT backend honors it is unverified).
     fn chatgpt_oauth_service_tier(
@@ -2119,7 +2119,7 @@ impl OpenAIClient {
         }
     }
 
-    /// The tier a ChatGPT OAuth call is reported and priced at: the one
+    /// The tier a ChatGPT OAuth call is reported and priced at is the one
     /// requested (Fast when `priority` was sent, standard otherwise), not the
     /// `service_tier` the response echoes. The ChatGPT backend echoes
     /// `default` or `auto` for Fast calls that are served fast, and Codex
@@ -2240,7 +2240,7 @@ impl OpenAIClient {
             tools: None,
             tool_choice: None,
             parallel_tool_calls: None,
-            // Every model: the key routes requests of one conversation to the
+            // Every model. The key routes requests of one conversation to the
             // same prompt cache.
             prompt_cache_key: Some(conversation.prompt_cache_key.clone()),
             prompt_cache_options: None,
@@ -2316,7 +2316,7 @@ impl OpenAIClient {
         // `all_turns` only for GPT-5.6 ("GPT-5.6 models support this value",
         // https://developers.openai.com/api/docs/guides/reasoning), its
         // default. Over ChatGPT OAuth, Codex also sends it for GPT-6 (and the
-        // backend echoes it); with an API key GPT-6 gets nothing until it is
+        // backend echoes it), and with an API key GPT-6 gets nothing until it is
         // documented there. Earlier models default to `current_turn`.
         let reasoning_context = (conversation.model.model_type == ModelType::Reasoning
             && (is_gpt5_6 || (is_gpt6 && is_chatgpt_oauth)))
@@ -2364,7 +2364,7 @@ impl OpenAIClient {
                 // https://developers.openai.com/api/docs/models/gpt-5-pro
                 (&[OpenAIEffort::High], "high")
             } else if is_gpt5_1 {
-                // xhigh arrived with GPT-5.2; GPT-5.1 supports none through high.
+                // xhigh arrived with GPT-5.2, and GPT-5.1 supports none through high.
                 // https://developers.openai.com/api/docs/models/gpt-5.1
                 (
                     &[
@@ -2443,7 +2443,7 @@ impl OpenAIClient {
                 context: reasoning_context,
             });
         } else if config.openai_reasoning_mode.is_some() || reasoning_context.is_some() {
-            // API key: without a configured effort the model's own default
+            // API key. Without a configured effort the model's own default
             // applies (none on GPT-5.1/5.2/5.4, high on GPT-5.5 Pro, medium on
             // GPT-5.5/5.6/6). https://developers.openai.com/api/docs/guides/reasoning
             request.reasoning = Some(OpenAIReasoning {
@@ -2509,7 +2509,7 @@ impl OpenAIClient {
                         ));
                     }
                     // A reasoning item must be followed by the item it led
-                    // to; the API rejects one replayed with nothing after it
+                    // to, since the API rejects one replayed with nothing after it
                     // ("Item 'rs_…' of type 'reasoning' was provided without
                     // its required following item", openai/codex#1498). A
                     // response cut off after its reasoning (`incomplete`,
@@ -2531,7 +2531,7 @@ impl OpenAIClient {
 
                 // Messages without output items (saved by earlier versions,
                 // built by the application, or from another provider) are
-                // reconstructed: reasoning, function calls, then the text.
+                // reconstructed (reasoning, function calls, then the text).
                 if let Some(ReasoningArtifact::OpenAIEncryptedReasoning { items }) =
                     &message.reasoning_artifact
                 {
@@ -2631,7 +2631,7 @@ impl OpenAIClient {
         )?)?)
     }
 
-    /// ChatGPT OAuth requests can't carry an output limit or turn caching off:
+    /// ChatGPT OAuth requests can't carry an output limit or turn caching off, because
     /// the backend rejects `max_output_tokens`, and caches implicitly with no
     /// option to disable it. A set limit and caching turned off are ignored,
     /// with a warning logged once each.
@@ -2688,7 +2688,7 @@ impl OpenAIClient {
         }
     }
 
-    /// A result's `function_call_output.output`: the output text, or with
+    /// A result's `function_call_output.output` is the output text, or with
     /// images the model takes inside the result, an array of `input_text`
     /// (the output, then each image's label) and `input_image` items. Empty
     /// texts are left out.
@@ -2948,7 +2948,7 @@ impl OpenAIClient {
     }
 
     /// The form of an output item that later requests replay, or `None` for
-    /// items that aren't replayed: reasoning without `encrypted_content`
+    /// items that aren't replayed, namely reasoning without `encrypted_content`
     /// (it can't be replayed with `store: false`), unfinished function
     /// calls, and item types arko doesn't request. Like Codex, `status` is
     /// dropped. Everything else is kept as sent.
@@ -3080,7 +3080,7 @@ struct OpenAIToolChoiceObject {
 #[derive(Debug, Serialize)]
 struct OpenAIRequest {
     // The tier right after the model, ahead of a large `input`, as Codex
-    // orders its routing fields: gateways may read the body incrementally
+    // orders its routing fields, because gateways may read the body incrementally
     // (openai/codex `codex-rs/codex-api/src/common.rs`, `ResponsesApiRequest`).
     // `stream` stays in place, so bodies without a tier are unchanged.
     model: String,
@@ -3493,7 +3493,7 @@ mod tests {
             assert!(error.is_retryable());
             assert_eq!(error.retry_after(), Some(Duration::from_secs(60)));
             // The provider returned immediately. The caller explicitly decides
-            // when to make the next request; no hidden sixty-second retry loop.
+            // when to make the next request, and no hidden sixty-second retry loop.
             let result = super::refresh_chatgpt_oauth_token(
                 &client,
                 "synthetic-refresh",
@@ -3535,7 +3535,7 @@ mod tests {
                 let value = serde_json::to_value(request).unwrap();
 
                 assert_eq!(value["model"], "gpt-6-astra");
-                // `all_turns` over OAuth only (Codex parity); undocumented
+                // `all_turns` over OAuth only (Codex parity), and undocumented
                 // for GPT-6 with API keys.
                 if oauth {
                     assert_eq!(value["reasoning"]["context"], "all_turns");
@@ -3638,7 +3638,7 @@ mod tests {
                 Err(Error::InvalidRequest(_))
             ));
 
-            // API key: no effort configured means the model default applies,
+            // API key. No effort configured means the model default applies,
             // and no reasoning object is sent.
             let request = client
                 .build_request(&conversation, &GenerationConfig::default(), false)
@@ -3761,7 +3761,7 @@ mod tests {
         assert!(value.get("prompt_cache_options").is_none());
     }
 
-    /// The ChatGPT backend rejects `max_output_tokens` and caches implicitly:
+    /// The ChatGPT backend rejects `max_output_tokens` and caches implicitly, so
     /// an explicit limit and caching turned off are dropped, each with a
     /// warning logged once.
     #[test]
@@ -3973,7 +3973,7 @@ mod tests {
 
         let value = serde_json::to_value(request).unwrap();
 
-        // API key: no effort is sent, only the reasoning context.
+        // API key. No effort is sent, only the reasoning context.
         assert!(value["reasoning"].get("mode").is_none());
         assert!(value["reasoning"].get("effort").is_none());
         assert_eq!(value["reasoning"]["context"], "all_turns");
@@ -4060,7 +4060,7 @@ mod tests {
                 .is_none()
         );
 
-        // ChatGPT OAuth: Fast mode as Codex sends it, on every model its
+        // ChatGPT OAuth, with Fast mode as Codex sends it, on every model its
         // catalog offers it for (GPT-5.5 by its undated ID)...
         for model in [
             Model::openai_gpt_6_astra(),
@@ -4098,7 +4098,7 @@ mod tests {
             );
         }
         // Default is standard routing, which Codex expresses by sending no
-        // tier; Flex and Auto stay API-key only.
+        // tier, and Flex and Auto stay API-key only.
         let default = build(
             true,
             Model::openai_gpt_6_astra(),
@@ -4124,7 +4124,7 @@ mod tests {
             body.starts_with(r#"{"model":"gpt-6-astra","service_tier":"priority","#),
             "{body}"
         );
-        // gpt-4.1 has no Flex; gpt-5.4-nano has no Fast mode.
+        // gpt-4.1 has no Flex, and gpt-5.4-nano has no Fast mode.
         for (model, tier) in [
             (Model::openai_gpt_4_1(), OpenAIServiceTier::Flex),
             (Model::openai_gpt_5_4_nano(), OpenAIServiceTier::Fast),
@@ -4171,7 +4171,7 @@ mod tests {
         use crate::config::OpenAIServiceTier;
         let standard = GenerationConfig::default();
         let flex = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Flex);
-        // GPT-6 Astra short context: 0.1M input at $10 + 1M output at $50.
+        // GPT-6 Astra short context, 0.1M input at $10 + 1M output at $50.
         let usage = priced(None, &standard, false);
         assert_eq!(usage.reasoning_tokens, Some(400_000));
         assert!(close(usage.total_cost, 51.0));
@@ -4179,8 +4179,8 @@ mod tests {
             priced(Some("priority"), &standard, false).total_cost,
             102.0
         ));
-        // The requested tier applies only when the response doesn't report one;
-        // a Flex request served at the default tier is priced as standard.
+        // The requested tier applies only when the response doesn't report one,
+        // and a Flex request served at the default tier is priced as standard.
         assert!(close(priced(None, &flex, false).total_cost, 25.5));
         let downgraded = priced(Some("default"), &flex, false);
         assert_eq!(
@@ -4358,9 +4358,9 @@ mod tests {
         assert!(close(usage.input_cost, 1.0));
         assert_eq!(usage.billed(), 0.0);
 
-        // Fast mode over OAuth: estimated at the API's Fast rates ("increased
+        // Fast mode over OAuth is estimated at the API's Fast rates ("increased
         // usage" of the plan, per Codex), still not billed. The requested
-        // tier is reported whatever the response echoes: the ChatGPT backend
+        // tier is reported whatever the response echoes. The ChatGPT backend
         // echoes `default` or `auto` for Fast calls served fast, and Codex
         // never reads the echo.
         let fast = GenerationConfig::default()
@@ -4372,8 +4372,8 @@ mod tests {
             assert!(close(usage.total_cost, 102.0));
             assert_eq!(usage.billed(), 0.0);
         }
-        // Without Fast, no tier is sent: standard, even if `priority` is
-        // echoed.
+        // Without Fast, no tier is sent (standard, even if `priority` is
+        // echoed).
         for reported in [Some("priority"), None, Some("default")] {
             let usage = priced(reported, &GenerationConfig::default(), true);
             assert_eq!(
@@ -4382,7 +4382,7 @@ mod tests {
             );
             assert!(close(usage.total_cost, 51.0));
         }
-        // On the API the echo still wins: a Fast request served at the
+        // On the API the echo still wins, so a Fast request served at the
         // default tier is priced as standard.
         let downgraded = priced(Some("default"), &fast, false);
         assert_eq!(
@@ -4462,7 +4462,7 @@ mod model_rule_tests {
             let value = request(model.clone(), &GenerationConfig::default()).unwrap();
             assert!(value["reasoning"].get("effort").is_none(), "{}", model.id);
             // GPT-5.6 still asks for reasoning from all turns (documented for
-            // API keys); the others send no reasoning object at all.
+            // API keys), and the others send no reasoning object at all.
             if model.is_openai_gpt_5_6() {
                 assert_eq!(
                     value["reasoning"],

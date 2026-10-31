@@ -27,7 +27,7 @@ enum Step {
     Hold(tokio::sync::oneshot::Receiver<()>),
 }
 
-/// Serves one request: a 200 response head for an event stream with no
+/// Serves one request with a 200 response head for an event stream with no
 /// length (the body ends when the connection closes), then `steps`. The
 /// connection is closed only when the steps are done.
 async fn serve(steps: Vec<Step>, content_type: &'static str) -> String {
@@ -121,7 +121,7 @@ async fn last_event(client: &LLMClient, model: Model) -> Result<StreamEvent, Err
     Ok(last.expect("the stream ended without an event"))
 }
 
-/// Off by default: a stream that goes quiet is waited for.
+/// Off by default, so a stream that goes quiet is waited for.
 #[tokio::test]
 async fn without_a_timeout_a_quiet_stream_is_waited_for() {
     let (release, released) = tokio::sync::oneshot::channel();
@@ -157,7 +157,7 @@ async fn without_a_timeout_a_quiet_stream_is_waited_for() {
     assert!(matches!(event, StreamEvent::End(_)), "{event:?}");
 }
 
-/// Set on the `LLMClient`, the timeout reaches every provider: a stream
+/// Set on the `LLMClient`, the timeout reaches every provider, and a stream
 /// quiet for longer ends with a transient error naming the timeout.
 #[tokio::test]
 async fn a_stream_quiet_past_the_timeout_fails_with_a_transient_error_on_every_provider() {
@@ -215,7 +215,7 @@ async fn a_stream_quiet_past_the_timeout_fails_with_a_transient_error_on_every_p
     drop(holds);
 }
 
-/// The timeout is the longest wait between data: a body that keeps sending
+/// The timeout is the longest wait between data, so a body that keeps sending
 /// (here keep-alive comments) runs longer than the timeout. The body is in
 /// memory and the clock is paused, so how fast the machine is can't matter.
 #[tokio::test(start_paused = true)]

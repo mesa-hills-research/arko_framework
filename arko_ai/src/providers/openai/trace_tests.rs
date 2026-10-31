@@ -273,7 +273,7 @@ async fn turn_state_tokens_are_never_written_in_the_clear() {
 
 #[tokio::test]
 async fn a_final_response_that_does_not_parse_is_traced_as_an_error() {
-    // Well-formed JSON that isn't a Responses object: `output` must be a list.
+    // Well-formed JSON that isn't a Responses object, because `output` must be a list.
     let mut malformed = completed_response();
     malformed["output"] = serde_json::json!("not a list");
     let streamed = format!(

@@ -145,7 +145,7 @@ impl LLMClient {
         Ok(client)
     }
 
-    /// ChatGPT OAuth credentials from the environment: kept in step with the
+    /// ChatGPT OAuth credentials from the environment, kept in step with the
     /// Codex `auth.json` when it holds the same refresh token, otherwise in
     /// memory with a warning at the first rotation.
     fn with_chatgpt_oauth_from_env(
@@ -292,7 +292,7 @@ impl LLMClient {
         }
     }
 
-    /// The OpenAI client the OAuth methods act on: one set with
+    /// The OpenAI client the OAuth methods act on, one set with
     /// [`set_openai_client`](Self::set_openai_client), else the configured
     /// one, or, with a ChatGPT account list, the account the next request
     /// would go to. (Clones share the credentials.)
@@ -1101,8 +1101,8 @@ mod tests {
         let credentials = shared.openai_chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(credentials.access_token, "file-access");
 
-        // Another token, or the same token for another account: memory only,
-        // with a warning at the first rotation.
+        // Another token, or the same token for another account, stays in memory
+        // only, with a warning at the first rotation.
         for other in [
             oauth("other-refresh", "account"),
             oauth("shared-refresh", "other"),
@@ -1122,7 +1122,7 @@ mod tests {
         assert!(!openai(&no_refresh).has_credential_store());
         assert!(!openai(&no_refresh).warns_unsaved_rotation());
 
-        // A missing or unreadable file is no match; ~/.codex is found through
+        // A missing or unreadable file is no match, and ~/.codex is found through
         // HOME when CODEX_HOME is unset.
         let empty = tempfile::tempdir().unwrap();
         std::fs::create_dir(empty.path().join(".codex")).unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     /// A provider client set while the client is in use reaches every clone,
-    /// made before or after, from their next request: it adds the provider,
+    /// made before or after, from their next request. It adds the provider,
     /// and replaces the one the client was built with and one set before.
     #[tokio::test]
     async fn a_provider_client_set_in_use_reaches_every_clone() {

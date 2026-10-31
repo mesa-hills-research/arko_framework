@@ -44,8 +44,8 @@ impl Model {
     }
 }
 
-/// An Anthropic model's image limit: the long side and the tokens an
-/// image is scaled down to.
+/// An Anthropic model's image limit (the long side and the tokens an
+/// image is scaled down to).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AnthropicTier {
     long_edge: u32,
@@ -64,7 +64,7 @@ impl AnthropicTier {
         tokens: 1_568,
     };
 
-    /// The tier of Claude model `id`: from its version, the first two
+    /// The tier of Claude model `id`, from its version, the first two
     /// numbers of its ID (`claude-opus-4-7`, `claude-sonnet-4.5`,
     /// `claude-3-5-sonnet`).
     pub(crate) fn of(id: &str) -> Self {
@@ -79,7 +79,7 @@ impl AnthropicTier {
     }
 }
 
-/// Anthropic's rule: `⌈w / 28⌉ × ⌈h / 28⌉`, after scaling to the tier's
+/// Anthropic's rule is `⌈w / 28⌉ × ⌈h / 28⌉`, after scaling to the tier's
 /// long side and tokens.
 pub(crate) fn anthropic_tokens(size: Option<(u32, u32)>, tier: AnthropicTier) -> usize {
     let Some((width, height)) = size else {
@@ -108,7 +108,7 @@ pub(crate) fn anthropic_tokens(size: Option<(u32, u32)>, tier: AnthropicTier) ->
 
 /// OpenAI's rule for model `id`.
 fn openai_tokens(size: Option<(u32, u32)>, id: &str) -> usize {
-    // Tile-based models: base tokens, and tokens per 512-pixel tile.
+    // Tile-based models have base tokens, and tokens per 512-pixel tile.
     let tiles = if id.starts_with("gpt-4o-mini") {
         Some((2_833, 5_667))
     } else if id.starts_with("gpt-4o")
@@ -140,7 +140,7 @@ fn openai_tokens(size: Option<(u32, u32)>, id: &str) -> usize {
         }
         return base + tile * ((w / 512.0).ceil() * (h / 512.0).ceil()) as usize;
     }
-    // Patch-based models: the longest side and the patch budget the
+    // Patch-based models have the longest side and the patch budget the
     // default detail scales an image to, and the multiplier.
     let (long_edge, budget, multiplier) = if id.starts_with("gpt-6") || id.starts_with("gpt-5.6") {
         (65_535, None, 1.2)
@@ -179,7 +179,7 @@ fn openai_tokens(size: Option<(u32, u32)>, id: &str) -> usize {
     (patches(w, h) as f64 * multiplier).ceil() as usize
 }
 
-/// Google's rule: 258 tokens up to 384 pixels a side, else 258 per tile,
+/// Google's rule is 258 tokens up to 384 pixels a side, else 258 per tile,
 /// tiles of about two thirds of the shorter side.
 fn gemini_tokens((width, height): (u32, u32)) -> usize {
     if width <= 384 && height <= 384 {
@@ -238,25 +238,25 @@ mod tests {
         assert_eq!(opus.image_tokens(&Image::new_url("https://x/y.png")), 4_784);
     }
 
-    /// OpenAI's examples: patches of 32 pixels times 1.2 on current models,
+    /// OpenAI's examples, patches of 32 pixels times 1.2 on current models,
     /// within the model's own budget.
     #[test]
     fn openai_images_count_by_patches_or_tiles() {
         let luna = Model::openai_gpt_5_6_luna();
         assert_eq!(luna.image_tokens(&png(1024, 1024)), 1229);
         assert_eq!(luna.image_tokens(&png(4096, 512)), 2458);
-        // The original size: an 8K screenshot is 32,400 patches.
+        // The original size (an 8K screenshot is 32,400 patches).
         assert_eq!(luna.image_tokens(&png(7680, 4320)), 38_880);
         let mut older = luna.clone();
         older.id = "gpt-5.4".into();
-        // Within 2,500 patches: 1600 × 1600.
+        // Within 2,500 patches, 1600 × 1600.
         assert_eq!(older.image_tokens(&png(2048, 2048)), 3000);
         older.id = "gpt-4o".into();
-        // 2048 × 4096 → 1024 × 2048 → 768 × 1536: 2 × 3 tiles.
+        // 2048 × 4096 → 1024 × 2048 → 768 × 1536, giving 2 × 3 tiles.
         assert_eq!(older.image_tokens(&png(2048, 4096)), 85 + 170 * 6);
     }
 
-    /// Google's: one tile up to 384 pixels a side, else tiles of two thirds
+    /// Google's rule is one tile up to 384 pixels a side, else tiles of two thirds
     /// of the shorter side.
     #[test]
     fn gemini_images_count_by_tiles() {

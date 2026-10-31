@@ -1,5 +1,5 @@
 //! Checks how a message from another agent can reach a running Claude Code
-//! turn: as `additionalContext` from a `PostToolUse` hook, or as a user
+//! turn, as `additionalContext` from a `PostToolUse` hook, or as a user
 //! message sent while the turn runs. Uses the CLI's login.
 //!
 //! cargo run -p arko_ai --example claude_code_delivery_probe

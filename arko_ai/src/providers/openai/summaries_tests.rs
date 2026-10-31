@@ -28,7 +28,7 @@ fn summary(body: &Value) -> Option<&str> {
     body["reasoning"]["summary"].as_str()
 }
 
-/// Refused reasoning summaries are dropped: the request goes again without
+/// Refused reasoning summaries are dropped, so the request goes again without
 /// them, its response says so, and the client's later requests ask for
 /// none, streamed or not.
 #[tokio::test]

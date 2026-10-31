@@ -444,8 +444,8 @@ impl ChatGptAccountStatus {
     }
 }
 
-/// What one report about an account says about its windows and credits:
-/// the usage headers of a response, or a usage check.
+/// What one report about an account says about its windows and credits,
+/// from the usage headers of a response, or a usage check.
 struct Report {
     /// Some window is used up. `None` when the report has no window.
     used_up: Option<bool>,
@@ -485,7 +485,7 @@ struct Block {
     next_check: SystemTime,
     code: Option<String>,
     /// Set when the account may be usable again (its reset time passed, or
-    /// a check allowed it or couldn't tell): the next request tries it. The
+    /// a check allowed it or couldn't tell), and the next request tries it. The
     /// account is taken back, with [`ChatGptAccountEvent::Usable`] for this
     /// reason, once a request to it is accepted. A refusal sets it aside
     /// again quietly. So a check that allows an account the backend still
@@ -503,13 +503,13 @@ struct AccountState {
     /// them. Codex then keeps the previous ones
     /// (`merge_rate_limit_fields` in codex-rs/core/src/state/session.rs).
     credits: Option<PlanCredits>,
-    /// The backend is drawing on the credits: set by the first report of a
+    /// The backend is drawing on the credits. Set by the first report of a
     /// used-up window with credits left (which sends
     /// [`ChatGptAccountEvent::UsingCredits`]), cleared only by a report of
     /// no used-up window or no credits left, or by
     /// [`mark_usable`](ChatGptAccounts::mark_usable).
     drawing_credits: bool,
-    /// The [stamp](PoolState::stamp) of the newest report applied: a report
+    /// The [stamp](PoolState::stamp) of the newest report applied. A report
     /// stamped earlier (the headers of a request accepted before a check, a
     /// reset, or a newer request's headers) changes nothing.
     reported: u64,
@@ -615,7 +615,7 @@ impl PoolState {
             .find(|index| self.list[*index].label == label)
     }
 
-    /// A number larger than every one handed out before: the order in which
+    /// A number larger than every one handed out before, the order in which
     /// reports about the accounts arrived. A response is stamped when the
     /// backend accepts its request (its head, which carries the usage
     /// headers, arrives), a usage check when its answer arrives, and
@@ -633,7 +633,7 @@ fn fingerprint(text: &str) -> u64 {
 }
 
 /// Errors after which an account can't serve requests until its limit
-/// resets or its credits are refilled: a plan usage limit, and the credit,
+/// resets or its credits are refilled, namely a plan usage limit, and the credit,
 /// spend and quota walls Codex stops on (`QuotaExceeded`,
 /// `UsageNotIncluded`).
 fn exhausts_account(error: &Error) -> bool {
@@ -1119,7 +1119,7 @@ impl ChatGptAccounts {
     }
 
     /// The client of the account the next request would go to (the first
-    /// usable one, else the first): what the `LLMClient`'s OAuth methods
+    /// usable one, else the first), which the `LLMClient`'s OAuth methods
     /// (refreshing, reading credentials) act on.
     pub(crate) fn preferred_client(&self) -> OpenAIClient {
         let now = self.now();
@@ -1179,7 +1179,7 @@ impl ChatGptAccounts {
         }
     }
 
-    /// Runs the status checks that are due: exhausted accounts ranked above
+    /// Runs the status checks that are due, meaning exhausted accounts ranked above
     /// the first usable one whose check time has come. Skipped while
     /// another request is checking.
     async fn run_due_checks(&self) {
@@ -1284,7 +1284,7 @@ impl ChatGptAccounts {
                 .filter(|until| *until > now);
             let code = error_code(error);
             // Already set aside (a retry refused again, or another request
-            // refused at the same time): nothing new to report.
+            // refused at the same time), so nothing new to report.
             if previous.is_none() && listed {
                 events.push(ChatGptAccountEvent::Exhausted {
                     account: label,
@@ -1303,7 +1303,7 @@ impl ChatGptAccounts {
         self.emit(events);
     }
 
-    /// The error of a request no account can serve: a usage-limit error
+    /// The error of a request no account can serve is a usage-limit error
     /// retryable at the earliest known reset. Without one, the last
     /// account's own error when there is one.
     fn all_exhausted(&self, last_error: Option<Error>) -> Error {
@@ -1358,7 +1358,7 @@ impl ChatGptAccounts {
 
     /// Records that `index` accepted a request, taking it back if it was
     /// being tried again. An account set aside without a retry was refused
-    /// by a later request while this one was under way: it stays aside.
+    /// by a later request while this one was under way, so it stays aside.
     fn serving(&self, index: usize) {
         let mut events = Vec::new();
         {
@@ -1407,7 +1407,7 @@ impl ChatGptAccounts {
             let mut state = self.lock();
             state.served.insert(index);
             state.all_exhausted_sent = false;
-            // The response's own usage is reported as it came; the account's
+            // The response's own usage is reported as it came, and the account's
             // state follows it only if no newer report was applied.
             if let Some(usage) = &response.model_call_usage.plan_usage {
                 let account = &mut state.accounts[index];
@@ -1449,7 +1449,7 @@ impl ChatGptAccounts {
         self.emit(events);
     }
 
-    /// `conversation` as `index` may receive it: without the encrypted
+    /// `conversation` as `index` may receive it, without the encrypted
     /// reasoning, and the turn-state token, of other accounts. Borrowed when
     /// nothing is removed.
     fn prepare<'a>(&self, conversation: &'a Conversation, index: usize) -> Cow<'a, Conversation> {
@@ -1503,7 +1503,7 @@ impl ChatGptAccounts {
 
     /// Trying `index` again failed for another reason than its limit. A
     /// temporary failure (a server error, a short rate limit, a connection
-    /// or refresh timeout) says nothing about the limit: the next request
+    /// or refresh timeout) says nothing about the limit, so the next request
     /// tries the account again. After any other failure it stays set aside
     /// until a check allows it.
     fn retry_failed(&self, index: usize, error: &Error) {
@@ -1622,7 +1622,7 @@ impl ChatGptAccounts {
             loop {
                 let Some(mut index) = self.choose(&tried) else {
                     // An account tried again failed for another reason than
-                    // its limit: that failure is the request's, as with one
+                    // its limit. That failure is the request's, as with one
                     // account, not a usage limit until another account's
                     // reset.
                     if let Some(error) = retry_error {
@@ -1659,14 +1659,14 @@ impl ChatGptAccounts {
                     }
                     Err(error) => {
                         // The file may hold another account now (a revoked
-                        // token is the sign): the request goes to it.
+                        // token is the sign), so the request goes to it.
                         if error.kind() == ErrorKind::Authentication
                             && !std::mem::replace(&mut reread, true)
                             && self.follow_file(index).await.is_some()
                         {
                             continue;
                         }
-                        // Trying an account set aside is a guess; another
+                        // Trying an account set aside is a guess, and another
                         // account serves when it fails.
                         if !retrying {
                             return Err(error);
@@ -1788,7 +1788,7 @@ fn encrypted_reasoning(
 
 /// Reads `client`'s account usage from `url` with its credentials (refreshed
 /// first when they expire soon), sending the headers Codex's backend client
-/// sends: the bearer token, `ChatGPT-Account-Id`, and the client's
+/// sends, namely the bearer token, `ChatGPT-Account-Id`, and the client's
 /// `User-Agent` when one is configured.
 async fn fetch_usage(client: &OpenAIClient, url: &str) -> Result<ChatGptUsageStatus, Error> {
     client
@@ -1833,7 +1833,7 @@ impl ProviderClient for ChatGptAccounts {
         conversation: &Conversation,
         config: &GenerationConfig,
     ) -> Result<GenerationResponse, Error> {
-        // The ChatGPT backend always streams; collect the stream.
+        // The ChatGPT backend always streams, so collect the stream.
         let mut stream = self.open(conversation, config, BTreeSet::new()).await?;
         while let Some(event) = stream.next().await {
             if let StreamEvent::End(response) = event? {

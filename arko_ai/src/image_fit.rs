@@ -64,7 +64,7 @@ const MIB: usize = 1024 * 1024;
 /// once decoded is too large to shrink.
 pub const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Anthropic's: 10 MB of base64 per image on its own API and 5 MB on other
+/// Anthropic's limits. 10 MB of base64 per image on its own API and 5 MB on other
 /// clouds, 8,000 pixels a side and 2,000 once a request holds more than 20
 /// images (fitting every image to 2,000 keeps the requests valid as the
 /// conversation grows), 100 images for models with a 200k-token context
@@ -80,7 +80,7 @@ const ANTHROPIC: ImageLimits = ImageLimits {
     animations: true,
 };
 
-/// OpenAI's: an image over 30,000 patches of 32 pixels is refused, not
+/// OpenAI's limits. An image over 30,000 patches of 32 pixels is refused, not
 /// shrunk (the default detail of current models keeps an image's size), 512
 /// MB per request and 1,500 images. PNG, JPEG, WebP and GIF without
 /// animation.
@@ -97,7 +97,7 @@ const OPENAI: ImageLimits = ImageLimits {
     animations: false,
 };
 
-/// Google's: 20 MB of inline data per request and 3,600 images. PNG, JPEG,
+/// Google's limits. 20 MB of inline data per request and 3,600 images. PNG, JPEG,
 /// WebP, HEIC and HEIF.
 const GOOGLE: ImageLimits = ImageLimits {
     max_image_bytes: 15 * MIB,
@@ -216,7 +216,7 @@ pub fn fit_image(image: &Image, limits: &ImageLimits) -> Result<Option<Image>, S
     off_the_runtime(|| fit_decoded(&bytes, format, limits, &why))
 }
 
-/// Runs `work` without holding up a Tokio worker: through `block_in_place`
+/// Runs `work` without holding up a Tokio worker, through `block_in_place`
 /// on a multi-threaded runtime's worker, directly otherwise.
 fn off_the_runtime<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
@@ -227,7 +227,7 @@ fn off_the_runtime<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
-/// Data that isn't standard base64 can't be checked: it goes as it is when
+/// Data that isn't standard base64 can't be checked, so it goes as it is when
 /// it is within the byte limit and of a format the provider takes.
 fn unreadable_as_is(
     data: &str,
@@ -254,7 +254,7 @@ struct Header {
     size: Option<(u32, u32)>,
     orientation: Orientation,
     animated: bool,
-    /// The MIME type it is sent as: its format's, or the one it came with.
+    /// The MIME type it is sent as (its format's, or the one it came with).
     mime: String,
 }
 
@@ -585,8 +585,8 @@ mod tests {
         );
     }
 
-    /// Too wide: scaled down to the longest side, keeping its aspect, and
-    /// still a PNG.
+    /// Too wide (scaled down to the longest side, keeping its aspect, and
+    /// still a PNG).
     #[test]
     fn a_wide_image_is_scaled_to_the_longest_side() {
         let fitted = fit_image(&png(400, 100, false), &limits(MIB, 200))
@@ -596,8 +596,8 @@ mod tests {
         assert_eq!(mime(&fitted), "image/png");
     }
 
-    /// Too large in bytes: re-encoded as JPEG, and scaled down further until
-    /// it fits.
+    /// Too large in bytes (re-encoded as JPEG, and scaled down further until
+    /// it fits).
     #[test]
     fn a_large_image_is_reencoded_and_shrunk_until_it_fits() {
         let image = png(300, 300, true);
@@ -616,7 +616,7 @@ mod tests {
     }
 
     /// Over a patch limit (OpenAI refuses an image over 30,000 squares of
-    /// 32 pixels): scaled down until it covers no more.
+    /// 32 pixels) is scaled down until it covers no more.
     #[test]
     fn an_image_is_fitted_to_a_patch_limit() {
         let limit = PatchLimit { size: 32, max: 100 };
@@ -635,7 +635,7 @@ mod tests {
     /// A JPEG with EXIF orientation 6 (stored sideways, as phones store a
     /// portrait photo).
     fn sideways_photo() -> Image {
-        // Stored 40 × 20: red on top, blue below.
+        // Stored 40 × 20, red on top, blue below.
         let pixels = image::RgbImage::from_fn(40, 20, |_, y| {
             if y < 10 {
                 image::Rgb([255, 0, 0])
@@ -647,7 +647,7 @@ mod tests {
         DynamicImage::ImageRgb8(pixels)
             .write_to(&mut Cursor::new(&mut jpeg), ImageFormat::Jpeg)
             .unwrap();
-        // An APP1 segment: "Exif", a big-endian TIFF header, one IFD entry
+        // An APP1 segment with "Exif", a big-endian TIFF header, one IFD entry
         // (orientation, a SHORT, 6), no next IFD.
         let mut exif = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
         exif.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
@@ -681,8 +681,8 @@ mod tests {
         );
     }
 
-    /// A format the provider doesn't take is converted when it can be read:
-    /// a BMP to PNG, an animated GIF to its first frame for OpenAI. One that
+    /// A format the provider doesn't take is converted when it can be read.
+    /// Examples are a BMP to PNG, an animated GIF to its first frame for OpenAI. One that
     /// can't be read here is refused, saying what to do.
     #[test]
     fn formats_the_provider_doesnt_take_are_converted_or_refused() {

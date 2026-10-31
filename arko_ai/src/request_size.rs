@@ -183,7 +183,7 @@ mod tests {
     use crate::model::Model;
     use crate::tool::{ToolCall, ToolDefinition, ToolResult, ToolResultImage};
 
-    /// 1×1 PNG: 20 bytes of header is all the size reads.
+    /// 1×1 PNG, so 20 bytes of header is all the size reads.
     fn png(width: u32, height: u32) -> Image {
         let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         bytes.extend(width.to_be_bytes());
@@ -256,7 +256,7 @@ mod tests {
             grown.add_message(message);
         }
         assert_eq!(grown, sizes);
-        // The text alone: the same text, the images counted, no tokens.
+        // The text alone (the same text, the images counted, no tokens).
         let text =
             RequestSizes::text_of_messages(&conversation, &conversation.messages, Some(&tools));
         assert_eq!(

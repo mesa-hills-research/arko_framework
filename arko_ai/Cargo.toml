@@ -13,8 +13,8 @@ categories = ["api-bindings", "asynchronous"]
 [dependencies]
 # TLS is rustls with the ring provider (already compiled for tokenizer
 # downloads) and the OS trust store. reqwest's default backend would add
-# aws-lc, another C build; CI rejects aws-lc and OpenSSL.
-# No http2 feature: requests use HTTP/1.1, as they did with reqwest 0.11.
+# aws-lc, another C build, and CI rejects aws-lc and OpenSSL.
+# No http2 feature. Requests use HTTP/1.1, as they did with reqwest 0.11.
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "charset", "system-proxy", "rustls-no-provider"] }
 rustls = { version = "0.23.27", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
@@ -24,7 +24,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 base64 = "0.22"
-# Shrinks images over a provider's limits; pure Rust codecs only.
+# Shrinks images over a provider's limits, with pure Rust codecs only.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 url = "2.4"
 log.workspace = true

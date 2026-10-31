@@ -40,7 +40,7 @@ type TokenDigest = [u8; 32];
 static SPENT: Mutex<BTreeSet<TokenDigest>> = Mutex::new(BTreeSet::new());
 
 fn spent() -> MutexGuard<'static, BTreeSet<TokenDigest>> {
-    // Only whole digests are ever inserted: valid after any panic.
+    // Only whole digests are ever inserted, so it is valid after any panic.
     SPENT
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -49,7 +49,7 @@ fn spent() -> MutexGuard<'static, BTreeSet<TokenDigest>> {
 #[cfg(test)]
 thread_local! {
     /// Tests run in parallel threads of one process, many with the same fake
-    /// tokens: each test thread (with its current-thread runtime) gets its
+    /// tokens, so each test thread (with its current-thread runtime) gets its
     /// own record, as if it were a process of its own.
     static TEST_SCOPE: u64 = {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -65,7 +65,7 @@ fn digest(refresh_token: &str) -> TokenDigest {
     hasher.finalize().into()
 }
 
-/// Records `refresh_token` as spent: a refresh with it returned a new one,
+/// Records `refresh_token` as spent when a refresh with it returned a new one,
 /// or the server refused it for good.
 pub(crate) fn record(refresh_token: &str) {
     let digest = digest(refresh_token);
@@ -84,7 +84,7 @@ pub(crate) fn credentials_spent(credentials: &ChatGptOAuthCredentials) -> bool {
 }
 
 /// Error codes of a refused refresh after which the refresh token can never
-/// be used again (as Codex classifies them: exhausted, expired, revoked).
+/// be used again (exhausted, expired or revoked, as Codex classifies them).
 const FINAL_REFRESH_ERRORS: [&str; 3] = [
     "refresh_token_reused",
     "refresh_token_expired",
@@ -92,7 +92,7 @@ const FINAL_REFRESH_ERRORS: [&str; 3] = [
 ];
 
 /// Whether the error `body` of a refused refresh says the refresh token can
-/// never be used again. The code is read as Codex reads it: `error` when it
+/// never be used again. The code is read as Codex reads it, with `error` when it
 /// is a string, else `error.code`, else a top-level `code`.
 pub(crate) fn refused_for_good(body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body.trim()) else {

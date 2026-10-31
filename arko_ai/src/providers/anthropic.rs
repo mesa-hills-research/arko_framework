@@ -295,7 +295,7 @@ impl AnthropicClient {
 
         let adaptive = Self::uses_adaptive_thinking(conversation, config);
 
-        // `thinking.display` works in both adaptive and manual modes; where
+        // `thinking.display` works in both adaptive and manual modes, and where
         // summarized text is already the default it is a no-op.
         // https://platform.claude.com/docs/en/build-with-claude/thinking
         if config.anthropic_summarized_thinking == Some(true)
@@ -405,7 +405,7 @@ impl AnthropicClient {
                     ));
                 }
 
-                // Opus 4.6 has no interleaved thinking in manual mode; the beta
+                // Opus 4.6 has no interleaved thinking in manual mode, and the beta
                 // header would be a silent no-op.
                 // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
                 if conversation.model.is_opus_4_6() && Self::uses_manual_thinking(config) {
@@ -508,7 +508,7 @@ impl AnthropicClient {
 
     /// Normalizes a finished turn. `trailing_tool_call` says the last content
     /// block was a completed `tool_use` block, which a token limit may have
-    /// cut short. Stop reasons:
+    /// cut short. Stop reasons are at
     /// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
     fn finish_turn(
         message: &mut Message,
@@ -532,7 +532,7 @@ impl AnthropicClient {
             message.tool_calls.pop();
         }
 
-        // Streaming classifier refusals: partial output must be discarded and
+        // Streaming classifier refusals. Partial output must be discarded and
         // the turn removed before continuing.
         // https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals
         let refusal = (stop_reason == StopReason::Refusal).then(|| {
@@ -710,7 +710,7 @@ impl AnthropicClient {
                             "thinking" => {
                                 current_thinking = Some((String::new(), None));
                             }
-                            // Encrypted; kept for replay but never shown as reasoning text.
+                            // Encrypted, kept for replay but never shown as reasoning text.
                             "redacted_thinking" => {
                                 fragments.push(
                                     AnthropicReasoningFragment::RedactedThinking {
@@ -810,7 +810,7 @@ impl AnthropicClient {
                     }
                     Some("message_delta") => {
                         // The stop reason ends the message. Its `usage` carries
-                        // cumulative counts; without it (as from some proxies)
+                        // cumulative counts, and without it (as from some proxies)
                         // the `message_start` counts stand.
                         if value
                             .get("delta")
@@ -855,7 +855,7 @@ impl AnthropicClient {
                             };
 
                             // A tool block still open here never finished, so it
-                            // was never added; only a closed trailing one may be cut.
+                            // was never added, and only a closed trailing one may be cut.
                             let trailing_tool_call =
                                 last_block_type == "tool_use" && current_tool.is_none();
                             let (stop_reason, refusal) = Self::finish_turn(
@@ -916,7 +916,7 @@ impl AnthropicClient {
         let sanitized = super::without_foreign_settings(&conversation.model, config);
         let config: &GenerationConfig = &sanitized;
         // Omitted unless set, so the provider default applies (1.0, which is
-        // also what thinking requires; validate_config rejects anything else).
+        // also what thinking requires, and validate_config rejects anything else).
         // Models that take no sampling parameters reject one, so it is dropped.
         let omits_sampling = conversation.model.omits_anthropic_sampling_parameters();
         if omits_sampling && config.temperature.is_some() {
@@ -951,7 +951,7 @@ impl AnthropicClient {
         };
 
         // Summarized thinking text must be requested where the model defaults to
-        // omitted text; elsewhere it is already the default.
+        // omitted text, and elsewhere it is already the default.
         let display = (config.anthropic_summarized_thinking == Some(true)
             && conversation
                 .model
@@ -996,7 +996,7 @@ impl AnthropicClient {
                     }
 
                     // These caps come from older Anthropic guidance for manual
-                    // budgets and are no longer in the current docs; they are kept
+                    // budgets and are no longer in the current docs, and they are kept
                     // deliberately for models on the numeric-budget path.
                     if (conversation.model.is_opus_4_5() || conversation.model.is_sonnet_4_6())
                         && *budget_tokens > 52_000
@@ -1256,7 +1256,7 @@ impl AnthropicClient {
         Ok(converted)
     }
 
-    /// A `tool_result`'s `content`: the output text, or with images the
+    /// A `tool_result`'s `content` is the output text, or with images the
     /// model takes inside the result, `text` blocks (the output, then each
     /// image's label) and `image` blocks. Empty text blocks are left out,
     /// since the API rejects them.
@@ -1547,7 +1547,7 @@ struct AnthropicToolResultContent {
     is_error: Option<bool>,
 }
 
-/// A `tool_result`'s content: a string, or content blocks.
+/// A `tool_result`'s content is a string, or content blocks.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum AnthropicToolResultBody {
@@ -1621,7 +1621,7 @@ struct AnthropicUsage {
     output_tokens_details: Option<AnthropicOutputTokensDetails>,
 }
 
-/// `usage.output_tokens_details`: `thinking_tokens` counts the raw reasoning
+/// In `usage.output_tokens_details`, `thinking_tokens` counts the raw reasoning
 /// (part of `output_tokens`), not the possibly summarized thinking text.
 #[derive(Debug, Default, Deserialize)]
 struct AnthropicOutputTokensDetails {
@@ -2024,7 +2024,7 @@ mod tests {
             .collect();
         assert_eq!(ids, ["toolu_a"]);
 
-        // An unfinished block was never added; earlier calls stay.
+        // An unfinished block was never added, and earlier calls stay.
         let mut events = vec![message_start()];
         events.extend(tool_block(0, "toolu_a", "{\"n\":1}", true));
         events.extend(tool_block(1, "toolu_b", "{\"n\":", false));
@@ -2233,13 +2233,13 @@ mod tests {
             .unwrap()
         };
         let config = GenerationConfig::default();
-        // 100,000 tokens in all: $0.10 input, $0.01 reads, $0.50 output.
+        // 100,000 tokens in all, $0.10 input, $0.01 reads, $0.50 output.
         let small = AnthropicClient::generation_response(response(99_000), &conversation, &config);
         assert!(close(
             small.usage.total_cost,
             (1000.0 * 0.10 + 99_000.0 * 0.01 + 1000.0 * 0.50) / 1e6
         ));
-        // 121,000: $0.50 input, $0.05 reads, $2.50 output.
+        // 121,000, $0.50 input, $0.05 reads, $2.50 output.
         let large = AnthropicClient::generation_response(response(120_000), &conversation, &config);
         assert!(close(
             large.usage.total_cost,
@@ -2276,7 +2276,7 @@ mod tests {
             usage.service_tier,
             Some(crate::pricing::ServiceTier::Standard)
         );
-        // Opus 4.6: $5 input, $0.50 reads, $6.25 5m writes, $10 1h writes, $25 output.
+        // Opus 4.6 is $5 input, $0.50 reads, $6.25 5m writes, $10 1h writes, $25 output.
         assert!(close(usage.input_cost, 100.0 * 5.0 / 1e6));
         assert!(close(usage.cache_read_cost.unwrap(), 1000.0 * 0.5 / 1e6));
         assert!(close(
@@ -2316,7 +2316,7 @@ mod tests {
         let mut usage = AnthropicClient::calculate_usage(&reported);
         assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
         assert_eq!(usage.inference_geo.as_deref(), Some("us"));
-        // Opus 4.8: $5 + $25 standard; fast 2x and US-only 1.1x stack.
+        // Opus 4.8 is $5 + $25 standard, and fast 2x and US-only 1.1x stack.
         usage.calculate_cost(&Model::anthropic_claude_opus_4_8(), None);
         assert!(close(usage.total_cost, 30.0 * 2.0 * 1.1));
         // Opus 4.5 offers neither modifier.
@@ -2326,7 +2326,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_reason_without_usage_still_ends_the_stream() {
-        // Some proxies omit `usage` on the final `message_delta`; the
+        // Some proxies omit `usage` on the final `message_delta`, and the
         // `message_start` counts stand.
         let mut events = vec![message_start()];
         events.extend(text_block(0, "Hi"));
@@ -2395,7 +2395,7 @@ mod tests {
         assert_eq!(usage.billing, BillingKind::Metered);
         assert!(close(usage.billed(), usage.total_cost));
 
-        // Streaming: before any output...
+        // Streaming, before any output...
         let events = vec![
             message_start(),
             json!({"type":"message_delta","delta":{"stop_reason":"refusal",
@@ -2629,7 +2629,7 @@ mod model_rule_tests {
 
     #[test]
     fn summarized_display_works_in_both_modes_and_is_a_no_op_where_default() {
-        // Opus 4.6: summarized is already the default.
+        // For Opus 4.6, summarized is already the default.
         let adaptive = GenerationConfig::default()
             .with_reasoning(ReasoningConfig::anthropic_adaptive())
             .with_anthropic_summarized_thinking(true);
@@ -2786,7 +2786,7 @@ mod model_rule_tests {
         .unwrap();
         let mut usage = AnthropicClient::calculate_usage(&reported);
         usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
-        // $4 input + $20 output + $8 1-hour writes; fast 2x and US-only 1.1x stack.
+        // $4 input + $20 output + $8 1-hour writes, and fast 2x and US-only 1.1x stack.
         let expected = (4.0 + 20.0 + 8.0) * 2.0 * 1.1;
         assert!(
             (usage.total_cost - expected).abs() < 1e-6,
@@ -2794,7 +2794,7 @@ mod model_rule_tests {
             usage.total_cost
         );
 
-        // The response, not the request, decides: standard speed, global inference.
+        // The response, not the request, decides (standard speed, global inference).
         let standard: super::AnthropicUsage = serde_json::from_value(json!({
             "input_tokens": 1_000_000, "output_tokens": 0,
             "speed": "standard", "inference_geo": "global"
@@ -2840,7 +2840,7 @@ mod base_url_tests {
                 .interactions_url(),
             "http://proxy.local/v1/interactions"
         );
-        // OpenAI and Voyage are covered by their own request tests; construction
+        // OpenAI and Voyage are covered by their own request tests, and construction
         // with an override must at least be possible for every client.
         let _ = OpenAIClient::new("k").with_base_url("http://proxy.local/v1");
         let _ = VoyageClient::new("k").with_base_url("http://proxy.local/v1");

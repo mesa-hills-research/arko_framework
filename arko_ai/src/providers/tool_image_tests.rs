@@ -38,7 +38,7 @@ fn pixels() -> Image {
 enum Layout {
     /// Results only.
     ResultsOnly,
-    /// Results, an answer text, and a labelled image as sibling content: the
+    /// Results, an answer text, and a labelled image as sibling content, the
     /// layout the arko_agents runtime writes, and conversations saved before
     /// result images existed hold.
     Siblings,
@@ -188,7 +188,7 @@ fn output_of<'a>(input: &'a Value, call_id: &str) -> &'a Value {
         .unwrap()
 }
 
-/// OpenAI (API key and ChatGPT OAuth): the image goes in the call's
+/// OpenAI (API key and ChatGPT OAuth) puts the image in the call's
 /// `function_call_output.output`, after the output and its label.
 #[test]
 fn openai_sends_result_images_inside_the_function_call_output() {
@@ -262,7 +262,7 @@ fn gemini_3_sends_result_images_inside_the_function_result() {
 }
 
 /// Gemini 2.x, Gemini ids whose version can't be read, and OpenRouter take
-/// no images in results: they follow the results after the runtime's label,
+/// no images in results, so they follow the results after the runtime's label,
 /// byte for byte the layout the runtime writes today (the answer text, then
 /// the labelled image).
 #[test]
@@ -303,7 +303,7 @@ fn other_models_get_result_images_after_the_results_as_before() {
     );
 }
 
-/// Result images count as image input: a model without it rejects them
+/// Result images count as image input, so a model without it rejects them
 /// before sending (the only case where OpenAI and Anthropic would not take
 /// them inside the result).
 #[test]
@@ -333,7 +333,7 @@ fn models_without_image_input_reject_result_images() {
     }
 }
 
-/// Gemini 3.x: the rest of a tool-result message is folded into its last
+/// Gemini 3.x, where the rest of a tool-result message is folded into its last
 /// result, with no `user_input` after the results (TI-3).
 mod gemini_3_fold {
     use super::*;
@@ -516,7 +516,7 @@ mod gemini_3_fold {
     }
 
     /// An image message after the results joins the last result's images,
-    /// with the text before it in its own message as its label; a text at
+    /// with the text before it in its own message as its label, and a text at
     /// the end of the results message doesn't label it.
     #[test]
     fn an_image_message_after_the_results_is_folded_with_its_label() {
@@ -537,8 +537,8 @@ mod gemini_3_fold {
         );
     }
 
-    /// A user message after the model's turn is a new input, not folded;
-    /// neither is a later results message.
+    /// A user message after the model's turn is a new input, not folded,
+    /// and neither is a later results message.
     #[test]
     fn a_user_message_after_an_assistant_message_is_not_folded() {
         let mut conversation = results_message(Vec::new(), 1);

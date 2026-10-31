@@ -277,7 +277,7 @@ async fn a_crash_reports_the_cli_error() {
     let mut session = ClaudeSession::start(fake()).await.unwrap();
     session.send("exit").await.unwrap();
     let error = session.receive_turn().await.unwrap_err();
-    // Stderr is read concurrently; give the tail a moment to fill.
+    // Stderr is read concurrently, so give the tail a moment to fill.
     let ClaudeError::Exited { .. } = error else {
         panic!("expected an exit error, got {error}");
     };

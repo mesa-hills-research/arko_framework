@@ -110,7 +110,7 @@ fn load_error(id: &str, revision: &str, error: impl std::fmt::Display) -> Error 
     ))
 }
 
-/// Whether a load error is the Hub client's for a failed download: the
+/// Whether a load error is the Hub client's for a failed download, when the
 /// request failed (`request error: ...`, which names the URL and the
 /// network failure), was retried to its limit, or got an answer without the
 /// headers a download needs. These are the messages of hf-hub's `ApiError`,
@@ -247,7 +247,7 @@ mod tests {
             .contains("HF_ENDPOINT")
         );
 
-        // Rejected before any network request: no network advice.
+        // Rejected before any network request, so no network advice.
         let Err(Error::TokenizerError(message)) =
             load_tokenizer("not a repository!", Some("main"), None, false)
         else {
@@ -263,7 +263,7 @@ mod tests {
         .to_string();
         assert!(!corrupt.contains("HF_ENDPOINT"), "{corrupt}");
 
-        // A revision the repository doesn't have: the Hub answers 404.
+        // A revision the repository doesn't have, so the Hub answers 404.
         let missing = load_error(
             "voyageai/voyage-4-lite",
             "44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9",

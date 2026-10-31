@@ -44,7 +44,7 @@ fn tls_config() -> rustls::ClientConfig {
     let mut config = match versions().with_platform_verifier() {
         Ok(builder) => builder.with_no_client_auth(),
         // Keep client construction infallible, as with the previous native
-        // TLS backend: HTTPS requests then fail certificate verification.
+        // TLS backend, so HTTPS requests then fail certificate verification.
         Err(error) => {
             log::error!(
                 "arko_ai: system CA certificates are unavailable ({error}). HTTPS requests will fail"
@@ -73,11 +73,11 @@ fn tls_config() -> rustls::ClientConfig {
 /// so reqwest's TLS options (extra root certificates, TLS versions, disabling
 /// certificate verification) do not apply to this builder.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
-    // No total request deadline: a connected generation may take arbitrarily
+    // No total request deadline, because a connected generation may take arbitrarily
     // long. Keep connection establishment and idle connection-pool cleanup
     // bounded.
     //
-    // Redirects are never followed: provider APIs don't redirect, and reqwest
+    // Redirects are never followed, because provider APIs don't redirect, and reqwest
     // strips only standard credential headers on a redirect, so `x-api-key`,
     // `x-goog-api-key` or `chatgpt-account-id`, and a re-sent refresh-token
     // body, would reach the redirect target.
@@ -176,7 +176,7 @@ impl GenerationResponse {
     }
 }
 
-/// Rejects content the model can't take before anything is sent: images
+/// Rejects content the model can't take before anything is sent, namely images
 /// (including those inside tool results) for models without image input, and
 /// mid-conversation configuration updates for providers that can't send them.
 pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
@@ -422,7 +422,7 @@ mod transport_tests {
         assert!(!server.await.unwrap(), "the redirect was followed");
     }
 
-    // Network checks for the TLS setup: `cargo test -p arko_ai -- --ignored tls_`.
+    // Network checks for the TLS setup run with `cargo test -p arko_ai -- --ignored tls_`.
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn tls_verifies_public_certificates_over_http_1_1() {
@@ -457,7 +457,7 @@ mod transport_tests {
                 expired = true;
                 break;
             }
-            // io::Error::source() skips its payload (the wrapped rustls error); descend into it instead.
+            // io::Error::source() skips its payload (the wrapped rustls error), so descend into it instead.
             source = match current
                 .downcast_ref::<std::io::Error>()
                 .and_then(std::io::Error::get_ref)

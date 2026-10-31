@@ -1,4 +1,4 @@
-//! Requests whose tool configuration lists no tools: every provider sends
+//! Requests whose tool configuration lists no tools, and every provider sends
 //! them as it sends a request without a tool configuration.
 
 use crate::{
@@ -71,7 +71,7 @@ fn base(model: &Model) -> GenerationConfig {
 }
 
 /// An empty tool list sends no `tools`, no tool choice and no parallel-call
-/// setting (providers refuse a tool choice without tools): the request is
+/// setting (providers refuse a tool choice without tools), so the request is
 /// the one sent without a tool configuration, byte for byte. Gemini, which
 /// can't turn parallel calls off, doesn't refuse the setting either when
 /// there are no tools to call.
@@ -100,7 +100,7 @@ fn an_empty_tool_list_sends_no_tool_fields() {
 }
 
 /// A conversation that called a tool, continued without tools (an agent
-/// switched to a chat): the ask, a reply with its reasoning, text and a
+/// switched to a chat) holds the ask, a reply with its reasoning, text and a
 /// call, the call's result with an image and the user's next words beside
 /// it, and the reply after.
 fn conversation_with_tool_history(model: Model) -> Conversation {
@@ -154,7 +154,7 @@ fn body_of(conversation: &Conversation, config: &GenerationConfig, oauth: bool) 
 }
 
 /// Written as text, a conversation that called tools goes to every
-/// provider without tools: no call or result items, and no reasoning of the
+/// provider without tools with no call or result items, and no reasoning of the
 /// turn that made the call (an OpenAI output item replays the call itself).
 /// The result's image follows its text.
 #[test]
@@ -249,7 +249,7 @@ fn offered_tools_needs_a_tool() {
 }
 
 /// Tool output written as text can't pass for the user or the record's own
-/// lines: every line is quoted, each result names its call's ID and tool
+/// lines. Every line is quoted, each result names its call's ID and tool
 /// (so parallel calls of one tool stay apart), a failed call says so, and
 /// the message opens by saying what the record is.
 #[test]

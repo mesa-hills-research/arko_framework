@@ -128,7 +128,7 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
             &OPENROUTER,
         ],
         // Claude Code takes the reasoning effort, fast mode and the cache
-        // TTL; it decides the rest itself.
+        // TTL, and it decides the rest itself.
         Provider::ClaudeCode => vec![
             &VERBOSITY,
             &OPENAI_REASONING_MODE,
@@ -149,7 +149,7 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
                 &ANTHROPIC_INFERENCE_GEO,
             ];
             // Claude through OpenRouter takes a cache TTL and interleaved
-            // thinking; summarized thinking and long context are what
+            // thinking, and summarized thinking and long context are what
             // OpenRouter already does for it.
             if !is_claude_family(&model.id) {
                 settings.extend([

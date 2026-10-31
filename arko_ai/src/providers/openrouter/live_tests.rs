@@ -127,7 +127,7 @@ fn describe(details: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// Turn 1 asks for a tool call with reasoning on; turn 2 replays the
+/// Turn 1 asks for a tool call with reasoning on, and turn 2 replays the
 /// reasoning_details verbatim with the tool result and must be accepted.
 async fn tool_continuation(client: &OpenRouterClient, model: &str, stream: bool) {
     let mut conversation = Conversation::new(Model::openrouter(model));
@@ -430,7 +430,7 @@ async fn older_claude_accepts_effort_without_max_tokens() {
 }
 
 /// The catalog lists `parallel_tool_calls` for few models (not Claude, GPT
-/// or Gemini); check that `false` still reaches them rather than being
+/// or Gemini), so check that `false` still reaches them rather than being
 /// dropped, since agents rely on it.
 #[tokio::test]
 #[ignore = "live OpenRouter request; needs OPENROUTER_API_KEY"]

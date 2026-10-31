@@ -1,4 +1,4 @@
-//! Reasoning summaries in a Responses stream: each summary delta is a
+//! Reasoning summaries in a Responses stream. Each summary delta is a
 //! `StreamEvent::ReasoningChunk` as it comes, apart from the reply's text,
 //! with an API key and over ChatGPT OAuth.
 

@@ -383,8 +383,8 @@ mod tests {
             ),
             Known(60 * MINUTE)
         );
-        // Uncached requests: caching off with an API key, or a model without
-        // caching.
+        // Uncached requests (caching off with an API key, or a model without
+        // caching).
         assert_eq!(
             lifetime(&astra, &hour.clone().with_prompt_caching(false)),
             Disabled

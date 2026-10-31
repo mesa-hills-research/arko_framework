@@ -271,7 +271,7 @@ impl OpenRouterClient {
 /// - "No available model provider meets your routing requirements" or "No
 ///   allowed providers" (503 or 404) is a permanent configuration error
 ///   (code `no_eligible_provider`), unless it carries a retry hint
-///   (`Retry-After`, or a delay in the body) and a retryable status: OpenRouter
+///   (`Retry-After`, or a delay in the body) and a retryable status. OpenRouter
 ///   adds `Retry-After` when every attempted provider returned a retry hint,
 ///   so it is then transient and keeps the hint. A 404 stays permanent.
 /// - Otherwise [`Error::ProviderError`], classified by `error_type` first,
@@ -350,7 +350,7 @@ pub(crate) fn openrouter_error(
         Some("provider_overloaded" | "provider_unavailable" | "rate_limit_exceeded")
     );
     // "When every attempted provider returned a retry hint, the error
-    // response also carries a `Retry-After`": the providers are only
+    // response also carries a `Retry-After`". The providers are only
     // unavailable for now, and a retryable status keeps the hint.
     let waiting = converted.retry_after().is_some() && converted.is_retryable();
     if unroutable

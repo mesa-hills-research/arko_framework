@@ -58,7 +58,7 @@ impl ToolOutput {
         self
     }
 
-    /// The MCP `content` of the result: the text (left out when empty and
+    /// The MCP `content` of the result is the text (left out when empty and
     /// there are images), then each image.
     fn content(&self) -> Vec<Value> {
         let mut content = Vec::new();

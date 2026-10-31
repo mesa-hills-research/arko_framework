@@ -123,7 +123,7 @@ impl Serialize for Image {
     }
 }
 
-/// How an image is written: with its data, or with the reference of a store
+/// How an image is written, with its data, or with the reference of a store
 /// that holds it.
 #[derive(Deserialize)]
 enum Repr {
