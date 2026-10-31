@@ -1,4 +1,4 @@
-//! Every language's chunks: the invariants (exact coverage, byte bound, UTF-8
+//! Every language's chunks, covering the invariants (exact coverage, byte bound, UTF-8
 //! boundaries, lines, identities), determinism, stable IDs, bounded work on adversarial
 //! input, mutated inputs, the structure the rules give each sample, Markdown's
 //! metadata region, and the original languages' output against a golden file.
@@ -98,7 +98,7 @@ fn options(max_bytes: usize) -> Options {
     }
 }
 
-/// Chunks `text` and checks every invariant: the metadata region starts at byte 0, the
+/// Chunks `text` and checks every invariant. The metadata region starts at byte 0, the
 /// chunks cover the rest exactly and in order, each within the bound and on UTF-8
 /// boundaries, with correct lines, IDs (path + trimmed content + occurrence) and token
 /// estimates, all in one language.
@@ -191,7 +191,7 @@ fn chunking_is_deterministic() {
 }
 
 /// An edit inside one chunk (a space before one of its line breaks) changes that chunk
-/// and at most its neighbours; every other chunk keeps its ID.
+/// and at most its neighbours, and every other chunk keeps its ID.
 #[test]
 fn ids_survive_unrelated_edits() {
     for (sample, _) in all_samples() {
@@ -222,7 +222,7 @@ fn ids_survive_unrelated_edits() {
     }
 }
 
-/// Giant lines, deep nesting and long runs of brackets or quotes stay bounded: exact
+/// Giant lines, deep nesting and long runs of brackets or quotes stay bounded, with exact
 /// coverage, within the bound, in bounded time (the parser's work budget and the
 /// fallback).
 #[test]
@@ -410,8 +410,8 @@ const SNIPPETS: &[&str] = &[
     "%>",
 ];
 
-/// Random edits: deletions, duplications, insertions of syntax-heavy snippets, swapped
-/// lines and truncations, on every grammar, at several bounds.
+/// Random edits (deletions, duplications, insertions of syntax-heavy snippets, swapped
+/// lines and truncations), on every grammar, at several bounds.
 #[test]
 fn mutated_inputs_hold_the_invariants() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
@@ -463,7 +463,7 @@ fn scope_at(file: &FileChunks, text: &str, needle: &str) -> String {
         .clone()
 }
 
-/// The structure each language's rules give its sample: the scope of the chunk holding
+/// The structure each language's rules give its sample, namely the scope of the chunk holding
 /// a piece of text, at the default bound.
 #[test]
 fn rules_give_each_sample_its_structure() {
@@ -758,7 +758,7 @@ fn markdown_metadata_region_title_and_description() {
     assert!(file.chunks.is_empty() && file.metadata.is_some());
 }
 
-/// The original nine languages chunk exactly as before the other grammars: the golden
+/// The original nine languages chunk exactly as before the other grammars, and the golden
 /// file is the `chunk` output of the build before them (branch arko-index-dense).
 #[test]
 fn original_languages_match_the_golden_output() {

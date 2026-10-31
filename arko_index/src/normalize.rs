@@ -81,7 +81,7 @@ pub(crate) fn annotations(source: &str) -> String {
             let legacy = matches!(token, "FAR" | "NEAR" | "PASCAL" | "WINAPI");
             let exception = token.ends_with("_TRY") || (standalone && token.contains("_CATCH"));
             if ann || region || legacy || exception {
-                // Function-like macros require argument-aware recovery; leave
+                // Function-like macros require argument-aware recovery, so leave
                 // those intact rather than changing source length or semantics.
                 if source[i..].trim_start().starts_with('(') && !region {
                     continue;

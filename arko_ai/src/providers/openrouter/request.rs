@@ -44,7 +44,7 @@ pub(crate) struct PreparedRequest {
 }
 
 /// `POST /api/v1/chat/completions` body. Deprecated or removed fields
-/// (`usage`, `stream_options`, `transforms`) are never sent: usage is always
+/// (`usage`, `stream_options`, `transforms`) are never sent, because usage is always
 /// returned.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ChatRequest {
@@ -145,7 +145,7 @@ fn invalid(message: String) -> Error {
     Error::InvalidRequest(message)
 }
 
-/// Interleaved thinking on Claude: OpenRouter sends the beta that turns it
+/// Interleaved thinking on Claude. OpenRouter sends the beta that turns it
 /// on, but has no way to turn it off. (On other models the setting is
 /// dropped with the other Anthropic ones, see `without_foreign_settings`.)
 fn check_interleaved_thinking(model: &Model, config: &GenerationConfig) -> Result<(), Error> {
@@ -166,7 +166,7 @@ fn image_part(image: &Image) -> Value {
     json!({"type": "image_url", "image_url": {"url": url}})
 }
 
-/// User content: a plain string for a single text part, otherwise parts.
+/// User content is a plain string for a single text part, otherwise parts.
 fn user_content(contents: &[&Content]) -> Value {
     if let [Content::Text(text)] = contents {
         return Value::String(text.clone());
@@ -212,7 +212,7 @@ fn assistant_message(message: &Message, raw_invalid_arguments: bool) -> Result<V
             .iter()
             .map(|call| {
                 // Invalid arguments are replayed exactly as the model wrote
-                // them to OpenAI models; other vendors need a JSON object
+                // them to OpenAI models, and other vendors need a JSON object
                 // (Claude `tool_use.input`), so they get `{}` as with the
                 // direct providers, and the tool result explains the error.
                 let arguments = match &call.invalid_arguments {
@@ -229,7 +229,7 @@ fn assistant_message(message: &Message, raw_invalid_arguments: bool) -> Result<V
             .collect();
     }
     match &message.reasoning_artifact {
-        // Replayed verbatim and in order: Claude signatures and Gemini thought
+        // Replayed verbatim and in order, because Claude signatures and Gemini thought
         // signatures must match what the model produced.
         Some(ReasoningArtifact::OpenRouter { details }) if !details.is_empty() => {
             value["reasoning_details"] = Value::Array(details.clone());
@@ -258,7 +258,7 @@ fn convert_messages(conversation: &Conversation) -> Result<Vec<Value>, Error> {
                 ));
             }
             previous_was_update = true;
-            // An update belongs before a user turn; between a tool call and
+            // An update belongs before a user turn, and between a tool call and
             // its result it would break the call/result pairing.
             let before_tool_results = conversation.messages.get(position + 1).is_some_and(|next| {
                 next.content
@@ -270,7 +270,7 @@ fn convert_messages(conversation: &Conversation) -> Result<Vec<Value>, Error> {
                     "A configuration update sits between tool calls and their results. Add it after the tool results, before the next user turn.".into(),
                 ));
             }
-            // The Chat Completions form: a content-less system message.
+            // The Chat Completions form is a content-less system message.
             messages.push(json!({
                 "role": "system",
                 "content": "",
@@ -580,7 +580,7 @@ impl OpenRouterClient {
         // With caching off, OpenAI models that bill cache writes (GPT-5.6 and
         // later) still write cache entries unless explicit mode leaves the
         // request without breakpoints. The catalog says which models bill
-        // writes; without one, the registry's model of the same id does.
+        // writes, and without one, the registry's model of the same id does.
         let takes_cache_options = match info {
             Some(_) => paid_cache_writes,
             None => base_slug(slug)
@@ -630,7 +630,7 @@ impl OpenRouterClient {
         })
     }
 
-    /// The `provider` object: the merged preferences, Auto Router overrides
+    /// The `provider` object holds the merged preferences, Auto Router overrides
     /// for router slugs, and the Auto Exacto policy for tool requests.
     fn routing_preferences(
         &self,

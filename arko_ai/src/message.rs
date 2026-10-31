@@ -120,7 +120,7 @@ impl Image {
 }
 
 /// Bytes `start..end` of the base64 `data` (fewer at its end), decoding
-/// only the characters that hold them: base64 decodes in groups of 4
+/// only the characters that hold them, because base64 decodes in groups of 4
 /// characters from any multiple of 4. `None` when they aren't valid
 /// standard base64.
 fn decode_range(data: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
@@ -163,7 +163,7 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
             return Some((u32::from(width), u32::from(height)));
         }
         if marker == 0xda {
-            // The scan's data starts: no frame header came before it.
+            // The scan's data starts, and no frame header came before it.
             return None;
         }
         at += 2 + usize::from(u16::from_be_bytes([header[2], header[3]]));
@@ -171,7 +171,7 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// Width and height from an image file's first bytes: PNG, GIF or WebP.
+/// Width and height from an image file's first bytes (PNG, GIF or WebP).
 fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     let u16_le = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
     let u24_le = |at: usize| {
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(message.image_count(), 3);
         assert_eq!(message.remove_images(), 3);
         assert!(!message.has_images());
-        // Results stay, with their output; label text is the caller's.
+        // Results stay, with their output, and label text is the caller's.
         assert_eq!(message.content.len(), 3);
         assert_eq!(message.content[0].as_tool_result().unwrap().output, "a.png");
         assert!(message.content[2].as_text().is_some());

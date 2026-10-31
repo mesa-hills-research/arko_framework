@@ -1,4 +1,4 @@
-//! Scaling prototype: an order-preserving, bounded-window parallel map.
+//! Scaling prototype, an order-preserving, bounded-window parallel map.
 //!
 //! Workers claim item indices from a shared counter, but never more than `window`
 //! items ahead of the consumer, so at most `window` results wait in the reorder
@@ -26,7 +26,7 @@ pub fn threads() -> usize {
 }
 
 /// Bytes of source that may be read but not yet handed to the sink (being processed,
-/// or finished and waiting for an earlier item): `ARKO_INDEX_WINDOW_MB` if set, else
+/// or finished and waiting for an earlier item) is `ARKO_INDEX_WINDOW_MB` if set, else
 /// 32 MB per thread. A byte budget instead of an item count lets workers run far
 /// ahead past one huge file at the head while still bounding memory.
 pub(crate) fn window_bytes(threads: usize) -> usize {
@@ -37,9 +37,9 @@ pub(crate) fn window_bytes(threads: usize) -> usize {
         .map_or(threads.max(1).saturating_mul(32 << 20), |mb| mb << 20)
 }
 
-/// Window weights for listed files: size from a parallel `lstat` pass (batches of
-/// 256: per-item claiming of such tiny work is slower than one thread) plus 4 KB, so
-/// many empty files still count. Only a memory heuristic: a file that changes or
+/// Window weights for listed files, size from a parallel `lstat` pass (batches of
+/// 256, because per-item claiming of such tiny work is slower than one thread) plus 4 KB, so
+/// many empty files still count. Only a memory heuristic, since a file that changes or
 /// vanishes before it is read just has a stale weight.
 pub(crate) fn source_weights(listed: &[crate::files::Listed], threads: usize) -> Vec<usize> {
     let mut weights = Vec::with_capacity(listed.len());
@@ -204,7 +204,7 @@ mod tests {
     fn a_panic_ends_the_walk_with_an_error() {
         let items: Vec<usize> = (0..200).collect();
         for threads in [1, 4] {
-            // A budget of a few items: the workers wait for the panicked head item.
+            // A budget of a few items, so the workers wait for the panicked head item.
             let result = ordered_map_weighted(
                 &items,
                 threads,

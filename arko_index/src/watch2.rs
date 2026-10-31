@@ -141,7 +141,7 @@ impl FileRec {
     }
 }
 
-/// A delta not yet acknowledged: the (old, new) record versions of each file with a
+/// A delta not yet acknowledged is the (old, new) record versions of each file with a
 /// non-empty diff, in path order. Its JSON is rendered from the store on delivery.
 #[derive(Clone, Serialize, Deserialize, Default)]
 struct PendingDelta {
@@ -238,7 +238,7 @@ fn decode_entry(buf: &[u8]) -> Result<Vec<EntryChunk<'_>>, Error> {
     Ok(out)
 }
 
-/// The original watcher's per-file diff: chunks of `new` whose id is not in `old`
+/// The original watcher's per-file diff, namely chunks of `new` whose id is not in `old`
 /// (added) or whose chunk or raw bytes differ (changed), and ids of `old` missing
 /// from `new` (removed). Chunk equality is JSON equality (serde_json is
 /// deterministic and these fields serialize injectively).
@@ -280,7 +280,7 @@ fn diff<'a>(old: &[EntryChunk<'a>], new: &[EntryChunk<'a>]) -> FileDiff<'a> {
     d
 }
 
-/// The record store: appends are buffered and written with `pwrite`. `sync` makes
+/// The record store. Appends are buffered and written with `pwrite`. `sync` makes
 /// everything appended so far durable (before the journal record that refers to it).
 struct Store {
     file: File,
@@ -461,7 +461,7 @@ impl Inotify {
     }
     fn forget(&mut self, wd: i32) {
         if let Some(d) = self.wd_dir.remove(&wd) {
-            // The path may have a newer watch (directory replaced): keep that mapping.
+            // The path may have a newer watch (directory replaced), so keep that mapping.
             if self.dir_wd.get(&d) == Some(&wd) {
                 self.dir_wd.remove(&d);
             }
@@ -631,12 +631,12 @@ fn release_memory() {
     }
 }
 
-/// One candidate's outcome: `None` if it vanished or is not text. Otherwise its new
+/// One candidate's outcome is `None` if it vanished or is not text. Otherwise its new
 /// record, with the encoded chunks if its content hash changed.
 type Update = Option<(FileRec, Option<Vec<u8>>)>;
 
 /// A candidate's index, [`Update`] and report entry if it was skipped, and, when it was
-/// chunked, its parse warning (`Some(None)`: none).
+/// chunked, its parse warning (`Some(None)` means none).
 type CandidateRead = (usize, Update, Option<Skipped>, Option<Option<String>>);
 
 impl Watcher2 {
@@ -676,7 +676,7 @@ impl Watcher2 {
         );
         let mut snap = match File::open(dir.join("watch2.snap")) {
             Ok(f) => {
-                // Check the version before the shape: older prototype states differ.
+                // Check the version before the shape, because older prototype states differ.
                 #[derive(Deserialize)]
                 struct Version {
                     version: u32,
@@ -706,7 +706,7 @@ impl Watcher2 {
             return Err("watch state root mismatch".into());
         }
         let load_s = t0.elapsed().as_secs_f64();
-        // Replay the journal; a torn final line was never acknowledged as committed.
+        // Replay the journal. A torn final line was never acknowledged as committed.
         let snap_existed = dir.join("watch2.snap").is_file();
         let mut replayed = 0usize;
         let wal_path = dir.join("watch2.wal");
@@ -723,8 +723,8 @@ impl Watcher2 {
                 replayed += 1;
             }
         }
-        // Different engine/options: drop cached partitions (reparse) but keep sequences;
-        // the old records stay readable for the diff.
+        // Different engine/options, so drop cached partitions (reparse) but keep sequences,
+        // and the old records stay readable for the diff.
         let engine_changed = snap.engine != engine;
         if engine_changed {
             for rec in snap.files.values_mut() {
@@ -734,7 +734,7 @@ impl Watcher2 {
             snap.engine = engine;
             snap.max_bytes = options.max_bytes;
         }
-        // Different rules (or a state from before rules were recorded): the startup
+        // Different rules (or a state from before rules were recorded), so the startup
         // reconciliation applies the current rules like any offline change.
         let rules_changed = snap_existed && snap.rules.as_ref() != Some(rules);
         snap.rules = Some(rules.clone());
@@ -826,7 +826,7 @@ impl Watcher2 {
         let mut line = serde_json::to_vec(&r)?;
         line.push(b'\n');
         // Once bytes may have reached the journal, a failure leaves its contents
-        // uncertain: refuse further work until reopen (replay decides).
+        // uncertain, so refuse further work until reopen (replay decides).
         let written = self
             .wal
             .write_all(&line)
@@ -899,9 +899,9 @@ impl Watcher2 {
         }
         next.write_buf()?;
         next.file.sync_all()?;
-        // Publish: the checkpoint names the new store; the journal restarts empty.
+        // Publish. The checkpoint names the new store, and the journal restarts empty.
         // If the checkpoint fails, the disk holds either the old checkpoint (old store,
-        // journal intact) or the new one; both are consistent, but this instance can no
+        // journal intact) or the new one. Both are consistent, but this instance can no
         // longer tell which, so it refuses further work until reopened.
         for (r, l) in self.snap.files.values_mut().zip(&locs) {
             r.rec = *l;
@@ -917,8 +917,8 @@ impl Watcher2 {
         Ok(())
     }
 
-    /// `dirs = None`: full reconciliation (walk, lstat all, add watches).
-    /// `dirs = Some(set)`: re-list only those directories.
+    /// `dirs = None` is full reconciliation (walk, lstat all, add watches).
+    /// `dirs = Some(set)` re-lists only those directories.
     fn reconcile(&mut self, dirs: Option<&BTreeSet<String>>) -> Result<(), Error> {
         let t = Instant::now();
         // 1. Current inventory of the scope, as relative paths.
@@ -973,7 +973,7 @@ impl Watcher2 {
                     }
                     // Excluded CACHEDIR.TAG directories keep a watch for their tag, so that
                     // removing the tag brings their files back. Check the tag again after
-                    // the watch exists: a removal in between would otherwise go unseen.
+                    // the watch exists, because a removal in between would otherwise go unseen.
                     let mut trigger_only = HashMap::new();
                     for (wd, rel) in info_added.lock().unwrap().drain(..) {
                         live.insert(wd);
@@ -1050,9 +1050,9 @@ impl Watcher2 {
                                 .map(|(k, _)| k.clone()),
                         );
                     }
-                    // Hard links: a write through one path notifies only that path's
+                    // Hard links, because a write through one path notifies only that path's
                     // directory, but every other path of the inode changed too (measured).
-                    // Inode counts are maintained incrementally; the table is scanned for
+                    // Inode counts are maintained incrementally, and the table is scanned for
                     // siblings only when an in-scope file shares its inode.
                     let in_scope: BTreeSet<&String> = present.iter().chain(known.iter()).collect();
                     let linked: HashSet<(u64, u64)> = in_scope
@@ -1079,7 +1079,7 @@ impl Watcher2 {
                 }
             };
         self.stats.insert("last_list_s", t.elapsed().as_secs_f64());
-        // 2. Metadata pre-check in parallel; only changed/racy/new files are read.
+        // 2. Metadata pre-check in parallel, and only changed/racy/new files are read.
         let t = Instant::now();
         let root = self.root.clone();
         let batches: Vec<&[String]> = scope_present.chunks(256).collect();
@@ -1113,7 +1113,7 @@ impl Watcher2 {
         )?;
         self.stats.insert("last_stat_s", t.elapsed().as_secs_f64());
         // 3. Read, hash and (only if the hash changed) chunk the candidates in parallel.
-        //    New records go to the store in candidate order; each file's diff against
+        //    New records go to the store in candidate order, and each file's diff against
         //    its previous version is computed as it arrives (only "is it empty" is kept).
         let t = Instant::now();
         let options = self.options.clone();
@@ -1146,7 +1146,7 @@ impl Watcher2 {
                     files::Read::Gone => return Ok((i, None, None, None)),
                 };
                 let hash = Hash32(Sha256::digest(data.text.as_bytes()).into());
-                // Metadata after the read: a write racing the read changes ctime, so the
+                // Metadata after the read. A write racing the read changes ctime, so the
                 // record stays untrusted and the next pass re-reads it.
                 let meta = std::fs::symlink_metadata(&item.path)
                     .map(|m| meta_of(&m))
@@ -1241,11 +1241,11 @@ impl Watcher2 {
                 ack: None,
             })?;
         }
-        // 5. The report. A full pass replaces it; a re-listing replaces the entries of
+        // 5. The report. A full pass replaces it, and a re-listing replaces the entries of
         // the files directly inside the re-listed directories and of the files it read
         // (directory entries change only through full passes, which every directory
         // event, tag change and, when honoured, ignore-file change triggers).
-        // Updated in place (no copy of a large report per batch); `report.json` is
+        // Updated in place (no copy of a large report per batch), and `report.json` is
         // written by the next `next_change` call, after this batch's delta is delivered.
         let files = self.snap.files.len() as u64;
         match dirs {
@@ -1498,7 +1498,7 @@ mod tests {
         let mut w = Watcher2::open(r, state.path(), &options).unwrap();
         assert_eq!(drain(&mut w, &mut model, idle), 1);
         assert_eq!(model, fresh(r));
-        // Live edits: change, append, delete, create, whitespace-only, hard link.
+        // Live edits (change, append, delete, create, whitespace-only, hard link).
         std::fs::write(r.join("a/f1.rs"), "fn first_1() { changed(); }\n").unwrap();
         std::fs::write(
             r.join("a/f2.rs"),
@@ -1514,7 +1514,7 @@ mod tests {
         drain(&mut w, &mut model, idle);
         assert_eq!(model, fresh(r), "hard-linked sibling updated");
         drop(w);
-        // Clean restart: nothing to report.
+        // Clean restart, so nothing to report.
         let mut w = Watcher2::open(r, state.path(), &options).unwrap();
         assert_eq!(drain(&mut w, &mut model, idle), 0);
         drop(w);
@@ -1538,7 +1538,7 @@ mod tests {
             !bytes.windows(7).any(|x| x == b"garbage"),
             "torn tail removed"
         );
-        // Compaction once dead versions dominate (no slack): a new store, same results.
+        // Compaction once dead versions dominate (no slack), giving a new store and the same results.
         w.store_slack = 0;
         for i in 7..20 {
             std::fs::write(r.join(format!("a/f{i}.rs")), format!("fn v2_{i}() {{}}\n")).unwrap();

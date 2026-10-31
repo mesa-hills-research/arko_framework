@@ -252,7 +252,7 @@ const OVERRIDE_PRICE_KEYS: &[&str] = &[
     "input_audio_cache",
 ];
 
-/// The long-context tier: the first `pricing.overrides` entry whose only
+/// The long-context tier is the first `pricing.overrides` entry whose only
 /// condition is `min_prompt_tokens` (the entry applies when the prompt has
 /// more tokens than that), with its threshold.
 ///
@@ -285,7 +285,7 @@ fn long_context_override(pricing: &Value) -> Option<(&Value, usize)> {
         })
 }
 
-/// One catalog entry as a [`Model`]: context length, the top provider's
+/// One catalog entry as a [`Model`], with context length, the top provider's
 /// output limit, image input, prices (with the first prompt-size override as
 /// the long-context tier) and the rest in [`OpenRouterModelInfo`].
 pub(crate) fn model_from_entry(entry: &Value) -> Option<Model> {

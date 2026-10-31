@@ -8,7 +8,7 @@ use serde_json::json;
 use std::{collections::VecDeque, time::UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// One scripted answer: to the account `account`, at `path`.
+/// One scripted answer, to the account `account`, at `path`.
 struct Answer {
     account: &'static str,
     path: &'static str,
@@ -17,7 +17,7 @@ struct Answer {
     headers: Vec<(&'static str, String)>,
     /// How long the mock waits before answering.
     delay: Duration,
-    /// How long the mock waits between the head and the body: the request
+    /// How long the mock waits between the head and the body. The request
     /// is accepted at once, and its response ends this much later.
     body_delay: Duration,
 }
@@ -499,7 +499,7 @@ async fn requests_move_back_once_the_usage_endpoint_allows_the_primary() {
         mock.take();
         take(&events);
 
-        // Still used up: the secondary goes on serving.
+        // Still used up, so the secondary goes on serving.
         mock.expect([
             answer(PRIMARY, "/wham/usage", 200, &usage_status(false, false)),
             answer(SECONDARY, "/responses", 200, &turn("enc_b2", "secondary")),
@@ -545,7 +545,7 @@ async fn requests_move_back_once_the_usage_endpoint_allows_the_primary() {
         assert_eq!(mock.take()[0].account, SECONDARY);
         assert!(take(&events).is_empty());
 
-        // The operator pressed a usage reset: the next check allows it.
+        // The operator pressed a usage reset, so the next check allows it.
         mock.expect([
             answer(PRIMARY, "/wham/usage", 200, &usage_status(true, false)),
             answer(PRIMARY, "/responses", 200, &turn("enc_a", "primary")),
@@ -592,7 +592,7 @@ async fn credits_keep_an_account_usable() {
             .unwrap();
         take(&events);
 
-        // Out of plan usage, but with credits: usable, as Codex decides.
+        // Out of plan usage, but with credits (usable, as Codex decides).
         mock.expect([
             answer(PRIMARY, "/wham/usage", 200, &usage_status(false, true)),
             answer(PRIMARY, "/responses", 200, &turn("enc_a", "primary"))
@@ -611,7 +611,7 @@ async fn credits_keep_an_account_usable() {
             Some("primary")
         );
         // The check is the first report of the window used up with credits
-        // left; the response's headers, saying the same, add nothing.
+        // left, and the response's headers, saying the same, add nothing.
         let events = take(&events);
         assert_eq!(
             using_credits_events(&events),
@@ -671,7 +671,7 @@ async fn the_reset_time_and_mark_usable_bring_an_account_back_without_a_check() 
         );
         assert!(mock.take().iter().all(|seen| seen.method == "POST"));
 
-        // Exhausted again; the operator says it was reset.
+        // Exhausted again, and the operator says it was reset.
         mock.expect([
             answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
             answer(SECONDARY, "/responses", 200, &turn("enc_b2", "secondary")),
@@ -726,7 +726,7 @@ async fn check_now_reads_every_exhausted_account_and_a_failed_check_allows_a_tri
         take(&events);
         mock.take();
 
-        // The usage endpoint refuses the check: nothing is decided, and the
+        // The usage endpoint refuses the check, so nothing is decided, and the
         // next request tries the account.
         mock.expect([answer(
             PRIMARY,
@@ -739,8 +739,8 @@ async fn check_now_reads_every_exhausted_account_and_a_failed_check_allows_a_tri
         assert!(take(&events).is_empty());
         assert_eq!(mock.take()[0].method, "GET");
 
-        // The trial is refused again: set aside quietly, served by the
-        // secondary, and not tried again before the next check.
+        // The trial is refused again (set aside quietly, served by the
+        // secondary, and not tried again before the next check).
         mock.expect([
             answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
             answer(SECONDARY, "/responses", 200, &turn("enc_b2", "secondary")),
@@ -785,7 +785,7 @@ async fn check_now_reads_every_exhausted_account_and_a_failed_check_allows_a_tri
         assert_eq!(mock.unanswered(), 0);
 
         // A check that allows it while the backend still refuses it (a
-        // limit the check doesn't show): tried once, nobody notified.
+        // limit the check doesn't show), tried once, nobody notified.
         mock.expect([
             answer(PRIMARY, "/wham/usage", 200, &usage_status(true, false)),
             answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
@@ -807,7 +807,7 @@ async fn check_now_reads_every_exhausted_account_and_a_failed_check_allows_a_tri
         assert!(take(&events).is_empty());
         assert_eq!(accounts.statuses()[0].retry, None);
 
-        // Allowed, and accepted: taken back.
+        // Allowed, and accepted, so taken back.
         mock.expect([
             answer(PRIMARY, "/wham/usage", 200, &usage_status(true, false)),
             answer(PRIMARY, "/responses", 200, &turn("enc_a", "primary")),
@@ -967,7 +967,7 @@ async fn each_account_is_sent_only_its_own_reasoning_and_turn_state() {
         assert_eq!(conversation.current_openai_turn_state(), Some("ts_primary"));
         mock.take();
 
-        // Within the same turn the primary is exhausted: the secondary gets
+        // Within the same turn the primary is exhausted, so the secondary gets
         // neither the primary's reasoning nor its turn-state token, but the
         // rest of the conversation unchanged.
         mock.expect([
@@ -1006,7 +1006,7 @@ async fn each_account_is_sent_only_its_own_reasoning_and_turn_state() {
         conversation.add_assistant_message_from_response(response);
         assert_eq!(replayed(&mock.take()[0]), (vec!["enc_b".to_string()], None));
 
-        // Back on the primary: its own reasoning, not the secondary's.
+        // Back on the primary, with its own reasoning, not the secondary's.
         accounts.mark_usable("primary").unwrap();
         conversation.add_user_message("Finish.");
         mock.expect([answer(PRIMARY, "/responses", 200, &turn("enc_a2", "end"))]);
@@ -1353,7 +1353,7 @@ async fn an_acceptance_older_than_a_refusal_leaves_the_account_aside() {
 }
 
 /// Both accounts exhausted, the first resetting in 10 minutes and the second
-/// in 3 days; then 11 minutes pass, so the next request tries the first.
+/// in 3 days, then 11 minutes pass, so the next request tries the first.
 async fn both_exhausted_then_the_first_resets(mock: &Mock) -> ChatGptAccounts {
     let (accounts, _events) = pool(mock);
     let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
@@ -1388,7 +1388,7 @@ async fn a_retry_that_fails_for_a_moment_returns_that_failure_and_is_tried_again
             ),
             answer(PRIMARY, "/responses", 200, &turn("enc_a", "primary")),
         ]);
-        // As with one account: the server error, not a usage limit until
+        // As with one account, the server error, not a usage limit until
         // the second account's reset three days later.
         let error = accounts
             .generate_text(&conversation(), &GenerationConfig::default())
@@ -1464,7 +1464,7 @@ fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEv
         .collect()
 }
 
-/// The usage endpoint after a manual reset: the weekly window back at 1%,
+/// The usage endpoint after a manual reset, with the weekly window back at 1%,
 /// credits unchanged, one reset left.
 fn usage_after_reset() -> String {
     json!({
@@ -1500,7 +1500,7 @@ fn started_now(
         .collect()
 }
 
-/// The production sequence: agents' responses report the weekly window used
+/// The production sequence. Agents' responses report the weekly window used
 /// up with credits (one without credits headers), the operator presses a
 /// reset, and responses to requests accepted before it end afterwards.
 #[tokio::test]
@@ -1511,7 +1511,7 @@ async fn drawing_on_credits_is_reported_once_and_older_headers_never_report_it_a
         let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
         let ms = Duration::from_millis;
 
-        // Three requests at once; their responses end in another order than
+        // Three requests at once, and their responses end in another order than
         // they were accepted, and one has no credits headers.
         mock.expect([
             answer(PRIMARY, "/responses", 200, &turn("enc_1", "a"))
@@ -1535,8 +1535,8 @@ async fn drawing_on_credits_is_reported_once_and_older_headers_never_report_it_a
         assert!(status.drawing_credits && status.using_credits());
         assert!(!status.exhausted);
 
-        // Two more are accepted while the window is still used up; then the
-        // operator presses a reset and the usage is read; then a request
+        // Two more are accepted while the window is still used up, then the
+        // operator presses a reset and the usage is read, then a request
         // reports the window at 1% and ends before the two older ones.
         mock.expect([
             answer(PRIMARY, "/responses", 200, &turn("enc_4", "d"))
@@ -1573,7 +1573,7 @@ async fn drawing_on_credits_is_reported_once_and_older_headers_never_report_it_a
         assert_eq!(usage.primary.as_ref().unwrap().used_percent, 1.0);
         assert_eq!(mock.unanswered(), 0);
 
-        // The window used up again: a new episode, reported once. Headers
+        // The window used up again, a new episode, reported once. Headers
         // without credits keep the last ones known, as in Codex.
         mock.expect([
             answer(PRIMARY, "/responses", 200, &turn("enc_7", "g")).weekly("100", Some("34500")),
@@ -1618,7 +1618,7 @@ async fn check_now_and_mark_usable_end_drawing_on_credits() {
         mock.take();
 
         // check_now reads an account drawing on credits too, though it is
-        // not set aside; an older response ending afterwards changes nothing.
+        // not set aside, and an older response ending afterwards changes nothing.
         mock.expect([
             answer(PRIMARY, "/responses", 200, &turn("enc_2", "b"))
                 .weekly("100", Some("34571.50"))
@@ -1644,7 +1644,7 @@ async fn check_now_and_mark_usable_end_drawing_on_credits() {
                 .any(|seen| seen.method == "GET" && seen.account == PRIMARY)
         );
 
-        // Drawing again; then the operator marks it usable after a reset,
+        // Drawing again, then the operator marks it usable after a reset,
         // while an older request is under way.
         mock.expect([
             answer(PRIMARY, "/responses", 200, &turn("enc_3", "c")).weekly("100", Some("34571")),
@@ -1861,7 +1861,7 @@ async fn a_list_that_follows_files_signs_in_as_the_account_a_file_now_holds() {
         conversation.add_user_message("Go on.");
         mock.take();
 
-        // `codex login` to another account, between two requests: the next
+        // `codex login` to another account, between two requests, and the next
         // request signs in as that one, without the first one's reasoning.
         write_auth(&path, SECONDARY);
         mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_b", "two"))]);
@@ -1932,7 +1932,7 @@ async fn a_rejection_stands_unless_the_file_holds_another_account_the_list_may_u
         write_auth(&second, SECONDARY);
         let config = GenerationConfig::default();
 
-        // Not asked to follow: the file changes, the rejection is the error.
+        // Not asked to follow, the file changes, and the rejection is the error.
         let accounts = ChatGptAccounts::new([file_account("login", &first, &mock.url)]).unwrap();
         write_auth(&first, THIRD);
         mock.expect([answer(PRIMARY, "/responses", 401, &token_revoked())]);
@@ -1944,7 +1944,7 @@ async fn a_rejection_stands_unless_the_file_holds_another_account_the_list_may_u
         assert_eq!(mock.take().len(), 1);
 
         // Following, but the file holds the account of another entry of the
-        // list: it is not used, and the rejection is the error.
+        // list, so it is not used, and the rejection is the error.
         write_auth(&first, PRIMARY);
         let accounts = ChatGptAccounts::new([
             file_account("first", &first, &mock.url),
@@ -2048,7 +2048,7 @@ async fn a_file_is_read_once_per_rejected_request_and_when_its_entry_is_set_asid
         mock.script.lock().unwrap().clear();
 
         // The entry is used up, and the operator signs in as another
-        // account: the next request goes to it, with no wait for a reset.
+        // account, so the next request goes to it, with no wait for a reset.
         write_auth(&path, PRIMARY);
         mock.expect([answer(
             PRIMARY,

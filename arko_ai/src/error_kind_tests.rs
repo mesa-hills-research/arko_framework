@@ -52,7 +52,7 @@ fn openai_api_errors() {
                 r#"{"error":{"message":"Incorrect API key provided: sk-proj-****. You can find your API key at https://platform.openai.com/account/api-keys.","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}"#,
                 Authentication,
             ),
-            // No code: the 401 decides.
+            // No code, so the 401 decides.
             (
                 Some(401),
                 r#"{"error":{"message":"You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY).","type":"invalid_request_error","param":null,"code":null}}"#,
@@ -106,7 +106,7 @@ fn openai_api_errors() {
 
 #[test]
 fn chatgpt_oauth_backend_errors() {
-    // The ChatGPT (Codex) backend: `response.failed` codes Codex treats as
+    // The ChatGPT (Codex) backend has `response.failed` codes Codex treats as
     // fatal (codex-rs/codex-api/src/sse/responses_error.rs) and its 429
     // bodies (codex-rs/codex-api/src/api_bridge.rs).
     assert_kinds(
@@ -484,7 +484,7 @@ fn arko_errors_and_retry_classes_are_unchanged() {
         assert_eq!(error.retry_class(), RetryClass::Permanent, "{code}");
         assert_ne!(error.kind(), Unknown, "{code}");
     }
-    // A kind a later version adds loads as Unknown; known kinds round-trip.
+    // A kind a later version adds loads as Unknown, and known kinds round-trip.
     assert_eq!(
         serde_json::from_str::<ErrorKind>(r#""from_the_future""#).unwrap(),
         Unknown

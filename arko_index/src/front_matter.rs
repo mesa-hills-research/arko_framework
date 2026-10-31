@@ -1,6 +1,6 @@
-//! A Markdown file's metadata region: its front matter (a YAML `---` or TOML `+++`
+//! A Markdown file's metadata region is its front matter (a YAML `---` or TOML `+++`
 //! block at the top) and, in MDX, the `import`/`export` lines after it. The region is
-//! file metadata: chunks leave it out, and its `title` (or the first `# H1`) becomes
+//! file metadata. Chunks leave it out, and its `title` (or the first `# H1`) becomes
 //! the root of every chunk's scope.
 
 /// The metadata region at the start of a Markdown file.
@@ -56,7 +56,7 @@ pub(crate) fn region(text: &str, mdx: bool) -> Option<Region> {
         }
     }
     if mdx {
-        // ESM paragraphs: from a line starting with `import` or `export` to the next
+        // ESM paragraphs run from a line starting with `import` or `export` to the next
         // blank line, after any blank lines.
         let mut at = end;
         loop {

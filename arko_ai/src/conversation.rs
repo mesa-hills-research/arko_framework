@@ -146,7 +146,7 @@ impl Conversation {
         self.messages.extend_from_slice(&messages[kept..]);
     }
 
-    /// Index and fingerprint of the message that started the current turn:
+    /// Index and fingerprint of the message that started the current turn,
     /// the last user message without tool results.
     fn turn_start(&self) -> (Option<usize>, Option<String>) {
         let index = self
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
 
         // The application rewinds and pushes a different user message
-        // directly, at the same index: a new turn.
+        // directly, at the same index. That is a new turn.
         conversation.messages.truncate(turn_start);
         conversation.messages.push(Message::new_user("second task"));
         assert_eq!(conversation.current_openai_turn_state(), None);
@@ -533,7 +533,7 @@ mod tests {
         // Rewinding to the same message is a retry of the same turn.
         conversation.messages.truncate(turn_start + 1);
         assert_eq!(conversation.current_openai_turn_state(), Some("t2"));
-        // So is restoring it unchanged; the fingerprint survives serialization.
+        // So is restoring it unchanged, because the fingerprint survives serialization.
         let restored: Conversation =
             serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
         assert_eq!(restored.current_openai_turn_state(), Some("t2"));

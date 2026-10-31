@@ -11,7 +11,7 @@ use crate::{
 };
 use std::borrow::Cow;
 
-/// The text sent before a result image that follows the turn's results: the
+/// The text sent before a result image that follows the turn's results, the
 /// text the arko_agents runtime writes before tool images.
 pub(crate) fn fallback_label(result: &ToolResult, image: &ToolResultImage) -> String {
     format!(

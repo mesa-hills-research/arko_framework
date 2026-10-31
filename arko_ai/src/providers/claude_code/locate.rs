@@ -143,7 +143,7 @@ fn find_on_path(program: &Path, environment: &Environment) -> Option<PathBuf> {
             .find(|candidate| (environment.is_file)(candidate));
     }
     let path = environment.path?;
-    // `PATH` uses `;` on Windows; split by hand so tests can build one on
+    // `PATH` uses `;` on Windows. Split by hand so tests can build one on
     // any host.
     path.to_string_lossy()
         .split(';')

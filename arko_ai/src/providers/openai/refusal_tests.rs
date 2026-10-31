@@ -86,7 +86,7 @@ async fn refusal_content_is_reported_as_a_refusal_for_text_and_stream_calls() {
     })))
     .await;
     assert_model_refusal(&streamed_response);
-    // Non-streaming responses come from the API-key path; ChatGPT OAuth
+    // Non-streaming responses come from the API-key path, and ChatGPT OAuth
     // text calls stream.
     tokio::time::timeout(Duration::from_secs(5), async {
         let (url, server) = server(vec![reply("/responses", 200, &response.to_string())]).await;
@@ -322,7 +322,7 @@ async fn a_stream_without_a_terminal_event_is_truncated() {
 
 #[tokio::test]
 async fn stream_error_events_without_a_code_stay_retryable() {
-    // Flat `error` event with a null code: `type` is the event name.
+    // Flat `error` event with a null code, so `type` is the event name.
     let body = event(serde_json::json!({"type":"error","code":null,
         "message":"An error occurred while processing your request.","param":null,"sequence_number":3}));
     let (_, error) = events(body).await;

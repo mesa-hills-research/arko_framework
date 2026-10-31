@@ -8,7 +8,7 @@ use std::{cell::RefCell, collections::HashMap, path::Path};
 use tree_sitter::{Node, ParseOptions, Parser};
 
 // An independent byte guard, also applied to every unsupported-language fallback.
-// UTF-8 byte count upper-bounds byte-level tokenizer tokens; reserve path + separators.
+// UTF-8 byte count upper-bounds byte-level tokenizer tokens, so reserve path + separators.
 const RENDER_LIMIT: usize = 24_000;
 thread_local! { static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new()); }
 
@@ -17,13 +17,13 @@ thread_local! { static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell
 pub(crate) fn language(path: &Path) -> &'static str {
     crate::languages::detect_path(path).name
 }
-/// Test hooks: a text that starts with one of these fails to parse like a grammar bug,
+/// Test hooks. A text that starts with one of these fails to parse like a grammar bug,
 /// with a panic or with no tree within the budget.
 #[cfg(test)]
 pub(crate) const TEST_PANIC: &str = "arko-index-test: parser panic\n";
 #[cfg(test)]
 pub(crate) const TEST_STOP: &str = "arko-index-test: parser stop\n";
-/// A parse: the tree, or none when the language has no grammar, a line is too long or
+/// A parse is the tree, or none when the language has no grammar, a line is too long or
 /// the work budget ran out (the file is then split as text). `failure` says why the
 /// parser itself failed, a grammar bug that also leaves no tree.
 struct Parsed {
@@ -72,14 +72,14 @@ fn parse(lang: &'static str, text: &str) -> Result<Parsed, Error> {
         match parsed {
             Ok(tree) => {
                 parser.reset();
-                // No tree within the budget: the runtime stopped a lexer or scanner that
+                // No tree within the budget, because the runtime stopped a lexer or scanner that
                 // kept advancing at the end of the input.
                 let failure = (tree.is_none() && calls <= budget)
                     .then(|| "stopped (a scanner never returned)".to_owned());
                 Ok(Parsed { tree, failure })
             }
             Err(payload) => {
-                // A grammar bug. The parser's state is unknown: this thread makes a new one.
+                // A grammar bug. The parser's state is unknown, so this thread makes a new one.
                 parsers.remove(lang);
                 let message = crate::par::panic_message(&*payload);
                 Ok(Parsed {
@@ -97,13 +97,13 @@ struct Part {
     symbol: String,
     kind: String,
     atomic: bool,
-    // Ephemeral AST parent identity: grouping must not cross lexical scopes even
+    // Ephemeral AST parent identity, so grouping must not cross lexical scopes even
     // when a wrapper has no display name (e.g. a module or anonymous namespace).
     sibling_scope: Option<usize>,
-    /// The chain of enclosing definition labels (`Chunk::scope`). Metadata only:
+    /// The chain of enclosing definition labels (`Chunk::scope`). Metadata only, since
     /// nothing below reads it to choose boundaries.
     scope: String,
-    /// While the node being split packs its parts: whether the unit the part came from
+    /// While the node being split packs its parts, whether the unit the part came from
     /// stayed one part (`Table::pack_whole_units`). The pieces of a split unit were
     /// packed when that unit was split.
     whole: bool,
@@ -138,7 +138,7 @@ fn contains_definition(n: Node, text: &str, rules: &Rules) -> bool {
         }
     }
 }
-/// A node's name: the first of the table's name fields, else its kind's name paths
+/// A node's name is the first of the table's name fields, else its kind's name paths
 /// (at most 200 bytes, whitespace collapsed). Else, for declarator kinds, the
 /// identifier at the end of C's declarator chain.
 fn name(n: Node, text: &str, rules: &Rules) -> Option<String> {
@@ -191,7 +191,7 @@ fn scope_label(n: Node, text: &str, lang: &str, rules: &Rules) -> Option<String>
         table_label(n, text, rules)
     }
 }
-/// The label from the table: a wrapper's inner definition's label, a keyed
+/// The label from the table is a wrapper's inner definition's label, a keyed
 /// definition's `key name`, the kind's label rule, or a tags.scm definition's
 /// `category name`.
 fn table_label(n: Node, text: &str, rules: &Rules) -> Option<String> {
@@ -255,7 +255,7 @@ fn unquote(name: String) -> String {
     }
     name
 }
-/// A label from a node's leading text: its first 400 bytes (to a character
+/// A label from a node's leading text, its first 400 bytes (to a character
 /// boundary), whitespace collapsed, without a trailing `{`, `:`, `=`, `(`, `do` or
 /// `where`.
 fn header(text: &str) -> String {
@@ -278,7 +278,7 @@ fn header(text: &str) -> String {
     }
     clip(label)
 }
-/// The labels of the classic languages. `lang` is the parser language: Python, C and
+/// The labels of the classic languages. `lang` is the parser language. Python, C and
 /// C++ share `function_definition`, Go and TypeScript `function_declaration`, Go and
 /// Java `method_declaration`.
 fn classic_label(n: Node, text: &str, lang: &str, rules: &Rules) -> Option<String> {
@@ -390,7 +390,7 @@ fn impl_label(n: Node, text: &str) -> Option<String> {
     })
 }
 /// The scope of parts merged into one chunk (a function family, a group of tiny
-/// definitions): their own scope when they share it. Otherwise the enclosing scope
+/// definitions) is their own scope when they share it. Otherwise the enclosing scope
 /// followed by the members' own labels joined with ` | ` (bounded by `cap` bytes,
 /// then `…`), as `symbol_path` joins symbols. The enclosing scope alone when a member
 /// has no label of its own.
@@ -440,7 +440,7 @@ fn children(n: Node) -> Vec<Node> {
         .collect()
 }
 fn child_units<'t>(mut n: Node<'t>, oversized: bool, text: &str, rules: &Rules) -> Vec<Node<'t>> {
-    // Iterative descent: adversarial parenthesized/declarator chains can contain
+    // Iterative descent, because adversarial parenthesized/declarator chains can contain
     // hundreds of thousands of single-child nodes without a long physical line.
     for _ in 0..128 {
         if let Some(body) = rules.body(n)
@@ -567,8 +567,8 @@ fn function_family_key(part: &Part) -> Option<(&str, &str, bool)> {
 }
 
 // Coherent short sibling pairs preserve complete function bodies while sharing
-// useful nearby vocabulary. The entire same-family run must be exactly two:
-// never greedily phase a long accessor run into windows. Each function retains
+// useful nearby vocabulary. The entire same-family run must be exactly two,
+// and never greedily phase a long accessor run into windows. Each function retains
 // at least one third of the group's nonwhitespace bytes, independent of queries.
 fn function_families(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> Vec<Part> {
     let mut result = Vec::with_capacity(parts.len());
@@ -619,8 +619,8 @@ fn function_families(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &
 }
 
 // Coalesce sustained runs of tiny sibling definitions (generated accessors/tables),
-// not ordinary short files. Content-defined cuts resynchronize after local insertions;
-// unrelated distant groups keep their identity instead of moving fixed-size windows.
+// not ordinary short files. Content-defined cuts resynchronize after local insertions,
+// so unrelated distant groups keep their identity instead of moving fixed-size windows.
 fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> Vec<Part> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -667,7 +667,7 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> 
                 .fold(0xcbf29ce484222325u64, |h, b| {
                     (h ^ b as u64).wrapping_mul(0x100000001b3)
                 });
-            // Avalanche all bits: raw FNV low bits correlate for repeated numeric names.
+            // Avalanche all bits, because raw FNV low bits correlate for repeated numeric names.
             key = (key ^ (key >> 33)).wrapping_mul(0xff51afd7ed558ccd);
             key = (key ^ (key >> 33)).wrapping_mul(0xc4ceb9fe1a85ec53);
             key ^= key >> 33;
@@ -688,7 +688,7 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> 
 }
 
 /// Adjacent definitions of the same kind and name in the same scope merge while the
-/// result fits: Haskell and Elixir write one function as several clauses.
+/// result fits, as Haskell and Elixir write one function as several clauses.
 fn merge_clauses(parts: Vec<Part>, limit: usize) -> Vec<Part> {
     let mut out: Vec<Part> = Vec::with_capacity(parts.len());
     for part in parts {
@@ -784,7 +784,7 @@ fn split(
         fallback(text, s, e, &symbol, &scope, n.kind(), limit, out);
         return;
     }
-    // Tiny classes remain self-contained; large containers expose member boundaries.
+    // Tiny classes remain self-contained, and large containers expose member boundaries.
     if !oversized && rules.compact(n) && e - s < 700 {
         emit(out, s, e, &symbol, &scope, n.kind(), true);
         return;
@@ -889,7 +889,7 @@ fn error_mass(root: Node) -> usize {
     mass
 }
 
-/// A Markdown file's metadata region: its front matter (and MDX's import/export lines
+/// A Markdown file's metadata region is its front matter (and MDX's import/export lines
 /// after it). The file's chunks cover the text after it.
 pub(crate) fn metadata_region(path: &Path, text: &str) -> Option<crate::front_matter::Region> {
     if !crate::headers::is_markdown(path) {
@@ -906,7 +906,7 @@ pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<FileCh
 }
 
 /// [`chunk`], and a warning for the walk's report when the file's parser failed (a
-/// grammar bug: it panicked, or the runtime stopped a scanner that never returned) and
+/// grammar bug, meaning it panicked, or the runtime stopped a scanner that never returned) and
 /// the file was split as plain text.
 pub(crate) fn chunk_noted(
     path: &Path,
@@ -1029,7 +1029,7 @@ pub(crate) fn chunk_noted(
     let mut duplicates: HashMap<String, u64> = HashMap::new();
     let mut chunks = Vec::with_capacity(parts.len());
     for p in parts {
-        // Trim only for identity: indentation/newlines remain fully covered in the range.
+        // Trim only for identity, so indentation/newlines remain fully covered in the range.
         let source = &text[p.s..p.e];
         let mut digest = Sha256::new();
         digest.update(path_s.as_bytes());

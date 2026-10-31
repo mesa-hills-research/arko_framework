@@ -43,7 +43,7 @@ mod tests {
             ..Model::openai_gpt_5_5()
         };
         assert_eq!(effective_max_input_tokens(&small, true), Some(128_000));
-        // The flag is about OpenAI requests; other providers keep theirs.
+        // The flag is about OpenAI requests, and other providers keep theirs.
         let opus = Model::anthropic_claude_opus_5_5();
         assert_eq!(
             effective_max_input_tokens(&opus, true),
@@ -68,7 +68,7 @@ mod tests {
             oauth.max_input_tokens(&opus).await,
             Some(opus.max_input_tokens)
         );
-        // No OpenAI client configured: the registry limit.
+        // No OpenAI client configured, so the registry limit applies.
         assert_eq!(
             LLMClient::new().max_input_tokens(&luna).await,
             Some(922_000)

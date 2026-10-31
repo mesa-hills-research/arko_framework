@@ -7,12 +7,12 @@
 //! ```
 //!
 //! 1. Reads each account's usage (`GET backend-api/wham/usage`) and prints
-//!    it: whether requests are allowed, the windows, the credits, the manual
-//!    resets left, and whether the list would count the account usable.
-//! 2. `--request`: sends one short request through the account list and
+//!    it (whether requests are allowed, the windows, the credits, the manual
+//!    resets left, and whether the list would count the account usable).
+//! 2. With `--request`, sends one short request through the account list and
 //!    prints the account that served it, its plan usage and credits headers,
 //!    and the list's events.
-//! 3. `--portability`: has the first account answer with reasoning, then
+//! 3. With `--portability`, has the first account answer with reasoning, then
 //!    sends the follow-up, that reasoning replayed, straight to the second
 //!    account (not through the list, which would leave it out), and prints
 //!    whether the backend accepts one account's encrypted reasoning from

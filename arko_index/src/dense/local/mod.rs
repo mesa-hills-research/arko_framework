@@ -195,7 +195,7 @@ impl Precision {
         !matches!(self, Precision::Int8)
     }
 
-    /// The suffix of the descriptor's revision: none for `f32`, the weights as
+    /// The suffix of the descriptor's revision, none for `f32`, the weights as
     /// published.
     fn suffix(self) -> &'static str {
         match self {
@@ -357,17 +357,17 @@ impl LocalModel {
 /// Texts per [`embed`](Embedder::embed) call ([`EmbedLimits::max_items`]) on the CPU.
 const MAX_ITEMS: usize = 256;
 
-/// Texts per [`embed`](Embedder::embed) call on a GPU: enough for batches of similar
+/// Texts per [`embed`](Embedder::embed) call on a GPU, enough for batches of similar
 /// lengths.
 const GPU_MAX_ITEMS: usize = 1024;
 
 /// Forward passes' worth of tokens per [`embed`](Embedder::embed) call on a GPU.
 const GPU_REQUEST_PASSES: usize = 8;
 
-/// The request limits with `batch_tokens` per forward pass: on the CPU up to 256 texts
+/// The request limits with `batch_tokens` per forward pass, on the CPU up to 256 texts
 /// and the larger of `batch_tokens` and the model's input per request, on a GPU up to
 /// 1,024 texts and the larger of eight passes and the model's input. No text is too
-/// long: a longer one goes in a request of its own and is embedded in windows.
+/// long, because a longer one goes in a request of its own and is embedded in windows.
 fn limits(model: &LocalModel, on_gpu: bool, batch_tokens: usize) -> EmbedLimits {
     let (items, tokens) = if on_gpu {
         (
@@ -541,7 +541,7 @@ impl LocalEmbedder {
             .into());
         }
         tokenizer.with_padding(None);
-        // Whole texts: a `tokenizer.json` may set a truncation (CodeRankEmbed's, 512).
+        // Whole texts, because a `tokenizer.json` may set a truncation (CodeRankEmbed's, 512).
         tokenizer
             .with_truncation(None)
             .map_err(|e| format!("{}: truncation: {e}", model.repo))?;
@@ -630,7 +630,7 @@ impl LocalEmbedder {
         s.padded_tokens += padded_tokens;
     }
 
-    /// Each text with the prefix of `kind`, tokenized whole: its token ids, special
+    /// Each text with the prefix of `kind`, tokenized whole, giving its token ids, special
     /// tokens included, and how many special tokens lead and trail.
     fn encode(&self, texts: &[&str], kind: InputKind) -> Result<Vec<Encoded>, Error> {
         let prefix = match kind {
@@ -741,7 +741,7 @@ impl Embedder for LocalEmbedder {
 
     /// On the CPU up to 256 texts and the larger of the batch size and the model's
     /// input per call, on a GPU up to 1,024 texts and the larger of eight batches and
-    /// the model's input. No text is too long: a longer one is embedded in windows.
+    /// the model's input. No text is too long, because a longer one is embedded in windows.
     fn limits(&self) -> EmbedLimits {
         limits(self.model, self.on_gpu(), self.batch_tokens)
     }
@@ -762,7 +762,7 @@ impl Embedder for LocalEmbedder {
             InputKind::Query => &self.query_prefix,
             InputKind::Document => &self.document_prefix,
         };
-        // Every text's windows, in order: (text, window).
+        // Every text's windows, in order, as (text, window).
         let mut windows = Vec::new();
         for (t, e) in self.encode(texts, kind)?.into_iter().enumerate() {
             for w in window::split(&e.ids, e.lead, e.tail, prefix, self.model.max_tokens)? {
@@ -788,7 +788,7 @@ impl Embedder for LocalEmbedder {
     }
 }
 
-/// A tokenized text: its ids and how many special tokens lead and trail them.
+/// A tokenized text, its ids and how many special tokens lead and trail them.
 struct Encoded {
     ids: Vec<u32>,
     lead: usize,

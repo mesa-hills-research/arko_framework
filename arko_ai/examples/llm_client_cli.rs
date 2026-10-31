@@ -1,12 +1,12 @@
-//! Command-line client for `arko_ai`: one-shot text generation and an
+//! Command-line client for `arko_ai` with one-shot text generation and an
 //! interactive chat against any configured provider.
 //!
 //! Credentials come from the environment (and a `.env` file) through
-//! `LLMClient::from_env`: ChatGPT OAuth or `OPENAI_API_KEY`,
+//! `LLMClient::from_env`, which takes ChatGPT OAuth or `OPENAI_API_KEY`,
 //! `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API_KEY`, and
 //! `OPENROUTER_API_KEY`. `--codex-auth` (the default Codex `auth.json`) or
 //! `--codex-auth-json PATH` takes OpenAI's ChatGPT OAuth credentials from a
-//! Codex `auth.json` instead, kept in step with the file: every token
+//! Codex `auth.json` instead, kept in step with the file. Every token
 //! refresh reads it again first, and rotated tokens are saved to it at once.
 //!
 //! ```text
@@ -18,7 +18,7 @@
 //! ```
 //!
 //! A model is a registered id (see `models`), an alias of one, or an
-//! OpenRouter slug (anything with a `/`). The flags are parsed here; which
+//! OpenRouter slug (anything with a `/`). The flags are parsed here, and which
 //! efforts, levels, budgets and parameters a model accepts is checked by the
 //! library when the request is built.
 
@@ -47,7 +47,7 @@ struct Cli {
 
     /// Use the ChatGPT OAuth login in the Codex auth.json
     /// ($CODEX_HOME/auth.json, else ~/.codex/auth.json) for OpenAI instead of
-    /// the environment; token refreshes keep the file up to date
+    /// the environment, and token refreshes keep the file up to date
     #[arg(long, global = true)]
     codex_auth: bool,
 
@@ -111,9 +111,9 @@ struct GenerationArgs {
     #[arg(short = 'n', long)]
     max_tokens: Option<usize>,
 
-    /// Reason at the model's defaults: no effort or level is sent. OpenAI
+    /// Reason at the model's defaults, so no effort or level is sent. OpenAI
     /// reasoning models use their default effort (none on GPT-5.1, 5.2 and
-    /// 5.4, which then don't reason) and return no summaries; use
+    /// 5.4, which then don't reason) and return no summaries. Use
     /// --reasoning-level for an effort and summaries. OpenRouter and Claude
     /// adaptive thinking use the model's default effort, Gemini its default
     /// level with thought summaries, and Claude models that need a manual
@@ -124,21 +124,21 @@ struct GenerationArgs {
     reasoning: bool,
 
     /// An effort (none, minimal, low, medium, high, xhigh, max) for OpenAI,
-    /// Claude adaptive thinking and OpenRouter; a thinking level (minimal,
-    /// low, medium, high) for Gemini; or a thinking token budget (Claude
+    /// Claude adaptive thinking and OpenRouter, a thinking level (minimal,
+    /// low, medium, high) for Gemini, or a thinking token budget (Claude
     /// manual thinking, Gemini, OpenRouter)
     #[arg(long)]
     reasoning_level: Option<String>,
 
     /// Claude effort (low, medium, high, xhigh, max), with adaptive thinking
-    /// or together with a --reasoning-level token budget (Claude Opus 4.5);
-    /// otherwise the same setting as --reasoning-level, which it must match
+    /// or together with a --reasoning-level token budget (Claude Opus 4.5). Otherwise
+    /// the same setting as --reasoning-level, which it must match
     /// when both are given
     #[arg(long)]
     reasoning_effort: Option<String>,
 
     /// Reasoning mode (standard or pro) for GPT-5.6 and GPT-6, directly or
-    /// through OpenRouter; GPT-6 Pro is gpt-6-* with --reasoning-mode pro
+    /// through OpenRouter, and GPT-6 Pro is gpt-6-* with --reasoning-mode pro
     #[arg(long)]
     reasoning_mode: Option<String>,
 
@@ -259,7 +259,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
             }
             println!("---");
 
-            // Billed amount (zero for subscription calls; OpenRouter's
+            // Billed amount (zero for subscription calls, OpenRouter's
             // reported charge) and the estimate at API list prices,
             // accumulated separately.
             let mut total_billed: f64 = 0.0;
@@ -373,7 +373,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
 }
 
 /// `LLMClient::from_env`, with OpenAI from a Codex `auth.json` when asked.
-/// With an auth file, OpenAI takes its credentials from the file alone: the
+/// With an auth file, OpenAI takes its credentials from the file alone, so the
 /// `OPENAI_OAUTH_*` variables are not read. `env` reads the environment.
 fn create_client(cli: &Cli, env: impl Fn(&str) -> Option<String>) -> Result<LLMClient, Error> {
     let path = match (&cli.codex_auth_json, cli.codex_auth) {
@@ -421,7 +421,7 @@ fn undated(id: &str) -> &str {
 }
 
 /// Every alias that names exactly one registered model and isn't itself a
-/// registered id: the undated id and, for Claude, the version written with
+/// registered id, namely the undated id and, for Claude, the version written with
 /// dots (`claude-opus-4.5`, `claude-3.7-sonnet`).
 fn aliases() -> HashMap<String, Vec<Model>> {
     let models = Model::all();
@@ -457,7 +457,7 @@ fn aliases() -> HashMap<String, Vec<Model>> {
 }
 
 fn get_model(name: &str) -> Result<Model, Error> {
-    // OpenRouter slugs: author/model, ~author/alias-latest, @preset/name.
+    // OpenRouter slugs are author/model, ~author/alias-latest, @preset/name.
     if name.contains('/') {
         return Ok(Model::openrouter(name));
     }
@@ -513,7 +513,7 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
 
     if let Some(temp) = args.temperature {
         // OpenAI reasoning models and Gemini reject a temperature with an
-        // error; these Claude models get none, so say so.
+        // error, and these Claude models get none, so say so.
         if model.provider == Provider::Anthropic && model.omits_anthropic_sampling_parameters() {
             eprintln!(
                 "{} takes no temperature. --temperature is not sent.",
@@ -560,7 +560,7 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
 }
 
 /// The thinking budget `--reasoning` gives Claude models that need a manual
-/// one: half of the output limit, so the answer has room, between the API's
+/// one, half of the output limit, so the answer has room, between the API's
 /// minimum of 1,024 and 16,000 tokens. (With an output limit of 1,024 or
 /// less the budget can't be below it, and the request is rejected.)
 fn default_claude_budget(model: &Model, max_tokens: Option<usize>) -> usize {
@@ -569,7 +569,7 @@ fn default_claude_budget(model: &Model, max_tokens: Option<usize>) -> usize {
 }
 
 /// The reasoning configuration the flags ask for, or `None` where the
-/// model's defaults need none: unset options keep the model's defaults.
+/// model's defaults need none, because unset options keep the model's defaults.
 fn reasoning_config(
     model: &Model,
     args: &GenerationArgs,
@@ -588,7 +588,7 @@ fn reasoning_config(
         Provider::OpenAI => {
             let Some(effort) = setting()? else {
                 // Reasoning models reason at their default effort without a
-                // configuration; others can't reason.
+                // configuration, and others can't reason.
                 if model.model_type != ModelType::Reasoning {
                     return Err(invalid(format!("{} is not a reasoning model.", model.id)));
                 }
@@ -612,7 +612,7 @@ fn reasoning_config(
         }
         Provider::Anthropic => {
             // A number is a manual thinking budget, which an effort may
-            // accompany (Claude Opus 4.5); a name is an effort, for adaptive
+            // accompany (Claude Opus 4.5), and a name is an effort, for adaptive
             // thinking where the model supports it.
             if let Some(budget) = level.and_then(|level| level.parse::<usize>().ok()) {
                 match effort.map(anthropic_effort).transpose()? {
@@ -631,7 +631,7 @@ fn reasoning_config(
             }
         }
         Provider::Google => match setting()? {
-            // -1: the model's default level or dynamic budget.
+            // -1 is the model's default level or dynamic budget.
             None => ReasoningConfig::google(-1, true),
             Some(level) => match level.parse::<isize>() {
                 Ok(budget) => ReasoningConfig::google(budget, true),
@@ -909,7 +909,7 @@ mod tests {
         config(args).unwrap().reasoning
     }
 
-    /// An auth file given explicitly wins: a partial `OPENAI_OAUTH_*`
+    /// An auth file given explicitly wins, so a partial `OPENAI_OAUTH_*`
     /// environment, an error on its own, is not even read.
     #[tokio::test]
     async fn an_auth_file_given_explicitly_ignores_the_oauth_environment() {
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(credentials.access_token, "file-access");
     }
 
-    /// `--reasoning` sends no effort or level: each model's default applies.
+    /// `--reasoning` sends no effort or level, so each model's default applies.
     #[test]
     fn reasoning_alone_uses_the_model_defaults() {
         assert!(reasoning(&["-m", "gpt-6-astra", "--reasoning"]).is_none());
@@ -969,7 +969,7 @@ mod tests {
         ));
     }
 
-    /// Claude models on manual thinking need a budget: half the output limit,
+    /// Claude models on manual thinking need a budget, half the output limit,
     /// between 1,024 and 16,000 tokens.
     #[test]
     fn manual_thinking_claude_models_get_a_useful_budget() {

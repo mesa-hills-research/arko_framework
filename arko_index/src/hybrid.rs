@@ -282,7 +282,7 @@ pub fn search(
     embedder: Option<&dyn Embedder>,
 ) -> Result<SearchResults, Error> {
     // A build may publish a new generation and remove the one being read, or the
-    // vectors of its chunks that are gone; then the search starts over on the new
+    // vectors of its chunks that are gone, and then the search starts over on the new
     // generation. The query is embedded (and billed) once.
     let mut embedded: Option<(ModelDescriptor, Vec<f32>)> = None;
     let mut query_tokens = 0;
@@ -354,7 +354,7 @@ fn search_once(
                 }
                 Vec::new()
             } else {
-                // Before the query is embedded (and billed): the format, the model and
+                // Before the query is embedded (and billed), this checks the format, the model and
                 // settings, and that the store holds the generation's vectors.
                 let store = generation.open_store(info)?;
                 let vector = match (&request.query_vector, &*embedded) {
@@ -370,7 +370,7 @@ fn search_once(
                         v
                     }
                 };
-                // Vectors the generation lacks (see `open_store`) are skipped: fetch
+                // Vectors the generation lacks (see `open_store`) are skipped, so fetch
                 // enough to keep `depth` of its own.
                 let others = store.len().saturating_sub(info.embedded as usize);
                 let hits = store.search(&vector, depth.saturating_add(others), &request.filter)?;
@@ -443,7 +443,7 @@ mod tests {
             (None, Some(2))
         );
         assert!((fused[0].score - (1.0 / 61.0 + 1.0 / 63.0)).abs() < 1e-12);
-        // Weights: dense only.
+        // Weights, dense only.
         let dense_only = Fusion::Rrf {
             k: 60.0,
             lexical_weight: 0.0,
@@ -483,7 +483,7 @@ mod tests {
             .map(|f| f.id)
             .collect();
         assert_eq!(ids, [1, 2, 3]);
-        // One candidate, or all equal: normalized to 1.
+        // One candidate, or all equal, so normalized to 1.
         let one = fuse(&[(7, 3.0)], &[], &fusion, 1).unwrap();
         assert_eq!(one[0].score, 0.5);
     }

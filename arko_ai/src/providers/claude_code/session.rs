@@ -27,8 +27,8 @@ const STDERR_TAIL: usize = 16 * 1024;
 
 /// Variables a Claude Code session sets for the programs it runs. A CLI
 /// started by such a program would otherwise treat itself as nested in that
-/// session: adopt its session ID, report through its messaging socket, and
-/// take its effort. Authentication variables are kept.
+/// session, adopting its session ID, reporting through its messaging socket, and
+/// taking its effort. Authentication variables are kept.
 const PARENT_SESSION_VARIABLES: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_SESSION_ID",
@@ -46,7 +46,7 @@ const PARENT_SESSION_VARIABLES: &[&str] = &[
 ];
 
 /// Variables a Claude Code session (or the environment it runs in) sets that
-/// change how a CLI started under it behaves: its subagents run in the
+/// change how a CLI started under it behaves. Its subagents run in the
 /// background (their calls return at once, and a crash leaves them
 /// unfinished), it compacts at another threshold, and it reads other
 /// directories' instructions and the user's email into its context. Like
@@ -74,7 +74,7 @@ const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
 ];
 
 /// Each `Bash` call starts in the session's working directory, as a host
-/// that checks a call's command from there (arko's command guard) expects:
+/// that checks a call's command from there (arko's command guard) expects, since
 /// by default the CLI keeps a `cd` from one call to the next. Set for every
 /// session unless its options set it ([`ClaudeOptions::env`]).
 const BASH_WORKING_DIRECTORY: (&str, &str) = ("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
@@ -465,8 +465,8 @@ async fn collect_stderr(mut pipe: tokio::process::ChildStderr, tail: Arc<StdMute
     }
 }
 
-/// Routes stdout: control responses to their waiting requests, control
-/// requests to the handlers, everything else to the session's messages.
+/// Routes stdout (control responses to their waiting requests, control
+/// requests to the handlers, everything else to the session's messages).
 async fn read_stdout(
     stdout: tokio::process::ChildStdout,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -526,7 +526,7 @@ async fn read_stdout(
                 in_flight.lock().unwrap().insert(id, task);
             }
             Some("control_cancel_request") => {
-                // The CLI gave up on the request; it expects no answer.
+                // The CLI gave up on the request, and it expects no answer.
                 if let Some(task) = value["request_id"]
                     .as_str()
                     .and_then(|id| in_flight.lock().unwrap().remove(id))
@@ -545,7 +545,7 @@ async fn read_stdout(
             }
         }
     }
-    // The CLI has exited: waiting control requests fail.
+    // The CLI has exited, so waiting control requests fail.
     pending.lock().unwrap().clear();
 }
 

@@ -17,9 +17,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ignore.workspace = true
-# Mesquite: a pure-Rust port of tree-sitter 0.25.10 and its grammars. The
+# Mesquite is a pure-Rust port of tree-sitter 0.25.10 and its grammars. The
 # libraries keep tree-sitter's names (tree_sitter, tree_sitter_rust, ...). The port pins
-# the grammar versions; a grammar upgrade changes chunk boundaries and IDs. The
+# the grammar versions, and a grammar upgrade changes chunk boundaries and IDs. The
 # TypeScript, OCaml and XML crates re-export TSX, OCaml interfaces and DTD.
 mesquite = "0.25.10"
 mesquite_rust = "0.1.0"
@@ -76,10 +76,10 @@ mesquite_yaml = "0.1.0"
 mesquite_zig = "0.1.0"
 fs2 = "0.4"
 libc = "0.2"
-# Caprock: the vector store behind dense search (pure, safe Rust).
+# Caprock is the vector store behind dense search (pure, safe Rust).
 caprock = "0.1.0"
 
-# The `local-embed` feature: embedding models run on the CPU (`dense::local`), all pure
+# The `local-embed` feature runs embedding models on the CPU (`dense::local`), all pure
 # Rust. gemm multiplies the f32 matrices, rayon spreads the work over threads, tokenizers
 # (with the fancy-regex engine instead of the C Oniguruma one) splits text into tokens.
 gemm = { version = "0.19", default-features = false, features = ["std", "rayon", "x86-v4"], optional = true }
@@ -89,12 +89,12 @@ rayon = { version = "1.10", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
 libm = { version = "0.2", optional = true }
 
-# The `local-embed-gpu` and `local-embed-cuda` features: the local models on a GPU, on
+# The `local-embed-gpu` and `local-embed-cuda` features run the local models on a GPU, on
 # burn's tensors (pure Rust). wgpu runs Vulkan, Metal and DirectX 12. CUDA (through
 # cubecl and cudarc) loads the driver and NVRTC when it starts and compiles its kernels at
 # run time, so building needs no CUDA toolkit. Both include burn's ndarray backend, on
 # which the offline tests run. burn 0.22's CUDA backend downloads LLVM and compiles C
-# while building, so these stay on 0.21. burn's operation fusion stays off: its fused
+# while building, so these stay on 0.21. burn's operation fusion stays off, because its fused
 # kernels returned wrong vectors for whole batches of some shapes (an RTX 5090 in f16 at
 # 13 x 608 tokens, an L4 in f32 at 16 x 992), which the same graph without fusion did not.
 burn-tensor = { version = "=0.21.0", default-features = false, features = ["std"], optional = true }
@@ -102,7 +102,7 @@ burn-ndarray = { version = "=0.21.0", default-features = false, features = ["std
 burn-wgpu = { version = "=0.21.0", default-features = false, features = ["std", "autotune"], optional = true }
 burn-cuda = { version = "=0.21.0", default-features = false, features = ["std", "autotune"], optional = true }
 # Finding the adapters (wgpu) and the driver, GPUs and NVRTC (cudarc) before choosing a
-# device, and placing cubecl's kernel tuning cache: the versions burn uses.
+# device, and placing cubecl's kernel tuning cache, at the versions burn uses.
 wgpu = { version = "29", default-features = false, optional = true }
 cubecl-runtime = { version = "=0.10.0", default-features = false, features = ["std"], optional = true }
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "fallback-dynamic-loading", "cuda-version-from-build-system", "fallback-latest"], optional = true }

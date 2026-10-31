@@ -1,4 +1,4 @@
-//! The processes around the CLI's background embedding: the owner it belongs to, which
+//! The processes around the CLI's background embedding, namely the owner it belongs to, which
 //! it watches so that it ends when the owner ends, and starting it detached from the
 //! CLI's terminal and descriptors.
 
@@ -34,7 +34,7 @@ impl Owner {
         }
     }
 
-    /// An owner recorded with another start time than its process has: a process that
+    /// An owner recorded with another start time than its process has, meaning a process that
     /// reused the id of one that ended.
     #[cfg(all(test, unix))]
     pub fn with_start(pid: u32, start: u64) -> Owner {
@@ -48,7 +48,7 @@ impl Owner {
         self.pid
     }
 
-    /// Whether the process is still running: the same process, not a zombie.
+    /// Whether the process is still running (the same process, not a zombie).
     pub fn alive(&self) -> bool {
         #[cfg(unix)]
         {
@@ -61,7 +61,7 @@ impl Owner {
     }
 }
 
-/// The owner of a background run this process starts: the program that ran the CLI.
+/// The owner of a background run this process starts is the program that ran the CLI.
 /// On Unix it is the leader of this process's session (the terminal's shell, or the
 /// harness that started a session), which outlives the `sh -c` that tools and harnesses
 /// often run a command through, or this process's parent when the session leader is
@@ -88,7 +88,7 @@ pub fn default_owner() -> Option<u32> {
 /// (the standard three are the command's own). On Windows it is a detached process in
 /// a new process group, and this process's standard handles are made non-inheritable
 /// first, so a caller that reads this process's output sees it end. Other inheritable
-/// handles this process received from its caller still pass to it on Windows: the
+/// handles this process received from its caller still pass to it on Windows, because the
 /// standard library has no way to limit the handles a child inherits.
 pub fn detach(command: &mut Command) {
     #[cfg(unix)]
@@ -123,7 +123,7 @@ mod unix {
         }
         #[cfg(target_os = "linux")]
         {
-            // /proc/PID/stat: "pid (comm) state ... starttime" (field 22), and comm may
+            // /proc/PID/stat has "pid (comm) state ... starttime" (field 22), and comm may
             // hold spaces and parentheses.
             let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
             let fields: Vec<&str> = stat
@@ -161,7 +161,7 @@ mod unix {
         }
     }
 
-    /// The highest descriptor number to mark close-on-exec when `close_range` can't:
+    /// The highest descriptor number to mark close-on-exec when `close_range` can't, namely
     /// the soft limit on open files, at most 2^20.
     pub fn max_fd() -> libc::c_int {
         let mut limit = libc::rlimit {

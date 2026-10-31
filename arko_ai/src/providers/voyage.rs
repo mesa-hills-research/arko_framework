@@ -117,7 +117,7 @@ impl EmbeddingProviderTrait for VoyageClient {
             ));
         }
 
-        // A body cut off in transfer stays a transport error; one that isn't
+        // A body cut off in transfer stays a transport error, and one that isn't
         // the documented object is a malformed response.
         let body = response.bytes().await?;
         let response_data: api::VoyageEmbeddingResponse =
@@ -153,8 +153,8 @@ impl EmbeddingProviderTrait for VoyageClient {
 /// same requests, as Voyage answered them (2026-10-04). A request over the
 /// model's total tokens per request carries an `error_code`
 /// (`TOO_MANY_TOKENS_IN_BATCH`, undocumented), which becomes the error's
-/// code: [`ErrorKind::ContextOverflow`](crate::ErrorKind::ContextOverflow).
-/// The others carry only a `detail`: an input over the model's context
+/// code, namely [`ErrorKind::ContextOverflow`](crate::ErrorKind::ContextOverflow).
+/// The others carry only a `detail`. An input over the model's context
 /// window ("...does not fit into the model's context window of 32000
 /// tokens...") is `ContextOverflow`, and a batch over the item limit ("The
 /// batch size limit is 1000...") is
@@ -193,8 +193,8 @@ fn error_code(message: &str) -> Option<String> {
 
 /// A successful response that isn't the documented embeddings object. Voyage
 /// answered, and may have billed, the request, so this is not the caller's
-/// invalid request, and it is permanent rather than resent automatically: an
-/// [`Error::JsonError`] of kind [`ErrorKind::Unknown`](crate::ErrorKind::Unknown).
+/// invalid request, and it is permanent rather than resent automatically (an
+/// [`Error::JsonError`] of kind [`ErrorKind::Unknown`](crate::ErrorKind::Unknown)).
 fn malformed(detail: impl std::fmt::Display) -> Error {
     Error::JsonError(<serde_json::Error as serde::de::Error>::custom(format!(
         "Malformed Voyage AI embeddings response: {detail}"

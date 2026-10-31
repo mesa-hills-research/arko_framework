@@ -1,4 +1,4 @@
-//! Build script: records the locked tree-sitter crates (`mesquite` and its
+//! Build script that records the locked tree-sitter crates (`mesquite` and its
 //! grammar crates) for the watcher's engine id (`src/watch.rs`), so a grammar upgrade
 //! invalidates cached partitions.
 use std::{
@@ -15,7 +15,7 @@ fn main() {
 
 /// Writes the `[[package]]` entries of the tree-sitter crates from the nearest
 /// `Cargo.lock` (the workspace's, or the package's own when built from a packaged crate).
-/// A git or registry dependency's entry names its exact source; a path dependency's
+/// A git or registry dependency's entry names its exact source, and a path dependency's
 /// entry has only its name, version and dependencies.
 fn engine_lock(manifest_dir: &Path, out_dir: &Path) {
     let lock = manifest_dir

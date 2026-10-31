@@ -137,11 +137,11 @@ pub enum VectorIndex {
     Graph,
 }
 
-/// The int8 rescoring depth: `max(RESCORE_FACTOR × k, RESCORE_MIN)` candidates per
+/// The int8 rescoring depth is `max(RESCORE_FACTOR × k, RESCORE_MIN)` candidates per
 /// segment.
 const RESCORE_FACTOR: u32 = 4;
 const RESCORE_MIN: u32 = 40;
-/// Part of every store directory's name: a change to how ids or settings map onto
+/// Part of every store directory's name, so a change to how ids or settings map onto
 /// Caprock gets a new store.
 const STORE_FORMAT: u32 = 1;
 
@@ -247,7 +247,7 @@ fn store_options() -> StoreOptions {
     }
 }
 
-/// The Caprock key of an id: 32 hex digits, so key order is id order.
+/// The Caprock key of an id is 32 hex digits, so key order is id order.
 fn key(id: VectorId) -> String {
     format!("{id:032x}")
 }
@@ -513,7 +513,7 @@ mod tests {
 
     type Vectors = [(VectorId, Vec<f32>, usize)];
 
-    /// Exact reference ranking in memory: f64 cosine, ties by id.
+    /// Exact reference ranking in memory, with f64 cosine, ties by id.
     fn reference(vectors: &Vectors, q: &[f32], k: usize, f: &Filter) -> Vec<VectorId> {
         let norm = |v: &[f32]| v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
         let mut scored: Vec<(f64, VectorId)> = vectors
@@ -608,7 +608,7 @@ mod tests {
                     (id, vector(i, dims), i as usize % PATHS.len())
                 })
                 .collect();
-            // Two identical vectors tie: the lower id comes first.
+            // Two identical vectors tie, so the lower id comes first.
             vectors.push((1, vector(7, dims), 0));
             for batch in vectors.chunks(100) {
                 store.upsert(&records(batch)).unwrap();
@@ -645,7 +645,7 @@ mod tests {
         store.persist().unwrap();
         drop(store);
 
-        // Reopened for writing: delete some, replace some (another vector and path),
+        // Reopened for writing to delete some, replace some (another vector and path),
         // add some.
         let mut store = CaprockStore::open_for(dir.path(), &config).unwrap();
         assert_eq!(store.len(), 300);
@@ -686,7 +686,7 @@ mod tests {
             .collect();
         store.upsert(&records(&vectors)).unwrap();
         store.persist().unwrap();
-        // Applied, sealed into segment files, never committed: as if the process died.
+        // Applied, sealed into segment files, never committed, as if the process died.
         let more: Vec<_> = (500..800u64)
             .map(|i| (u128::from(i), vector(i, dims), 1))
             .collect();
@@ -725,7 +725,7 @@ mod tests {
         assert_ne!(a.dir_name().unwrap(), f32.dir_name().unwrap());
         assert_eq!(a.dir_name().unwrap(), a.clone().dir_name().unwrap());
 
-        // The same model and settings: kept. Others: replaced by an empty store.
+        // The same model and settings are kept. Others are replaced by an empty store.
         let (store, created) = open_or_create(dir.path(), &a).unwrap();
         assert!(!created && store.len() == 1);
         drop(store);

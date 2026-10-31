@@ -670,7 +670,7 @@ mod tests {
     /// there still compiles but fails to load. Every variant must round-trip.
     #[test]
     fn every_reasoning_artifact_variant_round_trips() {
-        // Exhaustive on purpose: a new variant fails to compile here until it
+        // Exhaustive on purpose, so a new variant fails to compile here until it
         // gets a sample below.
         fn tag(artifact: &ReasoningArtifact) -> &'static str {
             match artifact {

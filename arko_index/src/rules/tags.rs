@@ -1,16 +1,16 @@
-//! What each grammar's `queries/tags.scm` marks as a definition: `(kind, category)` for
+//! What each grammar's `queries/tags.scm` marks as a definition, given as `(kind, category)` for
 //! every `@definition.<category>` capture. Written by `tools/gen_language_rules.py`
-//! from the grammars' `tags.scm` and `node-types.json`: do not edit by hand. The
+//! from the grammars' `tags.scm` and `node-types.json`. Do not edit by hand. The
 //! curated rules in `mod.rs` start from these lists.
 
-/// `c_sharp`: tags.scm definitions.
+/// `c_sharp` tags.scm definitions.
 pub(super) const C_SHARP: &[(&str, &str)] = &[
     ("class_declaration", "class"),
     ("interface_declaration", "interface"),
     ("method_declaration", "method"),
     ("namespace_declaration", "module"),
 ];
-/// `dart`: tags.scm definitions.
+/// `dart` tags.scm definitions.
 pub(super) const DART: &[(&str, &str)] = &[
     ("class_declaration", "class"),
     ("constant_constructor_signature", "method"),
@@ -33,16 +33,16 @@ pub(super) const DART: &[(&str, &str)] = &[
     ("top_level_variable_declaration", "variable"),
     ("type_alias", "type"),
 ];
-/// `elixir`: tags.scm definitions.
+/// `elixir` tags.scm definitions.
 pub(super) const ELIXIR: &[(&str, &str)] = &[("call", "function"), ("call", "module")];
-/// `elm`: tags.scm definitions.
+/// `elm` tags.scm definitions.
 pub(super) const ELM: &[(&str, &str)] = &[
     ("module_declaration", "module"),
     ("type_declaration", "type"),
     ("type_declaration", "union"),
     ("value_declaration", "function"),
 ];
-/// `fortran`: tags.scm definitions.
+/// `fortran` tags.scm definitions.
 pub(super) const FORTRAN: &[(&str, &str)] = &[
     ("derived_type_statement", "class"),
     ("function_statement", "function"),
@@ -53,7 +53,7 @@ pub(super) const FORTRAN: &[(&str, &str)] = &[
     ("subroutine_statement", "function"),
     ("subroutine_statement", "interface"),
 ];
-/// `fsharp`: tags.scm definitions.
+/// `fsharp` tags.scm definitions.
 pub(super) const FSHARP: &[(&str, &str)] = &[
     ("exception_definition", "class"),
     ("file", "constant"),
@@ -70,14 +70,14 @@ pub(super) const FSHARP: &[(&str, &str)] = &[
     ("namespace", "module"),
     ("type_definition", "class"),
 ];
-/// `lua`: tags.scm definitions.
+/// `lua` tags.scm definitions.
 pub(super) const LUA: &[(&str, &str)] = &[
     ("assignment_statement", "function"),
     ("function_declaration", "function"),
     ("function_declaration", "method"),
     ("table_constructor", "function"),
 ];
-/// `ocaml`: tags.scm definitions.
+/// `ocaml` tags.scm definitions.
 pub(super) const OCAML: &[(&str, &str)] = &[
     ("class_binding", "class"),
     ("class_type_binding", "class"),
@@ -92,7 +92,7 @@ pub(super) const OCAML: &[(&str, &str)] = &[
     ("tag_specification", "enum_variant"),
     ("type_binding", "type"),
 ];
-/// `ocaml_interface`: tags.scm definitions.
+/// `ocaml_interface` tags.scm definitions.
 pub(super) const OCAML_INTERFACE: &[(&str, &str)] = &[
     ("class_binding", "class"),
     ("class_type_binding", "class"),
@@ -107,7 +107,7 @@ pub(super) const OCAML_INTERFACE: &[(&str, &str)] = &[
     ("tag_specification", "enum_variant"),
     ("type_binding", "type"),
 ];
-/// `php`: tags.scm definitions.
+/// `php` tags.scm definitions.
 pub(super) const PHP: &[(&str, &str)] = &[
     ("class_declaration", "class"),
     ("function_definition", "function"),
@@ -117,9 +117,9 @@ pub(super) const PHP: &[(&str, &str)] = &[
     ("property_declaration", "field"),
     ("trait_declaration", "interface"),
 ];
-/// `r`: tags.scm definitions.
+/// `r` tags.scm definitions.
 pub(super) const R: &[(&str, &str)] = &[("binary_operator", "function")];
-/// `ruby`: tags.scm definitions.
+/// `ruby` tags.scm definitions.
 pub(super) const RUBY: &[(&str, &str)] = &[
     ("alias", "method"),
     ("class", "class"),
@@ -128,7 +128,7 @@ pub(super) const RUBY: &[(&str, &str)] = &[
     ("singleton_class", "class"),
     ("singleton_method", "method"),
 ];
-/// `scala`: tags.scm definitions.
+/// `scala` tags.scm definitions.
 pub(super) const SCALA: &[(&str, &str)] = &[
     ("class_definition", "class"),
     ("class_parameter", "property"),
@@ -146,7 +146,7 @@ pub(super) const SCALA: &[(&str, &str)] = &[
     ("var_declaration", "variable"),
     ("var_definition", "variable"),
 ];
-/// `solidity`: tags.scm definitions.
+/// `solidity` tags.scm definitions.
 pub(super) const SOLIDITY: &[(&str, &str)] = &[
     ("contract_declaration", "class"),
     ("enum_declaration", "class"),
@@ -157,7 +157,7 @@ pub(super) const SOLIDITY: &[(&str, &str)] = &[
     ("library_declaration", "interface"),
     ("struct_declaration", "class"),
 ];
-/// `swift`: tags.scm definitions.
+/// `swift` tags.scm definitions.
 pub(super) const SWIFT: &[(&str, &str)] = &[
     ("class_declaration", "class"),
     ("class_declaration", "method"),

@@ -1,6 +1,6 @@
 //! A Voyage AI [`Embedder`] for arko_index, on arko_ai's tested Voyage client (HTTP,
 //! error classification, local token counting with the model's tokenizer). It does
-//! not re-implement any of that: it maps arko_index's synchronous interface onto
+//! not re-implement any of that. It maps arko_index's synchronous interface onto
 //! `arko_ai::EmbeddingClient`, retries what arko_ai classifies as transient, and
 //! reports the tokens Voyage billed.
 //!
@@ -28,8 +28,8 @@ fn request_token_limit(details: &EmbeddingModelDetails) -> u64 {
 }
 
 /// Embeds with a Voyage model. Documents use `input_type: document` and queries
-/// `input_type: query` unless input types are off; the output dimension is always
-/// sent; `truncation` is false (arko_ai's default), so no text is cut silently.
+/// `input_type: query` unless input types are off, and the output dimension is always
+/// sent, and `truncation` is false (arko_ai's default), so no text is cut silently.
 pub struct VoyageEmbedder {
     client: EmbeddingClient,
     details: EmbeddingModelDetails,
@@ -55,7 +55,7 @@ impl VoyageEmbedder {
     }
 
     /// With a configured client. Loads the model's tokenizer (from Hugging Face on
-    /// first use; arko_ai caches it).
+    /// first use, and arko_ai caches it).
     pub fn new(
         client: EmbeddingClient,
         model: &str,
@@ -89,8 +89,8 @@ impl VoyageEmbedder {
     }
 
     /// Retries of a request arko_ai classifies as transient (rate limit, server
-    /// error, lost connection) or capacity (502-504); default 4. Voyage does not
-    /// document whether failed requests are billed; a retried request whose first
+    /// error, lost connection) or capacity (502-504). The default is 4. Voyage does not
+    /// document whether failed requests are billed, and a retried request whose first
     /// attempt Voyage processed but whose answer was lost is billed twice and
     /// accounted once.
     pub fn with_max_retries(mut self, retries: u32) -> Self {

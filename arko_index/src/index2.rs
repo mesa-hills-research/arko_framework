@@ -82,7 +82,7 @@ struct Meta {
     dense: bool,
 }
 
-/// Removes a generation directory unless `CURRENT2` names it: a build that fails before
+/// Removes a generation directory unless `CURRENT2` names it, so a build that fails before
 /// publishing leaves nothing behind (the embedding cache keeps every vector paid for).
 struct Unpublished {
     state_dir: PathBuf,
@@ -172,7 +172,7 @@ impl Shard {
             }
         }
     }
-    /// Adds one file's postings for this shard: (varint local doc, varint term
+    /// Adds one file's postings for this shard, as (varint local doc, varint term
     /// length, term, varint tf)*, with doc ids relative to `base`.
     fn ingest(&mut self, base: u32, buf: &[u8]) -> Result<(), Error> {
         let mut pos = 0;
@@ -214,17 +214,17 @@ impl Shard {
     }
 }
 
-/// What a worker produces for one file: the chunks' JSON (doc store bytes), their
+/// What a worker produces for one file, namely the chunks' JSON (doc store bytes), their
 /// token lengths, and their postings split by shard.
 struct FileDocs {
-    /// Not indexed: the report entry (`None` for a file that vanished).
+    /// Not indexed, with the report entry (`None` for a file that vanished).
     skip: Option<Option<files::Skipped>>,
     path: String,
     json: Vec<u8>,
     ends: Vec<u64>,
     lens: Vec<u32>,
     shards: Vec<Vec<u8>>,
-    /// With embeddings: each chunk's rendered-text hash...
+    /// With embeddings, each chunk's rendered-text hash...
     hashes: Vec<[u8; 32]>,
     /// ...and the rendered text of each chunk the cache does not hold.
     missing: Vec<([u8; 32], String)>,
@@ -241,7 +241,7 @@ fn shard_of(term: &[u8], shards: usize) -> usize {
     (h.finish() % shards as u64) as usize
 }
 
-/// What a document holds besides its source: the scope's terms for lexical search,
+/// What a document holds besides its source, namely the scope's terms for lexical search,
 /// and the parts of the embedded text.
 #[derive(Clone, Copy)]
 struct DocText {
@@ -285,7 +285,7 @@ fn file_docs(
     if chunks.is_empty() {
         return Ok(out);
     }
-    // A document's text is "path\npath-relative source"; '\n' separates words, so its
+    // A document's text is "path\npath-relative source", and '\n' separates words, so its
     // terms are the path's terms plus the source's terms (plus, with `lexical_scope`,
     // the scope's terms).
     let path_lower = path.to_ascii_lowercase();
@@ -527,7 +527,7 @@ pub fn build(
     let mut files_dat = w("files.dat")?;
     // (first doc, path) of every file with chunks, for the vector keys.
     let mut file_table: Vec<(u32, String)> = Vec::new();
-    // Embeddings: the texts the model's cache holds (read only: embedding runs write
+    // For embeddings, the texts the model's cache holds (read only, since embedding runs write
     // it), each doc's text hash (in doc order), the texts to embed, and the distinct
     // hashes seen.
     let cached = match dense {
@@ -554,7 +554,7 @@ pub fn build(
     let weights = par::source_weights(&listed, threads);
     phases.push(("walk_s", clock.elapsed().as_secs_f64()));
     // Postings are accumulated by `shards` threads, each owning the terms that hash to
-    // it, so no single thread touches every posting. One thread: everything inline.
+    // it, so no single thread touches every posting. With one thread, everything is inline.
     let shards = if threads > 1 { threads } else { 1 };
     let new_shard = |id: usize| Shard {
         dir: dir.clone(),
@@ -571,7 +571,7 @@ pub fn build(
         let mut handles = Vec::new();
         if shards > 1 {
             for id in 0..shards {
-                // Bounded: a slow shard applies back-pressure instead of buffering postings.
+                // Bounded, so a slow shard applies back-pressure instead of buffering postings.
                 let (tx, rx) = std::sync::mpsc::sync_channel::<(u32, Vec<u8>)>(64);
                 senders.push(tx);
                 let mut shard = new_shard(id);
@@ -639,7 +639,7 @@ pub fn build(
                     if shards == 1 {
                         inline.ingest(base, &buf)?;
                     } else if senders[id].send((base, buf)).is_err() {
-                        // The shard stopped on an error; its join below reports it.
+                        // The shard stopped on an error, and its join below reports it.
                         return Err("index shard stopped".into());
                     }
                 }
@@ -675,7 +675,7 @@ pub fn build(
     for f in [&mut docs_dat, &mut docs_off, &mut lens, &mut files_dat] {
         f.flush()?;
     }
-    // Merge runs by term; runs hold increasing doc ranges, so a term's postings are
+    // Merge runs by term, and runs hold increasing doc ranges, so a term's postings are
     // the concatenation of its run segments, re-basing each segment's first delta.
     // `runs` lists each shard's runs in creation order, and a term lives in one shard.
     let mut readers = Vec::new();
@@ -701,7 +701,7 @@ pub fn build(
         buf.clear();
         let mut df = 0u32;
         let mut prev_last: Option<u32> = None;
-        // Same term in several runs: take them in run (= doc) order.
+        // Same term in several runs, so take them in run (= doc) order.
         same.clear();
         same.push(first_run);
         while heap
@@ -751,8 +751,8 @@ pub fn build(
     for p in &runs {
         std::fs::remove_file(p)?;
     }
-    // Embeddings: every doc's vector key, and the coverage the store already gives
-    // this generation. The store is only read here: embedding runs write it.
+    // For embeddings, this gathers every doc's vector key, and the coverage the store already gives
+    // this generation. The store is only read here, because embedding runs write it.
     let mut dense_stats = None;
     if let (Some(d), Some(cached), Some(vhash), Some(spool)) =
         (dense, cached.as_ref(), vhash.take(), spool.take())
@@ -817,7 +817,7 @@ pub fn build(
             serde_json::json!({ "index2_phases": phases, "shards": shards })
         );
     }
-    // Older generations: readers that already opened their files keep reading them. One
+    // Older generations are removed, and readers that already opened their files keep reading them. One
     // that cannot be removed now (an embedding run still reading it, on a platform that
     // keeps open files) goes with a later build.
     for e in std::fs::read_dir(&state_dir)? {
@@ -838,7 +838,7 @@ pub fn build(
     }
     files::write_report(&state_dir, &report)?;
     // The embedding cache is compacted only here, with no other build reading it (this
-    // one holds the index lock) and no run writing it: a run in progress keeps it as
+    // one holds the index lock) and no run writing it. A run in progress keeps it as
     // it is, and a later build compacts it.
     if let (Some(d), Some(stats)) = (dense, dense_stats.as_mut()) {
         let embed_lock = lock_file(&state_dir, EMBED_LOCK)?;
@@ -857,7 +857,7 @@ pub fn build(
                     "{e} (the build published its generation, so lexical search works, and a later embedding run continues where this one stopped)"
                 )
             })?;
-            // Superseded before it began: what the build published.
+            // Superseded before it began, by what the build published.
             Some(if run.superseded && run.docs == 0 {
                 EmbedStats {
                     superseded: true,
@@ -868,7 +868,7 @@ pub fn build(
             })
         }
         (None, _) => {
-            // A lexical generation: the vector stores go once no run writes them, unless
+            // A lexical generation, so the vector stores go once no run writes them, unless
             // a newer generation was published meanwhile (its run keeps its own store).
             let embed_lock = lock_file(&state_dir, EMBED_LOCK)?;
             embed_lock.lock_exclusive()?;
@@ -917,7 +917,7 @@ fn current_generation(state_dir: &Path) -> Result<String, Error> {
         .to_owned())
 }
 
-/// `embed-progress.json`: the latest run's generation, its state and figures, and why
+/// `embed-progress.json` holds the latest run's generation, its state and figures, and why
 /// it was stopped, when its stop signal ended it.
 #[derive(Serialize, Deserialize)]
 struct RunRecord {
@@ -967,7 +967,7 @@ fn embedding_active(state_dir: &Path) -> bool {
     }
 }
 
-/// How many of `keys` the store in `dir` holds, read only: 0 when it is missing,
+/// How many of `keys` the store in `dir` holds, read only, giving 0 when it is missing,
 /// unreadable or of other settings (an embedding run then replaces it).
 fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u64 {
     let Ok(store) = CaprockStore::open(dir) else {
@@ -1003,7 +1003,7 @@ pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Err
     embed_run(state_dir, dense, None)
 }
 
-/// [`embed`], or with `expect` only that generation: superseded when another is current.
+/// [`embed`], or with `expect` only that generation, superseded when another is current.
 fn embed_run(
     state_dir: &Path,
     d: &DenseBuild<'_>,
@@ -1020,7 +1020,7 @@ fn embed_run(
     }
     let superseded = || current_generation(state_dir).ok().as_deref() != Some(name.as_str());
     // A build may publish a newer generation and remove this one before the run has
-    // read it: the run is superseded, not failed.
+    // read it, so the run is superseded, not failed.
     let read = || -> Result<_, Error> {
         let generation = Generation::open_at(state_dir, &name)?;
         let Some(info) = generation.stored_dense_info()? else {
@@ -1064,7 +1064,7 @@ fn embed_run(
 
     // The vectors of chunks the generation lacks go first (the generation is current,
     // so no reader needs them), and stores of other models or settings. A newer
-    // generation may still need them: then its run decides.
+    // generation may still need them, and then its run decides.
     let (mut store, created) =
         vector::open_or_create(&state_dir.join(&info.store), &info.store_config())?;
     stats.store_created = created;
@@ -1081,7 +1081,7 @@ fn embed_run(
     stats.vectors_removed = stale.len() as u64;
     remove_other_stores(state_dir, Some(&info.store))?;
 
-    // The docs without a vector: those whose text the cache holds get it now, the
+    // The docs without a vector. Those whose text the cache holds get it now, the
     // others when their text is embedded.
     let mut refill = Vec::new();
     let mut by_hash: HashMap<[u8; 32], Vec<(VectorId, u32)>> = HashMap::new();
@@ -1145,7 +1145,7 @@ fn embed_run(
     if !by_hash.is_empty() && !was_superseded && !stopped {
         let spool = match File::open(dir.join(SPOOL)) {
             Ok(spool) => Some(spool),
-            // Gone with the generation: superseded. Gone otherwise: its texts are
+            // Gone with the generation means superseded. Gone otherwise means its texts are
             // counted as left below.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
@@ -1217,8 +1217,8 @@ fn embed_run(
     } else if totals.cap_reached {
         EmbedState::CapReached
     } else {
-        // Left now: texts over the model's limit, and any the spool lacks (its build
-        // found them in a cache that has since lost them; a rebuild embeds them).
+        // Left now are texts over the model's limit, and any the spool lacks (its build
+        // found them in a cache that has since lost them, and a rebuild embeds them).
         stats.not_embedded += (by_hash.len() as u64).saturating_sub(totals.too_long);
         EmbedState::Complete
     };
@@ -1324,11 +1324,11 @@ fn remove_other_stores(state_dir: &Path, keep: Option<&str>) -> Result<(), Error
     }
     Ok(())
 }
-/// Bytes per `vkeys.dat` entry: a u128 vector id (big-endian, so byte order is id
+/// Bytes per `vkeys.dat` entry, a u128 vector id (big-endian, so byte order is id
 /// order) and a u32 doc.
 const VKEY_BYTES: usize = 20;
 
-/// A doc's vector id: a digest of its path, its embedded text's hash, and how many
+/// A doc's vector id is a digest of its path, its embedded text's hash, and how many
 /// docs of the file have the same text before it. A chunk keeps its id, so its
 /// vector, while its path and text stay the same, whatever its doc id.
 fn vector_id(path: &str, hash: &[u8; 32], occurrence: u32) -> VectorId {
@@ -1384,7 +1384,7 @@ fn write_vector_keys(dir: &Path, keys: &[(VectorId, u32)]) -> Result<(), Error> 
     Ok(())
 }
 
-/// What a store holding `stored` (ascending) needs to hold `keys` (by id): the keys
+/// What a store holding `stored` (ascending) needs to hold `keys` (by id), namely the keys
 /// to add, and the ids to remove.
 fn diff_ids(
     keys: &[(VectorId, u32)],
@@ -1428,7 +1428,7 @@ pub(crate) fn check_dense_format(info: &DenseIndexInfo) -> Result<(), Error> {
     .into())
 }
 
-/// The sparse term index (`terms.idx`) without a `String` per entry: the raw bytes
+/// The sparse term index (`terms.idx`) without a `String` per entry, holding the raw bytes
 /// plus the start of each entry, searched by byte comparison (String order).
 struct TermIndex {
     raw: Vec<u8>,
@@ -1500,7 +1500,7 @@ fn lookup(
     Ok(None)
 }
 
-/// Per-document score sums: a dense array when the query's postings cover a large
+/// Per-document score sums, in a dense array when the query's postings cover a large
 /// share of the documents, else a map of the touched documents only. Either way
 /// each document's sum is accumulated in the same order, so scores are identical.
 enum Scores {
@@ -1550,7 +1550,7 @@ impl Scores {
 
 /// The first doc and the path of every file with chunks (`files.dat`).
 fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
-    // The kind stays: a search that finds the file gone (a build removed the
+    // The kind stays, so a search that finds the file gone (a build removed the
     // generation) starts over.
     let raw = std::fs::read(dir.join("files.dat")).map_err(|e| {
         std::io::Error::new(
@@ -1569,7 +1569,7 @@ fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
     Ok(out)
 }
 
-/// The current generation of an index2 state directory, opened for reading: every
+/// The current generation of an index2 state directory, opened for reading. Every
 /// read goes to the generation `CURRENT2` named when it was opened, so lexical and
 /// dense results of one search come from the same build.
 pub(crate) struct Generation {
@@ -1598,7 +1598,7 @@ impl Generation {
         })
     }
 
-    /// The embeddings of this generation, if it has them, with their coverage now: the
+    /// The embeddings of this generation, if it has them, with their coverage now, being the
     /// latest embedding run's, when it ran on this generation. Read before the store
     /// is opened, since a run records the coverage after it commits the store.
     pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
@@ -1617,7 +1617,7 @@ impl Generation {
     fn stored_dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
         match std::fs::read(self.dir.join("dense.json")) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            // Missing from a generation built with embeddings: a build removed the
+            // Missing from a generation built with embeddings means a build removed the
             // generation, and the error makes a search start over on the new one.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.meta.dense => Ok(None),
             Err(e) => Err(e.into()),
@@ -1625,7 +1625,7 @@ impl Generation {
     }
 
     /// The vector store of this generation's embeddings, read-only. It holds the
-    /// vectors the generation's coverage counts, and can hold others: those of chunks
+    /// vectors the generation's coverage counts, and can hold others, namely those of chunks
     /// an older generation had, until the run for this one removes them.
     pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<CaprockStore, Error> {
         check_dense_format(info)?;
@@ -1644,7 +1644,7 @@ impl Generation {
             .into());
         }
         // A replacement store (a run repairing an unusable one) is empty until the run
-        // fills it and records its coverage: refuse it rather than find nothing. A run
+        // fills it and records its coverage, so refuse it rather than find nothing. A run
         // that removed vectors of this generation works for a newer one, and the
         // search starts over on that.
         if (store.len() as u64) < info.embedded {
@@ -1697,7 +1697,7 @@ impl Generation {
         let terms = File::open(dir.join("terms.dat"))?;
         let terms_len = terms.metadata()?.len();
         let query: BTreeSet<_> = tokens(query).into_iter().collect();
-        // Same accumulation order per document as search::search: query terms ascending.
+        // Same accumulation order per document as search::search (query terms ascending).
         let mut found = Vec::new();
         for t in &query {
             if let Some(hit) = lookup(&idx, &terms, terms_len, t)? {
@@ -1707,7 +1707,7 @@ impl Generation {
         if found.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
-        // A filter is applied per file: (first doc, passes) of each file, by doc.
+        // A filter is applied per file, as (first doc, passes) of each file, by doc.
         let allowed: Option<Vec<(u32, bool)>> = if filter.is_empty() {
             None
         } else {

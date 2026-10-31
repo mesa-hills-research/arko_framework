@@ -100,7 +100,7 @@ pub(super) async fn server(
 }
 
 /// A server answering requests concurrently with `replies` in the order the
-/// requests arrive, for as long as the test runs; a request beyond them gets
+/// requests arrive, for as long as the test runs, and a request beyond them gets
 /// no answer. Every request is recorded, and `arrived` gets its body as it
 /// comes in. With `gated`, each answer first waits for a permit on `gate`.
 struct TestServer {
@@ -141,7 +141,7 @@ impl TestServer {
                     }
                     match reply {
                         Some(reply) => write_reply(&mut socket, &reply).await,
-                        // Hold the connection open: the request never completes.
+                        // Hold the connection open, so the request never completes.
                         None => std::future::pending().await,
                     }
                 });
@@ -237,7 +237,7 @@ async fn oauth_recovery_handles_server_expiry_for_text_and_stream_without_an_out
                 reply("/responses", 200, &body),
             ])
             .await;
-            // One refresh token per round: the first round's is spent.
+            // One refresh token per round, because the first round's is spent.
             let refresh_token = format!("server-expiry-{streaming}");
             let client = served_by(
                 OpenAIClient::new_chatgpt_oauth(
@@ -551,7 +551,7 @@ async fn a_store_is_read_before_each_refresh_and_receives_the_rotated_tokens() {
 #[tokio::test]
 async fn tokens_another_program_refreshed_are_used_without_a_refresh_request() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        // No /token reply: a refresh request would fail the test.
+        // No /token reply, because a refresh request would fail the test.
         let (url, server) = server(vec![
             expired(),
             reply("/responses", 200, &completed_stream()),
@@ -741,14 +741,14 @@ fn permission_denied() -> Reply {
     )
 }
 
-/// Like Codex's unauthorized recovery: any 401 first re-reads the store, and
-/// newer tokens there are used for one more try; only `token_expired`
+/// Like Codex's unauthorized recovery, any 401 first re-reads the store, and
+/// newer tokens there are used for one more try, while only `token_expired`
 /// refreshes.
 #[tokio::test]
 async fn any_401_adopts_newer_stored_tokens_and_sends_again_once() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for second_reply_ok in [true, false] {
-            // No /token reply: a refresh request would fail the test.
+            // No /token reply, because a refresh request would fail the test.
             let second = if second_reply_ok {
                 reply("/responses", 200, &completed_stream())
             } else {
@@ -780,7 +780,7 @@ async fn any_401_adopts_newer_stored_tokens_and_sends_again_once() {
             if second_reply_ok {
                 result.unwrap();
             } else {
-                // A second rejection is returned; nothing loops.
+                // A second rejection is returned, and nothing loops.
                 let error = result.unwrap_err();
                 assert!(
                     matches!(
@@ -900,9 +900,9 @@ async fn clients_made_separately_from_one_auth_file_refresh_it_once() {
 }
 
 /// The first client's rotated tokens can't be saved, so the file keeps the
-/// spent refresh token: the other clients of the file, one made from it
+/// spent refresh token, so the other clients of the file, one made from it
 /// afterwards, and the first client too (it doesn't rotate its tokens again
-/// before they are saved) stop with an error naming the recovery file; no
+/// before they are saved) stop with an error naming the recovery file, and no
 /// one is handed the unsaved tokens. Once the file can be written, the first
 /// client's next refresh saves them first (with their id_token) and
 /// refreshes them, and the others take the newest tokens from the file.
@@ -973,7 +973,7 @@ async fn a_refresh_dropped_after_its_request_was_sent_still_installs_and_saves_t
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
         // The refresh holds the credentials until the new tokens are
-        // installed and saved: a host about to shut its runtime down awaits
+        // installed and saved. A host about to shut its runtime down awaits
         // them, and so waits for the refresh.
         let host = crate::LLMClient::new().with_openai_client(client.clone());
         let settled = host.openai_chatgpt_oauth_credentials();
@@ -994,7 +994,7 @@ async fn a_refresh_dropped_after_its_request_was_sent_still_installs_and_saves_t
 /// While one client's refresh waits on a stalled token endpoint (holding the
 /// file's refresh lock), another client of the same file keeps serving
 /// requests with its still valid token, also while it waits for that lock to
-/// refresh; it then finds the first client's tokens in the file.
+/// refresh, and it then finds the first client's tokens in the file.
 #[tokio::test]
 async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1012,7 +1012,7 @@ async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
             let first = first.clone();
             async move { first.refresh_oauth_token_once().await }
         });
-        // The refresh request is out: the first client holds the file's
+        // The refresh request is out, so the first client holds the file's
         // refresh lock until the token endpoint answers.
         tokens.arrived.recv().await.unwrap();
         let conversation = Conversation::new(Model::openai_gpt_6_astra());
@@ -1055,13 +1055,13 @@ async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
     .unwrap();
 }
 
-/// A token endpoint that takes the request but never answers: the refresh
+/// A token endpoint that takes the request but never answers, so the refresh
 /// times out with a transient error (back to the agent's bounded recovery)
 /// and lets go of the credentials.
 #[tokio::test]
 async fn a_stalled_token_endpoint_times_out_with_a_transient_error() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        // The 401 is answered; the refresh request after it never is.
+        // The 401 is answered, and the refresh request after it never is.
         let server = TestServer::start(vec![expired()], false).await;
         let mut client = client(&server.url);
         assert_eq!(client.oauth_refresh_timeout, Some(OAUTH_REFRESH_TIMEOUT));
@@ -1096,7 +1096,7 @@ async fn a_stalled_token_endpoint_times_out_with_a_transient_error() {
     .unwrap();
 }
 
-/// A rate-limited refresh waits with no lock held: another caller refreshes
+/// A rate-limited refresh waits with no lock held, so another caller refreshes
 /// meanwhile, and the waiting one then takes its tokens instead of sending a
 /// third request. Real time, with a one-second Retry-After. (That one wait
 /// honors at most 15 minutes of a longer hint is unit-tested with the delay
@@ -1141,7 +1141,7 @@ async fn an_explicit_refresh_that_waits_for_another_returns_its_tokens() {
             async move { client.refresh_oauth_token().await }
         });
         server.arrived.recv().await.unwrap();
-        // The first refresh holds the credentials; this one waits for them.
+        // The first refresh holds the credentials, and this one waits for them.
         let second = client.refresh_oauth_token();
         tokio::pin!(second);
         assert!(futures::poll!(&mut second).is_pending());
@@ -1167,7 +1167,7 @@ async fn concurrent_expiry_checks_refresh_once() {
         };
         for clones in [false, true] {
             let server = TestServer::start(vec![answer(), answer()], false).await;
-            // One refresh token per round: the first round's is spent.
+            // One refresh token per round, because the first round's is spent.
             let refresh_token = format!("expiry-check-{clones}");
             let expired = OpenAIClient::new_chatgpt_oauth(&jwt(1), Some(&refresh_token), "synthetic-account");
             let client = served_by(expired, &server.url);
@@ -1184,7 +1184,7 @@ async fn concurrent_expiry_checks_refresh_once() {
                     client.refresh_oauth_token_if_expiring(margin),
                 )
             };
-            // One call refreshed; the other found the new token.
+            // One call refreshed, and the other found the new token.
             let (a, b) = (a.unwrap(), b.unwrap());
             assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1, "{clones}");
             assert_eq!(a.or(b).unwrap().access_token, fresh_jwt());
@@ -1262,7 +1262,7 @@ async fn an_expiry_check_adopts_stored_tokens_and_refreshes_them_only_if_they_ex
 }
 
 /// After a rotation that couldn't be saved, the user signs in again (as the
-/// recovery message suggests): every client takes the new credentials, the
+/// recovery message suggests), so every client takes the new credentials, the
 /// one holding the forgotten rotation too, and none refreshes with the
 /// rotated or the spent token.
 #[tokio::test]
@@ -1307,7 +1307,7 @@ async fn clients_take_the_credentials_of_a_new_sign_in_after_an_unsaved_rotation
     .unwrap();
 }
 
-/// A host that builds a client per run and drops it: the unsaved rotation
+/// A host that builds a client per run and drops it. The unsaved rotation
 /// outlives the clients, so the next client made from the file doesn't
 /// refresh the spent token, and takes the rotation once the file can be
 /// written.
@@ -1368,11 +1368,11 @@ fn sent_refresh_tokens(server: &TestServer) -> Vec<String> {
         .collect()
 }
 
-/// B1: two clients of one `auth.json`. The first refreshes twice, and the
+/// B1 covers two clients of one `auth.json`. The first refreshes twice, and the
 /// second rotation can't be saved. The idle second client, whose tokens and
 /// the file's were both spent by those refreshes, gets an error naming the
 /// recovery file from its proactive refresh instead of taking the file's
-/// spent tokens and refreshing them; once the file can be written, it takes
+/// spent tokens and refreshing them, and once the file can be written, it takes
 /// the rotation. No refresh token reaches the server twice.
 #[tokio::test]
 async fn an_idle_client_never_refreshes_tokens_another_client_spent() {
@@ -1439,10 +1439,10 @@ async fn an_idle_client_never_refreshes_tokens_another_client_spent() {
     .unwrap();
 }
 
-/// M1a: two unsaved rotations in a row. The first client's rotation can't be
-/// saved; the user signs in again; the second client takes the new sign-in,
+/// M1a covers two unsaved rotations in a row. The first client's rotation can't be
+/// saved, the user signs in again, the second client takes the new sign-in,
 /// refreshes it, and can't save that either. The first client then neither
-/// takes the spent sign-in tokens nor refreshes them; once the file can be
+/// takes the spent sign-in tokens nor refreshes them, and once the file can be
 /// written, it takes the second rotation.
 #[tokio::test]
 async fn a_client_never_takes_a_sign_in_another_client_spent() {
@@ -1499,9 +1499,9 @@ async fn a_client_never_takes_a_sign_in_another_client_spent() {
     .unwrap();
 }
 
-/// M1b: while the file holds another account, the unsaved rotation is kept
+/// In M1b, while the file holds another account, the unsaved rotation is kept
 /// (also once its client is dropped). When the file is put back to the
-/// spent tokens, a client made from it doesn't refresh them: it gets an
+/// spent tokens, a client made from it doesn't refresh them, and it gets an
 /// error naming the recovery file, then the rotation once it can be saved.
 #[tokio::test]
 async fn an_unsaved_rotation_is_kept_while_the_file_holds_another_account() {
@@ -1561,7 +1561,7 @@ fn refused_as_spent(error: &Error) -> bool {
 }
 
 /// Once a refresh in this process exchanged a refresh token for a new one,
-/// no entry point sends it again or adopts stored credentials holding it:
+/// no entry point sends it again or adopts stored credentials holding it, namely
 /// `refresh_chatgpt_oauth_token`, explicit refreshes (with and without
 /// rate-limit retries), the proactive refresh, the refresh after a
 /// `token_expired` 401, and the store reads before a refresh and after any
@@ -1596,7 +1596,7 @@ async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
         .await
         .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
-        // Refresh tokens are unique: not sent to another token URL either.
+        // Refresh tokens are unique, so not sent to another token URL either.
         let elsewhere = TestServer::start(Vec::new(), false).await;
         let error = client(&elsewhere.url)
             .refresh_oauth_token_once()
@@ -1673,8 +1673,8 @@ async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
             with_store_client.chatgpt_oauth_credentials().await.unwrap(),
             other
         );
-        // After another 401, the store's credentials aren't taken either:
-        // the 401 stands and the request isn't sent again.
+        // After another 401, the store's credentials aren't taken either,
+        // so the 401 stands and the request isn't sent again.
         store.reads.lock().unwrap().push_back(Ok(Some(offered)));
         let error = with_store_client
             .generate_text(&conversation, &GenerationConfig::default())
@@ -1708,7 +1708,7 @@ async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
 
 /// A refresh waiting out an HTTP 429 finds, on its next attempt, that
 /// another client (sharing neither its credentials nor a store) exchanged
-/// the same refresh token meanwhile: it isn't sent again. Real time, with a
+/// the same refresh token meanwhile, so it isn't sent again. Real time, with a
 /// one-second Retry-After.
 #[tokio::test]
 async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() {
@@ -1738,7 +1738,7 @@ async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() 
 
 /// A host refreshed the file's token itself (with
 /// `refresh_chatgpt_oauth_token`) and installed the result in a client of
-/// the file: the file now holds spent credentials, so the client's are saved
+/// the file. The file now holds spent credentials, so the client's are saved
 /// over them and refreshed. The spent token is never sent again.
 #[tokio::test]
 async fn credentials_a_host_refreshed_itself_replace_the_spent_ones_in_the_file() {
@@ -1781,7 +1781,7 @@ async fn credentials_a_host_refreshed_itself_replace_the_spent_ones_in_the_file(
     .unwrap();
 }
 
-/// A store client refreshes the file's token at one token URL; a client
+/// A store client refreshes the file's token at one token URL, and a client
 /// without a store, holding the old credentials and sending to another URL,
 /// doesn't send the spent token there.
 #[tokio::test]
@@ -1812,7 +1812,7 @@ async fn a_token_spent_at_one_token_url_is_not_sent_to_another() {
 }
 
 /// A refresh the server refuses because the token was reused, expired or
-/// revoked records the token: later refreshes fail at once instead of
+/// revoked records the token, so later refreshes fail at once instead of
 /// sending it again. Other refusals don't.
 #[tokio::test]
 async fn a_token_the_server_refused_for_good_is_not_sent_again() {
@@ -1857,7 +1857,7 @@ async fn a_token_the_server_refused_for_good_is_not_sent_again() {
             }
             assert_eq!(server.request_count(), 1, "{code}");
         }
-        // A refusal that says nothing of the token's fate: it is sent again.
+        // A refusal that says nothing of the token's fate, so it is sent again.
         let busy = reply("/token", 500, r#"{"error":{"code":"server_error"}}"#);
         let server = TestServer::start(vec![busy, refreshed()], false).await;
         let expiring = served_by(
@@ -1937,7 +1937,7 @@ async fn an_access_token_without_a_refresh_token_is_used_until_the_server_reject
         assert!(error.to_string().contains("no refresh token"), "{error}");
         assert_eq!(server.await.unwrap().len(), 1, "no refresh request");
 
-        // So is a token whose expiry has passed: only the server's
+        // So is a token whose expiry has passed, and only the server's
         // rejection counts.
         let gone = served_by(
             OpenAIClient::new_chatgpt_oauth(&jwt(now_secs() - 60), None, "synthetic-account"),
@@ -1954,7 +1954,7 @@ async fn an_access_token_without_a_refresh_token_is_used_until_the_server_reject
     .unwrap();
 }
 
-/// Credentials taken from the environment can't be updated there: the first
+/// Credentials taken from the environment can't be updated there, so the first
 /// rotation says so, once.
 #[tokio::test]
 async fn a_rotation_no_store_keeps_warns_only_when_asked() {

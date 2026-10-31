@@ -61,7 +61,7 @@ fn compound_function_families_across_grammars() {
         );
     }
     // Tiny Java classes deliberately remain whole. Expose members in a larger
-    // container; a preceding declaration must not become part of the family.
+    // container, and a preceding declaration must not become part of the family.
     let java = format!(
         "class Renderer {{\nint unrelated() {{ return 1; }}{}\nint renderPlain() {{ return 10; }}\nint renderDebug() {{ return 20; }}\n}}\n",
         " ".repeat(800)

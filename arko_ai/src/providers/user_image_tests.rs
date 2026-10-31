@@ -1,4 +1,4 @@
-//! Where a user's images go in each provider's request: after the text of
+//! Where a user's images go in each provider's request. They go after the text of
 //! their message, as the provider's image input, in a task's first message
 //! and in a later one (a context update with a labelled image).
 
@@ -191,7 +191,7 @@ fn models_without_image_input_refuse_user_images() {
     }
 }
 
-/// What `Model::image_refusal` refuses: anything without image input, a URL
+/// What `Model::image_refusal` refuses, namely anything without image input, a URL
 /// where the request takes data only (Anthropic and Google refuse it, and
 /// Claude Code would pass it on as text), and GIF on Google.
 #[test]

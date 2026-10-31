@@ -2,7 +2,7 @@
 //!
 //! Runs several agent-like tool-loop conversations in parallel, traces every
 //! call with [`RequestTrace`], and summarizes cache hits per conversation.
-//! The key metric is `prev_found`: the share of calls whose cached prefix
+//! The key metric is `prev_found`, the share of calls whose cached prefix
 //! covers the previous request of the same conversation (within 1,024
 //! tokens), which reflects whether requests reach the server holding that
 //! conversation's cache. Raw hit rates depend on run length (every call adds
@@ -15,18 +15,18 @@
 //! `--auth-file`), kept in step with the file by arko_ai's
 //! [`CodexAuthStore`]. The access token is used as is while valid. Before it
 //! expires, the file is re-read, and tokens Codex refreshed in the meantime
-//! are adopted; otherwise it is refreshed. Every refresh (this one, or the
+//! are adopted, and otherwise it is refreshed. Every refresh (this one, or the
 //! provider's own after a 401) is written back at once, before any
-//! rate-limit wait: the previous contents go to `auth.json.bak` (one backup,
+//! rate-limit wait. The previous contents go to `auth.json.bak` (one backup,
 //! replaced each time), the file is replaced atomically, and newer tokens
 //! written by Codex are never overwritten. Refreshed tokens that can't be
 //! written go to an owner-only `auth.json.recovered-<unix seconds>` next to
 //! it, and the run stops. Tokens and the account id are never printed.
 //!
 //! By default requests go out exactly as the provider builds them (Codex
-//! parity: identity headers, turn state, verbatim output-item replay,
+//! parity, meaning identity headers, turn state, verbatim output-item replay,
 //! `reasoning.context`). `--legacy` reproduces the provider as it was before
-//! that fix; the other experiment flags re-enable one piece each on top of
+//! that fix, and the other experiment flags re-enable one piece each on top of
 //! `--legacy` (they are the default otherwise). Adjustments go through an
 //! [`OpenAIRequestHook`]:
 //!
@@ -38,18 +38,18 @@
 //! cargo run -p arko_ai --example oauth_cache_probe -- --out <dir> --idle-gap 240,600,1200,1800
 //! ```
 //!
-//! `--idle-gap` measures how long the cache outlives an idle conversation:
-//! each gap (seconds; repeat the flag or give a comma list) runs as its own
+//! `--idle-gap` measures how long the cache outlives an idle conversation.
+//! Each gap (seconds, repeat the flag or give a comma list) runs as its own
 //! conversation, all of them concurrently. Each makes its warm calls
 //! (`--turns`, default 2 in this mode), sleeps for its gap, then makes one
 //! more call. The summary compares the post-gap call's cached and input
 //! tokens with the last warm call's. Each such conversation's instructions
 //! start with a line naming it and the run, so no prefix is shared with
-//! another conversation or an earlier run: only the conversation's own
+//! another conversation or an earlier run, so only the conversation's own
 //! cache entry can serve the post-gap call.
 //!
 //! A short-term rate limit (HTTP 429 that isn't a plan or quota limit) is
-//! retried after its `Retry-After` delay, up to three times per call; every
+//! retried after its `Retry-After` delay, up to three times per call, and every
 //! attempt is traced. Plan limits, 401 and 403 stop every conversation.
 
 use arko_ai::{
@@ -76,21 +76,21 @@ use std::{
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Measure ChatGPT OAuth prompt caching with a traced tool-loop workload")]
 struct Args {
-    /// Trace and summary directory; must be new or empty unless --summarize-only.
+    /// Trace and summary directory. Must be new or empty unless --summarize-only.
     #[arg(long)]
     out: PathBuf,
-    /// Codex credentials file (default: ~/.codex/auth.json).
+    /// Codex credentials file (default ~/.codex/auth.json).
     #[arg(long)]
     auth_file: Option<PathBuf>,
     /// Conversations to run (default 3). Not with --idle-gap, which runs
     /// one conversation per gap.
     #[arg(long)]
     conversations: Option<usize>,
-    /// Calls per conversation (default 15); with --idle-gap, the warm calls
+    /// Calls per conversation (default 15), and with --idle-gap, the warm calls
     /// before the gap (default 2).
     #[arg(long)]
     turns: Option<usize>,
-    /// Idle-gap mode: for each gap, in seconds (repeat the flag or give a
+    /// Idle-gap mode. For each gap, in seconds (repeat the flag or give a
     /// comma list), one conversation makes its warm calls, stays idle for
     /// the gap, then makes one more call.
     #[arg(long = "idle-gap", value_name = "SECS", value_delimiter = ',')]
@@ -108,36 +108,36 @@ struct Args {
     #[arg(long)]
     summarize_only: bool,
 
-    /// Reproduce the provider as it was before the Codex-parity fix: no
+    /// Reproduce the provider as it was before the Codex-parity fix, with no
     /// identity headers, `OpenAI-Beta: responses=experimental`, no turn state,
     /// no `Accept` header, no `reasoning.context`, and the old replay (the
     /// assistant output came from `response.completed`, which the ChatGPT
-    /// backend leaves empty: no text, reasoning or output items; tool calls
+    /// backend leaves empty, giving no text, reasoning or output items, and tool calls
     /// from the stream, each followed by an empty assistant message). The
     /// flags below re-enable single pieces on top of it.
     #[arg(long)]
     legacy: bool,
-    /// With --legacy: send `session-id: <prompt_cache_key>`.
+    /// With --legacy, send `session-id: <prompt_cache_key>`.
     #[arg(long)]
     session_id_header: bool,
-    /// With --legacy: send `thread-id: <prompt_cache_key>`.
+    /// With --legacy, send `thread-id: <prompt_cache_key>`.
     #[arg(long)]
     thread_id_header: bool,
-    /// With --legacy: send `x-client-request-id: <prompt_cache_key>`.
+    /// With --legacy, send `x-client-request-id: <prompt_cache_key>`.
     #[arg(long)]
     client_request_id_header: bool,
-    /// With --legacy: echo the turn's `x-codex-turn-state`.
+    /// With --legacy, echo the turn's `x-codex-turn-state`.
     #[arg(long)]
     echo_turn_state: bool,
-    /// With --legacy: omit `OpenAI-Beta: responses=experimental`.
+    /// With --legacy, omit `OpenAI-Beta: responses=experimental`.
     #[arg(long)]
     no_legacy_beta_header: bool,
-    /// With --legacy: replay the output items assembled from
+    /// With --legacy, replay the output items assembled from
     /// `response.output_item.done`, verbatim and in order.
     #[arg(long)]
     replay_output_items: bool,
     /// Override `reasoning.context` (`auto`, `current_turn`, `all_turns`), or
-    /// `omit` to leave it out. Default: what the provider sends (`all_turns`
+    /// `omit` to leave it out. The default is what the provider sends (`all_turns`
     /// for GPT-5.6 and GPT-6), or nothing with --legacy.
     #[arg(long)]
     reasoning_context: Option<String>,
@@ -152,10 +152,10 @@ struct Settings {
     client_request_id_header: bool,
     turn_state: bool,
     legacy_beta_header: bool,
-    /// The provider sends `Accept: text/event-stream`; the old one didn't.
+    /// The provider sends `Accept: text/event-stream`, and the old one didn't.
     accept_header: bool,
     replay_output_items: bool,
-    /// `None` keeps what the provider sends; `Some("omit")` removes it.
+    /// `None` keeps what the provider sends, and `Some("omit")` removes it.
     reasoning_context: Option<String>,
 }
 
@@ -237,7 +237,7 @@ impl OpenAIRequestHook for ProbeHook {
 }
 
 /// The pre-fix provider kept only what `response.completed.output` held,
-/// which the ChatGPT backend leaves empty: the message had no text,
+/// which the ChatGPT backend leaves empty, so the message had no text,
 /// reasoning or id, and its tool calls came from the stream.
 fn legacy_response(mut response: GenerationResponse) -> GenerationResponse {
     response.message.content = vec![Content::Text(String::new())];
@@ -247,7 +247,7 @@ fn legacy_response(mut response: GenerationResponse) -> GenerationResponse {
 }
 
 /// The pre-fix provider replayed an empty assistant message after each
-/// turn's function calls; the provider no longer does.
+/// turn's function calls, and the provider no longer does.
 fn insert_legacy_empty_messages(input: &mut Vec<Value>) {
     let empty = json!({"role": "assistant", "type": "message", "content": [{"type": "output_text", "text": ""}]});
     let mut index = 0;
@@ -320,7 +320,7 @@ async fn run(args: Args) -> Result<(), String> {
     run_workload(&args, &settings, &plans, client, tokens, model, effort).await
 }
 
-/// The client as a run uses it: traced into `out`, its requests adjusted
+/// The client as a run uses it, traced into `out`, its requests adjusted
 /// for the experiment `settings`.
 fn probe_client(client: LLMClient, out: &Path, settings: &Settings) -> LLMClient {
     let hook = Arc::new(ProbeHook {
@@ -331,7 +331,7 @@ fn probe_client(client: LLMClient, out: &Path, settings: &Settings) -> LLMClient
         .with_openai_request_hook(hook)
 }
 
-/// What one conversation of a run does: its calls, and in idle-gap mode the
+/// What one conversation of a run does, namely its calls, and in idle-gap mode the
 /// gap after them and the one call that follows it.
 #[derive(Clone, Debug, PartialEq)]
 struct Plan {
@@ -492,7 +492,7 @@ async fn run_workload(
 }
 
 /// When each idle-gap conversation's gap ran, in `<out>/idle_gaps.json`,
-/// rewritten as each gap starts and ends; the summary reads it to find the
+/// rewritten as each gap starts and ends, and the summary reads it to find the
 /// last warm call and the post-gap call in the trace.
 #[derive(Clone)]
 struct GapLog {
@@ -535,7 +535,7 @@ impl GapLog {
 
 const IDLE_GAPS_FILE: &str = "idle_gaps.json";
 
-/// Waits out `gap`, or until another conversation stops the run; false
+/// Waits out `gap`, or until another conversation stops the run. False
 /// when the run stopped.
 async fn idle(gap: Duration, stop: &AtomicBool) -> bool {
     let deadline = tokio::time::Instant::now() + gap;
@@ -655,7 +655,7 @@ async fn run_conversation(
             Err(error) => {
                 let text = error.to_string();
                 // A short-term rate limit that outlasted its retries also
-                // stops the run: the account is being throttled.
+                // stops the run, because the account is being throttled.
                 if matches!(classify(&error), Failure::StopAll | Failure::RateLimited(_)) {
                     stop.store(true, Ordering::SeqCst);
                     return format!(
@@ -679,7 +679,7 @@ async fn run_conversation(
 }
 
 /// One model call. A short-term rate limit is retried after its delay, up
-/// to [`RATE_LIMIT_RETRIES`] times; each attempt is traced as its own call.
+/// to [`RATE_LIMIT_RETRIES`] times, and each attempt is traced as its own call.
 async fn generate(
     index: usize,
     client: &LLMClient,
@@ -699,7 +699,7 @@ async fn generate(
 
 /// Runs `attempt`, retrying short-term rate limits after `sleep`ing for
 /// their delay. Tokens the provider refreshes during an attempt are saved
-/// as it refreshes, before any wait; a failure to save them stops the run.
+/// as it refreshes, before any wait, and a failure to save them stops the run.
 async fn retry_rate_limits<T, Attempt, Sleep>(
     index: usize,
     client: &LLMClient,
@@ -777,7 +777,7 @@ const PLAN_LIMIT_CODES: &[&str] = &[
 
 #[derive(Debug, PartialEq)]
 enum Failure {
-    /// A plan limit or an authentication failure: stop every conversation.
+    /// A plan limit or an authentication failure, so stop every conversation.
     StopAll,
     /// A short-term rate limit, with the server's delay hint.
     RateLimited(Option<Duration>),
@@ -811,7 +811,7 @@ fn classify(error: &Error) -> Failure {
 }
 
 /// The server's delay (or a default) plus up to three seconds of jitter,
-/// capped at two minutes. The hint is the server's number: the sum
+/// capped at two minutes. The hint is the server's number, so the sum
 /// saturates rather than overflow.
 fn rate_limit_delay(hint: Option<Duration>, sample: u64) -> Duration {
     let jitter = Duration::from_millis(250 + sample % 2_750);
@@ -821,7 +821,7 @@ fn rate_limit_delay(hint: Option<Duration>, sample: u64) -> Duration {
 }
 
 // ---------------------------------------------------------------------------
-// Workload: deterministic instructions, tools, task and tool results.
+// Workload (deterministic instructions, tools, task and tool results).
 
 fn instructions() -> String {
     let mut text = String::from(
@@ -1029,9 +1029,9 @@ fn parse_effort(value: &str) -> Result<OpenAIEffort, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Credentials: ~/.codex/auth.json through arko_ai's `CodexAuthStore`.
+// Credentials come from ~/.codex/auth.json through arko_ai's `CodexAuthStore`.
 //
-// ChatGPT refresh tokens rotate: once a refresh succeeds, the previous refresh
+// ChatGPT refresh tokens rotate. Once a refresh succeeds, the previous refresh
 // token no longer works, and Codex, which shares the file, is signed out
 // unless the new tokens reach it. The client's credential store re-reads the
 // file before every refresh (the probe's own, or the provider's after a 401),
@@ -1042,15 +1042,15 @@ fn parse_effort(value: &str) -> Result<OpenAIEffort, String> {
 /// Refresh when the access token expires within this margin.
 const REFRESH_MARGIN: Duration = Duration::from_secs(300);
 
-/// The client's credential store: auth.json's [`CodexAuthStore`], noting
+/// The client's credential store is auth.json's [`CodexAuthStore`], noting
 /// each refresh for the summary and stopping the run after a failed save.
 struct TokenKeeper {
     store: CodexAuthStore,
     /// auth.json as loaded, for the client's first credentials.
     file: CodexAuthFile,
     refreshes: Mutex<Vec<String>>,
-    /// Set when rotated tokens could not be saved to the file: the run
-    /// stops. Names the recovery file; never holds a token.
+    /// Set when rotated tokens could not be saved to the file, and the run
+    /// stops. Names the recovery file, and never holds a token.
     unsaved: Mutex<Option<String>>,
 }
 
@@ -1114,7 +1114,7 @@ impl TokenKeeper {
             .refresh_openai_oauth_token_if_expiring(REFRESH_MARGIN)
             .await;
         // Also when this call only waited for another conversation's
-        // refresh: if that one's tokens couldn't be saved, stop here.
+        // refresh. If that one's tokens couldn't be saved, stop here.
         self.check()?;
         refreshed.map_err(|error| format!("token refresh failed: {}", error_text(&error, 200)))?;
         Ok(())
@@ -1221,7 +1221,7 @@ fn summarize(out: &Path) -> Result<Value, String> {
     Ok(summary)
 }
 
-/// For one idle-gap conversation: its gap, and the cached and input tokens
+/// For one idle-gap conversation, its gap, and the cached and input tokens
 /// of the last successful call before the gap and the first after it.
 fn idle_gap_stats(gap: &Value, calls: &[Value]) -> Value {
     let mut ok: Vec<&Value> = calls
@@ -1254,7 +1254,7 @@ fn idle_gap_stats(gap: &Value, calls: &[Value]) -> Value {
     };
     let (last_warm, post_gap) = (call(last_warm), call(post_gap));
     // How much of the last warm call's input the post-gap call found
-    // cached: near 100% when the entry outlived the gap.
+    // cached, near 100% when the entry outlived the gap.
     let kept = match (
         post_gap["cached_tokens"].as_u64(),
         last_warm["input_tokens"].as_u64(),
@@ -1387,7 +1387,7 @@ fn stats(calls: &[Value]) -> Value {
 /// conversation could have left in the cache, summed over calls.
 #[derive(Debug, Default, PartialEq)]
 struct PrefixReuse {
-    /// Σ min(previous input, input): the input a perfect cache would serve.
+    /// Σ min(previous input, input) is the input a perfect cache would serve.
     reusable: u64,
     /// Σ previous input.
     previous_input: u64,
@@ -1518,8 +1518,8 @@ fn percentile_i64(values: &[i64], p: usize) -> Value {
     }
 }
 
-/// An error's own text: an authentication failure without its
-/// "Authentication failed: " prefix.
+/// An error's own text (an authentication failure without its
+/// "Authentication failed: " prefix).
 fn error_message(error: &Error) -> String {
     match error {
         Error::AuthenticationFailed(message) => message.clone(),
@@ -1528,7 +1528,7 @@ fn error_message(error: &Error) -> String {
 }
 
 /// An error's text, shortened to `max` characters unless it is an
-/// authentication failure: those are arko_ai's own messages, which name the
+/// authentication failure, because those are arko_ai's own messages, which name the
 /// recovery file of tokens that could not be saved.
 fn error_text(error: &Error, max: usize) -> String {
     match error {
@@ -1659,7 +1659,7 @@ mod tests {
             call("b", 1, 2_000, 1_000, "completed"),
         ];
         let summary = stats(&calls);
-        // Pairs: (4000 -> 5000) and (5000 -> 4500); the failed call and each
+        // Pairs are (4000 -> 5000) and (5000 -> 4500), and the failed call and each
         // conversation's first call have no previous.
         assert_eq!(summary["ceiling"], json!(round(8_500.0 / 15_500.0)));
         assert_eq!(summary["efficiency"], json!(round(8_500.0 / 8_500.0)));
@@ -1760,7 +1760,7 @@ mod tests {
     // fake tokens. Refreshes go to a local server standing in for the token
     // endpoint and the Responses API (the client uses the system proxy
     // settings, so a proxy must exempt 127.0.0.1). Refresh tokens are unique
-    // per test: the process's record of spent tokens is shared by every test.
+    // per test, because the process's record of spent tokens is shared by every test.
 
     fn now() -> u64 {
         SystemTime::now()
@@ -1887,7 +1887,7 @@ mod tests {
         }
     }
 
-    /// Reads one request, body included; returns its path and JSON body
+    /// Reads one request, body included, and returns its path and JSON body
     /// (`null` if it has none).
     async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
         use tokio::io::AsyncReadExt;
@@ -1926,7 +1926,7 @@ mod tests {
     async fn a_refresh_during_a_request_is_saved_before_the_rate_limit_wait() {
         let (_dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_request_1");
         let rotated_access = jwt("a2", now() + 3_600);
-        // The server rejects the first request's token as expired; the
+        // The server rejects the first request's token as expired, and the
         // provider refreshes and resends it, and that is rate limited. The
         // retry after the wait fails for good.
         let server = {
@@ -2009,7 +2009,7 @@ mod tests {
     {
         let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_unsaved_1");
         // Codex also refreshes, and writes its tokens while this process
-        // refreshes: ours must not overwrite them, so they can't be saved.
+        // refreshes, and ours must not overwrite them, so they can't be saved.
         let codex = auth_json(&jwt("a3", now() + 3_600), "rt_unsaved_3");
         let ours = jwt("a2", now() + 3_600);
         let server = {
@@ -2023,7 +2023,7 @@ mod tests {
         let tokens = TokenKeeper::load(&path).unwrap();
         let client = server.client(&tokens);
 
-        // Two conversations check at once: the second waits for the first
+        // Two conversations check at once, so the second waits for the first
         // one's refresh, and stops too instead of sending another request.
         let (first, second) =
             tokio::join!(tokens.ensure_fresh(&client), tokens.ensure_fresh(&client));
@@ -2060,7 +2060,7 @@ mod tests {
             );
         }
 
-        // The run is over: later checks fail the same way and write nothing.
+        // The run is over, so later checks fail the same way and write nothing.
         assert_eq!(tokens.check(), Err(error.clone()));
         assert_eq!(tokens.ensure_fresh(&client).await, Err(error.clone()));
         // A run stopped this way ends like any other authentication failure.
@@ -2072,7 +2072,7 @@ mod tests {
         let outcome = error_text(&stopped, 300);
         assert_eq!(outcome, format!("Authentication failed: {error}"));
         // A request in flight at the stop that refreshes after a 401 sends
-        // no refresh token again: the store hands it Codex's tokens.
+        // no refresh token again, because the store hands it Codex's tokens.
         let _ = client.refresh_openai_oauth_token_once().await;
         assert_eq!(server.requests("/token"), 1);
         assert_eq!(
@@ -2092,7 +2092,7 @@ mod tests {
         let client = server.client(&tokens);
         fs::remove_file(&path).unwrap();
 
-        // Nothing rotated, so nothing is at risk: requests go on.
+        // Nothing rotated, so nothing is at risk, and requests go on.
         tokens.check().unwrap();
         // But refreshing now could rotate away tokens Codex wrote.
         let error = tokens.ensure_fresh(&client).await.unwrap_err();
@@ -2185,7 +2185,7 @@ mod tests {
     #[tokio::test]
     async fn idle_gap_conversations_idle_between_warm_and_post_gap_calls() {
         let (_auth_dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_idle_1");
-        // Usage grows with each conversation's calls; the conversation with
+        // Usage grows with each conversation's calls, and the conversation with
         // the longer gap finds nothing cached after it.
         let server = {
             let calls = Arc::new(Mutex::new(BTreeMap::<String, u64>::new()));
@@ -2280,7 +2280,7 @@ mod tests {
             assert_eq!(gap["post_gap_cached_of_last_warm_input"], json!(kept));
             let idled = gap["gap_ended_unix_ms"].as_u64().unwrap()
                 - gap["gap_started_unix_ms"].as_u64().unwrap();
-            // Wall-clock stamps of a monotonic sleep: allow a little slack.
+            // Wall-clock stamps of a monotonic sleep, so allow a little slack.
             assert!(idled + 10 >= (secs * 1_000.0) as u64, "{idled}");
         }
         // The two conversations share no prefix.

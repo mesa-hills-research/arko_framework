@@ -1,4 +1,4 @@
-//! Embedding while the index is in use: a build publishes its generation for lexical
+//! Embedding while the index is in use. A build publishes its generation for lexical
 //! search before anything is embedded, and an embedding run adds the vectors request by
 //! request. Searches during a run, edits and rebuilds while a run is going, a crash and a
 //! stop mid-run, the token cap, and watcher-driven rebuilds. A slow embedder (the hash
@@ -27,7 +27,7 @@ use std::{
 
 const DIMS: usize = 32;
 
-/// The hash embedder behind a gate: each document request waits until the test lets
+/// The hash embedder behind a gate, where each document request waits until the test lets
 /// one through ([`SlowEmbedder::allow`]), as a request to a slow model would take its
 /// time. Queries pass at once. It records the texts it embeds, and can panic on a
 /// given request, as a process that dies mid-run.
@@ -40,7 +40,7 @@ struct SlowEmbedder {
     panic_on_request: Option<u64>,
 }
 impl SlowEmbedder {
-    /// Closed: no request passes until [`allow`](Self::allow).
+    /// Closed, so no request passes until [`allow`](Self::allow).
     fn new() -> Self {
         Self {
             inner: HashEmbedder::new(DIMS),
@@ -61,7 +61,7 @@ impl SlowEmbedder {
         *self.permits.lock().unwrap() += requests;
         self.gate.notify_all();
     }
-    /// Waits until `n` document requests have started: the run is at the gate of the
+    /// Waits until `n` document requests have started, so the run is at the gate of the
     /// `n`th, its earlier requests done.
     fn wait_for_request(&self, n: u64) {
         wait_until(|| self.started.load(Ordering::SeqCst) >= n);
@@ -125,7 +125,7 @@ fn write(root: &Path, path: &str, text: &str) {
     fs::write(p, text).unwrap();
 }
 
-/// A small tree: Rust, Python and Markdown.
+/// A small tree of Rust, Python and Markdown.
 fn corpus(root: &Path) {
     write(
         root,
@@ -220,7 +220,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / norm(a) / norm(b)
 }
 
-/// A dense search with the query's vector, every result: each hit is a chunk with a
+/// A dense search with the query's vector, every result. Each hit is a chunk with a
 /// vector, scored against the embedding of its text as the tree holds it now (never a
 /// vector of an older text).
 fn dense_exact(root: &Path, state: &Path, query: &str) -> SearchResults {
@@ -278,7 +278,7 @@ fn lexical_search_is_ready_while_dense_coverage_fills_in() {
     assert_eq!((d.docs, d.texts), (s.docs, all.len() as u64));
     assert!(e.texts().is_empty());
 
-    // Lexical search is complete: the same as an index built without embeddings.
+    // Lexical search is complete, the same as an index built without embeddings.
     build(root.path(), lexical.path(), None);
     let queries = [
         "retry backoff",
@@ -293,7 +293,7 @@ fn lexical_search_is_ready_while_dense_coverage_fills_in() {
             "{q}"
         );
     }
-    // Nothing embedded yet: dense finds nothing, hybrid is the lexical ranking, and the
+    // Nothing embedded yet, so dense finds nothing, hybrid is the lexical ranking, and the
     // query is not embedded.
     let hybrid_now = |q: &str| {
         hybrid::search(
@@ -324,7 +324,7 @@ fn lexical_search_is_ready_while_dense_coverage_fills_in() {
 
     std::thread::scope(|scope| {
         let run = scope.spawn(|| index2::embed(state.path(), &DenseBuild::new(&e)));
-        // One request through; the run waits at its second.
+        // One request through, and the run waits at its second.
         e.allow(1);
         e.wait_for_request(2);
         wait_until(|| index2::dense_info(state.path()).unwrap().unwrap().embedded > 0);
@@ -338,7 +338,7 @@ fn lexical_search_is_ready_while_dense_coverage_fills_in() {
         assert_eq!(progress.total, all.len() as u64);
         assert_eq!(progress.embedded_docs, info.embedded);
 
-        // Dense search finds exactly the chunks with a vector, scored exactly; hybrid
+        // Dense search finds exactly the chunks with a vector, scored exactly, and hybrid
         // fuses them with the lexical ranking and says how far the coverage goes.
         let r = dense_exact(root.path(), state.path(), "exponential backoff retry");
         assert_eq!(r.hits.len() as u64, info.embedded);
@@ -399,7 +399,7 @@ fn edits_during_a_run_never_return_stale_vectors() {
                 .progress
                 .is_some_and(|p| p.requests == 2)
         });
-        // Edit a chunk that has a vector: its old text's vector is in the store.
+        // Edit a chunk that has a vector, and its old text's vector is in the store.
         let r = dense_exact(root.path(), state.path(), "journal entry backoff");
         let edited = r
             .hits
@@ -421,12 +421,12 @@ fn edits_during_a_run_never_return_stale_vectors() {
                 &source[edited.end_byte..]
             ),
         );
-        // A rebuild while the run waits: the new generation is searchable at once.
+        // A rebuild while the run waits, so the new generation is searchable at once.
         let s = build_lexical_first(root.path(), state.path(), &e);
         let d = s.dense.unwrap();
         assert!(d.embedded_docs > 0 && d.embedded_docs < d.docs);
-        // The old text's vector is still in the store, but no chunk is found by it:
-        // every hit is scored against its current text.
+        // The old text's vector is still in the store, but no chunk is found by it,
+        // because every hit is scored against its current text.
         let r = dense_exact(root.path(), state.path(), &old_text);
         assert!(
             r.hits.iter().all(|h| h.score < 0.9999),
@@ -446,7 +446,7 @@ fn edits_during_a_run_never_return_stale_vectors() {
         let s2 = index2::embed(state.path(), &DenseBuild::new(&e)).unwrap();
         assert!(!s2.superseded);
         assert_eq!(s2.embedded_docs, s2.docs);
-        // What the first run embedded came from the cache: no text was embedded twice.
+        // What the first run embedded came from the cache, so no text was embedded twice.
         let now = rendered(root.path());
         let reused = before.iter().filter(|t| now.contains(*t)).count() as u64;
         assert_eq!(s2.cached, reused);
@@ -483,7 +483,7 @@ fn a_crash_mid_run_resumes_from_the_cache_without_paying_again() {
     let first = SlowEmbedder::new();
     build_lexical_first(root.path(), state.path(), &first);
 
-    // The process dies during the third request: two were paid for and stored.
+    // The process dies during the third request, and two were paid for and stored.
     let crashing = SlowEmbedder {
         panic_on_request: Some(3),
         ..SlowEmbedder::open()
@@ -636,7 +636,7 @@ fn a_stopped_run_continues_and_a_lexical_build_waits_for_a_run_to_yield() {
 }
 
 /// A host keeps the index current from a watcher's deltas, rebuilding on each, while
-/// one thread embeds: each run goes until it finishes or a newer generation is
+/// one thread embeds, and each run goes until it finishes or a newer generation is
 /// published, and then the next run starts.
 #[cfg(unix)]
 #[test]
@@ -796,7 +796,7 @@ fn the_cli_embeds_in_the_background_and_reports_progress() {
         "complete coverage: no notice\n{stderr}"
     );
 
-    // An edit, rebuilt with --wait-embeddings: one new text, embedded before it returns.
+    // An edit, rebuilt with --wait-embeddings, giving one new text, embedded before it returns.
     let path = root.path().join("src/store/journal.rs");
     let text = fs::read_to_string(&path).unwrap();
     fs::write(
@@ -814,7 +814,7 @@ fn the_cli_embeds_in_the_background_and_reports_progress() {
     assert!(stderr.contains("0 embedded now in 0 requests"), "{stderr}");
 }
 
-/// A tree of `n` files of one small function each: one text per file, so the hash
+/// A tree of `n` files of one small function each, with one text per file, so the hash
 /// embedder needs several requests of 256 texts.
 #[cfg(unix)]
 fn many_files(root: &Path, n: usize) {
@@ -855,7 +855,7 @@ fn cli_status(state: &Path) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// The background run belongs to an owner process: when the owner ends, the run stops
+/// The background run belongs to an owner process, so when the owner ends, the run stops
 /// after its current request, keeps what it embedded, and a later `embed` continues
 /// without paying for it again.
 #[cfg(unix)]
@@ -925,7 +925,7 @@ fn a_background_run_stops_when_its_owner_ends() {
 }
 
 /// `ARKO_INDEX_OWNER_PID` names the owner when no `--owner-pid` is given, and
-/// `--owner-pid 0` gives the run no owner: it goes on to the end.
+/// `--owner-pid 0` gives the run no owner, so it goes on to the end.
 #[cfg(unix)]
 #[test]
 fn the_owner_comes_from_the_flag_then_the_environment() {
@@ -949,7 +949,7 @@ fn the_owner_comes_from_the_flag_then_the_environment() {
         wait_for_background_run(&stderr);
         cli_status(state.path())
     };
-    // The owner is gone before the run starts: nothing is embedded.
+    // The owner is gone before the run starts, so nothing is embedded.
     let s = index2(None);
     assert_eq!(s["dense"]["state"], "embedding");
     assert_eq!(s["dense"]["embedded"], 0);
@@ -957,7 +957,7 @@ fn the_owner_comes_from_the_flag_then_the_environment() {
         s["stopped"].as_str().unwrap().contains("no longer running"),
         "{s}"
     );
-    // No owner: the run completes.
+    // No owner, so the run completes.
     let s = index2(Some("0"));
     assert_eq!(s["dense"]["state"], "complete");
     assert_eq!(s["dense"]["embedded"], s["docs"]);

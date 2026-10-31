@@ -1,4 +1,4 @@
-//! Which files are indexed: defaults, opt-in ignore files, exclude/include lists,
+//! Which files are indexed, covering defaults, opt-in ignore files, exclude/include lists,
 //! skipped-file reports, and the watchers following rule changes.
 #![cfg(unix)]
 use arko_index::bench_v1::*;
@@ -12,7 +12,7 @@ use std::{
 const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# a cache directory\n";
 
 /// The `arko_index_cli` example. `cargo test` builds the package's examples before
-/// it runs the tests; integration tests live in `<target>/<profile>/deps`, examples in
+/// it runs the tests, and integration tests live in `<target>/<profile>/deps`, examples in
 /// `<target>/<profile>/examples`.
 fn cli() -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
@@ -346,7 +346,7 @@ fn invalid_ignore_file_lines_are_warnings_not_errors() {
     write(r, "x.log", "x\n");
     let (chunks, report) = chunk_dir_with(r, &Options::default(), &respect()).unwrap();
     let got: BTreeSet<String> = chunks.into_iter().map(|c| c.path).collect();
-    // The valid line still applies; the invalid one is reported, and the run goes on.
+    // The valid line still applies, the invalid one is reported, and the run goes on.
     assert_eq!(got, set(&[".gitignore", "a.rs"]));
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
     assert!(report.skipped.is_empty());
@@ -459,7 +459,7 @@ fn indexes_exclude_their_state_and_write_the_report() {
     let saved: Report =
         serde_json::from_slice(&fs::read(state.join("report.json")).unwrap()).unwrap();
     assert_eq!(saved, report);
-    // index2 applies the same rules (here: an exclude pattern).
+    // index2 applies the same rules (here an exclude pattern).
     let mut rules = FileRules::default();
     rules.exclude = vec!["*.rs".into()];
     let state2 = r.join("state2");
@@ -596,8 +596,8 @@ fn rule_changes_scenario(open: &dyn Fn(&Path, &Path, &FileRules) -> Box<dyn Watc
     settle(&mut *w, &mut model, r, &rules);
     assert!(model_paths(&model).contains("b.rs"));
 
-    // Removing the tag of a directory excluded since startup brings its files back;
-    // tagging a directory removes them.
+    // Removing the tag of a directory excluded since startup brings its files back,
+    // and tagging a directory removes them.
     fs::remove_file(r.join("cache/CACHEDIR.TAG")).unwrap();
     settle(&mut *w, &mut model, r, &rules);
     assert!(model_paths(&model).contains("cache/d.rs"));
@@ -639,7 +639,7 @@ fn rule_changes_scenario(open: &dyn Fn(&Path, &Path, &FileRules) -> Box<dyn Watc
     assert!(!w.rules_changed());
     drop(w);
 
-    // Restart with different rules: the first delta reconciles to them.
+    // Restart with different rules, so the first delta reconciles to them.
     let mut other = FileRules::default();
     other.exclude = vec!["sub/".into()];
     let mut w = open(r, state.path(), &other);
@@ -714,7 +714,7 @@ fn cli_flags_and_report() {
     let saved: Report = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
     assert_eq!(saved.files, 2);
     assert!(saved.rules.respect_ignore);
-    // Only built-in exclusions (.git): stderr stays quiet; --report still has them.
+    // Only built-in exclusions (.git), so stderr stays quiet, and --report still has them.
     let quiet = tempfile::tempdir().unwrap();
     write(quiet.path(), ".git/HEAD", "ref: refs/heads/main\n");
     write(quiet.path(), "a.rs", "fn a() {}\n");

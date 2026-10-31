@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Texts to embed, in first-seen order: (32-byte hash, u32 LE length, UTF-8 text)*.
+/// Texts to embed, in first-seen order, as (32-byte hash, u32 LE length, UTF-8 text)*.
 pub(crate) struct Spool {
     path: PathBuf,
     out: BufWriter<File>,
@@ -35,7 +35,7 @@ impl Spool {
         self.count += 1;
         Ok(())
     }
-    /// Flushes the spool and makes it durable: a run may embed it after a restart.
+    /// Flushes the spool and makes it durable, because a run may embed it after a restart.
     pub(crate) fn finish(self) -> Result<(PathBuf, u64), Error> {
         self.out
             .into_inner()
@@ -80,7 +80,7 @@ pub(crate) enum Flow {
     Stop,
 }
 
-/// A request's records: each text's hash and its vector.
+/// A request's records, each text's hash and its vector.
 pub(crate) type Records = [([u8; 32], Vec<f32>)];
 
 /// Embeds the texts of `spool` that `wanted` accepts and the cache lacks into the cache,
@@ -161,7 +161,7 @@ pub(crate) fn embed_spool(
             n += 1;
             sum += t;
         }
-        // ...and within the cap: tokens billed so far plus this request's count.
+        // ...and within the cap (tokens billed so far plus this request's count).
         if let Some(cap) = cap {
             let room = cap.saturating_sub(totals.tokens);
             while n > 0 && sum > room {
@@ -236,7 +236,7 @@ pub(crate) fn embed_spool(
     Ok(totals)
 }
 
-/// What is sent for a text: providers such as Voyage reject empty inputs, and a
+/// What is sent for a text. Providers such as Voyage reject empty inputs, and a
 /// chunk's text can be empty or blank (an empty file with `--embed-text source`),
 /// so a blank text is embedded as a fixed placeholder. Its cache key stays the
 /// text's own hash.

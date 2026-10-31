@@ -25,7 +25,7 @@ fn with_retry_after(mut reply: Reply, seconds: u64) -> Reply {
     reply
 }
 
-/// One received request: the request line and headers (lowercased), and the
+/// One received request, with the request line and headers (lowercased), and the
 /// JSON body (`Null` for none).
 #[derive(Debug)]
 struct Received {
@@ -396,7 +396,7 @@ async fn catalogs_are_fetched_only_on_request_and_validate_later_calls() {
         assert!(requests[1].head.starts_with("get /api/v1/models/user "), "{}", requests[1].head);
         assert_eq!(requests[1].header("authorization"), Some("bearer sk-or-test"));
 
-        // Validation now uses the catalog: no request is sent for these.
+        // Validation now uses the catalog, so no request is sent for these.
         let unknown = client
             .generate_text(&conversation("openai/gpt-7"), &GenerationConfig::default())
             .await

@@ -3,10 +3,10 @@
 //! Chunks the tree, renders each chunk's embedded text the way an index build does,
 //! and embeds the distinct texts at each thread count, in requests packed as a build
 //! packs them, printing texts and tokens per second and the process's memory. With
-//! two precisions it also compares their vectors: the cosine similarity of each
+//! two precisions it also compares their vectors, using the cosine similarity of each
 //! text's two vectors. With `--index STATE` it then builds an index2 with the model
 //! (in the first precision, at the last thread count) and prints the size of the
-//! state: the lexical index, the vectors and the embedding cache.
+//! state, namely the lexical index, the vectors and the embedding cache.
 //!
 //! ```sh
 //! cargo run --release -p arko_index --features local-embed --example local_embed_bench -- \
@@ -138,7 +138,7 @@ fn memory() -> String {
     format!("resident {}, peak {}", field("VmRSS:"), field("VmHWM:"))
 }
 
-/// Every text's vector in requests packed as a build packs them; the tokens and
+/// Every text's vector in requests packed as a build packs them, and the tokens and
 /// requests.
 fn embed_all(
     embedder: &local::LocalEmbedder,
@@ -291,7 +291,7 @@ fn main() -> Result<(), Error> {
             started.elapsed().as_secs_f64()
         );
         let cache = size(&state.join("embed-cache"));
-        // The vector store: `vectors-<digest>/` beside the generations.
+        // The vector store is `vectors-<digest>/` beside the generations.
         let dense: u64 = std::fs::read_dir(state)?
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with("vectors-"))

@@ -1,4 +1,4 @@
-//! Context headers: the parts of `Chunk::scope` that do not come from a syntax tree
+//! Context headers are the parts of `Chunk::scope` that do not come from a syntax tree
 //! (Markdown heading chains under the document's title) and the bounds every scope
 //! keeps. The labels of definitions (`fn f`, `class C`) are made where the tree is
 //! walked, in `syntax.rs`.
@@ -29,7 +29,7 @@ pub(crate) fn clip(mut label: String) -> String {
     label
 }
 
-/// At most [`MAX_SCOPE_BYTES`]: a longer chain keeps its innermost elements (from an
+/// At most [`MAX_SCOPE_BYTES`], and a longer chain keeps its innermost elements (from an
 /// element boundary when there is one in range) after `… › `.
 pub(crate) fn bounded(scope: String) -> String {
     if scope.len() <= MAX_SCOPE_BYTES {
@@ -74,7 +74,7 @@ fn lines(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// Leading spaces (a tab counts as four: such a line is never a heading).
+/// Leading spaces (a tab counts as four, so such a line is never a heading).
 fn indent(line: &str) -> usize {
     let mut n = 0;
     for b in line.bytes() {
@@ -87,7 +87,7 @@ fn indent(line: &str) -> usize {
     n
 }
 
-/// The ATX heading on a line (`## Title ##`): level and title.
+/// The ATX heading on a line (`## Title ##`), as level and title.
 fn atx(body: &str) -> Option<(usize, String)> {
     let level = body.bytes().take_while(|&b| b == b'#').count();
     let rest = &body[level..];
@@ -95,7 +95,7 @@ fn atx(body: &str) -> Option<(usize, String)> {
         return None;
     }
     let mut title = rest.trim();
-    // An optional closing sequence: spaces, then only `#`s.
+    // An optional closing sequence (spaces, then only `#`s).
     let stripped = title.trim_end_matches('#');
     if stripped.is_empty() {
         title = "";
@@ -105,7 +105,7 @@ fn atx(body: &str) -> Option<(usize, String)> {
     Some((level, title.to_owned()))
 }
 
-/// A line that can be the text of a setext heading: not blank, not indented as code,
+/// A line that can be the text of a setext heading, meaning not blank, not indented as code,
 /// not a list item, quote, table row, HTML or fence.
 fn plain(line: &str) -> bool {
     let body = line.trim_start();
@@ -122,14 +122,14 @@ fn plain(line: &str) -> bool {
     {
         return false;
     }
-    // Ordered list items: digits, then `.` or `)`, then a space (not `5.1.0`).
+    // Ordered list items are digits, then `.` or `)`, then a space (not `5.1.0`).
     let digits = body.bytes().take_while(u8::is_ascii_digit).count();
     !(digits > 0
         && matches!(body.as_bytes().get(digits), Some(b'.' | b')'))
         && marker_end(digits + 1))
 }
 
-/// The headings of a Markdown text: ATX (`# Title`) and setext (a one-line paragraph
+/// The headings of a Markdown text, namely ATX (`# Title`) and setext (a one-line paragraph
 /// underlined with `===` or `---`). Headings inside fenced code blocks and a leading
 /// YAML (`---`) or TOML (`+++`) front matter block are not headings.
 fn headings(text: &str) -> Vec<Heading> {
@@ -207,7 +207,7 @@ fn headings(text: &str) -> Vec<Heading> {
     out
 }
 
-/// The scope of each range of a Markdown file: the document's root, then the heading
+/// The scope of each range of a Markdown file is the document's root, then the heading
 /// chain at the range (see [`markdown_chains`]). The root is `title` (the front
 /// matter's), with ` — description` when one is given. Without a title, the first
 /// level-1 heading's text. The heading that gives the root, and a level-1 heading
@@ -265,7 +265,7 @@ fn clip_to(mut text: String, max: usize) -> String {
     text
 }
 
-/// The heading chain of each range `(start, end)` (ascending, not overlapping): the
+/// The heading chain of each range `(start, end)` (ascending, not overlapping), namely the
 /// headings in effect at the range's first non-whitespace byte, each closing the
 /// headings of its own and deeper levels, as `# A › ## B`. A range that starts before
 /// any heading (front matter, a preamble) but contains one gets the chain of its
@@ -373,7 +373,7 @@ mod tests {
             chains(text, &[0, at("text\n")]),
             ["# Title", "# Title › ## Sub"]
         );
-        // A version number is not a list item; a list item is not a heading's text.
+        // A version number is not a list item, and a list item is not a heading's text.
         let text = "5.1.0 / 2025-03-31\n===\n\n* item\n- x\n---\n";
         assert_eq!(
             chains(text, &[text.find("- x").unwrap()]),

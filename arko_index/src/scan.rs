@@ -1,4 +1,4 @@
-//! Scaling prototype: measures the change-detection primitives a watcher pass needs.
+//! Scaling prototype that measures the change-detection primitives a watcher pass needs.
 use crate::{bench_v1::Error, files, files::FileRules, par};
 use std::{os::unix::fs::MetadataExt, path::Path, time::Instant};
 
@@ -40,7 +40,7 @@ pub fn bench_scan_with(root: &Path, threads: usize, rules: &FileRules) -> Result
         Ok(())
     })?;
     let stat_1_s = t.elapsed().as_secs_f64();
-    // Tiny work items are claimed in batches of 256: per-item claiming contends on the
+    // Tiny work items are claimed in batches of 256, because per-item claiming contends on the
     // claim lock and is slower than one thread (measured).
     let batches: Vec<&[files::Listed]> = listed.chunks(256).collect();
     let t = Instant::now();

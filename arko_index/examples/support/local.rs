@@ -1,8 +1,8 @@
-//! Local embedding models for the examples (`--features local-embed`): fetches a
+//! Local embedding models for the examples (`--features local-embed`). It fetches a
 //! model's pinned files into the Hugging Face cache once, then loads them with
 //! arko_index's [`LocalEmbedder`], which checks every file's size and SHA-256.
 //!
-//! [`LazyEmbedder`] loads the model on its first use: a process that only records
+//! [`LazyEmbedder`] loads the model on its first use, so a process that only records
 //! which model an index uses, such as `index2` before it hands the embedding to a
 //! background run, never reads the model's 548 MB. On a GPU it finds the device when
 //! it is made, which reads no model either.
@@ -58,7 +58,7 @@ pub fn model_dir(model: &LocalModel) -> Result<PathBuf, Error> {
 }
 
 /// `model` in `precision` on the CPU, loaded from the cache (downloaded first if need
-/// be), with `ARKO_INDEX_THREADS` threads (default: every CPU this process may use).
+/// be), with `ARKO_INDEX_THREADS` threads (default every CPU this process may use).
 pub fn embedder(model: &'static LocalModel, precision: Precision) -> Result<LocalEmbedder, Error> {
     LocalEmbedder::load_with_precision(model, &model_dir(model)?, precision)
 }

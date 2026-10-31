@@ -1,5 +1,5 @@
 //! Runs the user's installed Claude Code for a short conversation, to check
-//! the client against the real CLI: an in-process tool, a hook, the
+//! the client against the real CLI with an in-process tool, a hook, the
 //! permission handler, two turns in one process, and a resume in a new
 //! process. It uses the CLI's current login and so counts against its usage.
 //!

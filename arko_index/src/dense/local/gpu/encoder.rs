@@ -1,4 +1,4 @@
-//! The encoders of the local models on burn tensors, generic over the backend: the
+//! The encoders of the local models on burn tensors, generic over the backend, with the
 //! same layers as the CPU encoder ([`model`](super::super::model)), on padded batches.
 //!
 //! A batch is `rows × len` tokens, each text from position 0 and padded at its end.
@@ -29,7 +29,7 @@ use burn_tensor::{
 /// batch, every head), 256 MB in `f32`.
 pub(crate) const SCORE_ELEMENTS: usize = 1 << 26;
 
-/// Tests lower the limit to run attention in blocks (0: [`SCORE_ELEMENTS`]).
+/// Tests lower the limit to run attention in blocks (0 means [`SCORE_ELEMENTS`]).
 #[cfg(test)]
 pub(crate) static SCORE_LIMIT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -75,7 +75,7 @@ fn by_rows<B: Backend>(
     Tensor::cat(parts, 0)
 }
 
-/// The score of a padded key: `e^(x - max)` is zero for it, and adding ALiBi biases to
+/// The score of a padded key, for which `e^(x - max)` is zero, and adding ALiBi biases to
 /// it stays finite.
 const MASKED: f32 = -1.0e30;
 
@@ -177,7 +177,7 @@ pub(crate) struct Encoder<B: Backend> {
     pooling: Pooling,
     dtype: FloatDType,
     device: B::Device,
-    /// The most f32 values one tensor may hold: the device's largest buffer.
+    /// The most f32 values one tensor may hold, set by the device's largest buffer.
     max_elements: usize,
     vocab: usize,
     /// `[vocab, hidden]`, `f32`.
@@ -186,9 +186,9 @@ pub(crate) struct Encoder<B: Backend> {
     token_type: Tensor<B, 2>,
     emb_norm: Norm<B>,
     layers: Vec<Layer<B>>,
-    /// ALiBi: minus each head's slope, `[1, heads, 1, 1]`.
+    /// For ALiBi, minus each head's slope, `[1, heads, 1, 1]`.
     neg_slopes: Option<Tensor<B, 4>>,
-    /// Rotary: the inverse frequency of each pair of a head's dimensions.
+    /// For rotary, the inverse frequency of each pair of a head's dimensions.
     inv_freq: Vec<f32>,
 }
 
@@ -261,7 +261,7 @@ impl<B: Backend> Encoder<B> {
         }
         let dev = &self.device;
         let ids = Tensor::<B, 1, Int>::from_data(TensorData::new(ids, [rows * len]), dev);
-        // Added to every score: `[rows, 1, 1, len]`.
+        // Added to every score, shaped `[rows, 1, 1, len]`.
         let mask = Tensor::<B, 4>::from_data(TensorData::new(mask, [rows, 1, 1, len]), dev);
         let rotary = (!self.inv_freq.is_empty()).then(|| {
             let half = self.inv_freq.len();
@@ -339,7 +339,7 @@ impl<B: Backend> Encoder<B> {
             Pooling::Mean => {
                 let lens: Vec<f32> = batch.iter().map(|t| t.len() as f32).collect();
                 let lens = Tensor::<B, 2>::from_data(TensorData::new(lens, [rows, 1]), dev);
-                // 1 for a text's tokens, 0 for padding: `[rows, len, 1]`.
+                // 1 for a text's tokens, 0 for padding, shaped `[rows, len, 1]`.
                 let keep = mask.reshape([rows, len, 1]).equal_elem(0.0).float();
                 (x * keep).sum_dim(1).reshape([rows, h]) / lens
             }
@@ -395,7 +395,7 @@ impl<B: Backend> Encoder<B> {
     }
 }
 
-/// Query rows per attention block: all of them when `streams × len × len` scores fit in
+/// Query rows per attention block, all of them when `streams × len × len` scores fit in
 /// `limit`, else the most that fit, a multiple of 16 when at least 16 fit, and at least
 /// one.
 pub(crate) fn query_block(streams: usize, len: usize, limit: usize) -> usize {
@@ -409,7 +409,7 @@ pub(crate) fn query_block(streams: usize, len: usize, limit: usize) -> usize {
     }
 }
 
-/// Rotates queries or keys (`[rows, len, heads, head_dim]`) by their positions: the two
+/// Rotates queries or keys (`[rows, len, heads, head_dim]`) by their positions. The two
 /// halves of a head form the pairs, GPT-NeoX style. `cos` and `sin` are
 /// `[1, len, 1, head_dim / 2]`.
 fn rotate<B: Backend>(x: Tensor<B, 4>, cos: &Tensor<B, 4>, sin: &Tensor<B, 4>) -> Tensor<B, 4> {

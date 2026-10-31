@@ -1,4 +1,4 @@
-//! Allocation-light term counting for the index builders: exactly the multiset of
+//! Allocation-light term counting for the index builders, giving exactly the multiset of
 //! terms that `search::tokens` returns, without a `String` per token.
 //!
 //! ASCII words (almost all source code) are handled on a lower-cased copy of the
@@ -86,7 +86,7 @@ pub(crate) fn count<'a>(text: &str, lowered: &'a str, counts: &mut Counts<'a>) -
     let mut total = 0u32;
     let mut i = 0;
     while i < bytes.len() {
-        // Skip separators: anything that is neither alphanumeric nor '_'.
+        // Skip separators, meaning anything that is neither alphanumeric nor '_'.
         let b = bytes[i];
         if b < 0x80 {
             if !(b.is_ascii_alphanumeric() || b == b'_') {
@@ -100,7 +100,7 @@ pub(crate) fn count<'a>(text: &str, lowered: &'a str, counts: &mut Counts<'a>) -
                 continue;
             }
         }
-        // A word: maximal run of alphanumeric characters and '_'.
+        // A word is a maximal run of alphanumeric characters and '_'.
         let start = i;
         let mut ascii = true;
         while i < bytes.len() {
@@ -133,7 +133,7 @@ pub(crate) fn count<'a>(text: &str, lowered: &'a str, counts: &mut Counts<'a>) -
     total
 }
 
-/// The `search::tokens` rules for one ASCII word: the whole word lower-cased, then
+/// The `search::tokens` rules for one ASCII word, namely the whole word lower-cased, then
 /// its `_` / camel-case parts (trimmed of `_`) that differ from the whole word.
 #[inline]
 fn ascii_word<'a>(w: &[u8], lower: &'a str, counts: &mut Counts<'a>) -> u32 {

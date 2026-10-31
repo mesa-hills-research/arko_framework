@@ -1,4 +1,4 @@
-//! ChatGPT OAuth parity with Codex over HTTP: identity headers, turn state,
+//! ChatGPT OAuth parity with Codex over HTTP, covering identity headers, turn state,
 //! output assembly from `response.output_item.done`, verbatim replay, and
 //! reroute detection.
 
@@ -55,7 +55,7 @@ fn without_status(item: &Value) -> Value {
     item
 }
 
-/// A Codex-backend stream: every item arrives as `output_item.done`, and
+/// A Codex-backend stream in which every item arrives as `output_item.done`, and
 /// `response.completed` carries no output.
 fn tool_turn_stream(call: &str) -> String {
     sse(&[
@@ -265,8 +265,8 @@ async fn oauth_text_calls_assemble_output_from_output_item_done_and_replay_it_ve
 
         let requests = server.await.unwrap();
         let input = requests[1].1["input"].as_array().unwrap();
-        // Items replay in output order, exactly as received minus `status`:
-        // no reconstruction and no empty assistant message.
+        // Items replay in output order, exactly as received minus `status`,
+        // with no reconstruction and no empty assistant message.
         assert_eq!(input.len(), 5, "{input:#?}");
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[1..4], expected);
@@ -452,7 +452,7 @@ async fn trailing_reasoning_without_a_following_item_is_not_replayed() {
         ])
     );
 
-    // Only the trailing run of reasoning goes; reasoning that something
+    // Only the trailing run of reasoning goes, and reasoning that something
     // follows (an item, a call the message holds, or the message's own
     // text) is replayed.
     let second_reasoning = || {
@@ -505,7 +505,7 @@ async fn trailing_reasoning_without_a_following_item_is_not_replayed() {
             "message:user"
         ],
     );
-    // The call was dropped by the application: nothing follows the reasoning.
+    // The call was dropped by the application, so nothing follows the reasoning.
     assert_eq!(
         replay(vec![reasoning(), without_status(&call_item("a"))], "", &[]),
         ["message:user", "message:user"]
@@ -594,7 +594,7 @@ async fn a_kept_refusal_replays_without_the_calls_it_dropped() {
         };
         assert!(items.iter().any(|item| item["type"] == "function_call"));
 
-        // What the agent keeps: no calls, and the explanation as the text.
+        // What the agent keeps, with no calls and the explanation as the text.
         let mut kept = response.message;
         kept.tool_calls.clear();
         kept.content = vec![Content::Text(refusal.explanation.unwrap())];
@@ -645,7 +645,7 @@ async fn turn_state_is_echoed_within_a_turn_and_dropped_at_the_next_user_message
         let config = tool_config();
         let mut conversation = conversation();
 
-        // Turn 1: a fresh user message, two tool follow-ups.
+        // Turn 1 is a fresh user message with two tool follow-ups.
         for _ in 0..2 {
             let response = client.generate_text(&conversation, &config).await.unwrap();
             conversation.add_assistant_message_from_response(response.clone());
@@ -691,8 +691,8 @@ async fn turn_state_is_echoed_within_a_turn_and_dropped_at_the_next_user_message
 
 #[test]
 fn saved_conversations_with_reasoning_items_replay_through_reconstruction() {
-    // Conversations saved before output items were kept: one reasoning item
-    // stored directly (oldest form) and a list of items; no turn state.
+    // Conversations saved before output items were kept, with one reasoning item
+    // stored directly (oldest form) and a list of items, and no turn state.
     let key = "arko:conversation:saved";
     let saved = json!({
         "model": serde_json::to_value(Model::openai_gpt_6_astra()).unwrap(),
@@ -728,9 +728,9 @@ fn saved_conversations_with_reasoning_items_replay_through_reconstruction() {
     );
 }
 
-/// Fast mode over ChatGPT OAuth goes out as Codex sends it: `service_tier:
+/// Fast mode over ChatGPT OAuth goes out as Codex sends it, with `service_tier:
 /// "priority"` in the body and `tier=priority` in the routing hint. The
-/// requested tier prices the call, which the subscription covers: the
+/// requested tier prices the call, which the subscription covers. The
 /// backend echoes `default` or `auto` for Fast calls served fast, and Codex
 /// never reads the echo. With an API key the echo still wins.
 #[tokio::test]
@@ -772,7 +772,7 @@ async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_requested_t
                 Some("model=gpt-6-astra;tier=priority")
             );
         }
-        // GPT-6 Astra at Fast rates (2x): 0.1M input at $20 + 1M output at
+        // GPT-6 Astra at Fast rates (2x), 0.1M input at $20 + 1M output at
         // $100, estimated but not billed.
         let usage = &served.usage;
         assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
@@ -786,7 +786,7 @@ async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_requested_t
         );
         assert!((echoed_default.usage.total_cost - 102.0).abs() < 1e-9);
 
-        // API keys: the same body value, no routing hint, metered.
+        // API keys get the same body value, no routing hint, metered.
         let (raw, body) = &requests[2];
         assert_eq!(body["service_tier"], "priority");
         assert_eq!(header(raw, "x-codex-routing-hint"), None);
@@ -954,7 +954,7 @@ async fn a_served_model_other_than_the_requested_one_is_a_reroute() {
         )
         .1
     );
-    // Any reported model that differs does; the header is the served model.
+    // Any reported model that differs does, and the header is the served model.
     assert_eq!(
         served(&head("gpt-6-astra", None), "gpt-6-astra", Some("gpt-5.2")),
         (Some("gpt-6-astra".into()), true)
@@ -968,7 +968,7 @@ async fn a_served_model_other_than_the_requested_one_is_a_reroute() {
 }
 
 /// `reasoning.context: "all_turns"` is documented for API-key requests only
-/// on GPT-5.6 ("GPT-5.6 models support this value"); over ChatGPT OAuth it
+/// on GPT-5.6 ("GPT-5.6 models support this value"), and over ChatGPT OAuth it
 /// is sent for GPT-5.6 and GPT-6, as Codex does (verified live).
 #[test]
 fn all_turns_reasoning_context_goes_where_documented_or_verified() {

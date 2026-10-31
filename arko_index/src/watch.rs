@@ -40,7 +40,7 @@ struct State {
 // actual boundary/identity policy and locked dependencies, rather than relying on
 // a manually bumped string when a grammar or normalization implementation changes.
 /// [`engine_id`], qualified by the options other than `max_bytes` (which the state
-/// records itself) that change chunks: the default options keep the plain engine id.
+/// records itself) that change chunks. The default options keep the plain engine id.
 pub(crate) fn engine_for(options: &Options) -> String {
     if options.front_matter_description {
         format!("{}-front-matter-description", engine_id())
@@ -154,7 +154,7 @@ pub(crate) fn atomic_json<T: Serialize>(dir: &Path, name: &str, value: &T) -> Re
             .create(true)
             .truncate(true)
             .open(&tmp)?;
-        // S-21956424 (r06): buffer serde's small writes, but explicitly flush
+        // For S-21956424 (r06), buffer serde's small writes, but explicitly flush
         // before fsync/rename. Drop alone would silently discard flush errors.
         {
             let mut buffered = BufWriter::new(&mut f);
@@ -186,7 +186,7 @@ impl std::error::Error for UncertainCommit {
         Some(&self.0)
     }
 }
-// Test-only injection exercises the post-rename error boundary; never an env hook.
+// Test-only injection exercises the post-rename error boundary, and never an env hook.
 #[cfg(test)]
 thread_local! {
     static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -274,7 +274,7 @@ impl Watcher {
                 rules: Some(rules.clone()),
             }
         };
-        // Different rules (or a state from before rules were recorded): the startup
+        // Different rules (or a state from before rules were recorded), so the startup
         // reconciliation below applies the current rules like any offline change.
         let rules_changed = existed && state.rules.as_ref() != Some(rules);
         state.rules = Some(rules.clone());
@@ -330,7 +330,7 @@ impl Watcher {
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
     }
-    /// Sets the report: the walk's `report` and the parse warnings of the cached files.
+    /// Sets the report from the walk's `report` and the parse warnings of the cached files.
     fn set_report(&mut self, mut report: Report) -> Result<(), Error> {
         report.warnings.extend(self.parse_warnings());
         if report != self.report {
@@ -683,7 +683,7 @@ mod cache_tests {
         let (root, _state, mut w) = fixture();
         let initial = w.next_change(Duration::ZERO).unwrap().unwrap();
         w.ack(initial.sequence).unwrap();
-        // Same length, same normalized ID, same metadata: only exact bytes distinguish it.
+        // Same length, same normalized ID, same metadata, so only exact bytes distinguish it.
         std::fs::write(root.path().join("a.rs"), "fn first() {} ").unwrap();
         reset_work();
         let d = w.next_change(Duration::from_secs(1)).unwrap().unwrap();

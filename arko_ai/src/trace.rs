@@ -62,8 +62,8 @@ const REDACTED_HEADERS: &[&str] = &[
     "set-cookie",
 ];
 
-/// Headers written as `sha256:<hex>` of their value: routing tokens that
-/// shouldn't be stored, but whose changes the trace should show.
+/// Headers written as `sha256:<hex>` of their value (routing tokens that
+/// shouldn't be stored, but whose changes the trace should show).
 const HASHED_HEADERS: &[&str] = &["x-codex-turn-state"];
 
 /// Response headers copied into the `calls.jsonl` summary when present.
@@ -267,7 +267,7 @@ impl RequestTrace {
                 .is_some_and(|latest| latest.seq == seq)
         {
             state.previous = previous.map(|mut previous| {
-                // Evicted while the call ran: keep the bound.
+                // Evicted while the call ran, so keep the bound.
                 if !retained {
                     previous.input_json = None;
                 }
@@ -473,7 +473,7 @@ impl TraceCall {
         });
         self.write_file("response", &document);
 
-        // Usage numbers come from the server: saturate rather than overflow.
+        // Usage numbers come from the server, so saturate rather than overflow.
         let previous_found = match (self.previous_input_tokens, cached_tokens) {
             (Some(previous), Some(cached)) => Some(cached.saturating_add(1024) >= previous),
             (Some(_), None) if error.is_none() => Some(false),
@@ -624,7 +624,7 @@ fn prefix_metrics(
     })
 }
 
-/// Headers as written to a trace: credentials redacted, routing tokens
+/// Headers as written to a trace, with credentials redacted, routing tokens
 /// hashed, repeated headers joined with `, `.
 fn redacted_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> {
     let mut map = Map::new();
@@ -712,7 +712,7 @@ fn sanitize(key: &str) -> String {
     format!("_{readable}-{hash}")
 }
 
-/// Whether `name` ends as a hashed name does: `-` and 16 lowercase hex digits.
+/// Whether `name` ends as a hashed name does (`-` and 16 lowercase hex digits).
 fn ends_with_hash(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 17
@@ -856,7 +856,7 @@ mod tests {
             assert_eq!(joined.parent(), Some(dir), "{key:?} -> {name:?}");
             assert_eq!(joined.components().count(), 2, "{key:?} -> {name:?}");
         }
-        // Ordinary keys keep their readable names; unusable ones stay distinct.
+        // Ordinary keys keep their readable names, and unusable ones stay distinct.
         assert_eq!(
             sanitize("arko:conversation:x"),
             "arko_conversation_x-ed168f36ad25bfa2"

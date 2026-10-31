@@ -1,4 +1,4 @@
-//! Source path identity must be injective: filenames are data, not escape sequences.
+//! Source path identity must be injective, because filenames are data, not escape sequences.
 #![cfg(unix)]
 use arko_index::{bench_v1::*, search};
 use std::{fs, path::Path, time::Duration};
@@ -72,7 +72,7 @@ fn undecodable_paths_are_skipped_or_rejected_instead_of_lossy_collisions() {
         "fn real_replacement_character() {}\n",
     )
     .unwrap();
-    // A directory walk skips the undecodable name and reports it; the real U+FFFD
+    // A directory walk skips the undecodable name and reports it, and the real U+FFFD
     // name is indexed under its own path, so nothing aliases.
     let (chunks, report) =
         chunk_dir_with(root.path(), &Options::default(), &FileRules::default()).unwrap();

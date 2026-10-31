@@ -223,8 +223,8 @@ impl GoogleClient {
                             .to_string();
 
                         match last_step_type.as_str() {
-                            // A step can start with its first content: text on
-                            // `model_output`, a summary on `thought`.
+                            // A step can start with its first content (text on
+                            // `model_output`, a summary on `thought`).
                             // https://ai.google.dev/gemini-api/docs/interactions/thinking
                             "model_output" => {
                                 let mut text = String::new();
@@ -716,7 +716,7 @@ impl GoogleClient {
 
     /// The `thinking_level` and `thinking_summaries` to send. Both are
     /// optional in the Interactions API, so without a reasoning configuration
-    /// neither is sent and the model's own defaults apply: thinking at its
+    /// neither is sent and the model's own defaults apply, with thinking at its
     /// documented default level (medium on Gemini 3.5 to 3.8 Flash, minimal
     /// on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic
     /// on 2.5) and no thought summaries.
@@ -998,7 +998,7 @@ impl GoogleClient {
 
     /// A `function_result` step. With images the model takes inside the
     /// result (Gemini 3 and later), `result` holds the output text, then each
-    /// image after its label: Google advises against sending a function's
+    /// image after its label. Google advises against sending a function's
     /// images outside its response ("This can lead to unexpected model
     /// behavior (e.g. thought leakage)",
     /// https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5#multimodal-function-responses).
@@ -1053,7 +1053,7 @@ impl GoogleClient {
         })
     }
 
-    /// Gemini 3.x: a user message's tool results, with the rest of the message
+    /// Gemini 3.x sends a user message's tool results, with the rest of the message
     /// folded into its last result, so no `user_input` step follows them.
     /// Google advises it: "We often see clients provide additional
     /// instructions along with function responses as subsequent Parts. This
@@ -1309,7 +1309,7 @@ fn blocked_generation(error: &Value) -> Option<Refusal> {
     })
 }
 
-/// The error recorded on a failed interaction or error event: the v1
+/// The error recorded on a failed interaction or error event, the v1
 /// `Interaction.errors` list (the first entry classifies it), or `error`.
 /// https://ai.google.dev/static/api/interactions-v1.openapi.json
 fn first_error(value: &Value) -> Option<&Value> {
@@ -1744,7 +1744,7 @@ mod tests {
         assert!(
             matches!(&error, Error::Refusal(refusal) if refusal.category.as_deref() == Some("safety"))
         );
-        // The single-error form still works; no details stays a generic error.
+        // The single-error form still works, and no details stays a generic error.
         let error = failed(
             json!({"id":"int_1","status":"failed","error":{"code":"invalid_request","message":"m"}}),
         );

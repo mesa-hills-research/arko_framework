@@ -1,9 +1,9 @@
-//! Texts longer than a model's input: split into windows the model takes, embedded
+//! Texts longer than a model's input are split into windows the model takes, embedded
 //! one by one, and combined into one vector per text. Independent of how the encoder
 //! runs.
 use crate::bench_v1::Error;
 
-/// One window of a text: the token ids the encoder runs, and the weight of its vector
+/// One window of a text, the token ids the encoder runs, and the weight of its vector
 /// in the text's vector (the text tokens it holds).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Window {
@@ -49,7 +49,7 @@ pub(crate) fn split(
         .collect())
 }
 
-/// The vector of a text from the unit vectors of its windows: their mean weighted by
+/// The vector of a text from the unit vectors of its windows is their mean weighted by
 /// `weights`, at unit length.
 pub(crate) fn combine(vectors: &[Vec<f32>], weights: &[usize]) -> Vec<f32> {
     if let [one] = vectors {
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn long_texts_split_with_their_special_tokens() {
-        // [CLS] 10..=16 [SEP] in windows of five: three text tokens each.
+        // [CLS] 10..=16 [SEP] in windows of five, with three text tokens each.
         let ids = [1, 10, 11, 12, 13, 14, 15, 16, 2];
         let w = split(&ids, 1, 1, &[], 5).unwrap();
         let got: Vec<(Vec<u32>, usize)> = w.into_iter().map(|w| (w.ids, w.weight)).collect();
