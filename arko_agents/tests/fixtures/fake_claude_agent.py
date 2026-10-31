@@ -42,6 +42,12 @@ the next turn's index). Steps:
                                          exits before it saves the message
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
+  {"parallel": [tool steps], "report": [1, 0]}
+                                         calls that run side by side, each
+                                         with its hooks, their results
+                                         reported afterwards in this order
+  a tool step with "sleep_before": 1.5   waits this many seconds before the
+                                         call, also in "parallel"
   {"exit": 3}                            the CLI crashes
   a tool step with "crash": "pre"        the CLI crashes once the call is
                                          allowed, before it runs; "post":
@@ -50,7 +56,7 @@ the next turn's index). Steps:
   a tool step with "cancel_notes": true  the messages sent during the turn
                                          so far are reported cancelled after
                                          its PostToolUse hook, before its
-                                         result
+                                         result ("complete_notes": completed)
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"serve": 1}                           answers the host's get_usage
                                          requests, waiting for one if none
@@ -361,7 +367,10 @@ def hook(event, fields, tool_use_id):
                 "tool_use_id": tool_use_id}) or {}
 
 
-def call_tool(step, index):
+def call_tool(step, index, report=True):
+    """Runs a tool step's call and its hooks, then reports its result, or
+    returns the result message to report later when `report` is false."""
+    time.sleep(step.get("sleep_before", 0))
     name, tool_input = step["tool"], step.get("input", {})
     tool_use_id = step.get("id", "toolu_%d_%d" % (state["message"] + 1, index))
     assistant([{"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}], step)
@@ -402,18 +411,22 @@ def call_tool(step, index):
     log("post", tool=name, answer=post, output=output, is_error=is_error, input=tool_input)
     if step.get("crash") == "post":
         sys.exit(3)
-    if step.get("cancel_notes"):
+    if step.get("cancel_notes") or step.get("complete_notes"):
         # The messages sent during the turn so far are reported cancelled
-        # before the call's result, as Claude Code can when the turn stops
-        # while the call's hooks run.
+        # (or completed) before the call's result, as Claude Code can when
+        # the turn stops while the call's hooks run.
+        verdict = "cancelled" if step.get("cancel_notes") else "completed"
         for note in state.pop("notes", []):
             send({"type": "command_lifecycle", "command_uuid": note, "session_id": SESSION,
-                  "state": "cancelled", "uuid": str(uuid.uuid4())})
-    send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
-          "uuid": record(output),
-          "message": {"role": "user", "content": [
-              {"type": "tool_result", "tool_use_id": tool_use_id, "content": output,
-               "is_error": is_error}]}})
+                  "state": verdict, "uuid": str(uuid.uuid4())})
+    result = {"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
+              "uuid": record(output),
+              "message": {"role": "user", "content": [
+                  {"type": "tool_result", "tool_use_id": tool_use_id, "content": output,
+                   "is_error": is_error}]}}
+    if not report:
+        return result
+    send(result)
 
 
 def turn(text, message_uuid=None):
@@ -558,6 +571,14 @@ def turn(text, message_uuid=None):
             final = step["text"]
         if "tool" in step:
             call_tool(step, index)
+        if "parallel" in step:
+            # Calls that run side by side: each runs with its hooks, then
+            # their results are reported in the order "report" gives.
+            results = [call_tool(dict(call, id=call.get("id", "toolu_p%d_%d" % (index, number))),
+                                 index, report=False)
+                       for number, call in enumerate(step["parallel"])]
+            for number in step.get("report", range(len(results))):
+                send(results[number])
     send({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
           "session_id": SESSION, "duration_ms": 5, "result": final,
           "usage": usage(steps[-1] if steps else {}, 5)})

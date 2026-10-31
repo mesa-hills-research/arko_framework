@@ -2903,3 +2903,107 @@ async fn a_note_taken_before_a_claude_code_compaction_isnt_given_again_on_recove
         .sum::<usize>();
     assert_eq!(count, 1, "{given:#?}");
 }
+
+/// The operator's note goes to a Claude Code agent as the user's message
+/// with the first of three calls side by side (H1), and a host's note comes
+/// behind it before that message is done, which the second call's hook (H2)
+/// takes, raising the notes' mark. No call's result is reported, so H1 is
+/// never acknowledged, and the third call, which holds, is saved with the
+/// task. The workflow then crashes: persistence freezes first, and the run
+/// is dropped with no end of its session. The saved task still holds both
+/// notes, behind the notes' mark, so the recovered run gets them, the
+/// operator's note included.
+#[tokio::test]
+async fn notes_waiting_behind_a_users_message_survive_a_crash() {
+    let workspace = Workspace::new();
+    let fake = FakeClaude::new(json!([
+        [
+            {"sleep": 1.0},
+            {"parallel": [
+                {"tool": "Grep", "input": {"pattern": "a"}},
+                {"tool": "Grep", "input": {"pattern": "b"}, "sleep_before": 1.5},
+                {"tool": "mcp__arko__hold", "input": {}, "id": "toolu_hold"},
+            ]},
+        ],
+        [{"tool": "mcp__arko__complete_task", "input": {"summary": "recovered"}}],
+    ]));
+    let server = ResponsesServer::start(|_, _| None).await;
+    let claude_code = |hold: Arc<ProbeTool>| {
+        let mut coder = fake.agent();
+        coder.tool_config.available_tool_names.push("Grep".into());
+        Workflow::builder()
+            .name("recovery-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", coder)
+            .global_tool(hold)
+            .persistence(config(&workspace))
+    };
+    let hold = ProbeTool::new("hold", true);
+    let workflow = Arc::new(claude_code(hold.clone()).build().unwrap());
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Search it.").await }
+    });
+    // After the first input: the operator's note goes with the first
+    // search's hook, as the user's message.
+    until(|| !fake.logged("user").is_empty()).await;
+    workflow
+        .post_note(
+            crate::notes::Note::new("OPERATOR-NOTE")
+                .source(crate::notes::NoteSource::Operator)
+                .once(),
+        )
+        .unwrap();
+    until(|| !fake.logged("post").is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The host's note comes behind it, at the second search's hook.
+    workflow
+        .post_note(
+            crate::notes::Note::new("HOST-NOTE")
+                .source(crate::notes::NoteSource::Host)
+                .once(),
+        )
+        .unwrap();
+    within(hold.started.notified()).await;
+    assert!(running_call_saved(&workspace));
+    assert_eq!(fake.logged("midturn").len(), 1, "the operator's note went");
+    assert_eq!(
+        fake.logged("post").len(),
+        2,
+        "both searches' hooks were given"
+    );
+    let path = latest(&workspace);
+    crash(workflow, vec![run]).await;
+
+    let resumed = claude_code(ProbeTool::new("hold", false))
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    let saved = resumed.interrupted_runs().remove(0);
+    let task = saved.task().unwrap();
+    // Read from the task itself: both notes wait, the operator's first, and
+    // the mark covers them.
+    let pending = task.pending_texts();
+    let operator = pending
+        .iter()
+        .position(|text| text.contains("OPERATOR-NOTE"));
+    let host = pending.iter().position(|text| text.contains("HOST-NOTE"));
+    assert!(operator.is_some() && operator < host, "{pending:?}");
+    assert_eq!(task.context_marks.get("notes"), Some(&2));
+    let result = within(resumed.recover_agent(&saved)).await.unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let inputs = fake
+        .logged("user")
+        .into_iter()
+        .filter_map(|entry| entry["text"].as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let operator = inputs.find("OPERATOR-NOTE").expect("given again");
+    assert!(operator < inputs.find("HOST-NOTE").unwrap());
+}

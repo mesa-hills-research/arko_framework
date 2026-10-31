@@ -256,6 +256,7 @@ async fn wait_holds_the_task_until_the_answer() {
         commands
             .send(UserCommand::SubmitUserResponse {
                 response: "The user answered q1.\nq1 Which file? README.md".into(),
+                ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -455,6 +456,7 @@ async fn a_partial_answer_to_a_waited_batch_leaves_the_rest_open() {
     commands
         .send(UserCommand::SubmitUserResponse {
             response: "The user answered q1.\nq1 Tabs or spaces? Spaces\nStill open: q2.".into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -699,6 +701,7 @@ async fn an_answer_that_lands_before_the_wait_follows_the_reply() {
     commands
         .send(UserCommand::SubmitUserResponse {
             response: REPLIED.into(),
+            ids: Vec::new(),
         })
         .await
         .unwrap();
@@ -732,5 +735,117 @@ async fn an_answer_that_lands_before_the_wait_follows_the_reply() {
         })
         .unwrap();
     assert!(noted < done, "the note went with the request: {texts:#?}");
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Keeps the task as the handover found it.
+#[derive(Default)]
+struct HandedOver(std::sync::Mutex<Option<Task>>);
+
+impl crate::handover::HandoverHook for HandedOver {
+    fn on_handover(&self, task: &Task, _report: &str) -> crate::handover::HandoverSeed {
+        *self.0.lock().unwrap() = Some(task.clone());
+        crate::handover::HandoverSeed::for_task(task)
+    }
+}
+
+/// An answer that holds what the host delivers is in the step a request
+/// over the model's input limit leaves out. The answer stays with its
+/// record, and the asking call goes with its result, so every result left
+/// has its call. (`Task::leave_out_step`'s test has the answer beside the
+/// results.)
+#[tokio::test]
+async fn a_step_left_out_keeps_an_answer_without_the_result_beside_it() {
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.async_questions = false;
+    config.handover = Some(HandoverConfig::at_input_tokens(900_000));
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    let handed_over = Arc::new(HandedOver::default());
+    agent.handover_hook = Some(handed_over.clone());
+    let which = serde_json::json!({"questions": [{"question": "Which file?"}]});
+    push(
+        &mut agent,
+        vec![
+            with_input(vec![native_call("ask", "ask_user", which)], 100),
+            Err(ai::Error::ProviderError {
+                message: "Your input exceeds the context window of this model.".into(),
+                status: Some(400),
+                code: Some("context_length_exceeded".into()),
+                retry_after: None,
+            }),
+            with_input(
+                vec![native_call(
+                    "report",
+                    HANDOVER_REPORT_TOOL_NAME,
+                    serde_json::json!({"report": "Asked which file."}),
+                )],
+                120,
+            ),
+            complete(),
+        ],
+    );
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    super::tool_call_tests::wait_for(&mut events, &mut seen, |event| match event {
+        AgentEvent::UserQuestionsAsked { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "The user answered q1.\nq1 Which file? README.md".into(),
+            ids: vec!["message:answer".into()],
+        })
+        .await
+        .unwrap();
+    let (task, _) = finish(run, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.handovers.len(), 1);
+    // The report covers the answer, which the fresh conversation records.
+    assert_eq!(
+        task.holding("message:answer"),
+        crate::task::Holding::Recorded
+    );
+    let old = handed_over.0.lock().unwrap().clone().unwrap();
+    let calls = old
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter_map(|call| call.id.clone())
+        .collect::<Vec<_>>();
+    assert!(!calls.contains(&"ask".to_string()), "{calls:?}");
+    for result in old
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(ai::Content::as_tool_result)
+    {
+        assert!(
+            result
+                .call_id
+                .as_ref()
+                .is_some_and(|call| calls.contains(call)),
+            "a result without its call: {result:?}"
+        );
+    }
+    let answer = old
+        .conversation
+        .messages
+        .iter()
+        .position(|message| message_text(message).contains("q1 Which file? README.md"))
+        .expect("the answer stays");
+    assert_eq!(old.conversation.messages[answer].role, ai::Role::User);
+    assert_eq!(
+        old.holding("message:answer"),
+        crate::task::Holding::Recorded
+    );
+    assert!(
+        old.context_records
+            .iter()
+            .any(|record| record.message == answer)
+    );
     std::fs::remove_dir_all(workspace).unwrap();
 }

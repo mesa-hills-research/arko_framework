@@ -12,10 +12,14 @@ use uuid::Uuid;
 mod copy;
 mod cut_back;
 mod latest_request;
+mod pending;
 mod refusal;
 pub(crate) use cut_back::{CONTEXT_UPDATE, RESTARTED_CALL, UNREACHED_CALL};
 pub use cut_back::{UserTurn, UserTurnKind};
 pub use latest_request::{LatestRequest, RequestRecord};
+pub use pending::{
+    ContextRecord, Holding, PendingContext, PendingKind, RecordedPart, UnidentifiedContext,
+};
 pub use refusal::{RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult};
 
 /// Information about a single tool call pending approval, typically part of a batch.
@@ -448,9 +452,35 @@ pub struct Task {
     /// refusal is unresolved (a pending fallback answers exactly the refused
     /// input, and [`Task::resolve_refusal`] needs it to be the last input),
     /// and once completed (the model has not read it). Saved so a task that
-    /// runs again still gets it.
+    /// runs again still gets it. Everything that waits for the model is an
+    /// item here, in order, until the conversation records its last part
+    /// (see [`context_records`](Self::context_records)): a host's
+    /// injection, the turn context source's update, the user's typed notes,
+    /// an approval's message and the rest of a denial too long for its
+    /// answer. Items saved as bare text by older versions still load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_context_injections: Vec<String>,
+    pub pending_context_injections: Vec<PendingContext>,
+    /// The number the latest item of the pending context took (see
+    /// [`PendingContext::id`]).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub next_context_item: u64,
+    /// What the conversation's messages hold of the task's context, by the
+    /// items' numbers and the host's ids, so a host learns what the task
+    /// holds without reading its text ([`holding`](Self::holding)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_records: Vec<ContextRecord>,
+    /// The first message [`context_records`](Self::context_records) cover:
+    /// 0 for a task that kept them from its start, the conversation's
+    /// length when a task saved before they existed first ran again, and
+    /// `None` until then. Only text says what the messages before it hold
+    /// ([`unidentified_context`](Self::unidentified_context)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_records_from: Option<usize>,
+    /// The host's ids of what the initial prompt presents (such as the
+    /// messages a workflow gives the run in it), recorded with the first
+    /// message as the runtime writes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_prompt_ids: Vec<String>,
     /// The images of the context in `pending_context_injections` (see
     /// [`TurnContext::images`](crate::runtime::TurnContext::images)), added
     /// with it, after its text.
@@ -590,6 +620,10 @@ pub struct TaskParent {
 }
 
 fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
@@ -795,6 +829,10 @@ impl Task {
             plan_usage_threshold_reported: None,
             monitor_pause: false,
             pending_context_injections: Vec::new(),
+            next_context_item: 0,
+            context_records: Vec::new(),
+            context_records_from: Some(0),
+            initial_prompt_ids: Vec::new(),
             pending_context_images: Vec::new(),
             unavailable_images: Vec::new(),
             handover_requested: None,
@@ -954,7 +992,8 @@ impl Task {
     /// It takes a task between turns, one completed, awaiting the user's
     /// answer, or cancelled (a turn the cancellation left open is settled
     /// first, as when the task runs again). Returns `InvalidTaskState`
-    /// otherwise, and for an empty `request`.
+    /// otherwise, and for a `request` that is empty or over
+    /// [`MAX_REPORT_REQUEST_BYTES`](crate::handover::MAX_REPORT_REQUEST_BYTES).
     pub fn request_report(&mut self, request: Option<String>) -> Result<(), ArkoAgentsError> {
         if !matches!(
             self.current_state,
@@ -974,6 +1013,15 @@ impl Task {
             return Err(ArkoAgentsError::InvalidTaskState(
                 "a report's request must not be empty".to_string(),
             ));
+        }
+        if let Some(request) = request.as_deref()
+            && request.len() > crate::handover::MAX_REPORT_REQUEST_BYTES
+        {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a report's request may be at most {} bytes, and this one is {} bytes",
+                crate::handover::MAX_REPORT_REQUEST_BYTES,
+                request.len()
+            )));
         }
         self.set_state(TaskState::InProgress);
         // Claude Code writes it in a copy of the session, which the task
@@ -1338,6 +1386,7 @@ impl Task {
         self.conversation_usage_start = self.usage_history.len();
         self.conversation_model_call_start = self.model_call_usage_history.len();
         self.latest_request = RequestRecord::NoRequest;
+        self.reset_context_records();
         replaced
     }
 
@@ -1623,14 +1672,46 @@ mod tests {
         let mut loaded: Task = serde_json::from_value(json).unwrap();
         assert!(loaded.pending_context_injections.is_empty());
 
-        loaded.pending_context_injections = vec!["First.".into(), "Second.".into()];
+        loaded.queue_context(PendingContext::new(
+            PendingKind::Context,
+            "First.",
+            vec!["message:1".into()],
+        ));
+        loaded.queue_context(PendingContext::new(
+            PendingKind::Typed,
+            "Second.",
+            Vec::new(),
+        ));
         let json = serde_json::to_value(&loaded).unwrap();
         assert_eq!(
             json["pending_context_injections"],
-            serde_json::json!(["First.", "Second."])
+            serde_json::json!([
+                {"id": 1, "text": "First.", "host_ids": ["message:1"]},
+                {"id": 2, "kind": "typed", "text": "Second."},
+            ])
         );
-        let loaded: Task = serde_json::from_str(&json.to_string()).unwrap();
-        assert_eq!(loaded.pending_context_injections, ["First.", "Second."]);
+        assert_eq!(json["next_context_item"], 2);
+        let reloaded: Task = serde_json::from_str(&json.to_string()).unwrap();
+        assert_eq!(
+            reloaded.pending_context_injections,
+            loaded.pending_context_injections
+        );
+        // A task saved before items had ids holds bare texts, which only
+        // their text identifies, and which a run numbers as it starts.
+        let mut old = json;
+        old["pending_context_injections"] = serde_json::json!(["Old."]);
+        old.as_object_mut().unwrap().remove("next_context_item");
+        old.as_object_mut().unwrap().remove("context_records_from");
+        let mut old: Task = serde_json::from_value(old).unwrap();
+        assert_eq!(old.pending_context_injections, ["Old."]);
+        assert!(old.pending_context_injections[0].unidentified);
+        assert_eq!(old.context_records_from, None);
+        assert_eq!(old.holding("message:1"), Holding::Unknown);
+        assert_eq!(old.unidentified_context().pending, ["Old."]);
+        old.number_context();
+        assert_eq!(old.pending_context_injections[0].id, 1);
+        assert!(old.pending_context_injections[0].unidentified);
+        assert_eq!(old.context_records_from, Some(0));
     }
 
     #[test]

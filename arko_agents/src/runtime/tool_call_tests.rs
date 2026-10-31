@@ -1892,6 +1892,7 @@ async fn ask_user_asks_without_an_approval_step_by_default() {
         commands
             .send(UserCommand::SubmitUserResponse {
                 response: "README.md".into(),
+                ids: Vec::new(),
             })
             .await
             .unwrap();

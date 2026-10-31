@@ -244,6 +244,7 @@ impl AgentLoop {
             mut next_user_message_from_command,
             mut next_message_is_runtime,
             follow_up_done,
+            held_ids,
         } = follow_up;
         // A command the wait didn't ignore (those continue
         // above) ends it; a later wait gets its own deadline.
@@ -302,6 +303,8 @@ impl AgentLoop {
                 if next_message_is_runtime {
                     self.task.mark_last_message_runtime();
                 }
+                let last = self.task.conversation.messages.len().saturating_sub(1);
+                self.task.record_held_ids(last, held_ids);
                 self.reset_llm_recovery();
             } else {
                 self.add_runtime_message(CONTINUE_AFTER_DECISION)?;

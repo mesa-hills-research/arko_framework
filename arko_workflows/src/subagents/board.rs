@@ -11,12 +11,12 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
-use arko_agents::{AgentConfig, Task};
+use arko_agents::{AgentConfig, Holding, Task};
 
 use super::{
     MailItem, MailKind, MailSender, PendingLaunch, StartRequest, SubagentEvent, SubagentEventKind,
     SubagentHook, SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot,
-    UPDATE_MAIL_FRAME, UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
+    UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
 };
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
@@ -556,11 +556,9 @@ impl Board {
     }
 
     /// The mail for run `task_id`'s next turn boundary, oldest first, as
-    /// much as fits ([`UPDATE_MAX_MAIL_BYTES`] and `max_chars` characters),
-    /// with the items' ids (`mail:<id>`): it counts as delivered. An item
-    /// that alone is over `max_chars` is cut, with the file that holds all
-    /// of it.
-    pub(crate) fn update(&self, task_id: Uuid, max_chars: usize) -> Option<(String, Vec<String>)> {
+    /// much as fits ([`UPDATE_MAX_MAIL_BYTES`]), with the items' ids
+    /// (`mail:<id>`): it counts as delivered.
+    pub(crate) fn update(&self, task_id: Uuid) -> Option<(String, Vec<String>)> {
         let (text, taken) = {
             let mut state = self.state.lock();
             let indices = state
@@ -574,29 +572,15 @@ impl Board {
                 return None;
             }
             let now = Utc::now();
-            let limit = max_chars.saturating_sub(UPDATE_MAIL_FRAME);
-            let (mut bytes, mut chars) = (0, 0);
+            let mut bytes = 0;
             let mut parts = Vec::new();
             let mut taken = Vec::new();
             for &index in &indices {
-                let mut excerpt = state.mail[index].excerpt();
-                // With the "- " before it and the line break after.
-                let mut len = excerpt.chars().count() + 3;
-                if parts.is_empty() && len > limit {
-                    let item = &mut state.mail[index];
-                    if item.file.is_none() {
-                        item.file = self.save_mail(item.id, &item.heading, &item.body);
-                    }
-                    excerpt = item.excerpt_within(limit);
-                    len = excerpt.chars().count() + 3;
-                }
-                if !parts.is_empty()
-                    && (bytes + excerpt.len() > UPDATE_MAX_MAIL_BYTES || chars + len > limit)
-                {
+                let excerpt = state.mail[index].excerpt();
+                if !parts.is_empty() && bytes + excerpt.len() > UPDATE_MAX_MAIL_BYTES {
                     break;
                 }
                 bytes += excerpt.len();
-                chars += len;
                 parts.push(format!("- {excerpt}"));
                 state.mail[index].delivered_at = Some(now);
                 taken.push(state.mail[index].clone());
@@ -2107,7 +2091,7 @@ impl Board {
         ctx: &Arc<SharedContext>,
         me: Uuid,
         questions: &str,
-    ) -> Result<String, WorkflowError> {
+    ) -> Result<(String, Vec<String>), WorkflowError> {
         let Some(record) = self.record(me) else {
             return Err(WorkflowError::Channel("not a subagent".to_string()));
         };
@@ -2176,7 +2160,7 @@ impl Board {
             };
             if let Some(answer) = answer {
                 self.delivered(me, std::slice::from_ref(&answer));
-                return Ok(answer.text());
+                return Ok((answer.text(), vec![format!("mail:{}", answer.id)]));
             }
             tokio::select! {
                 biased;
@@ -2185,9 +2169,12 @@ impl Board {
                 }
                 _ = version.changed() => {}
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(format!(
-                        "Your lead didn't answer within {} minutes. Decide yourself, and say what you decided in your report.",
-                        QUESTION_TIMEOUT.as_secs() / 60
+                    return Ok((
+                        format!(
+                            "Your lead didn't answer within {} minutes. Decide yourself, and say what you decided in your report.",
+                            QUESTION_TIMEOUT.as_secs() / 60
+                        ),
+                        Vec::new(),
                     ));
                 }
             }
@@ -3195,9 +3182,6 @@ pub(crate) fn split_ids(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `task` holds `item`: in its conversation (a context update, a
-/// prompt or a tool result), in context it took and hasn't added, or given
-/// before its latest handover (its report covers it).
 /// Whether `messages` hold the result of the call that started subagent
 /// `handle` (`start_agent`'s "Started r1 (agent ..." or "Queued r1
 /// (agent ...").
@@ -3215,23 +3199,41 @@ fn holds_start(messages: &[arko_ai::Message], handle: &str) -> bool {
     })
 }
 
+/// Whether `task` holds `item`: in its conversation (a context update, a
+/// prompt or a tool result), in context it took and hasn't added, or given
+/// before its latest handover (its report covers it). The task's records say
+/// by the item's id. For context it saved without ids, its text says, as it
+/// did before tasks kept ids, and so does a tool result (`wait_for_agents`),
+/// which only holds the item with both its markers, so one cut short
+/// doesn't count.
 fn task_holds(task: &Task, item: &MailItem) -> bool {
     if let (Some(handover), Some(delivered)) = (task.handovers.last(), item.delivered_at)
         && handover.at >= delivered
     {
         return true;
     }
-    task.pending_context_injections
-        .iter()
-        .any(|content| item.held_in(content))
-        || task.conversation.messages.iter().any(|message| {
-            message.content.iter().any(|content| match content {
-                arko_ai::Content::Text(text) => {
-                    message.role == arko_ai::Role::User && item.held_in(text)
-                }
-                arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
-                arko_ai::Content::Image(_) => false,
-            })
+    let holding = task.holding(&format!("mail:{}", item.id));
+    if matches!(holding, Holding::Recorded | Holding::Pending) {
+        return true;
+    }
+    let in_results = task.conversation.messages.iter().any(|message| {
+        message.content.iter().any(|content| match content {
+            arko_ai::Content::ToolResult(result) => item.held_in(&result.output),
+            _ => false,
+        })
+    });
+    if in_results || holding != Holding::Unknown {
+        return in_results;
+    }
+    let unknown = task.unidentified_context();
+    unknown.pending.iter().any(|text| item.held_in(text))
+        || unknown.messages.iter().any(|message| {
+            message.role == arko_ai::Role::User
+                && message
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .any(|text| item.held_in(text))
         })
 }
 
@@ -3764,56 +3766,108 @@ mod update_tests {
         Board::new(None, Some(snapshot), &[], Uuid::new_v4(), None)
     }
 
-    /// Within 9,500 characters, three items of 6,000 come one at a time, whole
-    /// and in order, each with the count of those that follow. Without a
-    /// limit they come together.
+    /// An update takes the mail up to about `UPDATE_MAX_MAIL_BYTES`, whole
+    /// and in order, with the count of the items that follow, and those
+    /// come with the next update.
     #[test]
-    fn items_that_dont_fit_the_limit_wait_for_the_next_update() {
+    fn items_past_the_updates_bytes_wait_for_the_next_update() {
         let run = Uuid::new_v4();
-        let bodies = ["a", "b", "c"].map(|letter| letter.repeat(6_000)).to_vec();
+        let bodies = ["a", "b", "c", "d"]
+            .map(|letter| letter.repeat(15_000))
+            .to_vec();
         let board = board_with(&bodies, run);
-        for (number, body) in bodies.iter().enumerate() {
-            let (text, ids) = board.update(run, 9_500).unwrap();
-            assert!(text.chars().count() < 9_500, "{}", text.chars().count());
-            assert!(text.contains(body), "item {number}");
-            assert_eq!(ids, [format!("mail:{}", number + 1)]);
-            let follows = 2 - number;
-            assert_eq!(
-                text.contains(&format!("({follows} more items follow")),
-                follows > 1
-            );
-            assert_eq!(text.contains("(1 more item follows"), follows == 1);
-        }
-        assert!(board.update(run, 9_500).is_none());
-        let (text, ids) = board_with(&bodies, run).update(run, usize::MAX).unwrap();
-        assert_eq!(ids.len(), 3);
-        assert!(bodies.iter().all(|body| text.contains(body)));
+        let (text, ids) = board.update(run).unwrap();
+        assert_eq!(ids, ["mail:1", "mail:2", "mail:3"]);
+        assert!(bodies[..3].iter().all(|body| text.contains(body)));
+        assert!(
+            text.contains("(1 more item follows"),
+            "{}",
+            &text[text.len() - 80..]
+        );
+        let (text, ids) = board.update(run).unwrap();
+        assert_eq!(ids, ["mail:4"]);
+        assert!(text.contains(&bodies[3]));
+        assert!(board.update(run).is_none());
     }
 
-    /// An item that alone is over the limit is cut at a line end. The update
-    /// names the file that holds all of it, saved for the purpose, and the
-    /// line to read on from.
+    /// The task's records say whether it holds an item, by its id: one whose
+    /// rest is pending, or recorded too. A task saved before tasks kept ids
+    /// holds what its text holds whole, and a tool result holds an item only
+    /// with both its markers.
     #[test]
-    fn an_item_alone_over_the_limit_is_cut_with_its_file_and_the_line_to_read_on_from() {
+    fn a_task_holds_an_item_by_its_records_or_its_old_text() {
         let run = Uuid::new_v4();
-        let body = (1..=800)
-            .map(|number| format!("line {number} of the report"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let board = board_with(std::slice::from_ref(&body), run);
-        let (text, _) = board.update(run, 9_500).unwrap();
-        assert!(text.chars().count() < 9_500, "{}", text.chars().count());
-        let file = board.snapshot().unwrap().mail[0].file.clone().unwrap();
-        let saved = std::fs::read_to_string(&file).unwrap();
-        let marker = "read on from line ";
-        let at = text.find(marker).unwrap() + marker.len();
-        let line: usize = text[at..].split(' ').next().unwrap().parse().unwrap();
-        assert!(text.contains(&file.display().to_string()));
-        // The last line shown is the one before it, and it is not shown.
-        let lines = saved.lines().collect::<Vec<_>>();
-        assert!(text.contains(lines[line - 2]), "{text}");
-        assert!(!text.contains(lines[line - 1]), "{text}");
-        let _ = std::fs::remove_file(file);
+        let item = board_with(&["x".repeat(12_000)], run)
+            .snapshot()
+            .unwrap()
+            .mail[0]
+            .clone();
+        let id = format!("mail:{}", item.id);
+        let config = arko_agents::AgentConfig::builder(
+            "worker".into(),
+            "Worker".into(),
+            arko_agents::AgentLLMConfig {
+                model: arko_ai::Model::anthropic_claude_opus_5_5(),
+                generation_config: arko_ai::GenerationConfig::default(),
+            },
+        )
+        .role_description("Works.".into())
+        .instructions("Test only.".into())
+        .build()
+        .unwrap();
+        let mut task = Task::new(config, "Work.".into(), std::env::temp_dir(), None);
+        task.conversation
+            .add_user_message("# Workflow context update\n\nThe first part.");
+        assert!(!task_holds(&task, &item));
+        let mut rest = arko_agents::PendingContext::new(
+            arko_agents::PendingKind::Context,
+            item.excerpt(),
+            vec![id.clone()],
+        );
+        rest.given = 100;
+        task.queue_context(rest);
+        assert!(task_holds(&task, &item));
+        task.pending_context_injections.clear();
+        assert!(!task_holds(&task, &item), "its first part alone");
+        task.conversation
+            .add_user_message("# Workflow context update\n\nThe rest.");
+        task.record_held_ids(1, vec![id.clone()]);
+        assert!(task_holds(&task, &item));
+        // Saved before ids: its text, whole.
+        let mut old = task.clone();
+        old.context_records.clear();
+        old.context_records_from = None;
+        assert!(!task_holds(&old, &item));
+        old.conversation.add_user_message(&format!(
+            "# Workflow context update\n\n- {}",
+            item.excerpt()
+        ));
+        assert!(task_holds(&old, &item));
+        // Saved before ids, then numbered and recorded since: no hook
+        // splits it, so its 12 KB are whole in one message.
+        let mut json = serde_json::to_value(&old).unwrap();
+        json["conversation"]["messages"] = serde_json::to_value(vec![arko_ai::Message::new_user(
+            &format!("# Workflow context update\n\n- {}", item.excerpt()),
+        )])
+        .unwrap();
+        json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+        json["context_records_from"] = serde_json::json!(0);
+        let recorded: Task = serde_json::from_value(json).unwrap();
+        assert_eq!(recorded.holding(&id), Holding::Unknown);
+        assert!(task_holds(&recorded, &item));
+        // A result cut short doesn't hold it.
+        let mut cut = task.clone();
+        cut.context_records.clear();
+        cut.conversation
+            .messages
+            .push(arko_ai::Message::new_user_with_contents(vec![
+                arko_ai::Content::ToolResult(arko_ai::ToolResult::new(
+                    None,
+                    "wait_for_agents",
+                    &item.excerpt()[..200],
+                )),
+            ]));
+        assert!(!task_holds(&cut, &item));
     }
 }
 

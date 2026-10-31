@@ -50,10 +50,6 @@ pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 /// notes, the rest come at the next turn boundary).
 pub const PROMPT_MAX_NOTES: usize = 20;
 
-/// The characters of an update of notes besides the notes: its introduction,
-/// the rule of notes and the count of notes that follow.
-const NOTES_FRAME: usize = 500;
-
 /// About this many bytes of notes are shown in a prompt or a context update,
 /// as [`PROMPT_MAX_NOTES`] says. No further note is added once it would pass
 /// this. The first note is always shown in full.
@@ -544,19 +540,20 @@ impl NoteBoard {
 
     /// The notes section of the initial prompt of run `task_id` of `agent`
     /// (`review` for a completion verifier's review): the standing notes it
-    /// receives, newest first and capped. Empty when there are none. The
-    /// run has then been given every note so far.
+    /// receives, newest first and capped, and the ids of those it shows,
+    /// which the task records with its prompt. Empty when there are none.
+    /// The run has then been given every note so far.
     pub(crate) fn initial_section(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> String {
+    ) -> (String, Vec<String>) {
         self.poll(ctx);
         let mut state = self.state.lock();
         let Some(newest) = state.notes.last().map(|note| note.seq) else {
-            return String::new();
+            return (String::new(), Vec::new());
         };
         state.seen.insert(task_id, newest);
         state.started.insert(task_id, newest);
@@ -568,31 +565,44 @@ impl NoteBoard {
                 posted.note.kind == NoteKind::Standing && self.receives(&posted.note, agent, review)
             })
             .collect::<Vec<_>>();
-        section(&notes)
+        (section(&notes), shown_ids(&notes))
     }
 
-    /// The notes for the fresh conversation of run `task_id` after a
+    /// The notes for the fresh conversation of run `task` of `agent` after a
     /// handover, and for its conversation after Claude Code compacted it:
-    /// the standing notes it receives that it had been given,
-    /// newest first and capped, as an initial prompt shows them. The notes
-    /// it hasn't been given (such as one posted while it wrote its report)
-    /// come in the context update before its first request, so none is lost
-    /// to the cap or given twice. The one-time notes it had been given
-    /// aren't repeated (its report covers them).
-    pub(crate) fn handover_section(&self, agent: &str, task_id: Uuid, review: bool) -> String {
-        let state = self.state.lock();
-        let seen = state.seen.get(&task_id).copied().unwrap_or(0);
-        let notes = state
-            .notes
+    /// the standing notes it receives that its conversation holds whole, by
+    /// the task's records, newest first and capped, as an initial prompt
+    /// shows them, with the ids of those it shows. The notes still pending
+    /// in the task, also one whose first part the model has read, come with
+    /// its next input, and those it hasn't been given (such as one posted
+    /// while it wrote its report) in the context update before its first
+    /// request, so none is lost to the cap or given twice. The one-time
+    /// notes it holds aren't repeated (its report covers them).
+    pub(crate) fn handover_section(
+        &self,
+        agent: &str,
+        task: &arko_agents::Task,
+        review: bool,
+    ) -> (String, Vec<String>) {
+        let standing = {
+            let state = self.state.lock();
+            state
+                .notes
+                .iter()
+                .rev()
+                .filter(|posted| {
+                    posted.note.kind == NoteKind::Standing
+                        && self.receives(&posted.note, agent, review)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // Searched outside the lock (a conversation can be long).
+        let notes = standing
             .iter()
-            .rev()
-            .filter(|posted| {
-                posted.note.kind == NoteKind::Standing
-                    && posted.seq <= seen
-                    && self.receives(&posted.note, agent, review)
-            })
+            .filter(|posted| recorded(task, posted))
             .collect::<Vec<_>>();
-        section(&notes)
+        (section(&notes), shown_ids(&notes))
     }
 
     /// The notes run `task_id` of `agent` (`review` for a completion
@@ -602,15 +612,13 @@ impl NoteBoard {
     /// images, each labelled with its note, or `None` when there are none. Only
     /// the notes shown count as given: the rest come at the next boundary.
     /// The update comes in two texts, the operator's notes (empty without
-    /// one) and the others', each its own update. The others' texts take at
-    /// most `max_chars` characters, besides the first note.
+    /// one) and the others', each its own update.
     pub(crate) fn update_with_seqs(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-        max_chars: usize,
     ) -> Option<NotesUpdate> {
         self.poll(ctx);
         let mut state = self.state.lock();
@@ -629,7 +637,7 @@ impl NoteBoard {
                     && !skipped(&state, task_id, posted)
             })
             .collect::<Vec<_>>();
-        let shown = fitting(&notes, max_chars.saturating_sub(NOTES_FRAME));
+        let shown = fitting(&notes);
         let given = match notes.get(shown) {
             // The newest shown: the notes after it wait for the next update.
             Some(_) => notes[shown - 1].seq,
@@ -661,10 +669,11 @@ impl NoteBoard {
                     .map(|config| config.model)
             };
             let (images, lost) = self.context_images(&with_images, model.as_ref());
-            let seqs = taken.iter().map(|posted| posted.seq).collect();
             let (operator, others): (Vec<_>, Vec<_>) = taken
                 .iter()
                 .partition(|posted| posted.note.source == NoteSource::Operator);
+            let operator_seqs = operator.iter().map(|posted| posted.seq).collect();
+            let other_seqs = others.iter().map(|posted| posted.seq).collect();
             // The count of notes that follow and the host's reply hint end
             // the operator's update, which comes last, or the only one.
             let (others, operator) = if operator.is_empty() {
@@ -684,7 +693,8 @@ impl NoteBoard {
             NotesUpdate {
                 others,
                 operator,
-                seqs,
+                other_seqs,
+                operator_seqs,
                 given,
                 images,
             }
@@ -712,8 +722,10 @@ impl NoteBoard {
         self.held_in_conversation(agent, task, review);
     }
 
-    /// [`recovered`](Self::recovered) by the notes `task`'s conversation
-    /// holds: the newest one it holds tells what it was given.
+    /// [`recovered`](Self::recovered) by the notes `task` holds, in its
+    /// conversation or pending: it was given every note up to the first one
+    /// it lacks. A note it holds after one it lacks doesn't count, since the
+    /// one it lacks would never come again.
     fn held_in_conversation(&self, agent: &str, task: &arko_agents::Task, review: bool) {
         let (started, given) = {
             let state = self.state.lock();
@@ -721,7 +733,6 @@ impl NoteBoard {
             let given = state
                 .notes
                 .iter()
-                .rev()
                 .filter(|posted| {
                     posted.seq > started
                         && self.receives(&posted.note, agent, review)
@@ -731,13 +742,11 @@ impl NoteBoard {
                 .collect::<Vec<_>>();
             (started, given)
         };
-        // Notes are given oldest first, each update starting after the last
-        // one shown, so the newest one the task holds tells what it was
-        // given. The conversation is searched outside the lock (it can be
-        // long).
+        // Searched outside the lock (a conversation can be long).
         let held = given
             .iter()
-            .find(|posted| holds(task, &item_head(posted)))
+            .take_while(|posted| holds(task, posted))
+            .last()
             .map_or(started, |posted| posted.seq);
         let mut state = self.state.lock();
         if state.seen.get(&task.id).is_some_and(|seen| *seen > held) {
@@ -1043,20 +1052,61 @@ fn insert(
     posted
 }
 
-/// Whether `task` holds `text` in a user message of its conversation, or in
-/// context it took and hasn't added yet.
-fn holds(task: &arko_agents::Task, text: &str) -> bool {
-    task.pending_context_injections
+/// Whether `task` holds note `posted`, in its conversation or pending, as
+/// its records say by the note's id. For context it saved without ids, its
+/// text says: a user message, or context it took and hasn't added, with the
+/// note's item whole.
+fn holds(task: &arko_agents::Task, posted: &PostedNote) -> bool {
+    match task.holding(&note_id(posted.seq)) {
+        arko_agents::Holding::Recorded | arko_agents::Holding::Pending => true,
+        arko_agents::Holding::Unknown => {
+            let text = item_head(posted);
+            let unknown = task.unidentified_context();
+            unknown
+                .pending
+                .iter()
+                .any(|content| content.contains(&text))
+                || in_messages(&unknown.messages, &text)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `task`'s conversation holds `posted` whole: by its records, or
+/// by its text where only text can say. A note still pending doesn't count.
+fn recorded(task: &arko_agents::Task, posted: &PostedNote) -> bool {
+    match task.holding(&note_id(posted.seq)) {
+        arko_agents::Holding::Recorded => true,
+        arko_agents::Holding::Unknown => {
+            in_messages(&task.unidentified_context().messages, &item_head(posted))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a user message of `messages` has `text`.
+fn in_messages(messages: &[&arko_ai::Message], text: &str) -> bool {
+    messages.iter().any(|message| {
+        message.role == arko_ai::Role::User
+            && message
+                .content
+                .iter()
+                .filter_map(arko_ai::Content::as_text)
+                .any(|part| part.contains(text))
+    })
+}
+
+/// The id a task's records and pending context know note `seq` by.
+fn note_id(seq: u64) -> String {
+    format!("note:{seq}")
+}
+
+/// The ids of the notes [`section`] shows of `notes`.
+fn shown_ids(notes: &[&PostedNote]) -> Vec<String> {
+    notes[..fitting(notes)]
         .iter()
-        .any(|content| content.contains(text))
-        || task.conversation.messages.iter().any(|message| {
-            message.role == arko_ai::Role::User
-                && message
-                    .content
-                    .iter()
-                    .filter_map(arko_ai::Content::as_text)
-                    .any(|part| part.contains(text))
-        })
+        .map(|posted| note_id(posted.seq))
+        .collect()
 }
 
 /// Whether `note` may reach run `task_id`: a note for one run reaches
@@ -1211,26 +1261,17 @@ fn item(posted: &PostedNote) -> String {
 
 /// How many of `notes`, from the first, fit in a prompt or an update: at
 /// most [`PROMPT_MAX_NOTES`], and no further note once it would pass
-/// [`PROMPT_MAX_BYTES`], nor once the notes that don't come from the
-/// operator pass `max_chars` characters (the operator's reach the agent
-/// apart from the others). The first always (at least one, when there are
+/// [`PROMPT_MAX_BYTES`]. The first always (at least one, when there are
 /// any).
-fn fitting(notes: &[&PostedNote], max_chars: usize) -> usize {
-    let (mut bytes, mut chars) = (0, 0);
+fn fitting(notes: &[&PostedNote]) -> usize {
+    let mut bytes = 0;
     let mut shown = 0;
     for posted in notes.iter().take(PROMPT_MAX_NOTES) {
-        let text = item(posted);
-        let len = text.len();
-        let hooked = if posted.note.source == NoteSource::Operator {
-            0
-        } else {
-            text.chars().count()
-        };
-        if shown > 0 && (bytes + len > PROMPT_MAX_BYTES || chars + hooked > max_chars) {
+        let len = item(posted).len();
+        if shown > 0 && bytes + len > PROMPT_MAX_BYTES {
             break;
         }
         bytes += len;
-        chars += hooked;
         shown += 1;
     }
     shown
@@ -1249,7 +1290,7 @@ fn section(notes: &[&PostedNote]) -> String {
     if notes.is_empty() {
         return String::new();
     }
-    let shown = fitting(notes, usize::MAX);
+    let shown = fitting(notes);
     let left = match notes.len() - shown {
         0 => String::new(),
         1 => "\n- (1 earlier note is not shown.)".to_string(),
@@ -1396,8 +1437,10 @@ pub(crate) struct NotesUpdate {
     pub others: String,
     /// The update of the operator's notes, empty without one.
     pub operator: String,
-    /// The numbers of the notes shown.
-    pub seqs: Vec<u64>,
+    /// The numbers of the notes `others` shows.
+    pub other_seqs: Vec<u64>,
+    /// The numbers of the notes `operator` shows.
+    pub operator_seqs: Vec<u64>,
     /// The number of the newest note the run counts as given now.
     pub given: u64,
     pub images: Vec<arko_agents::ContextImage>,
@@ -1426,31 +1469,20 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
     }
 
     /// The inner source's context, the notes the run hasn't been given
-    /// (`note:<number>`), and its subagent mail (`mail:<id>`).
+    /// (`note:<number>`), and its subagent mail (`mail:<id>`). The operator's
+    /// notes are the part the user typed, with their own ids.
     fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
-        self.context_update_within(task_id, usize::MAX)
-    }
-
-    /// As `context_update`, with the text of `content` limited to `max_chars`
-    /// characters: the notes and the mail that don't fit wait for the next
-    /// call, whole items in order, and a mail item alone over the limit is
-    /// cut. The mail waits when the others took half of the limit.
-    fn context_update_within(
-        &self,
-        task_id: Uuid,
-        max_chars: usize,
-    ) -> Option<arko_agents::TurnContext> {
         let mut parts = Vec::new();
         let mut user_content = String::new();
         let mut ids = Vec::new();
+        let mut user_ids = Vec::new();
         let mut images = Vec::new();
         let mut marks = std::collections::BTreeMap::new();
-        let mut used = 0;
-        if let Some(inner) = self.inner.context_update_within(task_id, max_chars) {
-            used += inner.content.chars().count();
+        if let Some(inner) = self.inner.context_update(task_id) {
             parts.push(inner.content);
             user_content = inner.user_content;
             ids.extend(inner.ids);
+            user_ids.extend(inner.user_ids);
             images.extend(inner.images);
             marks.extend(inner.marks);
         }
@@ -1459,9 +1491,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             &self.agent_name,
             task_id,
             self.review,
-            max_chars.saturating_sub(used),
         ) {
-            used += notes.others.chars().count();
             if !notes.others.is_empty() {
                 parts.push(notes.others);
             }
@@ -1471,16 +1501,13 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
                 }
                 user_content.push_str(&notes.operator);
             }
-            ids.extend(notes.seqs.into_iter().map(|seq| format!("note:{seq}")));
+            ids.extend(notes.other_seqs.into_iter().map(note_id));
+            user_ids.extend(notes.operator_seqs.into_iter().map(note_id));
             images.extend(notes.images);
             marks.insert(NOTES_MARK.to_string(), notes.given);
         }
         if !self.review
-            && max_chars.saturating_sub(used) >= max_chars / 2
-            && let Some((mail, mail_ids)) = self
-                .context
-                .subagents
-                .update(task_id, max_chars.saturating_sub(used))
+            && let Some((mail, mail_ids)) = self.context.subagents.update(task_id)
         {
             parts.push(mail);
             ids.extend(mail_ids);
@@ -1489,6 +1516,7 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             content: parts.join("\n\n"),
             user_content,
             ids,
+            user_ids,
             images,
             marks,
         })

@@ -47,6 +47,10 @@ impl Task {
             plan_usage_threshold_reported,
             monitor_pause,
             pending_context_injections,
+            next_context_item,
+            context_records,
+            context_records_from,
+            initial_prompt_ids,
             pending_context_images,
             unavailable_images,
             handover_requested,
@@ -105,6 +109,10 @@ impl Task {
         copy.monitor_pause = *monitor_pause;
         copy.pending_context_injections
             .clone_from(pending_context_injections);
+        copy.next_context_item = *next_context_item;
+        copy.context_records.clone_from(context_records);
+        copy.context_records_from = *context_records_from;
+        copy.initial_prompt_ids.clone_from(initial_prompt_ids);
         same(&mut copy.pending_context_images, pending_context_images);
         copy.unavailable_images.clone_from(unavailable_images);
         copy.handover_requested.clone_from(handover_requested);

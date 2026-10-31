@@ -1054,7 +1054,7 @@ async fn a_report_run_aborted_after_a_turn_gives_back_what_it_took() {
     assert!(
         now.pending_context_injections
             .iter()
-            .any(|context| context.contains("Use British spelling.")),
+            .any(|context| context.text.contains("Use British spelling.")),
         "{:?}",
         now.pending_context_injections
     );
@@ -1418,7 +1418,7 @@ async fn a_report_run_aborted_after_the_grace_period_gives_back_what_it_took() {
     assert!(
         now.pending_context_injections
             .iter()
-            .any(|context| context.contains("Use British spelling.")),
+            .any(|context| context.text.contains("Use British spelling.")),
         "{:?}",
         now.pending_context_injections
     );

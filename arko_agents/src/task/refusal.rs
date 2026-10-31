@@ -422,6 +422,12 @@ impl Task {
         }
 
         self.conversation = conversation;
+        // The records follow their messages, and those of messages removed
+        // go with them.
+        self.move_context_records(|index| {
+            (index <= last && !removed.contains(&index))
+                .then(|| index - removed.iter().filter(|gone| **gone < index).count())
+        });
         self.runtime_messages = runtime_messages;
         self.runtime_text_messages = runtime_text_messages;
         if let Some(prompt) = initial_task_prompt {

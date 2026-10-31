@@ -267,9 +267,22 @@ impl HandoverConfig {
         {
             return Err(error("report_request must not be empty."));
         }
+        if let Some(request) = self.report_request.as_deref()
+            && request.len() > MAX_REPORT_REQUEST_BYTES
+        {
+            return Err(error(&format!(
+                "report_request may be at most {MAX_REPORT_REQUEST_BYTES} bytes. This one is {} bytes.",
+                request.len()
+            )));
+        }
         Ok(())
     }
 }
+
+/// The longest report request, in bytes, [`HandoverConfig::report_request`]
+/// and [`Task::request_report`](crate::Task::request_report) take. A Claude
+/// Code agent reads it in a hook, whose text is limited, and needs it whole.
+pub const MAX_REPORT_REQUEST_BYTES: usize = 8_000;
 
 /// The default report request, using [`DEFAULT_REPORT_REQUEST`] when the agent
 /// gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
@@ -478,6 +491,12 @@ pub struct HandoverSeed {
     /// Context the host adds after the report, such as the agents the task
     /// can message.
     pub context: Option<String>,
+    /// The host's ids of what the message presents, which the task records
+    /// with the fresh conversation's first message
+    /// ([`Task::holding`](crate::Task::holding)). The runtime records there
+    /// too what the old conversation held whole, which the report covers
+    /// ([`Task::recorded_ids`](crate::Task::recorded_ids)).
+    pub ids: Vec<String>,
 }
 
 impl HandoverSeed {
@@ -486,6 +505,7 @@ impl HandoverSeed {
         Self {
             task_prompt: task.initial_task_prompt.clone(),
             context: None,
+            ids: Vec::new(),
         }
     }
 
@@ -519,6 +539,7 @@ impl HandoverSeed {
         Self {
             task_prompt: text,
             context: None,
+            ids: Vec::new(),
         }
     }
 
@@ -899,6 +920,48 @@ mod tests {
         assert!(blank.validate().is_err());
     }
 
+    /// A Claude Code agent reads the report request in a hook, so a request
+    /// too long to fit one whole is refused where it is set.
+    #[test]
+    fn a_report_request_over_its_limit_is_refused() {
+        let request = |bytes: usize| HandoverConfig {
+            report_request: Some("r".repeat(bytes)),
+            ..HandoverConfig::at_input_tokens(10)
+        };
+        assert!(request(MAX_REPORT_REQUEST_BYTES).validate().is_ok());
+        let error = request(MAX_REPORT_REQUEST_BYTES + 1)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 8000 bytes"), "{error}");
+        let config = crate::agent_config::AgentConfig::builder(
+            "reporter".into(),
+            "Reporter".into(),
+            crate::agent_config::AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into())
+        .build()
+        .unwrap();
+        let mut task = crate::Task::new(config, "Work.".into(), std::env::temp_dir(), None);
+        task.set_state(crate::task::TaskState::Completed {
+            summary: "Done.".into(),
+        });
+        let refused = task.request_report(Some("r".repeat(MAX_REPORT_REQUEST_BYTES + 1)));
+        assert!(matches!(
+            refused,
+            Err(crate::ArkoAgentsError::InvalidTaskState(_))
+        ));
+        assert!(task.handover_requested.is_none());
+        assert!(
+            task.request_report(Some("r".repeat(MAX_REPORT_REQUEST_BYTES)))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn compaction_in_claude_code_is_saved_only_when_set() {
         let config = HandoverConfig::at_input_tokens(10);
@@ -1035,6 +1098,7 @@ mod tests {
         let seed = HandoverSeed {
             task_prompt: "Fix the parser.\n".into(),
             context: Some("# Agents you can message\n- `lead`".into()),
+            ids: Vec::new(),
         };
         let message = seed.message("  Done: lexer. Next: parser.  ");
         assert!(message.starts_with("Fix the parser.\n\n# Handover report\n\n"));

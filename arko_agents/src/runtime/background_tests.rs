@@ -1107,10 +1107,10 @@ async fn a_note_sent_as_the_run_ends_stays_with_the_task() {
     .unwrap();
     let task = agent.finish().await.unwrap();
     assert!(
-        task.pending_context_injections
-            .iter()
-            .any(|content| content.starts_with(&format!("Job {job} ended."))
-                && content.ends_with("slow done")),
+        task.pending_context_injections.iter().any(|content| content
+            .text
+            .starts_with(&format!("Job {job} ended."))
+            && content.text.ends_with("slow done")),
         "{:?}",
         task.pending_context_injections
     );

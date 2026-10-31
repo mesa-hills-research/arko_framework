@@ -387,8 +387,9 @@ fn an_item_says_which_images_can_be_shown() {
     assert_eq!(line(0, 0), "See these.");
 }
 
-/// A saved conversation holds a note whose image was lost, whichever
-/// version of its item the agent was given.
+/// A conversation saved before tasks kept ids holds a note whose image was
+/// lost, whichever version of its item the agent was given, by its text. A
+/// task that keeps ids holds the notes its records name.
 #[test]
 fn a_conversation_holds_a_note_whose_image_was_lost() {
     let mut note = posted(3, "See this.");
@@ -400,15 +401,78 @@ fn a_conversation_holds_a_note_whose_image_was_lost() {
         std::env::temp_dir(),
         None,
     );
-    assert!(!holds(&task, &item_head(&note)));
+    task.context_records_from = None;
+    assert!(!holds(&task, &note));
     task.conversation
         .messages
         .push(arko_ai::Message::new_user(&format!(
             "# Workflow context update\n\nA new note on your task.{}",
             item_with(&note, 1)
         )));
-    assert!(holds(&task, &item_head(&note)));
-    assert!(!holds(&task, &item(&note)));
+    assert!(holds(&task, &note));
+    let mut longer = note.clone();
+    longer.note.text = format!("{} And more.", note.note.text);
+    assert!(!holds(&task, &longer));
+    let mut task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    task.conversation
+        .add_user_message("# Workflow context update\n\nAny text.");
+    assert!(!holds(&task, &note));
+    task.record_held_ids(0, vec![format!("note:{}", note.seq)]);
+    assert!(holds(&task, &note));
+}
+
+/// A 12 KB note saved as bare text, before items had ids, and recorded since
+/// is held by its text. No hook splits such an item, so one message has it
+/// whole.
+#[test]
+fn a_long_note_saved_as_bare_text_is_held_by_its_text() {
+    let note = posted(4, &"A line of a long note.\n".repeat(540));
+    let update = format!(
+        "# Workflow context update\n\nA new note on your task.{}",
+        item_with(&note, 0)
+    );
+    assert!(update.len() > 12_000);
+    let task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    let mut json = serde_json::to_value(&task).unwrap();
+    json["pending_context_injections"] = serde_json::json!([update]);
+    let pending: arko_agents::Task = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        pending.holding(&format!("note:{}", note.seq)),
+        arko_agents::Holding::Unknown
+    );
+    assert!(holds(&pending, &note));
+    json["pending_context_injections"] = serde_json::json!([]);
+    json["conversation"]["messages"] =
+        serde_json::to_value(vec![arko_ai::Message::new_user(&update)]).unwrap();
+    json["context_records"] = serde_json::json!([{"message": 0, "parts": [{"item": 1, "unidentified": true, "last": true}]}]);
+    let recorded: arko_agents::Task = serde_json::from_value(json).unwrap();
+    assert!(holds(&recorded, &note));
+}
+
+/// Whether `task`'s conversation or pending context has `text` in a user
+/// message, read directly rather than through its records.
+fn holds_text(task: &arko_agents::Task, text: &str) -> bool {
+    task.pending_context_injections
+        .iter()
+        .any(|item| item.text.contains(text))
+        || task.conversation.messages.iter().any(|message| {
+            message.role == arko_ai::Role::User
+                && message
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .any(|part| part.contains(text))
+        })
 }
 
 /// Only a one-time note carries images, and only to agents whose models
@@ -987,6 +1051,12 @@ async fn a_handover_carries_the_standing_notes() {
 
     let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
     assert_eq!(result.task().unwrap().handovers.len(), 1);
+    // The fresh conversation records the note it shows, so a later cut or
+    // recovery doesn't give it again.
+    assert_eq!(
+        result.task().unwrap().holding("note:1"),
+        arko_agents::Holding::Recorded
+    );
     let requests = requests_of(&server, "Draft it.");
     assert_eq!(requests.len(), 4);
     let fresh = &requests[3];
@@ -1366,6 +1436,51 @@ async fn note_images_are_checked_when_posted_and_fitted_when_given() {
     assert!(!body.contains("data:image/bmp"), "{body}");
 }
 
+/// A handover's seed and a compaction show the standing notes the task's
+/// conversation holds whole, by its records, with their ids. A note still
+/// pending, also one whose first part the model has read, comes with the
+/// next input instead, and one not given yet in the next update.
+#[test]
+fn a_handover_shows_the_standing_notes_the_task_recorded() {
+    let board = NoteBoard::new(
+        Some(NotesSnapshot {
+            notes: vec![
+                posted(1, "In the prompt."),
+                posted(2, "Partly given."),
+                posted(3, "In an update."),
+                posted(4, "Not given yet."),
+            ],
+            ..NotesSnapshot::default()
+        }),
+        BTreeSet::new(),
+        None,
+        None,
+    );
+    let mut task = arko_agents::Task::new(
+        crate::test_support::agent_config("Worker"),
+        "Do it.".to_string(),
+        std::env::temp_dir(),
+        None,
+    );
+    task.conversation.add_user_message("Do it.");
+    task.record_held_ids(0, vec!["note:1".into()]);
+    task.conversation
+        .add_user_message("# Workflow context update\n\nIn an update.");
+    task.record_held_ids(1, vec!["note:3".into()]);
+    let mut rest = arko_agents::PendingContext::new(
+        arko_agents::PendingKind::Context,
+        "A new note on your task. Partly given.",
+        vec!["note:2".into()],
+    );
+    rest.given = 5;
+    task.queue_context(rest);
+    let (section, ids) = board.handover_section("worker", &task, false);
+    assert_eq!(ids, ["note:3", "note:1"]);
+    assert!(section.find("In an update.").unwrap() < section.find("In the prompt.").unwrap());
+    assert!(!section.contains("Partly given."), "{section}");
+    assert!(!section.contains("Not given yet."), "{section}");
+}
+
 /// A checkpoint written while notes held their images still restores them:
 /// they move out of the notes as a posted note's do.
 #[test]
@@ -1443,7 +1558,10 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         .unwrap();
     let saved = state.agent_results_in(&run_dir(&workspace)).unwrap();
     assert_eq!(saved[0].status, AgentRunStatus::Interrupted);
-    assert!(!holds(saved[0].task().unwrap(), "Prefer the orbit method."));
+    assert!(!holds_text(
+        saved[0].task().unwrap(),
+        "Prefer the orbit method."
+    ));
     assert_eq!(
         state.notes.unwrap().seen.get(&saved[0].agent_run_id),
         Some(&1)
@@ -1465,7 +1583,10 @@ async fn a_recovered_run_is_given_again_the_notes_its_saved_task_lacks() {
         "{resent}"
     );
     // Given once: the task holds it now.
-    assert!(holds(result.task().unwrap(), "Prefer the orbit method."));
+    assert!(holds_text(
+        result.task().unwrap(),
+        "Prefer the orbit method."
+    ));
 }
 
 /// A note written to the control folder by another process while an agent
@@ -1676,28 +1797,18 @@ fn posted(seq: u64, text: &str) -> PostedNote {
     }
 }
 
-/// An update for a hook counts the characters of the host's notes only. The
-/// operator's notes reach the agent apart from the hook.
+/// An update takes notes up to its limits in count and bytes, whoever wrote
+/// them and whatever agent gets them, and the first always.
 #[test]
-fn an_update_for_a_hook_limits_the_notes_that_are_not_the_operators() {
-    let text = "n".repeat(4_000);
-    let by = |source: NoteSource| {
-        (1..=4)
-            .map(|seq| {
-                let mut note = posted(seq, &text);
-                note.note.source = source.clone();
-                note
-            })
-            .collect::<Vec<_>>()
-    };
-    let host = by(NoteSource::Host);
-    let host = host.iter().collect::<Vec<_>>();
-    assert_eq!(fitting(&host, 9_000), 2);
-    // The first always comes.
-    assert_eq!(fitting(&host, 100), 1);
-    let operator = by(NoteSource::Operator);
-    let operator = operator.iter().collect::<Vec<_>>();
-    assert_eq!(fitting(&operator, 100), 4);
+fn an_update_takes_notes_up_to_its_limits_and_the_first_always() {
+    let notes =
+        |count: u64, text: &str| (1..=count).map(|seq| posted(seq, text)).collect::<Vec<_>>();
+    let long = notes(4, &"n".repeat(6_000));
+    assert_eq!(fitting(&long.iter().collect::<Vec<_>>()), 2);
+    let alone = notes(2, &"n".repeat(MAX_NOTE_BYTES));
+    assert_eq!(fitting(&alone.iter().collect::<Vec<_>>()), 1);
+    let short = notes(30, "Short.");
+    assert_eq!(fitting(&short.iter().collect::<Vec<_>>()), PROMPT_MAX_NOTES);
 }
 
 /// A prompt shows the newest notes within the caps, the newest always in
@@ -1842,7 +1953,8 @@ async fn new_notes_past_an_updates_cap_come_at_the_next_boundary() {
     assert_eq!(count(&requests[2], "OLDER-NOTE"), 1);
     assert_eq!(count(&requests[2], "NEWER-NOTE"), 1);
     assert!(
-        holds(result.task().unwrap(), "OLDER-NOTE") && holds(result.task().unwrap(), "NEWER-NOTE")
+        holds_text(result.task().unwrap(), "OLDER-NOTE")
+            && holds_text(result.task().unwrap(), "NEWER-NOTE")
     );
     let snapshot = workflow.context().notes.snapshot().unwrap();
     assert_eq!(snapshot.seen.get(&result.agent_run_id), Some(&2));

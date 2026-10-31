@@ -478,20 +478,7 @@ impl AgentLoop {
         if !messages[start..].iter().any(in_step) {
             return Ok(false);
         }
-        let added = self.task.conversation.messages.split_off(start);
-        let runtime = &self.task.runtime_messages;
-        let kept: Vec<ai::Message> = added
-            .into_iter()
-            .enumerate()
-            .filter(|(offset, message)| !in_step(message) && !runtime.contains(&(start + offset)))
-            .map(|(_, message)| message)
-            .collect();
-        self.task.conversation.messages.extend(kept);
-        // The messages kept after `start` are the host's, not the runtime's.
-        self.task.runtime_messages.retain(|index| *index < start);
-        self.task
-            .runtime_text_messages
-            .retain(|index| *index < start);
+        self.task.leave_out_step(start);
         if self.details_sent_with.is_some_and(|index| index >= start) {
             self.details_sent_with = None;
         }

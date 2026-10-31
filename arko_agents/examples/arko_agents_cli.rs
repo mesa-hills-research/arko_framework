@@ -402,6 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let cmd = UserCommand::SubmitUserResponse {
                     response: response.trim().to_string(),
+                    ids: Vec::new(),
                 };
                 if command_sender.send(cmd).await.is_err() {
                     eprintln!("[ERROR] Failed to send user response.");

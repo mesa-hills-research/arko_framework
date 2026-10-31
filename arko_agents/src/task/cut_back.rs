@@ -264,8 +264,9 @@ impl Task {
         self.pending_context_injections.clear();
         self.pending_context_images.clear();
         // What it took may have gone with the messages cut, so a host reads
-        // its conversation again.
+        // what the records of the messages kept say.
         self.context_marks.clear();
+        self.cut_context_records(index);
         self.handover_requested = None;
         // Its latest request isn't the shorter conversation's.
         self.latest_request = RequestRecord::NoRequest;
@@ -347,6 +348,57 @@ impl Task {
         self.claude_code_entries.retain(|kept, _| *kept < index);
         self.claude_code_synced = from;
         Ok(())
+    }
+
+    /// Leaves out the step the conversation took from message `start` on,
+    /// as a runtime does when the step's request was over the model's input
+    /// limit: the model's replies, their results and the runtime's own
+    /// messages go. A message holding context the task recorded stays, so
+    /// the record keeps what it says, and one that also holds the step's
+    /// results (an answer beside them) stays without them, since their calls
+    /// go. The host's other messages stay too.
+    pub(crate) fn leave_out_step(&mut self, start: usize) {
+        let in_step = |message: &Message| {
+            message.role == Role::Assistant
+                || message
+                    .content
+                    .iter()
+                    .any(|content| content.as_tool_result().is_some())
+        };
+        let added = self.conversation.messages.split_off(start);
+        let recorded: std::collections::HashSet<usize> = self
+            .context_records
+            .iter()
+            .map(|record| record.message)
+            .collect();
+        let mut moved = std::collections::HashMap::new();
+        let mut kept: Vec<Message> = Vec::new();
+        for (offset, mut message) in added.into_iter().enumerate() {
+            let index = start + offset;
+            let keep = if recorded.contains(&index) {
+                message
+                    .content
+                    .retain(|content| content.as_tool_result().is_none());
+                message.role == Role::User && !message.content.is_empty()
+            } else {
+                !in_step(&message) && !self.runtime_messages.contains(&index)
+            };
+            if keep {
+                moved.insert(index, start + kept.len());
+                kept.push(message);
+            }
+        }
+        self.conversation.messages.extend(kept);
+        self.move_context_records(|index| {
+            if index < start {
+                Some(index)
+            } else {
+                moved.get(&index).copied()
+            }
+        });
+        // The messages kept after `start` are the host's, not the runtime's.
+        self.runtime_messages.retain(|index| *index < start);
+        self.runtime_text_messages.retain(|index| *index < start);
     }
 }
 
@@ -679,5 +731,54 @@ mod tests {
         assert_eq!(session.claude_code_directory, Some(PathBuf::from("/w")));
         session.move_to("/w".into());
         assert_eq!(session.claude_code_directory, None);
+    }
+
+    /// A step left out takes its calls and results with it. An answer beside
+    /// the results, which a record names, stays without them, and a context
+    /// update stays too, each with its record. The runtime's note goes.
+    #[test]
+    fn a_step_left_out_keeps_the_recorded_answer_without_its_results() {
+        let mut task = task();
+        let messages = &mut task.conversation;
+        messages.add_user_message("Plan a trip.");
+        let mut reply = Message::new_assistant("Asking.");
+        reply.tool_calls = vec![call()];
+        messages.messages.push(reply);
+        messages.add_user_message_with_contents(vec![
+            Content::ToolResult(ToolResult::from_tool_call(&call(), "Asked.")),
+            Content::Text("The user responded: Lisbon.".into()),
+        ]);
+        messages.add_user_message("# Workflow context update\n\nA note: in May.");
+        messages.add_user_message("Continue.");
+        task.runtime_messages.insert(4);
+        task.record_held_ids(2, vec!["message:answer".into()]);
+        task.record_held_ids(3, vec!["note:1".into()]);
+        task.leave_out_step(1);
+        let messages = &task.conversation.messages;
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|message| {
+            message.tool_calls.is_empty()
+                && message
+                    .content
+                    .iter()
+                    .all(|content| content.as_tool_result().is_none())
+        }));
+        assert_eq!(
+            messages[1].content,
+            [Content::Text("The user responded: Lisbon.".into())]
+        );
+        assert_eq!(
+            task.holding("message:answer"),
+            super::super::Holding::Recorded
+        );
+        assert_eq!(task.holding("note:1"), super::super::Holding::Recorded);
+        assert_eq!(
+            task.context_records
+                .iter()
+                .map(|record| record.message)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(task.runtime_messages.is_empty());
     }
 }

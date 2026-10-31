@@ -1078,16 +1078,11 @@ async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
         .unwrap();
     let waiting = workflow.agent_result(task_id).unwrap();
     let mut task = waiting.task().unwrap().clone();
-    task.pending_context_injections = vec![crate::messaging::injection(&message)];
+    task.pending_context_injections = vec![crate::messaging::injection(&message).into()];
     let waiting = AgentResult::of_task(waiting.agent_name, task);
-    context.messages.settle_run(
-        "lead",
-        task_id,
-        &waiting.task().unwrap().conversation,
-        &[],
-        &waiting.task().unwrap().pending_context_injections,
-        false,
-    );
+    context
+        .messages
+        .settle_run("lead", waiting.task().unwrap(), &[], false);
     assert!(context.messages.pending_for("lead", task_id).is_empty());
     let answered = within(workflow.continue_agent(&waiting, "parser.rs"))
         .await

@@ -346,7 +346,8 @@ that, and changes nothing while the request may fit:
   over from the conversation as it was at the last answered request, which fit. Its
   report request starts with `STEP_LEFT_OUT`, which says the step was left out and asks
   the report to say what it was for, so the fresh conversation can do it in smaller
-  parts. Context updates added since stay. Without a handover, the error ends recovery
+  parts. Context updates added since stay, and so does an answer the task recorded
+  beside the step's results, without them. Without a handover, the error ends recovery
   like any error that retrying can't fix, recorded as `ContextOverflow`.
 - `ToolResultShortened` reports each shortened result, with its estimated size and the
   reason. The `ToolResult` event before it has the whole output.
@@ -1098,8 +1099,9 @@ Besides answers to the waiting states, a running task accepts:
   A workflow holds agents over their budget this way. A Claude Code agent is asked before
   each turn and at each message of a turn, and a turn it holds is interrupted.
   Each update that goes into the conversation is reported with `ContextInjected`. Its
-  `ids` come from the source. `context_update` returns a `TurnContext { content, user_content, ids, images, marks }`
-  (by default `turn_context` with no ids), and `identify` gives an id for each queued
+  `ids` come from the source. `context_update` returns a `TurnContext { content, user_content, ids, user_ids, images, marks }`
+  (by default `turn_context` with no ids), where `ids` name what `content` holds and
+  `user_ids` what `user_content` holds, and `identify` gives an id for each queued
   `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
   `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
   read. `wakes_calls` says whether a queued `InjectContext` fires the running calls'
@@ -1107,23 +1109,48 @@ Besides answers to the waiting states, a running task accepts:
   don't, so they wait for the turn boundary. `TurnContext::marks` are the source's
   high-water marks of what the update gives, by name. The task keeps the highest of each
   in `Task::context_marks` once it holds the update (in its conversation, or pending in it).
-  A Claude Code agent's update given with a call's result counts once the CLI reports that
-  result, so a CLI that exits first leaves no mark. The marks are saved with the task and kept through
-  handovers and compactions (a cut back clears them), so a host can tell from a saved task
-  what it was given after its conversation no longer shows it. A workflow marks the newest
-  note (`notes`) and recovers a run's notes from that mark. `TurnContext::user_content` is the part of
-  an update the user typed themselves (a workflow's operator notes), which follows
-  `content` in the same message. During a turn, a Claude Code agent gets it as a message
-  from the user (`ClaudeSession::send_human`), at the next tool boundary, instead of in
-  the hook. It counts as delivered once it is written. The CLI reports each message by its
-  UUID, and one it cancels (the turn stopped before the model's next request) goes with the
-  task's next input. A hook's text is limited, since Claude Code replaces over 10,000
-  characters with a preview and a file name. The runtime asks the source for at most 9,500
-  (`TurnContextSource::context_update_within`, which by default is `context_update`), and
-  the queued `InjectContext` content that doesn't fit, whole and in order, waits for the
-  next result or input. A workflow's source holds back the notes and mail that don't fit,
-  and cuts a mail item that alone is over the limit. An injection or note that alone is
-  over it is not split. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
+  The marks rise in the step the update joins the task's pending context, and are saved with
+  the task and kept through handovers and compactions (a cut back clears them), so a host can
+  tell from a saved task what it was given after its conversation no longer shows it. A
+  workflow marks the newest note (`notes`) and recovers a run's notes from that mark.
+  `TurnContext::user_content` is the part of an update the user typed themselves (a
+  workflow's operator notes), which follows `content` in the same message. During a turn, a
+  Claude Code agent gets it as a message from the user (`ClaudeSession::send_human`) at a
+  tool boundary, once the hooks carry everything queued before it. It stays pending, and
+  nothing behind it goes, until both its hook is acknowledged and the CLI says it completed
+  the message. One the CLI cancels (the turn stopped before the model's next request) waits
+  again where it is.
+
+  Everything that waits for the model is an item of `Task::pending_context_injections`
+  (a `PendingContext` with its number, its `PendingKind`, its text, the host's ids and how
+  much of it the conversation holds already), from the step the runtime takes it until the
+  conversation records its last part. Nothing in that list moves. `Task::context_records`
+  says by number and id what each context message of the conversation holds, and records
+  follow their messages through cut backs, refusal fixes and steps left out.
+  `Task::holding(id)` answers `Recorded`, `Pending`, `NotHeld` or `Unknown`, where only
+  text can say for context a task saved before it kept ids (`Task::unidentified_context`).
+  A host records what its own prompts present with `Task::initial_prompt_ids`,
+  `Task::record_held_ids`, `HandoverSeed::ids` and the `ids` of `SubmitUserResponse`.
+  A handover's fresh conversation records with its first message the seed's ids and what
+  the old conversation held whole (`Task::recorded_ids`), which the report covers.
+
+  A Claude Code agent gets its pending context during a turn in its calls' PostToolUse
+  hooks. Claude Code replaces a hook's text of over 10,000 characters with a preview and a
+  file name, so the runtime keeps every text it gives the model through a hook, report
+  requests and other denials included, within 9,500 bytes, whatever the source and the host
+  give. A hook carries the pending items in order, whole while they fit. An item that would
+  fit an empty hook waits whole for the next one. An item longer than that is split, cut at
+  a line break near the end of the part where there is one, and its parts end with
+  `(This update goes on in the next one.)` and start with `(Continued from the previous update.)`.
+  An item saved as bare text, which only its whole text identifies, isn't split. It waits
+  whole for the next input, with what is behind it.
+  What a hook carries stays pending until the CLI reports the call's result. Then the hook's
+  text joins the conversation after the result with its record, and its items leave the
+  pending context or move on to their next part, in one step, so a stop or a crash before
+  that leaves them pending for the next input, which carries everything from where it was. A
+  denial too long for its answer is cut too, and its rest joins the pending context, ahead of
+  what waits, once its call's result is reported. The task is saved with that rest, and with
+  an approval's message, before the answer goes out. `TurnContext::images` (each a `ContextImage { label, image }`) follow the
   update's text in the same message, each after its label, and wait with it in
   `Task::pending_context_images` when it can't go yet. During a turn, a Claude Code agent
   gets an update's text at once, in a hook (a hook's context is text), with a line saying
@@ -1833,7 +1860,8 @@ Before a model request, once that request is estimated to have at
    `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
    (`DEFAULT_REPORT_REQUEST` for an agent that gives it with the `handover_report` tool,
    `DEFAULT_TEXT_REPORT_REQUEST` for one that replies with it, or `report_request` for
-   either) and emits `HandoverRequested`. It waits
+   either, at most `MAX_REPORT_REQUEST_BYTES`, 8,000 bytes, so it fits a Claude Code hook)
+   and emits `HandoverRequested`. It waits
    for a boundary where a user message can go, so not while calls wait for results, and not
    for a refusal fallback's request. A conversation whose first request was already over
    the threshold doesn't hand over (the fresh one would start over it too). A warning is
@@ -1929,7 +1957,7 @@ arko_workflows engine does all three for every agent it runs.
 `Task::request_report(request)` asks for the report alone, without a handover, such as before
 the work goes on in another conversation on another model. The task's next run sends `request`
 (by default `DEFAULT_REPORT_ONLY_REQUEST`, or `DEFAULT_TEXT_REPORT_ONLY_REQUEST` where the report
-is a reply) and rejects every other call, `complete_task` included, until the report comes. The
+is a reply, and at most `MAX_REPORT_REQUEST_BYTES`) and rejects every other call, `complete_task` included, until the report comes. The
 task then completes with the report as its summary, and the conversation keeps the request and the
 report. Context that arrives meanwhile waits for the task's next run. A Claude Code agent writes it
 in a copy of its session (a fork) that the task goes on in, so the session is left as it was for a

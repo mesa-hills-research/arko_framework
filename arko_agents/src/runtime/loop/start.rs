@@ -112,6 +112,7 @@ impl AgentLoop {
     /// Writes the system prompt and the task prompt, unless the
     /// conversation has them already.
     pub(super) fn write_prompts(&mut self) -> Result<(), ArkoAgentsError> {
+        self.task.number_context();
         if self.task.conversation.system_message.is_none() {
             let tool_defs_for_prompt = self.prompt_tool_definitions();
             let prompt_builder = PromptBuilder::new(
@@ -138,6 +139,7 @@ impl AgentLoop {
                     .conversation
                     .add_user_message_with_contents(content);
                 self.task.increment_user_message_count();
+                self.task.record_initial_prompt();
                 self.reset_llm_recovery();
             }
         }

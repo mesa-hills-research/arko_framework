@@ -110,10 +110,6 @@ pub const MAX_MAIL_BYTES: usize = 16 * 1024;
 /// at the next turn boundary. The first item always goes.
 pub const UPDATE_MAX_MAIL_BYTES: usize = 48 * 1024;
 
-/// The characters of a context update's mail section besides its items: the
-/// introduction and the count of items that follow.
-const UPDATE_MAIL_FRAME: usize = 250;
-
 /// How background subagents work in a workflow. See the [module](self).
 ///
 /// Who may start which agent is
@@ -730,43 +726,6 @@ impl MailItem {
             self.end_marker()
         )
         .replace('\n', "\n  ")
-    }
-
-    /// The item as a context update shows it when it alone is longer than
-    /// `limit` characters: its start up to a line end, then the file that
-    /// holds all of it and the line to read on from, then its end marker, so
-    /// it counts as held. The whole body when it fits.
-    pub(crate) fn excerpt_within(&self, limit: usize) -> String {
-        let body = self.body.trim();
-        let file = self.file.as_ref().map(|file| file.display().to_string());
-        let head = format!("{} {}\n", self.marker(), self.heading);
-        // Room for the note that ends the excerpt and the end marker.
-        let used =
-            head.chars().count() + 230 + file.as_ref().map_or(0, |file| file.chars().count());
-        let room = limit.saturating_sub(used);
-        // Every line after the first is indented by two characters.
-        let mut chars = 0;
-        let Some(end) = body.char_indices().find_map(|(index, char)| {
-            chars += if char == '\n' { 3 } else { 1 };
-            (chars > room).then_some(index)
-        }) else {
-            return self.excerpt();
-        };
-        let (shown, at_line_end) = match body[..end].rfind('\n') {
-            Some(newline) => (&body[..newline], true),
-            None => (&body[..end], false),
-        };
-        // The file starts with the heading and a blank line. The line the
-        // cut falls in is read again when it is cut in the middle.
-        let lines = format!("{}\n\n{shown}", self.heading).lines().count();
-        let note = match file {
-            Some(file) => format!(
-                "[... cut here: read on from line {} of {file} with read_file ...]",
-                if at_line_end { lines + 1 } else { lines }
-            ),
-            None => "[... cut here: wait_for_agents returns the whole text ...]".to_string(),
-        };
-        format!("{head}{shown}\n\n{note}\n{}", self.end_marker()).replace('\n', "\n  ")
     }
 }
 

@@ -10,17 +10,29 @@ impl AgentLoop {
     /// conversation, so a task that stops first never loses it, and tells
     /// the calls running ([`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived)).
     pub(super) fn queue_context_injection(&mut self, content: String) {
-        if !content.trim().is_empty() {
-            // A call that waits can end, so the model reads it, unless the
-            // host says this content waits for the turn boundary.
-            let wakes = self
-                .turn_context
-                .as_ref()
-                .is_none_or(|source| source.wakes_calls(&content));
-            self.task.pending_context_injections.push(content);
-            if wakes {
-                self.context_arrivals.notify();
-            }
+        let ids = self
+            .turn_context
+            .as_ref()
+            .and_then(|source| source.identify(&content))
+            .into_iter()
+            .collect();
+        self.queue_context_item(content, ids);
+    }
+
+    /// Puts `content`, which the host identifies by `ids`, in the task's
+    /// pending context, and tells the calls running. Every item joins the
+    /// list here.
+    fn queue_context_item(&mut self, content: String, ids: Vec<String>) {
+        // A call that waits can end, so the model reads it, unless the host
+        // says this content waits for the turn boundary.
+        let wakes = self
+            .turn_context
+            .as_ref()
+            .is_none_or(|source| source.wakes_calls(&content));
+        let item =
+            crate::task::PendingContext::new(crate::task::PendingKind::Context, content, ids);
+        if self.task.queue_context(item).is_some() && wakes {
+            self.context_arrivals.notify();
         }
     }
 
@@ -107,15 +119,24 @@ impl AgentLoop {
             .as_ref()
             .and_then(|source| source.context_update(self.task.id))
         {
-            if !update.content.trim().is_empty()
-                || !update.user_content.trim().is_empty()
-                || !update.images.is_empty()
+            if update.content.trim().is_empty()
+                && update.user_content.trim().is_empty()
+                && !update.images.is_empty()
             {
-                self.context_ids.extend(update.ids);
+                // Images alone: their ids go with them.
+                self.context_ids.extend(update.ids.iter().cloned());
             }
             self.task.raise_context_marks(&update.marks);
-            self.queue_context_injection(update.content);
-            self.queue_context_injection(update.user_content);
+            // A source that gives an update of typed notes alone may give
+            // their ids as the update's.
+            let (ids, user_ids) = if update.content.trim().is_empty() && update.user_ids.is_empty()
+            {
+                (Vec::new(), update.ids)
+            } else {
+                (update.ids, update.user_ids)
+            };
+            self.queue_context_item(update.content, ids);
+            self.queue_context_item(update.user_content, user_ids);
             self.task.pending_context_images.extend(update.images);
         }
         self.add_taken_context()
@@ -146,7 +167,13 @@ impl AgentLoop {
         {
             return Ok(());
         }
-        let mut content = self.task.pending_context_injections.join("\n\n");
+        let mut content = self
+            .task
+            .pending_context_injections
+            .iter()
+            .map(|item| crate::runtime::hook_budget::shown_from(item, item.given))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         // Its images as the model can be sent them, within what a request
         // takes: the others are left out, with a line saying why.
         let images = std::mem::take(&mut self.task.pending_context_images);
@@ -175,25 +202,28 @@ impl AgentLoop {
             .conversation
             .add_user_message_with_contents(crate::task::with_context_images(message, images));
         self.task.increment_user_message_count();
-        // The host's identifiers of what it holds, for its receipt: those of
-        // the content it sent, then the turn context source's.
-        let mut ids = self
-            .turn_context
-            .as_ref()
-            .map(|source| {
-                self.task
-                    .pending_context_injections
-                    .iter()
-                    .filter_map(|content| source.identify(content))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        ids.append(&mut self.context_ids);
+        // The host's identifiers of what it holds, for its receipt and its
+        // record: each item's, in order, then those of images alone.
+        let items = std::mem::take(&mut self.task.pending_context_injections);
+        let mut ids = Vec::new();
+        let mut parts = Vec::new();
+        for item in &items {
+            if item.given == 0 {
+                ids.extend(item.host_ids.iter().cloned());
+            }
+            parts.push(crate::task::RecordedPart::of(item, true));
+        }
+        let images_ids = std::mem::take(&mut self.context_ids);
+        ids.extend(images_ids.iter().cloned());
+        if !images_ids.is_empty() {
+            parts.push(crate::task::RecordedPart::presented(images_ids));
+        }
+        let message = self.task.conversation.messages.len() - 1;
+        self.task.record_context(message, parts);
         self.context_receipts.push(AgentEvent::ContextInjected {
             ids,
             bytes: content.len(),
         });
-        self.task.pending_context_injections.clear();
         Ok(())
     }
 

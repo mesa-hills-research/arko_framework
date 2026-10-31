@@ -166,8 +166,8 @@ pub struct AgentLoop {
     execution_middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     /// Asked for context at each safe turn boundary.
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
-    /// The identifiers of the turn context source's content queued and not
-    /// yet added. See [`add_taken_context`](Self::add_taken_context).
+    /// The identifiers of the turn context source's updates of images
+    /// alone, not yet added. See [`add_taken_context`](Self::add_taken_context).
     pub(super) context_ids: Vec<String>,
     /// `ContextInjected` events for context updates added and not yet
     /// emitted (the update is added where no event can be sent).
