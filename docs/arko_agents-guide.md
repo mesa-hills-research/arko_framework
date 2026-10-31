@@ -346,7 +346,8 @@ that, and changes nothing while the request may fit:
   over from the conversation as it was at the last answered request, which fit. Its
   report request starts with `STEP_LEFT_OUT`, which says the step was left out and asks
   the report to say what it was for, so the fresh conversation can do it in smaller
-  parts. Context updates added since stay. Without a handover, the error ends recovery
+  parts. Context updates added since stay, and so does an answer the task recorded
+  beside the step's results, without them. Without a handover, the error ends recovery
   like any error that retrying can't fix, recorded as `ContextOverflow`.
 - `ToolResultShortened` reports each shortened result, with its estimated size and the
   reason. The `ToolResult` event before it has the whole output.
@@ -1130,6 +1131,8 @@ Besides answers to the waiting states, a running task accepts:
   text can say for context a task saved before it kept ids (`Task::unidentified_context`).
   A host records what its own prompts present with `Task::initial_prompt_ids`,
   `Task::record_held_ids`, `HandoverSeed::ids` and the `ids` of `SubmitUserResponse`.
+  A handover's fresh conversation records with its first message the seed's ids and what
+  the old conversation held whole (`Task::recorded_ids`), which the report covers.
 
   A Claude Code agent gets its pending context during a turn in its calls' PostToolUse
   hooks. Claude Code replaces a hook's text of over 10,000 characters with a preview and a
@@ -1139,6 +1142,8 @@ Besides answers to the waiting states, a running task accepts:
   fit an empty hook waits whole for the next one. An item longer than that is split, cut at
   a line break near the end of the part where there is one, and its parts end with
   `(This update goes on in the next one.)` and start with `(Continued from the previous update.)`.
+  An item saved as bare text, which only its whole text identifies, isn't split. It waits
+  whole for the next input, with what is behind it.
   What a hook carries stays pending until the CLI reports the call's result. Then the hook's
   text joins the conversation after the result with its record, and its items leave the
   pending context or move on to their next part, in one step, so a stop or a crash before
