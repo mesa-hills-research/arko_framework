@@ -3317,10 +3317,12 @@ impl ClaudeCodeRun {
     }
 
     /// The CLI reports each message it is sent by its UUID. It says `started`
-    /// once it takes the message into the turn, at the next tool boundary,
-    /// where the model gets it. It says `completed` only when that turn
-    /// ends, so a typed item counts as taken in at the first of the two.
-    /// `cancelled` before either means the model never got it. A typed item
+    /// once it takes the message into its conversation, at the next tool
+    /// boundary, just before its next request to the model. The message then
+    /// stays in the conversation, through an interruption and a resume too.
+    /// It says `completed` only when that turn ends, so a typed item counts
+    /// as taken in at the first of the two. `cancelled` before either means
+    /// the conversation never got it. A typed item
     /// whose hook was acknowledged too is done, and joins the conversation
     /// now. One the CLI cancelled waits again where it is, and the record of
     /// the results it went with, when they are still to come, leaves it out.

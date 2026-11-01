@@ -284,9 +284,10 @@ impl ClaudeSession {
     /// message. This returns once the message is written. The CLI then
     /// reports what became of it by its UUID, in `command_lifecycle`
     /// messages ([`Message::Other`]). It says `started` once it takes the
-    /// message into a turn, where the model gets it, then `completed` when
-    /// that turn ends, or `cancelled` when the message never reached a turn
-    /// or that turn stopped.
+    /// message into the conversation, just before its next request to the
+    /// model, then `completed` when that turn ends, or `cancelled` when the
+    /// message never reached a turn or that turn stopped. A message cancelled
+    /// after `started` stays in the conversation.
     pub async fn send_human(&self, text: impl Into<String>) -> Result<String, ClaudeError> {
         self.write_user(Value::String(text.into()), true).await
     }

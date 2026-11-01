@@ -632,7 +632,8 @@ def handle(message):
         text = content if isinstance(content, str) else json.dumps(content)
         if state.get("working"):
             # Like Claude Code, a message sent during a turn doesn't start
-            # one. The fake only logs it and settles it when the turn ends.
+            # one. The fake logs it, reports it started at the next tool
+            # boundary, and reports its end after the turn's result.
             log("midturn", text=text, origin=message.get("origin"), uuid=message.get("uuid"))
             state.setdefault("notes", []).append(message.get("uuid"))
             return

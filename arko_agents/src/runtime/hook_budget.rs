@@ -89,8 +89,9 @@ struct Sent {
     item: u64,
     /// Its hook was acknowledged.
     acked: bool,
-    /// The CLI took the message into the turn (`started`), so the model has
-    /// it. The CLI says `completed` only when that turn ends.
+    /// The CLI took the message into its conversation (`started`), so it
+    /// stays there through an interruption and a resume. The CLI says
+    /// `completed` only when that turn ends.
     started: bool,
 }
 
@@ -369,8 +370,8 @@ impl Delivery {
     /// acknowledged and the CLI took its message in, in either order. One
     /// it cancelled before taking it in never reached the model, and waits
     /// again where it is, left out of its hook's record. Once taken in, the
-    /// model has it, and a cancel for the turn stopping later changes
-    /// nothing.
+    /// conversation keeps it, and a cancel for the turn stopping later
+    /// changes nothing.
     pub(super) fn note_settled(
         &mut self,
         list: &mut Vec<PendingContext>,
