@@ -1117,9 +1117,11 @@ Besides answers to the waiting states, a running task accepts:
   workflow's operator notes), which follows `content` in the same message. During a turn, a
   Claude Code agent gets it as a message from the user (`ClaudeSession::send_human`) at a
   tool boundary, once the hooks carry everything queued before it. It stays pending, and
-  nothing behind it goes, until both its hook is acknowledged and the CLI says it completed
-  the message. One the CLI cancels (the turn stopped before the model's next request) waits
-  again where it is.
+  nothing behind it goes, until both its hook is acknowledged and the CLI says it took the
+  message into the turn (`started`, at the next tool boundary). The CLI says `completed`
+  only when that turn ends, which counts too when no `started` came before it. One the CLI
+  cancels before taking it in (the turn stopped before the model's next request) waits again
+  where it is.
 
   Everything that waits for the model is an item of `Task::pending_context_injections`
   (a `PendingContext` with its number, its `PendingKind`, its text, the host's ids and how

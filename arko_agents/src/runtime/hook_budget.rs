@@ -89,8 +89,9 @@ struct Sent {
     item: u64,
     /// Its hook was acknowledged.
     acked: bool,
-    /// The CLI said it completed the message.
-    completed: bool,
+    /// The CLI took the message into the turn (`started`), so the model has
+    /// it. The CLI says `completed` only when that turn ends.
+    started: bool,
 }
 
 /// What joins the conversation once a hook is acknowledged, or a typed item
@@ -115,7 +116,7 @@ pub(super) enum Verdict {
     /// The item is done, and joins the conversation.
     Done(Delivered),
     /// It waits for its hook's acknowledgement too.
-    Completed,
+    Started,
     /// Cancelled, it waits again where it is.
     Waiting,
 }
@@ -339,7 +340,7 @@ impl Delivery {
             uuid,
             item,
             acked: false,
-            completed: false,
+            started: false,
         });
     }
 
@@ -353,7 +354,7 @@ impl Delivery {
 
     /// Whether a typed item sent waits for the CLI's word on it.
     pub(super) fn notes_unsettled(&self) -> bool {
-        self.sent.iter().any(|sent| !sent.completed)
+        self.sent.iter().any(|sent| !sent.started)
     }
 
     /// The typed item `id` is done, so it leaves `list` for the record.
@@ -363,10 +364,13 @@ impl Delivery {
         Some(list.remove(index))
     }
 
-    /// The CLI said what became of message `uuid`. A typed item is done
-    /// once its hook is acknowledged and the CLI completed its message, in
-    /// either order. One it cancelled never reached the model, and waits
-    /// again where it is, left out of its hook's record.
+    /// The CLI said what became of message `uuid`, that it took it into the
+    /// turn or that it cancelled it. A typed item is done once its hook is
+    /// acknowledged and the CLI took its message in, in either order. One
+    /// it cancelled before taking it in never reached the model, and waits
+    /// again where it is, left out of its hook's record. Once taken in, the
+    /// model has it, and a cancel for the turn stopping later changes
+    /// nothing.
     pub(super) fn note_settled(
         &mut self,
         list: &mut Vec<PendingContext>,
@@ -377,6 +381,9 @@ impl Delivery {
             return Verdict::None;
         };
         let item = sent.item;
+        if sent.started {
+            return Verdict::None;
+        }
         if cancelled {
             self.sent.retain(|sent| sent.uuid != uuid);
             for hook in &mut self.in_flight {
@@ -386,9 +393,9 @@ impl Delivery {
             }
             return Verdict::Waiting;
         }
-        sent.completed = true;
+        sent.started = true;
         if !sent.acked {
-            return Verdict::Completed;
+            return Verdict::Started;
         }
         match self.note_done(list, item) {
             Some(note) => Verdict::Done(Delivered {
@@ -446,7 +453,7 @@ impl Delivery {
                 && let Some(sent) = self.sent.iter_mut().find(|sent| sent.item == id)
             {
                 sent.acked = true;
-                if sent.completed
+                if sent.started
                     && let Some(note) = self.note_done(list, id)
                 {
                     bytes += note.text.len();

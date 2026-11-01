@@ -283,8 +283,10 @@ impl ClaudeSession {
     /// after the tool result, in the same user message, instead of a system
     /// message. This returns once the message is written. The CLI then
     /// reports what became of it by its UUID, in `command_lifecycle`
-    /// messages ([`Message::Other`]), ending `completed` when the model has
-    /// it or `cancelled` when the turn stopped first.
+    /// messages ([`Message::Other`]). It says `started` once it takes the
+    /// message into a turn, where the model gets it, then `completed` when
+    /// that turn ends, or `cancelled` when the message never reached a turn
+    /// or that turn stopped.
     pub async fn send_human(&self, text: impl Into<String>) -> Result<String, ClaudeError> {
         self.write_user(Value::String(text.into()), true).await
     }

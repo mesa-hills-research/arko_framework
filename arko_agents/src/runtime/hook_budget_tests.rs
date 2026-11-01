@@ -209,7 +209,7 @@ fn a_typed_item_waits_until_the_hooks_carry_what_is_ahead_of_it() {
     assert!(delivery.due_note(&list.items).is_none());
     assert_eq!(
         delivery.note_settled(&mut list.items, "u1", false),
-        Verdict::Completed
+        Verdict::Started
     );
     let (done, _) = delivery.reported(&mut list.items, "c2");
     assert!(done[0].text.ends_with("\n\nUse tabs."));
@@ -231,7 +231,7 @@ fn a_typed_item_is_done_when_both_its_ack_and_its_verdict_came() {
         if verdict_first {
             assert_eq!(
                 delivery.note_settled(&mut list.items, "u1", false),
-                Verdict::Completed
+                Verdict::Started
             );
             assert_eq!(
                 list.items.len(),
@@ -241,7 +241,7 @@ fn a_typed_item_is_done_when_both_its_ack_and_its_verdict_came() {
             recorded.extend(delivery.reported(&mut list.items, "c1").0);
         } else {
             assert!(delivery.reported(&mut list.items, "c1").0.is_empty());
-            assert_eq!(list.items.len(), 2, "pending until the CLI completed it");
+            assert_eq!(list.items.len(), 2, "pending until the CLI took it in");
             assert!(
                 delivery.fill(&list.items, "c2").is_none(),
                 "its barrier stays"
@@ -284,6 +284,28 @@ fn a_cancelled_typed_item_waits_where_it_is() {
         delivery.due_note(&list.items),
         Some((2, "Use tabs.".to_string()))
     );
+}
+
+/// Once the CLI took a typed item in, the model has it, so the cancel the
+/// CLI reports when that turn stops later changes nothing.
+#[test]
+fn a_cancel_after_the_cli_took_a_typed_item_in_changes_nothing() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    list.push(PendingKind::Typed, "Use tabs.", &["note:3"]);
+    delivery.due_note(&list.items).unwrap();
+    delivery.note_sent("c1", "u1".into());
+    assert_eq!(
+        delivery.note_settled(&mut list.items, "u1", false),
+        Verdict::Started
+    );
+    assert_eq!(
+        delivery.note_settled(&mut list.items, "u1", true),
+        Verdict::None
+    );
+    let (done, _) = delivery.reported(&mut list.items, "c1");
+    assert_eq!(done[0].ids, ["note:3"]);
+    assert!(list.items.is_empty());
 }
 
 #[test]

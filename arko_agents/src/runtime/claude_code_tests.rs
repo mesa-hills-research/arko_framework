@@ -899,7 +899,7 @@ async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() 
     assert_eq!(sent[0]["text"], TYPED_NOTE);
     assert_eq!(sent[0]["origin"], json!({"kind": "human"}));
     // The message is no input of the session. No entry of the transcript
-    // stands for it, and the CLI completed it.
+    // stands for it, and the CLI took it into the turn.
     assert_eq!(fake.logged("user").len(), 1);
     let uuid = sent[0]["uuid"].as_str().unwrap();
     assert!(
@@ -914,8 +914,8 @@ async fn a_note_the_user_typed_goes_as_their_message_and_the_mail_in_the_hook() 
         .unwrap();
     assert!(hooked.contains("skip vendor/"), "{hooked}");
     assert!(!hooked.contains("Use tabs."), "{hooked}");
-    // The hook's record first. The note's follows once the CLI completed
-    // its message too, which the fake does as the turn ends.
+    // The hook's record first. The note's follows once the CLI took its
+    // message in too, which it does at the tool boundary after the result.
     let updates = texts(&task)
         .into_iter()
         .filter(|text| text.starts_with("# Workflow context update"))
@@ -946,16 +946,92 @@ async fn a_note_the_user_typed_alone_leaves_the_hook_empty() {
     assert!(texts(&task).contains(&format!("# Workflow context update\n\n{TYPED_NOTE}")));
 }
 
-/// A note the CLI cancels (the turn stopped before the model's next request)
-/// never reached the model, so it goes with the task's next input.
+/// Two notes the user typed one after the other while the agent works,
+/// given at the second and the third boundary.
+struct NotesTypedInTurn(std::sync::atomic::AtomicUsize);
+
+impl crate::runtime::TurnContextSource for NotesTypedInTurn {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        let (text, id) = match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            1 => ("Use tabs.", "note:3"),
+            2 => ("And spaces in YAML.", "note:4"),
+            _ => return None,
+        };
+        Some(crate::runtime::TurnContext {
+            user_content: text.into(),
+            ids: vec![id.into()],
+            ..Default::default()
+        })
+    }
+}
+
+/// Claude Code takes the user's message into the turn at the tool boundary
+/// after the call whose hook sent it, and says it completed it only when
+/// the turn ends. The note counts as given once taken in, so its
+/// `ContextInjected` comes during the turn, which is when a host shows it as
+/// read, and a note typed after it goes with the next call's hook instead
+/// of waiting for the turn's end.
 #[tokio::test]
-async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
+async fn a_typed_note_counts_as_given_once_the_cli_takes_it_in() {
     let fake = Fake::new(json!([[
         {"tool": "Grep", "input": {"pattern": "a"}},
-        {"sleep": 0.5},
         {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
         complete("Done"),
     ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(Arc::new(NotesTypedInTurn(Default::default())));
+    let (task, events) = start_with(task, runtime).finish().await;
+    let sent: Vec<Value> = fake
+        .logged("midturn")
+        .into_iter()
+        .map(|entry| entry["text"].clone())
+        .collect();
+    assert_eq!(sent, ["Use tabs.", "And spaces in YAML."]);
+    let given = |note: &str| {
+        events.iter().position(
+            |event| matches!(event, AgentEvent::ContextInjected { ids, .. } if *ids == [note]),
+        )
+    };
+    let results: Vec<usize> = (0..events.len())
+        .filter(|at| {
+            matches!(&events[*at], AgentEvent::ToolResult { tool_name, .. } if tool_name == "Grep")
+        })
+        .collect();
+    assert!(given("note:3").unwrap() < results[1], "{events:#?}");
+    assert!(given("note:4").unwrap() < results[2], "{events:#?}");
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// The script of a task whose first call's hook sends the typed note while
+/// the call beside it is still to start, half a second later. The CLI takes
+/// the note in only at the tool boundary after both.
+fn note_sent_beside_a_slow_call() -> Value {
+    json!([[
+        {"parallel": [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"tool": "Grep", "input": {"pattern": "b"}, "sleep_before": 0.5},
+        ]},
+        complete("Done"),
+    ]])
+}
+
+/// A note the CLI cancels (the turn stopped before the tool boundary that
+/// takes it in) never reached the model, so it goes with the task's next
+/// input.
+#[tokio::test]
+async fn a_note_the_cli_cancelled_goes_with_the_next_input() {
+    let fake = Fake::new(note_sent_beside_a_slow_call());
     let task = Task::new(
         config(&fake, &["Grep"]),
         "Find todos.".into(),
@@ -1147,12 +1223,7 @@ async fn a_note_the_cli_took_before_it_exited_goes_back_with_its_mark() {
 /// get the note again when a host recovers it.
 #[tokio::test]
 async fn a_cancelled_note_goes_back_with_its_mark() {
-    let fake = Fake::new(json!([[
-        {"tool": "Grep", "input": {"pattern": "a"}},
-        {"sleep": 0.5},
-        {"tool": "Grep", "input": {"pattern": "b"}},
-        complete("Done"),
-    ]]));
+    let fake = Fake::new(note_sent_beside_a_slow_call());
     let mut task = Task::new(
         config(&fake, &["Grep"]),
         "Find todos.".into(),
