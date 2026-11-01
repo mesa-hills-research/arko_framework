@@ -3286,7 +3286,7 @@ impl ClaudeCodeRun {
         let text = self.hook_text(call, None).await;
         // What the user typed goes as their own message once the hooks carry
         // everything ahead of it. It stays pending until both its hook is
-        // acknowledged and the CLI completed the message (see
+        // acknowledged and the CLI took the message into the turn (see
         // `note_settled`).
         if let Some(call) = call
             && let Some((_, typed)) = self
@@ -3316,15 +3316,21 @@ impl ClaudeCodeRun {
         Ok(text.map_or_else(cc::Hook::proceed, |text| add_context(&text)))
     }
 
-    /// The CLI reports each message it is sent by its UUID, from `queued` to
-    /// `completed`, or `cancelled` when the turn stopped before the model's
-    /// next request. A typed item whose hook was acknowledged too is done,
-    /// and joins the conversation now. One the CLI cancelled never reached
-    /// the model. It waits again where it is, and the record of the results
-    /// it went with, when they are still to come, leaves it out.
+    /// The CLI reports each message it is sent by its UUID. It says `started`
+    /// once it takes the message into its conversation, at the next tool
+    /// boundary, just before its next request to the model. The message then
+    /// stays in the conversation, through an interruption and a resume too.
+    /// It says `completed` only when that turn ends, so a typed item counts
+    /// as taken in at the first of the two. `cancelled` before either means
+    /// the conversation never got it. A typed item
+    /// whose hook was acknowledged too is done, and joins the conversation
+    /// now. One the CLI cancelled waits again where it is, and the record of
+    /// the results it went with, when they are still to come, leaves it out.
     async fn note_settled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
         let state = raw["state"].as_str();
-        if raw["type"] != "command_lifecycle" || !matches!(state, Some("completed" | "cancelled")) {
+        if raw["type"] != "command_lifecycle"
+            || !matches!(state, Some("started" | "completed" | "cancelled"))
+        {
             return Ok(());
         }
         let Some(uuid) = raw["command_uuid"].as_str() else {
@@ -3348,7 +3354,7 @@ impl ClaudeCodeRun {
     }
 
     /// Waits a moment for the CLI's word on the typed notes sent, which can
-    /// come after a turn's result, so a note it completed isn't sent again
+    /// come after a turn's result, so a note it took in isn't sent again
     /// with the next input.
     async fn await_note_verdicts(
         &mut self,
