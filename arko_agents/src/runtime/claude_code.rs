@@ -748,6 +748,27 @@ struct Entry {
     messages: usize,
 }
 
+/// The main conversation's latest response in a turn, as its stream events
+/// and messages report it. Claude Code saves no message for a response of
+/// thinking alone, so the conversation can't tell.
+#[derive(Debug, Default)]
+struct LatestResponse {
+    /// Its message ID, which its stream events and messages share.
+    id: Option<String>,
+    /// It called a tool.
+    called: bool,
+    /// Why it stopped, once it finished (its `message_delta`, or the
+    /// message of a response that came whole).
+    stop_reason: Option<String>,
+}
+
+impl LatestResponse {
+    /// The model finished the response, and it called no tool.
+    fn finished_without_calls(&self) -> bool {
+        !self.called && self.stop_reason.as_deref() == Some("end_turn")
+    }
+}
+
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
@@ -887,6 +908,9 @@ pub(super) struct ClaudeCodeRun {
     step_results: bool,
     /// The message ID of the model's latest response.
     response: Option<String>,
+    /// How the turn's latest response ended, for a turn that ends without
+    /// a reply.
+    latest_response: LatestResponse,
     /// The main conversation's response streaming now (its message ID).
     streaming: Option<String>,
     /// The responses whose text or thinking streamed as it came, which their
@@ -1006,6 +1030,7 @@ impl ClaudeCodeRun {
             answered: None,
             step_results: false,
             response: None,
+            latest_response: LatestResponse::default(),
             step_left_out: false,
             resume_at: None,
             streaming: None,
@@ -2298,6 +2323,7 @@ impl ClaudeCodeRun {
         // says nothing about this one's messages.
         self.streaming = None;
         self.response = None;
+        self.latest_response = LatestResponse::default();
         self.streamed.clear();
         self.streamed_text.clear();
         // A compaction due as the session starts (asked for while the task
@@ -3484,6 +3510,9 @@ impl ClaudeCodeRun {
                     self.answered = self.last_entry.take();
                     self.step_results = false;
                 }
+                if self.api_error.is_none() {
+                    self.note_response(&assistant);
+                }
                 // The response's text and thinking streamed as they came
                 // (`content_block_delta`), so not again.
                 let streamed = id.is_some_and(|id| self.streamed_text.contains(id));
@@ -3658,6 +3687,10 @@ impl ClaudeCodeRun {
                         // response that streamed without finishing failed.
                         self.discard_unfinished_stream().await?;
                         self.streaming = message["id"].as_str().map(str::to_string);
+                        self.latest_response = LatestResponse {
+                            id: self.streaming.clone(),
+                            ..LatestResponse::default()
+                        };
                         self.retrying_since = None;
                     }
                     let sent_at = self.request_started(message, &parent_tool_use_id).await?;
@@ -3679,6 +3712,8 @@ impl ClaudeCodeRun {
                     if parent_tool_use_id.is_none() {
                         // The response finished, so what it streamed stands.
                         self.streamed_bytes = (0, 0);
+                        self.latest_response.stop_reason =
+                            event["delta"]["stop_reason"].as_str().map(str::to_string);
                     }
                     // The request's final usage.
                     if let (Some(pending), Some(Value::Object(usage))) = (
@@ -3855,6 +3890,30 @@ impl ClaudeCodeRun {
             self.task
                 .claude_code_entries
                 .insert(index, uuid.to_string());
+        }
+    }
+
+    /// Follows the main conversation's latest response through `assistant`,
+    /// one of its messages. A message with another ID begins a response,
+    /// such as one that came whole, without stream events, and carries its
+    /// stop reason.
+    fn note_response(&mut self, assistant: &cc::AssistantMessage) {
+        let id = assistant.raw.pointer("/message/id").and_then(Value::as_str);
+        if id.is_none() || self.latest_response.id.as_deref() != id {
+            self.latest_response = LatestResponse {
+                id: id.map(str::to_string),
+                ..LatestResponse::default()
+            };
+        }
+        if assistant
+            .content
+            .iter()
+            .any(|block| matches!(block, cc::ContentBlock::ToolUse { .. }))
+        {
+            self.latest_response.called = true;
+        }
+        if let Some(reason) = &assistant.stop_reason {
+            self.latest_response.stop_reason = Some(reason.clone());
         }
     }
 
@@ -4696,6 +4755,8 @@ impl ClaudeCodeRun {
         result: &cc::ResultMessage,
         session: &mut cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        // The next turn's responses are its own.
+        let latest_response = std::mem::take(&mut self.latest_response);
         self.flush_usage().await?;
         // The CLI's word on the notes sent may follow the result.
         self.await_note_verdicts(session).await?;
@@ -4918,9 +4979,10 @@ impl ClaudeCodeRun {
         // The final reply of an agent whose reply in text ends the task. It is a
         // turn that ends with text, other than those above (Claude Code was
         // told to end them, or arko ended them) and the handover report. When
-        // the run's reply is optional, such a turn without text ends the task
-        // too, with an empty summary. A compaction or a report request the
-        // model hasn't seen yet waits, as it waits for a `complete_task` call.
+        // the run's reply is optional, a turn whose last response the model
+        // finished without text or a call ends the task too, with an empty
+        // summary. A compaction or a report request the model hasn't seen yet
+        // waits, as it waits for a `complete_task` call.
         if self.task.agent_config.tool_config.ends_task_with_text()
             && !(self.handover_due() && self.report_delivered)
         {
@@ -4930,7 +4992,9 @@ impl ClaudeCodeRun {
                 .filter(|_| self.ended_on_text())
                 .map(str::trim)
                 .unwrap_or_default();
-            if !reply.is_empty() || self.task.reply_optional {
+            if !reply.is_empty()
+                || (self.task.reply_optional && latest_response.finished_without_calls())
+            {
                 self.set_state(TaskState::Completed {
                     summary: reply.to_string(),
                 })

@@ -578,9 +578,10 @@ pub struct Task {
     /// host starts for news rather than for a person's message. An agent
     /// whose reply in text ends the task
     /// ([`ends_task_with_text`](crate::agent_config::AgentToolConfig::ends_task_with_text))
-    /// then completes it with an empty summary when it ends a response with
-    /// no text and no tool call, where it would otherwise get a note asking
-    /// for a reply. Other agents end without one by calling `complete_task`
+    /// then completes it with an empty summary when the model finishes a
+    /// response with no text and no tool call, where it would otherwise get
+    /// a note asking for a reply. A response cut short at a limit, a paused
+    /// one and a stream that ended without a response still get the note. Other agents end without one by calling `complete_task`
     /// with an empty summary. The host sets it for each run (an
     /// arko_workflows `RunOptions::reply_optional`), and tells the agent in
     /// its prompt, which the runtime leaves as it is. A run that resumes

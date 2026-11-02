@@ -658,13 +658,13 @@ impl AgentLoop {
             self.take_handover_report(text).await?;
             return Ok(self.end_of_pass());
         }
-        // A response cut short at a limit, or a stream that ended without
-        // one, may have lost a call it was writing, so neither ends a run
-        // without a reply.
+        // Only a response the model finished ends a run without a reply. One
+        // cut short at a limit may have lost a call it was writing, a paused
+        // one goes on, and a stream may end without a response.
         let quiet = self.task.reply_optional
             && final_generation_response
                 .as_ref()
-                .is_some_and(|response| !response.stop_reason.is_truncated());
+                .is_some_and(|response| response.stop_reason == ai::StopReason::EndTurn);
         if self.task.agent_config.tool_config.ends_task_with_text()
             && (quiet || !text.trim().is_empty())
         {

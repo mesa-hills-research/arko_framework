@@ -11,6 +11,10 @@ the next turn's index). Steps:
 
   {"text": "...", "input_tokens": 500}    an assistant text message
   {"thinking": "..."}                    an assistant thinking block
+  a text, thinking or tool step with "stop_reason": "max_tokens"
+                                         the response stops so (end_turn
+                                         when not given, and tool_use for a
+                                         call that came whole)
   a text or thinking step with "stream": true streams it first, a few
                                          words per content_block_delta (with
                                          --include-partial-messages), as
@@ -316,7 +320,7 @@ def stream_event(event):
 
 
 def delta(step):
-    stop = {"stop_reason": "end_turn"}
+    stop = {"stop_reason": step.get("stop_reason", "end_turn")}
     if "refused" in step:
         stop = {"stop_reason": "refusal", "stop_details": dict(type="refusal", **step["refused"])}
     stream_event({"type": "message_delta", "delta": stop,
@@ -351,11 +355,16 @@ def assistant(content, step):
                 piece = piece if number == len(pieces) - 1 else piece + " "
                 stream_event({"type": "content_block_delta", "index": index,
                               "delta": {"type": kind + "_delta", kind: piece}})
+    message = {"id": "msg_%d" % state["message"], "role": "assistant",
+               "model": step.get("model", "claude-opus-5-5"), "content": content,
+               "usage": usage(step, 1)}
+    # A response that came whole says why it stopped. A streamed one says so
+    # in its message_delta.
+    if step.get("closes", True) and not streamed:
+        called = any(block["type"] == "tool_use" for block in content)
+        message["stop_reason"] = step.get("stop_reason", "tool_use" if called else "end_turn")
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
-          "uuid": record(text),
-          "message": {"id": "msg_%d" % state["message"], "role": "assistant",
-                      "model": step.get("model", "claude-opus-5-5"), "content": content,
-                      "usage": usage(step, 1)}})
+          "uuid": record(text), "message": message})
     if step.get("closes", True) and streamed:
         delta(step)
 

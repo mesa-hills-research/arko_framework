@@ -5779,6 +5779,56 @@ async fn a_turn_without_text_ends_a_run_whose_reply_is_optional() {
     assert_eq!(notes(&fake), 2 * super::MAX_OPEN_TURNS as usize);
 }
 
+/// Only a turn whose last response the model finished without a call ends a
+/// run whose reply is optional, also a response of thinking alone that came
+/// whole. One cut short at its output-token limit, a turn that ended on a
+/// call, and a stream that ended without a response get the note, and the
+/// reply after it ends the run.
+#[tokio::test]
+async fn only_a_finished_response_ends_a_run_whose_reply_is_optional() {
+    let run = |script: Value| async move {
+        let fake = Fake::new(script);
+        let mut task = Task::new(
+            replying(&fake, &["Grep"]),
+            "News.".into(),
+            fake.workspace(),
+            None,
+        );
+        task.reply_optional = true;
+        let (task, _) = start(task).finish().await;
+        (task, user_texts(&fake).len())
+    };
+    for finished in [
+        json!({"thinking": "Nothing to add."}),
+        json!({"thinking": "Nothing to add.", "unstreamed": true}),
+    ] {
+        let (task, turns) = run(json!([[finished.clone()], [{"text": "Not asked for."}]])).await;
+        assert_eq!(
+            task.current_state,
+            TaskState::Completed {
+                summary: String::new()
+            },
+            "{finished}"
+        );
+        assert_eq!(turns, 1, "{finished}");
+    }
+    for unfinished in [
+        json!([{"thinking": "I must search next.", "stop_reason": "max_tokens"}]),
+        json!([{"text": "Looking."}, {"tool": "Grep", "input": {"pattern": "a"}}]),
+        json!([{"stream_fail": "unfinished"}]),
+    ] {
+        let (task, turns) = run(json!([unfinished.clone(), [{"text": "Recovered."}]])).await;
+        assert_eq!(
+            task.current_state,
+            TaskState::Completed {
+                summary: "Recovered.".into()
+            },
+            "{unfinished}"
+        );
+        assert_eq!(turns, 2, "{unfinished}");
+    }
+}
+
 /// Each request Claude Code makes is reported when its response starts,
 /// with the conversation's size (its arko tools included) and the bytes
 /// per token the previous request's reported input calibrated.

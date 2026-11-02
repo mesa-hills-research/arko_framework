@@ -95,9 +95,9 @@ impl RunOptions {
     /// started for news rather than for a person's message. An agent whose
     /// reply in text ends its task
     /// ([`ends_task_with_text`](arko_agents::AgentToolConfig::ends_task_with_text))
-    /// then completes it with an empty summary when it ends a response with
-    /// no text and no tool call, instead of getting a note asking for a
-    /// reply. Other agents end without one by calling `complete_task` with
+    /// then completes it with an empty summary when the model finishes a
+    /// response with no text and no tool call, instead of getting a note
+    /// asking for a reply. Other agents end without one by calling `complete_task` with
     /// an empty summary. Off by default. The agent's prompt stays as it is,
     /// so say in it or in the run's prompt when a reply may be left out. A
     /// run that resumes from a pause or a crash keeps the setting

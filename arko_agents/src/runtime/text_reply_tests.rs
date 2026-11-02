@@ -231,21 +231,46 @@ async fn a_run_whose_reply_is_optional_ends_without_one() {
     assert_eq!(completions(&events), ["A reply all the same."]);
 }
 
-/// A response cut short at its output-token limit may have lost a call, so
-/// it gets the note even when the run's reply is optional.
+/// Only a response the model finished ends a run without a reply. One cut
+/// short at its output-token limit or the context window may have lost a
+/// call, a paused one (Anthropic's `pause_turn`) isn't done, and a stream
+/// that ended without a response holds none. Each gets the note even when
+/// the run's reply is optional, and the finished response after it ends the
+/// run.
 #[tokio::test]
-async fn a_response_cut_short_gets_a_note_when_the_reply_is_optional() {
-    let (mut agent, mut events, _commands) = replying_harness();
-    agent.task.reply_optional = true;
-    let cut_short = Ok(futures::stream::iter([Ok(ai::StreamEvent::End(Box::new(
-        empty_response(ai::StopReason::MaxTokens),
-    )))])
-    .boxed());
-    push(&mut agent, vec![cut_short, streamed("", vec![])]);
-    let (task, events) = run(agent, &mut events).await;
-    assert_eq!(completions(&events), [""]);
-    assert_eq!(retries(&events), 1);
-    assert!(texts(&task).contains(&NO_NATIVE_TOOL_CALL_OR_REPLY.to_string()));
+async fn an_unfinished_response_gets_a_note_when_the_reply_is_optional() {
+    let ending = |stop_reason| {
+        Ok(
+            futures::stream::iter([Ok(ai::StreamEvent::End(Box::new(empty_response(
+                stop_reason,
+            ))))])
+            .boxed(),
+        )
+    };
+    let unfinished: Vec<(&str, ScriptedStreamResult)> = vec![
+        ("max tokens", ending(ai::StopReason::MaxTokens)),
+        (
+            "context window",
+            ending(ai::StopReason::ContextWindowExceeded),
+        ),
+        ("pause turn", ending(ai::StopReason::PauseTurn)),
+        (
+            "no response",
+            Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk("Part".into()))]).boxed()),
+        ),
+    ];
+    for (case, response) in unfinished {
+        let (mut agent, mut events, _commands) = replying_harness();
+        agent.task.reply_optional = true;
+        push(&mut agent, vec![response, streamed("", vec![])]);
+        let (task, events) = run(agent, &mut events).await;
+        assert_eq!(completions(&events), [""], "{case}");
+        assert_eq!(retries(&events), 1, "{case}");
+        assert!(
+            texts(&task).contains(&NO_NATIVE_TOOL_CALL_OR_REPLY.to_string()),
+            "{case}"
+        );
+    }
 }
 
 /// Ending without a reply resets error recovery, as a reply does, so the

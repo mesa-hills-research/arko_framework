@@ -187,13 +187,14 @@ arko_workflows refuses the setting on an agent a completion verifier reviews or 
 is refused together with `text_reply_as_message`, and output-based mode ignores it.
 
 A host that starts such an agent's run for news rather than for a person's message may let
-it end without a reply, with `Task::reply_optional` (off by default, saved with the task). A response with
-neither text nor a tool call then completes the task with an empty summary, with no note
-and no recovery attempt, while one cut short at its output-token limit still gets the note.
-On Claude Code models, a turn that ends without text does the same. The host sets the field
-for each run (arko_workflows' `RunOptions::reply_optional` and
-`ContinueOptions::reply_optional`), and a run resumed from a pause or a crash keeps it. The
-system prompt stays as it is, so the host says in its own prompt when a reply may be left
+it end without a reply, with `Task::reply_optional` (off by default, saved with the task). A
+response the model finished with neither text nor a tool call then completes the task with an
+empty summary, with no note and no recovery attempt. One cut short at a limit, a paused one
+(Anthropic's `pause_turn`) and a stream that ended without a response still get the note. On
+Claude Code models, a turn whose last response the model finished without text or a call does
+the same. The host sets the field for each run (arko_workflows' `RunOptions::reply_optional`
+and `ContinueOptions::reply_optional`), and a run resumed from a pause or a crash keeps it.
+The system prompt stays as it is, so the host says in its own prompt when a reply may be left
 out. An agent that ends its task with `complete_task` can end without a reply by calling it
 with an empty summary.
 
