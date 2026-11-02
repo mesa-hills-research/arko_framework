@@ -80,6 +80,7 @@ pub(crate) fn edit_receipt(
 ) -> EditReceipt {
     let mut built = Builder {
         before,
+        after,
         receipt: EditReceipt::default(),
         hunk: None,
         lines: 0,
@@ -134,18 +135,17 @@ pub(crate) fn edit_receipt(
         // The same lines after the edit.
         let after_start = starts[first] - (found[first] - start);
         let after_end = end - (found[last] + old_len) + (starts[last] + new_len);
-        let old: Vec<&str> = lines_of(&before[start..end]).collect();
-        let new: Vec<&str> = lines_of(&after[after_start..after_end]).collect();
         let old_line = line;
         let new_line = (line as isize + shift) as usize;
-        shift += new.len() as isize - old.len() as isize;
+        shift += lines_of(&after[after_start..after_end]).count() as isize
+            - lines_of(&before[start..end]).count() as isize;
         built.change(Change {
             old_line,
             new_line,
             start,
             end,
-            old,
-            new,
+            after_start,
+            after_end,
         });
         // (The scan goes on from the change's end.)
         for (offset, byte) in before.as_bytes()[scanned..end].iter().enumerate() {
@@ -190,6 +190,12 @@ fn lines_of(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// [`lines_of`], from the last line back.
+fn lines_back(text: &str) -> impl Iterator<Item = &str> {
+    text.rsplit_terminator('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
 /// `at` moved on past `lines` lines of `text` (each with its line break).
 fn advance(text: &str, mut at: usize, lines: usize) -> usize {
     for _ in 0..lines {
@@ -213,20 +219,23 @@ fn back(text: &str, mut end: usize, lines: usize) -> usize {
     end
 }
 
-/// A change's whole lines before and after, and where they are.
-struct Change<'a> {
+/// A change's whole lines, by their lines and bytes before and after.
+struct Change {
     old_line: usize,
     new_line: usize,
     /// Its bytes in the text before.
     start: usize,
     end: usize,
-    old: Vec<&'a str>,
-    new: Vec<&'a str>,
+    /// Its bytes in the text after.
+    after_start: usize,
+    after_end: usize,
 }
 
-/// A receipt as it's made.
+/// A receipt as it's made. Its lines are copied in only while they fit,
+/// so making it takes memory in proportion to the receipt.
 struct Builder<'a> {
     before: &'a str,
+    after: &'a str,
     receipt: EditReceipt,
     /// The hunk being made, with the line after its last change (before the
     /// edit) and the byte where that line starts.
@@ -242,33 +251,32 @@ impl<'a> Builder<'a> {
 
     /// Adds `change`, with the unchanged lines around it, to the hunk of the
     /// change before it when their context meets, else to a new one.
-    fn change(&mut self, mut change: Change<'a>) {
+    fn change(&mut self, mut change: Change) {
         // The lines both sides share at either end are unchanged, unless
         // nothing tells the two apart once their line breaks are off, when
         // the change shows as it is.
-        let lead = change
-            .old
-            .iter()
-            .zip(&change.new)
+        let old = &self.before[change.start..change.end];
+        let new = &self.after[change.after_start..change.after_end];
+        let (old_lines, new_lines) = (lines_of(old).count(), lines_of(new).count());
+        let lead = lines_of(old)
+            .zip(lines_of(new))
             .take_while(|(old, new)| old == new)
             .count();
-        let tail = change.old[lead..]
-            .iter()
-            .rev()
-            .zip(change.new[lead..].iter().rev())
+        let tail = lines_back(old)
+            .zip(lines_back(new))
+            .take(old_lines.min(new_lines) - lead)
             .take_while(|(old, new)| old == new)
             .count();
-        let (removed, added) = (
-            change.old.len() - lead - tail,
-            change.new.len() - lead - tail,
-        );
-        if removed > 0 || added > 0 {
+        let mut removed = old_lines - lead - tail;
+        if removed > 0 || new_lines - lead - tail > 0 {
             change.start = advance(self.before, change.start, lead);
             change.end = back(self.before, change.end, tail);
+            change.after_start = advance(self.after, change.after_start, lead);
+            change.after_end = back(self.after, change.after_end, tail);
             change.old_line += lead;
             change.new_line += lead;
-            change.old = change.old[lead..lead + removed].to_vec();
-            change.new = change.new[lead..lead + added].to_vec();
+        } else {
+            removed = old_lines;
         }
         let gap = self
             .hunk
@@ -276,8 +284,7 @@ impl<'a> Builder<'a> {
             .map(|(_, next, _)| change.old_line.saturating_sub(*next));
         match (self.hunk.take(), gap) {
             (Some((mut hunk, _, from)), Some(gap)) if gap <= 2 * EDIT_RECEIPT_CONTEXT => {
-                let between: Vec<&str> = lines_of(&self.before[from..change.start]).collect();
-                for line in between {
+                for line in lines_of(&self.before[from..change.start]) {
                     self.push(&mut hunk, LineChange::Kept, line);
                 }
                 self.hunk = Some((hunk, 0, 0));
@@ -292,13 +299,19 @@ impl<'a> Builder<'a> {
         let Some((mut hunk, _, _)) = self.hunk.take() else {
             return;
         };
-        for line in &change.old {
-            self.push(&mut hunk, LineChange::Removed, line);
+        // (Each side's lines until the receipt is full, and no further.)
+        let (before, after) = (self.before, self.after);
+        for line in lines_of(&before[change.start..change.end]) {
+            if !self.push(&mut hunk, LineChange::Removed, line) {
+                break;
+            }
         }
-        for line in &change.new {
-            self.push(&mut hunk, LineChange::Added, line);
+        for line in lines_of(&after[change.after_start..change.after_end]) {
+            if !self.push(&mut hunk, LineChange::Added, line) {
+                break;
+            }
         }
-        self.hunk = Some((hunk, change.old_line + change.old.len(), change.end));
+        self.hunk = Some((hunk, change.old_line + removed, change.end));
     }
 
     /// Starts the hunk of `change`, with up to [`EDIT_RECEIPT_CONTEXT`]
@@ -315,8 +328,7 @@ impl<'a> Builder<'a> {
             new_start: change.new_line - context,
             lines: Vec::new(),
         };
-        let lines: Vec<&str> = lines_of(&self.before[from..change.start]).collect();
-        for line in lines {
+        for line in lines_of(&self.before[from..change.start]) {
             self.push(&mut hunk, LineChange::Kept, line);
         }
         self.hunk = Some((hunk, 0, 0));
@@ -325,28 +337,32 @@ impl<'a> Builder<'a> {
     /// `hunk` with up to [`EDIT_RECEIPT_CONTEXT`] unchanged lines from byte
     /// `from` on.
     fn close(&mut self, mut hunk: EditHunk, from: usize) -> EditHunk {
-        let lines: Vec<&str> = lines_of(&self.before[from..])
-            .take(EDIT_RECEIPT_CONTEXT)
-            .collect();
-        for line in lines {
+        for line in lines_of(&self.before[from..]).take(EDIT_RECEIPT_CONTEXT) {
             self.push(&mut hunk, LineChange::Kept, line);
         }
         hunk
     }
 
-    /// Adds `text` to `hunk`, cut to [`EDIT_RECEIPT_LINE_BYTES`], unless the
-    /// receipt is full.
-    fn push(&mut self, hunk: &mut EditHunk, change: LineChange, text: &str) {
-        if self.full() {
+    /// Adds `text` to `hunk`, cut to [`EDIT_RECEIPT_LINE_BYTES`] and to the
+    /// bytes the receipt has room for, at a character boundary. False when
+    /// the receipt is full, which leaves it out.
+    fn push(&mut self, hunk: &mut EditHunk, change: LineChange, text: &str) -> bool {
+        let room = EDIT_RECEIPT_BYTES.saturating_sub(self.bytes);
+        if self.lines >= EDIT_RECEIPT_LINES || room == 0 {
             self.receipt.truncated = true;
-            return;
+            return false;
         }
-        let mut cut = text.len().min(EDIT_RECEIPT_LINE_BYTES);
+        let mut cut = text.len().min(EDIT_RECEIPT_LINE_BYTES).min(room);
         while !text.is_char_boundary(cut) {
             cut -= 1;
         }
         if cut < text.len() {
             self.receipt.truncated = true;
+            if cut == 0 {
+                // (Not a character of it fits, so the receipt is full.)
+                self.bytes = EDIT_RECEIPT_BYTES;
+                return false;
+            }
         }
         self.lines += 1;
         self.bytes += cut;
@@ -354,6 +370,7 @@ impl<'a> Builder<'a> {
             change,
             text: text[..cut].to_string(),
         });
+        true
     }
 
     fn finish(mut self) -> EditReceipt {
@@ -510,6 +527,117 @@ mod tests {
             serde_json::from_value::<crate::AgentEvent>(older).unwrap(),
             crate::AgentEvent::ToolResult { receipt: None, .. }
         ));
+    }
+
+    /// Every receipt of a non-truncated edit, laid over the file before and
+    /// after, shows exactly their lines, with what it leaves out the same
+    /// on both sides.
+    fn shows_the_written_lines(before: &str, old: &str, new: &str) {
+        let found: Vec<usize> = before.match_indices(old).map(|(at, _)| at).collect();
+        if found.is_empty() {
+            return;
+        }
+        let receipt = receipt(before, old, new);
+        let after = before.replace(old, new);
+        let context = format!("{before:?} {old:?} {new:?} {receipt:?}");
+        if receipt.truncated {
+            return;
+        }
+        let (was, is): (Vec<&str>, Vec<&str>) =
+            (lines_of(before).collect(), lines_of(&after).collect());
+        let (mut old_at, mut new_at) = (0, 0);
+        for hunk in &receipt.hunks {
+            let (from_old, from_new) = (hunk.old_start - 1, hunk.new_start - 1);
+            assert_eq!(was[old_at..from_old], is[new_at..from_new], "gap {context}");
+            (old_at, new_at) = (from_old, from_new);
+            for line in &hunk.lines {
+                if line.change != LineChange::Added {
+                    assert_eq!(was.get(old_at), Some(&line.text.as_str()), "{context}");
+                    old_at += 1;
+                }
+                if line.change != LineChange::Removed {
+                    assert_eq!(is.get(new_at), Some(&line.text.as_str()), "{context}");
+                    new_at += 1;
+                }
+            }
+        }
+        assert_eq!(was[old_at..], is[new_at..], "tail {context}");
+    }
+
+    #[test]
+    fn small_edits_of_every_shape_show_the_lines_written() {
+        let alphabet = ['a', 'b', '\n'];
+        for len in 1..=7u32 {
+            for mut mask in 0..3usize.pow(len) {
+                let mut before = String::new();
+                for _ in 0..len {
+                    before.push(alphabet[mask % 3]);
+                    mask /= 3;
+                }
+                for start in 0..before.len() {
+                    for end in start + 1..=before.len().min(start + 4) {
+                        let old = &before[start..end];
+                        for new in ["", "a", "b", "\n", "a\n", "\na", "a\nb", "\n\n"] {
+                            if old != new {
+                                shows_the_written_lines(&before, old, new);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn varied_edits_show_the_lines_written() {
+        let mut seed: u64 = 73;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let alphabet = ["a", "b", "\n", "\r\n", "界", "é", "c"];
+        for _ in 0..10_000 {
+            let before: String = (0..next() % 300 + 1)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
+            let edges: Vec<usize> = before
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain([before.len()])
+                .collect();
+            let from = next() % (edges.len() - 1);
+            let to = (from + next() % 12 + 1).min(edges.len() - 1);
+            let old = &before[edges[from]..edges[to]];
+            let new: String = (0..next() % 10)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
+            if old != new {
+                shows_the_written_lines(&before, old, &new);
+            }
+        }
+    }
+
+    /// A receipt's text is within its budget also where a line would cross
+    /// it, cut at a character boundary.
+    #[test]
+    fn a_receipt_keeps_to_its_byte_budget_where_a_line_crosses_it() {
+        let file = format!("{}x\n", "a".repeat(1_998)).repeat(40);
+        let receipt = receipt(&file, "x", "y");
+        let bytes: usize = receipt
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .map(|line| line.text.len())
+            .sum();
+        assert!(bytes <= EDIT_RECEIPT_BYTES, "{bytes}");
+        assert!(receipt.truncated);
+        // Where the budget ends inside a character.
+        let file = format!("{}x\n", "é".repeat(997)).repeat(40);
+        let receipt = super::tests::receipt(&file, "x", "y");
+        let lines: Vec<&EditLine> = receipt.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
+        let bytes: usize = lines.iter().map(|line| line.text.len()).sum();
+        assert!(bytes <= EDIT_RECEIPT_BYTES, "{bytes}");
+        assert!(lines.iter().all(|line| !line.text.is_empty()));
     }
 
     #[test]
