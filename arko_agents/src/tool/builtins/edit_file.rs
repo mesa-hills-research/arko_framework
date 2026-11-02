@@ -10,7 +10,8 @@
 //! full or not at all. It reads the file, checks the match and writes the
 //! file once, and any error leaves the file as it was.
 //!
-//! Its output carries a receipt of what it changed ([`EditReceipt`]), made
+//! Its output carries a receipt of what it changed
+//! ([`EditReceipt`](crate::tool::EditReceipt)), made
 //! from the text it read and wrote, for the host to show as a diff.
 
 use crate::tool::receipt::edit_receipt;
