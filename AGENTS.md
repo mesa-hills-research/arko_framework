@@ -28,5 +28,8 @@
   serde defaults and keep reading old ones. arko_index's on-disk data (index and watcher
   state) has no compatibility guarantee while the crate is unpublished.
 - Commit subjects name the crate when a change is in one (`arko_agents: ...`) and are plain
-  sentences otherwise, as `git log` shows. Messages are public and follow the `prose` skill, as
-  does every word a user reads (errors, tool descriptions, the prompts the agents get, docs).
+  sentences otherwise, as `git log` shows. Messages are public, so they say what changed and
+  why for any user of the project. Every word a user reads (errors, tool descriptions, the
+  prompts the agents get, docs) uses the fewest plain words that keep the meaning, as a person
+  would explain it to a colleague. Join clauses with a period or a comma, not a colon or a
+  semicolon.
