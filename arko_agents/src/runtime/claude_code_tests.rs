@@ -5711,6 +5711,74 @@ async fn a_turn_that_ends_with_text_completes_the_task() {
     assert!(system.contains("is your final reply"), "{system}");
 }
 
+/// A turn that ends without text gets a note asking for a reply, up to
+/// `MAX_OPEN_TURNS` in a run. In a run whose reply is optional, it
+/// completes the task with an empty summary instead, with no note. Each run
+/// counts its own open turns, so a run after one that ended without a reply
+/// gets the full count again.
+#[tokio::test]
+async fn a_turn_without_text_ends_a_run_whose_reply_is_optional() {
+    let open = || json!([{"thinking": "Nothing to say yet."}]);
+    let nudged = |reply: &str| {
+        let mut turns = vec![open(); super::MAX_OPEN_TURNS as usize];
+        turns.push(json!([{"text": reply}]));
+        turns
+    };
+    let mut script = nudged("First reply.");
+    script.push(open());
+    script.extend(nudged("Second reply."));
+    let fake = Fake::new(Value::Array(script));
+    let notes = |fake: &Fake| {
+        user_texts(fake)
+            .iter()
+            .filter(|text| text.starts_with(super::OPEN_TURN_NO_REPLY_NOTE))
+            .count()
+    };
+
+    // Asked for a reply, and nudged as often as a run is.
+    let task = Task::new(
+        replying(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (mut task, _) = start(task).finish().await;
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "First reply.".into()
+        }
+    );
+    assert_eq!(notes(&fake), super::MAX_OPEN_TURNS as usize);
+
+    // News, where a reply is optional. The turn ends quietly.
+    task.prepare_for_resumption_from_completed("News.".into())
+        .unwrap();
+    task.reply_optional = true;
+    let (mut task, events) = start(task).finish().await;
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: String::new()
+        }
+    );
+    assert_eq!(completions(&events), [""]);
+    assert_eq!(notes(&fake), super::MAX_OPEN_TURNS as usize);
+
+    // Asked for a reply again, with the full count.
+    task.prepare_for_resumption_from_completed("Anything?".into())
+        .unwrap();
+    task.reply_optional = false;
+    let (task, _) = start(task).finish().await;
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "Second reply.".into()
+        }
+    );
+    assert_eq!(notes(&fake), 2 * super::MAX_OPEN_TURNS as usize);
+}
+
 /// Each request Claude Code makes is reported when its response starts,
 /// with the conversation's size (its arko tools included) and the bytes
 /// per token the previous request's reported input calibrated.

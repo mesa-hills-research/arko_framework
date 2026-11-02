@@ -1847,6 +1847,9 @@ pub(crate) struct StartOptions {
     /// Images that go with the prompt (see
     /// [`RunOptions::images`](super::RunOptions::images)).
     pub images: Vec<arko_ai::Image>,
+    /// The run may end without a reply (see
+    /// [`RunOptions::reply_optional`](super::RunOptions::reply_optional)).
+    pub reply_optional: bool,
 }
 
 /// A message to an agent run, with its text, images after it, and the
@@ -1862,6 +1865,9 @@ pub(crate) struct UserInput<'a> {
     /// The directory the run goes on in (see
     /// [`ContinueOptions::workspace`](super::ContinueOptions::workspace)).
     pub workspace: Option<std::path::PathBuf>,
+    /// The run may end without a reply (see
+    /// [`ContinueOptions::reply_optional`](super::ContinueOptions::reply_optional)).
+    pub reply_optional: bool,
 }
 
 impl<'a> From<&'a str> for UserInput<'a> {
@@ -1872,6 +1878,7 @@ impl<'a> From<&'a str> for UserInput<'a> {
             config: None,
             cut_back_to: None,
             workspace: None,
+            reply_optional: false,
         }
     }
 }
@@ -2211,6 +2218,7 @@ impl Default for StartOptions {
             config: None,
             host_config: false,
             images: Vec::new(),
+            reply_optional: false,
         }
     }
 }
@@ -3008,6 +3016,10 @@ pub(crate) struct Recovery<'a> {
     /// Reopens a cancelled run. It is recovered as an interrupted one
     /// would be (see [`WorkflowEngine::reopen_agent`]).
     pub reopen: bool,
+    /// Whether the run may end without a reply from now on (see
+    /// [`ContinueOptions::reply_optional`](super::ContinueOptions::reply_optional)),
+    /// or `None` to keep its task's setting.
+    pub reply_optional: Option<bool>,
 }
 
 /// What a reopened run is told first (see [`WorkflowEngine::reopen_agent`]).
@@ -3759,6 +3771,7 @@ impl WorkflowEngine {
         task.parent = options.parent;
         task.reconfigured = options.host_config;
         task.initial_task_images = options.images;
+        task.reply_optional = options.reply_optional;
         match options.reserved {
             Some(task_id) => task.id = task_id,
             None => ctx.registry.start(&[(task.id, agent_name)]),
@@ -3930,6 +3943,7 @@ impl WorkflowEngine {
             images: options.images,
             host_config: options.config.is_some(),
             config: options.config,
+            reply_optional: options.reply_optional,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -4222,6 +4236,7 @@ impl WorkflowEngine {
             images: options.images,
             host_config: options.config.is_some(),
             config: options.config,
+            reply_optional: options.reply_optional,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -4272,6 +4287,7 @@ impl WorkflowEngine {
             config: options.config,
             cut_back_to: options.cut_back_to,
             workspace: options.workspace,
+            reply_optional: options.reply_optional,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
     }
@@ -4415,6 +4431,7 @@ impl WorkflowEngine {
         let agent_name = &previous.agent_name;
         let mut task = previous_task.clone();
         task.parent = parent;
+        task.reply_optional = input.reply_optional;
         // What changed in the task, reported as the run goes on.
         let mut lifecycle = Vec::new();
         if let Some(index) = input.cut_back_to {
@@ -4918,6 +4935,7 @@ impl WorkflowEngine {
             message: Some(&message),
             images: &images,
             reopen: true,
+            reply_optional: Some(options.reply_optional),
             ..Recovery::default()
         };
         self.recover_nested(&current, ctx, recovery).await
@@ -5038,6 +5056,9 @@ impl WorkflowEngine {
         let agent_name = &current.agent_name;
         if let Some(parent) = recovery.parent {
             task.parent = parent;
+        }
+        if let Some(optional) = recovery.reply_optional {
+            task.reply_optional = optional;
         }
         if let TaskState::Cancelled { reason } = &task.current_state {
             // Reopened, it runs on as an interrupted task does, its open

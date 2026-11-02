@@ -33,6 +33,8 @@ pub struct RunOptions {
     /// The configuration the run starts with, in place of its agent's
     /// registered one (see [`RunOptions::config`]).
     pub config: Option<arko_agents::AgentConfig>,
+    /// The run may end without a reply (see [`RunOptions::reply_optional`]).
+    pub reply_optional: bool,
 }
 
 // By hand, since a configuration has no `PartialEq` of its own, so two are equal
@@ -47,6 +49,7 @@ impl PartialEq for RunOptions {
         self.workspace == other.workspace
             && self.images == other.images
             && saved(&self.config) == saved(&other.config)
+            && self.reply_optional == other.reply_optional
     }
 }
 
@@ -87,6 +90,23 @@ impl RunOptions {
         self.images = images.into_iter().collect();
         self
     }
+
+    /// With `optional` true, the run may end without a reply, such as a run
+    /// started for news rather than for a person's message. An agent whose
+    /// reply in text ends its task
+    /// ([`ends_task_with_text`](arko_agents::AgentToolConfig::ends_task_with_text))
+    /// then completes it with an empty summary when it ends a response with
+    /// no text and no tool call, instead of getting a note asking for a
+    /// reply. Other agents end without one by calling `complete_task` with
+    /// an empty summary. Off by default. The agent's prompt stays as it is,
+    /// so say in it or in the run's prompt when a reply may be left out. A
+    /// run that resumes from a pause or a crash keeps the setting
+    /// ([`Task::reply_optional`](arko_agents::Task::reply_optional)), and
+    /// each continuation sets it again ([`ContinueOptions::reply_optional`]).
+    pub fn reply_optional(mut self, optional: bool) -> Self {
+        self.reply_optional = optional;
+        self
+    }
 }
 
 /// Options for continuing an agent run, for
@@ -114,6 +134,9 @@ pub struct ContinueOptions {
     /// The working directory the run goes on in (see
     /// [`ContinueOptions::workspace`]).
     pub workspace: Option<PathBuf>,
+    /// The run may end without a reply (see
+    /// [`ContinueOptions::reply_optional`]).
+    pub reply_optional: bool,
 }
 
 impl ContinueOptions {
@@ -185,6 +208,23 @@ impl ContinueOptions {
     /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
     pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
         self.workspace = Some(workspace.into());
+        self
+    }
+
+    /// With `optional` true, the continued run may end without a reply, as
+    /// [`RunOptions::reply_optional`] says. Each continuation sets it, so
+    /// one without it asks for a reply again.
+    /// [`Workflow::continue_agent_with`], [`Workflow::reopen_agent_with`]
+    /// and [`Workflow::restart_with`] take it. A run that is recovered
+    /// (its restart is [`Restart::Recover`]) goes on with the setting its
+    /// task was saved with.
+    ///
+    /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
+    /// [`Workflow::reopen_agent_with`]: crate::Workflow::reopen_agent_with
+    /// [`Workflow::restart_with`]: crate::Workflow::restart_with
+    /// [`Restart::Recover`]: crate::Restart::Recover
+    pub fn reply_optional(mut self, optional: bool) -> Self {
+        self.reply_optional = optional;
         self
     }
 }

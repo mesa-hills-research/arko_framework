@@ -574,6 +574,19 @@ pub struct Task {
     /// agent's registered configuration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reconfigured: bool,
+    /// The task's current run may end without a reply, such as a run its
+    /// host starts for news rather than for a person's message. An agent
+    /// whose reply in text ends the task
+    /// ([`ends_task_with_text`](crate::agent_config::AgentToolConfig::ends_task_with_text))
+    /// then completes it with an empty summary when it ends a response with
+    /// no text and no tool call, where it would otherwise get a note asking
+    /// for a reply. Other agents end without one by calling `complete_task`
+    /// with an empty summary. The host sets it for each run (an
+    /// arko_workflows `RunOptions::reply_optional`), and tells the agent in
+    /// its prompt, which the runtime leaves as it is. A run that resumes
+    /// from a pause or a crash keeps it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply_optional: bool,
     /// The tool calls that started running and have no recorded result yet,
     /// in the order they started. The runtime records a call here before it
     /// runs (and reports the task to its
@@ -850,6 +863,7 @@ impl Task {
             claude_code_resume_at: None,
             claude_code_fork_of: None,
             reconfigured: false,
+            reply_optional: false,
             running_tool_calls: Vec::new(),
             questions: crate::questions::QuestionLog::default(),
             context_marks: BTreeMap::new(),

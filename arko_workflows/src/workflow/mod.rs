@@ -3520,6 +3520,10 @@ mod reconfigure_tests;
 mod cut_back_tests;
 
 #[cfg(test)]
+#[path = "reply_optional_tests.rs"]
+mod reply_optional_tests;
+
+#[cfg(test)]
 #[path = "keep_warm_tests.rs"]
 mod keep_warm_tests;
 

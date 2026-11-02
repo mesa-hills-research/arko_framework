@@ -25,6 +25,10 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   offered `complete_task`. It works in native mode and on Claude Code models, and is
   refused together with `text_reply_as_message` and on agents a completion verifier
   reviews or runs on. See [Tools](reference-map.md#tools-arko_agents).
+- Such an agent's response with neither text nor a tool call gets a note asking for a
+  reply. A run whose reply is optional (`Task::reply_optional`, `false`, set with
+  arko_workflows' `RunOptions::reply_optional` and `ContinueOptions::reply_optional`)
+  completes its task with an empty summary instead, such as a run a host starts for news.
 - `AgentToolConfig::chat` (`false`) makes the agent a chat, with no tools. Its reply in text ends
   its task, a workflow adds none of its own tools (messaging, memory, subagents, registered
   tools) and no list of recipients, and a handover asks for a summary in text. Only an agent

@@ -638,10 +638,11 @@ impl AgentLoop {
 
     /// A native turn without calls. It is the handover report when one is
     /// due and the agent isn't offered `handover_report`, the final reply
-    /// of an agent whose reply in text ends the task (which completes it),
-    /// or else a response without a tool call, which gets a note and is
-    /// asked again under the error policy. Calls the stream announced are
-    /// rejected.
+    /// of an agent whose reply in text ends the task (which completes it,
+    /// also without text when the run's reply is optional, see
+    /// [`Task::reply_optional`](crate::Task::reply_optional)), or else a
+    /// response without a tool call, which gets a note and is asked again
+    /// under the error policy. Calls the stream announced are rejected.
     async fn native_turn_without_calls(
         &mut self,
         final_generation_response: Option<ai::GenerationResponse>,
@@ -657,7 +658,16 @@ impl AgentLoop {
             self.take_handover_report(text).await?;
             return Ok(self.end_of_pass());
         }
-        if self.task.agent_config.tool_config.ends_task_with_text() && !text.trim().is_empty() {
+        // A response cut short at a limit, or a stream that ended without
+        // one, may have lost a call it was writing, so neither ends a run
+        // without a reply.
+        let quiet = self.task.reply_optional
+            && final_generation_response
+                .as_ref()
+                .is_some_and(|response| !response.stop_reason.is_truncated());
+        if self.task.agent_config.tool_config.ends_task_with_text()
+            && (quiet || !text.trim().is_empty())
+        {
             self.complete_with_reply(text).await?;
             return Ok(self.end_of_pass());
         }
@@ -690,7 +700,8 @@ impl AgentLoop {
     /// The final reply of an agent whose reply in text ends the task
     /// ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)).
     /// The task completes with the reply as its summary, as a
-    /// `complete_task` call with it would complete it.
+    /// `complete_task` call with it would complete it. An empty reply, where
+    /// the run's reply is optional, completes it with an empty summary.
     async fn complete_with_reply(&mut self, reply: String) -> Result<(), ArkoAgentsError> {
         self.reset_llm_recovery();
         self.task.set_state(TaskState::Completed {

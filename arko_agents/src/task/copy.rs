@@ -68,6 +68,7 @@ impl Task {
             claude_code_resume_at,
             claude_code_fork_of,
             reconfigured,
+            reply_optional,
             running_tool_calls,
             parent,
             questions,
@@ -130,6 +131,7 @@ impl Task {
         copy.claude_code_resume_at.clone_from(claude_code_resume_at);
         copy.claude_code_fork_of.clone_from(claude_code_fork_of);
         copy.reconfigured = *reconfigured;
+        copy.reply_optional = *reply_optional;
         same(&mut copy.running_tool_calls, running_tool_calls);
         copy.parent = *parent;
         copy.questions.clone_from(questions);

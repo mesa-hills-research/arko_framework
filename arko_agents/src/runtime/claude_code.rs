@@ -4917,22 +4917,26 @@ impl ClaudeCodeRun {
         }
         // The final reply of an agent whose reply in text ends the task. It is a
         // turn that ends with text, other than those above (Claude Code was
-        // told to end them, or arko ended them) and the handover report. A
-        // compaction or a report request the model hasn't seen yet waits,
-        // as it waits for a `complete_task` call.
+        // told to end them, or arko ended them) and the handover report. When
+        // the run's reply is optional, such a turn without text ends the task
+        // too, with an empty summary. A compaction or a report request the
+        // model hasn't seen yet waits, as it waits for a `complete_task` call.
         if self.task.agent_config.tool_config.ends_task_with_text()
             && !(self.handover_due() && self.report_delivered)
-            && self.ended_on_text()
-            && let Some(reply) = result
-                .result
-                .as_ref()
-                .filter(|text| !text.trim().is_empty())
         {
-            self.set_state(TaskState::Completed {
-                summary: reply.trim().to_string(),
-            })
-            .await?;
-            return Ok(Some(SessionEnd::Stop));
+            let reply = result
+                .result
+                .as_deref()
+                .filter(|_| self.ended_on_text())
+                .map(str::trim)
+                .unwrap_or_default();
+            if !reply.is_empty() || self.task.reply_optional {
+                self.set_state(TaskState::Completed {
+                    summary: reply.to_string(),
+                })
+                .await?;
+                return Ok(Some(SessionEnd::Stop));
+            }
         }
         if self.compaction == Some(Compaction::Due) {
             return self.compact_now(session).await;

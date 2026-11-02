@@ -179,6 +179,99 @@ async fn an_empty_response_still_gets_a_note() {
     assert!(!NO_NATIVE_TOOL_CALL_OR_REPLY.contains("complete_task"));
 }
 
+/// A response ending as `stop_reason` says, without text or calls.
+fn empty_response(stop_reason: ai::StopReason) -> ai::GenerationResponse {
+    ai::GenerationResponse {
+        message: ai::Message::new_assistant(""),
+        usage: ai::UsageInfo::new(0, 0),
+        model_call_usage: ai::ModelCallUsage::new(
+            "fixture".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            0,
+            1000,
+        ),
+        stop_reason,
+        refusal: None,
+        openai_turn_state: None,
+    }
+}
+
+/// In a run whose reply is optional, a response with neither text nor a
+/// tool call completes the task with an empty summary, without a note or a
+/// retry. (Without the setting it gets the note, as
+/// `an_empty_response_still_gets_a_note` shows.) A reply in text still
+/// completes it with the reply.
+#[tokio::test]
+async fn a_run_whose_reply_is_optional_ends_without_one() {
+    let (mut agent, mut events, _commands) = replying_harness();
+    agent.task.reply_optional = true;
+    push(&mut agent, vec![streamed("", vec![])]);
+    let (task, events) = run(agent, &mut events).await;
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: String::new()
+        }
+    );
+    assert_eq!(completions(&events), [""]);
+    assert_eq!(retries(&events), 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+    );
+    assert!(!texts(&task).contains(&NO_NATIVE_TOOL_CALL_OR_REPLY.to_string()));
+
+    let (mut agent, mut events, _commands) = replying_harness();
+    agent.task.reply_optional = true;
+    push(&mut agent, vec![streamed("A reply all the same.", vec![])]);
+    let (_task, events) = run(agent, &mut events).await;
+    assert_eq!(completions(&events), ["A reply all the same."]);
+}
+
+/// A response cut short at its output-token limit may have lost a call, so
+/// it gets the note even when the run's reply is optional.
+#[tokio::test]
+async fn a_response_cut_short_gets_a_note_when_the_reply_is_optional() {
+    let (mut agent, mut events, _commands) = replying_harness();
+    agent.task.reply_optional = true;
+    let cut_short = Ok(futures::stream::iter([Ok(ai::StreamEvent::End(Box::new(
+        empty_response(ai::StopReason::MaxTokens),
+    )))])
+    .boxed());
+    push(&mut agent, vec![cut_short, streamed("", vec![])]);
+    let (task, events) = run(agent, &mut events).await;
+    assert_eq!(completions(&events), [""]);
+    assert_eq!(retries(&events), 1);
+    assert!(texts(&task).contains(&NO_NATIVE_TOOL_CALL_OR_REPLY.to_string()));
+}
+
+/// Ending without a reply resets error recovery, as a reply does, so the
+/// unusable responses before it count no more.
+#[tokio::test]
+async fn ending_without_a_reply_resets_recovery() {
+    let (mut agent, _events, _commands) = replying_harness();
+    agent.task.reply_optional = true;
+    agent.recovery.llm_interaction_attempts = 3;
+    agent
+        .native_turn(StreamedTurn {
+            response: Some(empty_response(ai::StopReason::EndTurn)),
+            parser_events: Vec::new(),
+            announced: HashMap::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.task.current_state,
+        TaskState::Completed {
+            summary: String::new()
+        }
+    );
+    assert_eq!(agent.recovery.llm_interaction_attempts, 0);
+}
+
 /// A call to `complete_task` from an agent that isn't offered it is a call
 /// to an unavailable tool, and it completes nothing.
 #[tokio::test]

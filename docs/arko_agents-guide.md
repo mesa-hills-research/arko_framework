@@ -186,6 +186,17 @@ tool call ends the task. The reply needs no approval and passes no execution mid
 arko_workflows refuses the setting on an agent a completion verifier reviews or runs on. It
 is refused together with `text_reply_as_message`, and output-based mode ignores it.
 
+A host that starts such an agent's run for news rather than for a person's message may let
+it end without a reply, with `Task::reply_optional` (off by default, saved with the task). A response with
+neither text nor a tool call then completes the task with an empty summary, with no note
+and no recovery attempt, while one cut short at its output-token limit still gets the note.
+On Claude Code models, a turn that ends without text does the same. The host sets the field
+for each run (arko_workflows' `RunOptions::reply_optional` and
+`ContinueOptions::reply_optional`), and a run resumed from a pause or a crash keeps it. The
+system prompt stays as it is, so the host says in its own prompt when a reply may be left
+out. An agent that ends its task with `complete_task` can end without a reply by calling it
+with an empty summary.
+
 The runtime runs only the tools the agent is offered, in either tool calling mode. In
 native mode, a call to any other tool, registered or not, gets an error result and emits
 `UnavailableToolAttempted`. Output-based parsing recognizes only the offered tools' tags,
