@@ -201,9 +201,18 @@ impl Delivery {
         self.held.iter().any(|(_, held)| *held == id)
     }
 
-    /// Whether `item` goes as a typed note, apart from the hook's text.
+    /// Whether `item` goes as a typed note, apart from the hook's text. One
+    /// whose message couldn't be sent goes in hooks as context, and so does
+    /// one the model has read part of that way.
     fn typed(&self, item: &PendingContext) -> bool {
-        item.kind == PendingKind::Typed && !self.as_context.contains(&item.id)
+        item.kind == PendingKind::Typed && !self.as_context.contains(&item.id) && item.given == 0
+    }
+
+    /// Whether `item` is a note the user typed that the model hasn't all
+    /// been given yet, whichever way it goes. Typed notes keep their order
+    /// by this, so a later one waits for an earlier one sent as context.
+    fn note_waits(&self, item: &PendingContext) -> bool {
+        item.kind == PendingKind::Typed && self.in_flight_end(item.id) != Some(item.text.len())
     }
 
     /// Whether `item` is all in a hook already, by its last part, or as a typed
@@ -229,9 +238,10 @@ impl Delivery {
             .is_none_or(|item| self.waits_for_input(item))
     }
 
-    /// Whether a typed item waits in `list`, sent or not.
+    /// Whether a note the user typed waits in `list`, sent or not, as a
+    /// message or as context.
     pub(super) fn holds_note(&self, list: &[PendingContext]) -> bool {
-        list.iter().any(|item| self.typed(item))
+        list.iter().any(|item| self.note_waits(item))
     }
 
     /// Where a denial's rest joins the list, behind the items in hooks, an
@@ -314,13 +324,14 @@ impl Delivery {
     /// The typed item that goes now as the user's message, with its text.
     /// It goes at the first hook after it joins the list, whatever context
     /// is ahead of it, since its message has no budget of its own to wait
-    /// for. Typed items go one at a time, in order. It is sent with
-    /// [`note_sent`](Self::note_sent) or goes as context with
+    /// for. Typed items go one at a time, in order, and one behind a note
+    /// that goes as context waits until hooks carry all of that note. It is
+    /// sent with [`note_sent`](Self::note_sent) or goes as context with
     /// [`note_unsent`](Self::note_unsent).
     pub(super) fn due_note(&mut self, list: &[PendingContext]) -> Option<(u64, String)> {
         // Behind a typed item sent, nothing goes until it is done.
-        let item = list.iter().find(|item| self.typed(item))?;
-        if self.sent(item.id) {
+        let item = list.iter().find(|item| self.note_waits(item))?;
+        if !self.typed(item) || self.sent(item.id) {
             return None;
         }
         self.sending = Some(item.id);

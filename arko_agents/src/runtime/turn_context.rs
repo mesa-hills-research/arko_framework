@@ -14,11 +14,13 @@ pub struct TurnContext {
     /// in the next one, or with its next input.
     pub content: String,
     /// The part of the update the user typed themselves, such as the
-    /// operator's notes, which follows `content`. Only a Claude Code agent
-    /// treats it apart. During a turn it gets this text as a message from the
-    /// user at a tool boundary, once a hook has carried everything that came
-    /// before it. Every other agent gets it after `content` in the same
-    /// update. May be empty.
+    /// operator's notes. Most agents get it after `content` in the same
+    /// update. During a turn, a Claude Code agent gets it as a message from
+    /// the user at the next tool boundary, even when context queued before
+    /// it, this update's `content` included, is longer than a hook holds and
+    /// comes in later hooks. So this text needs its own introduction rather
+    /// than one at the end of `content`. The user's notes keep their order
+    /// among themselves. May be empty.
     pub user_content: String,
     /// The host's identifiers of the items in `content` (such as note
     /// numbers or message ids), in any form it chooses. The task records

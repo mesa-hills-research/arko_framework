@@ -245,6 +245,49 @@ fn behind_a_typed_item_sent_nothing_goes_until_it_is_done() {
     );
 }
 
+/// A typed note whose message couldn't be sent goes in hooks as context. A
+/// later note waits until hooks carry all of it, so notes keep their order.
+#[test]
+fn a_later_typed_note_waits_for_an_earlier_notes_context_fallback() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    list.push(PendingKind::Typed, &"first note\n".repeat(1_200), &[]);
+    assert_eq!(delivery.due_note(&list.items).unwrap().0, 1);
+    delivery.note_unsent();
+    list.push(PendingKind::Typed, "Second note.", &[]);
+    let first = delivery.fill(&list.items, "c1").unwrap();
+    assert!(first.ends_with(GOES_ON));
+    assert!(
+        delivery.due_note(&list.items).is_none(),
+        "the first note still has an undelivered rest"
+    );
+    delivery.reported(&mut list.items, "c1");
+    let rest = delivery.fill(&list.items, "c2").unwrap();
+    assert!(rest.contains(CONTINUED) && !rest.contains("Second note."));
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((2, "Second note.".to_string()))
+    );
+}
+
+/// A typed note the model has read part of as context goes on as context
+/// after the session's hooks end, so its first part isn't given twice.
+#[test]
+fn a_typed_note_partly_given_as_context_goes_on_as_context() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    let note = "first note\n".repeat(1_200);
+    list.push(PendingKind::Typed, &note, &[]);
+    delivery.due_note(&list.items).unwrap();
+    delivery.note_unsent();
+    delivery.fill(&list.items, "c1").unwrap();
+    delivery.reported(&mut list.items, "c1");
+    delivery.settle();
+    assert!(delivery.due_note(&list.items).is_none());
+    let rest = delivery.fill(&list.items, "c2").unwrap();
+    assert!(rest.starts_with(&format!("{}{CONTINUED}", heading())));
+}
+
 /// What holds a hook's context back holds no typed item behind it, namely a
 /// denial's rest held for its call and a long item saved as bare text.
 #[test]
@@ -511,6 +554,7 @@ impl Random {
 fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
     // What the runs exercised.
     let (mut splits, mut notes, mut late, mut rests, mut early) = (0, 0, 0, 0, 0);
+    let (mut fallbacks, mut long_fallbacks) = (0, 0);
     for seed in 1..=400u64 {
         let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut delivery = Delivery::default();
@@ -519,8 +563,9 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         let mut expected: Vec<(u64, String)> = Vec::new();
         let mut typed: HashSet<u64> = HashSet::new();
         let mut given: Vec<String> = Vec::new();
-        // The items the records hold, part by part, in order.
-        let mut order: Vec<u64> = Vec::new();
+        // The items the records hold, part by part, in order, and whether
+        // each part is its item's last.
+        let mut order: Vec<(u64, bool)> = Vec::new();
         let mut unreported: Vec<String> = Vec::new();
         let mut sent: Vec<String> = Vec::new();
         let mut calls = 0;
@@ -537,14 +582,25 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
             assert!(
                 expected
                     .iter()
-                    .all(|(id, _)| ids.contains(id) || order.contains(id)),
+                    .all(|(id, _)| ids.contains(id) || order.iter().any(|(part, _)| part == id)),
                 "seed {seed}, step {step}: an item left unrecorded"
             );
             // Each item once, where its first part was recorded.
             let mut seen: Vec<u64> = Vec::new();
-            for id in &order {
-                if !seen.contains(id) {
-                    seen.push(*id);
+            for (at, (id, _)) in order.iter().enumerate() {
+                if seen.contains(id) {
+                    continue;
+                }
+                seen.push(*id);
+                // A typed note comes after all of every typed note before it.
+                if typed.contains(id) {
+                    let ended = |earlier: &u64| order[..at].contains(&(*earlier, true));
+                    assert!(
+                        seen.iter()
+                            .filter(|earlier| typed.contains(earlier) && *earlier != id)
+                            .all(ended),
+                        "seed {seed}, step {step}: a typed note came before all of an earlier one"
+                    );
                 }
             }
             let place = |id: &u64| expected.iter().position(|(item, _)| item == id).unwrap();
@@ -624,7 +680,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                     let late = unreported.remove(random.below(unreported.len()));
                     for done in delivery.reported(&mut list.items, &late).0 {
                         early += typed_early(&done, &typed, &list, &expected);
-                        order.extend(done.parts.iter().map(|part| part.item));
+                        order.extend(done.parts.iter().map(|part| (part.item, part.last)));
                         given.push(done.text);
                     }
                 }
@@ -635,7 +691,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                         delivery.note_settled(&mut list.items, &uuid, cancel)
                     {
                         early += typed_early(&done, &typed, &list, &expected);
-                        order.extend(done.parts.iter().map(|part| part.item));
+                        order.extend(done.parts.iter().map(|part| (part.item, part.last)));
                         given.push(done.text);
                     }
                 }
@@ -651,11 +707,20 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                         assert!(text.len() <= HOOK_MAX_BYTES, "{}", text.len());
                         splits += usize::from(text.ends_with(GOES_ON));
                     }
-                    if delivery.due_note(&list.items).is_some() {
+                    if let Some((_, text)) = delivery.due_note(&list.items) {
                         notes += 1;
-                        let uuid = format!("u{calls}");
-                        delivery.note_sent(&call, uuid.clone());
-                        sent.push(uuid);
+                        if random.below(4) == 0 {
+                            // Its message couldn't be sent, so it goes in
+                            // hooks as context.
+                            fallbacks += 1;
+                            delivery.note_unsent();
+                            long_fallbacks +=
+                                usize::from(heading().len() + text.len() > HOOK_MAX_BYTES);
+                        } else {
+                            let uuid = format!("u{calls}");
+                            delivery.note_sent(&call, uuid.clone());
+                            sent.push(uuid);
+                        }
                     }
                     assert_eq!(list.texts().join("\u{0}"), before, "a hook moves nothing");
                     unreported.push(call);
@@ -666,32 +731,40 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         // ends and the next input carries the rest.
         while !unreported.is_empty() || !sent.is_empty() {
             if let Some(call) = unreported.pop() {
-                given.extend(
-                    delivery
-                        .reported(&mut list.items, &call)
-                        .0
-                        .into_iter()
-                        .map(|done| done.text),
-                );
+                for done in delivery.reported(&mut list.items, &call).0 {
+                    order.extend(done.parts.iter().map(|part| (part.item, part.last)));
+                    given.push(done.text);
+                }
             }
             if let Some(uuid) = sent.pop()
                 && let Verdict::Done(done) = delivery.note_settled(&mut list.items, &uuid, false)
             {
+                order.extend(done.parts.iter().map(|part| (part.item, part.last)));
                 given.push(done.text);
             }
         }
         delivery.settle();
         given.extend(list.items.iter().map(|item| shown_from(item, item.given)));
+        // A typed note given as context in parts reads as context, in its
+        // place in the list. Every other comes whole.
+        let parted = |id: &u64| {
+            order.contains(&(*id, false))
+                || list
+                    .items
+                    .iter()
+                    .any(|item| item.id == *id && item.given > 0)
+        };
+        let whole = |id: &u64| typed.contains(id) && !parted(id);
         let typed_texts = expected
             .iter()
-            .filter(|(id, _)| typed.contains(id))
+            .filter(|(id, _)| whole(id))
             .map(|(_, text)| text.clone())
             .collect::<Vec<_>>();
         let (context, typed_given) = split_typed(&given, &typed_texts);
         assert_eq!(typed_given, typed_texts, "seed {seed}");
         let expected = expected
             .iter()
-            .filter(|(id, _)| !typed.contains(id))
+            .filter(|(id, _)| !whole(id))
             .map(|(_, text)| text.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -704,8 +777,14 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         );
     }
     assert!(
-        splits > 100 && notes > 50 && late > 50 && rests > 50 && early > 20,
-        "{splits} {notes} {late} {rests} {early}"
+        splits > 100
+            && notes > 50
+            && late > 50
+            && rests > 50
+            && early > 20
+            && fallbacks > 20
+            && long_fallbacks > 5,
+        "{splits} {notes} {late} {rests} {early} {fallbacks} {long_fallbacks}"
     );
 }
 

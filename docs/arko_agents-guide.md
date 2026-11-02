@@ -1129,7 +1129,9 @@ Besides answers to the waiting states, a running task accepts:
   workflow's operator notes), which follows `content` in the same message. During a turn, a
   Claude Code agent gets it as a message from the user (`ClaudeSession::send_human`) at the
   next tool boundary, even while context queued before it waits for later hooks (the rest
-  of a split update, for one). It stays pending, and
+  of a split update, for one), so it needs its own introduction. The user's notes keep
+  their order among themselves, also when one goes in hooks because its message couldn't be
+  sent. It stays pending, and
   nothing behind it goes, until both its hook is acknowledged and the CLI says it took the
   message into the turn (`started`, at the next tool boundary). The CLI says `completed`
   only when that turn ends, which counts too when no `started` came before it. One the CLI
