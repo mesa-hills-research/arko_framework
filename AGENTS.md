@@ -27,3 +27,6 @@
   checkpoints written by earlier versions have to load in later ones, so give new fields
   serde defaults and keep reading old ones. arko_index's on-disk data (index and watcher
   state) has no compatibility guarantee while the crate is unpublished.
+- Commit subjects name the crate when a change is in one (`arko_agents: ...`) and are plain
+  sentences otherwise, as `git log` shows. Messages are public and follow the `prose` skill, as
+  does every word a user reads (errors, tool descriptions, the prompts the agents get, docs).
