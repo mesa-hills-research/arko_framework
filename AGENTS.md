@@ -23,6 +23,8 @@
 - Test with `cargo test --workspace --locked`. The tests make no provider calls. The
   terminal, MCP and Claude Code tests need Python 3 (`ARKO_TEST_PYTHON` selects the
   interpreter).
+- Tests, fixtures, examples and docs use made-up paths and names (`/home/ada/proj`,
+  `C:\Users\ada`, "Example Studio"), never a real machine's or person's.
 - Saved data must stay loadable. Agent configurations, tasks, conversations and workflow
   checkpoints written by earlier versions have to load in later ones, so give new fields
   serde defaults and keep reading old ones. arko_index's on-disk data (index and watcher

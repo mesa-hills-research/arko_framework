@@ -159,7 +159,7 @@ mod tests {
     fn resolve_with(program: &str, files: &[&str]) -> Launch {
         let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
         let is_file = |path: &Path| files.iter().any(|file| file == path);
-        let path = OsStr::new(r"C:\Windows\system32;C:\Users\luke\AppData\Roaming\npm");
+        let path = OsStr::new(r"C:\Windows\system32;C:\Users\ada\AppData\Roaming\npm");
         resolve(
             Path::new(program),
             &Environment {
@@ -177,7 +177,7 @@ mod tests {
         parts
             .iter()
             .fold(
-                PathBuf::from(r"C:\Users\luke\AppData\Roaming\npm"),
+                PathBuf::from(r"C:\Users\ada\AppData\Roaming\npm"),
                 |path, part| path.join(part),
             )
             .display()

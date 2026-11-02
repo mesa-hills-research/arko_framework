@@ -186,7 +186,7 @@ impl Host {
         };
         // A workspace that is itself a protected place (a root, the home
         // directory, a system directory) grants nothing. One right under the
-        // root, such as `D:\RoboEnv` or `/data`, is fine. The rule that keeps
+        // root, such as `D:\Work` or `/data`, is fine. The rule that keeps
         // top-level directories from being deleted guards the directory
         // itself, not what's inside it, so it doesn't count here. Speculative
         // paths skip it the same way.

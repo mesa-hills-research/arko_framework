@@ -377,7 +377,7 @@ path and why, so the agent can correct the command.
 | Other paths, such as `~/Documents` or a sibling repository | Refused | `allow_outside_workspace: true`, or the path (and what is below it) in `allowed_paths` |
 | Protected paths, such as the filesystem root, drive roots and network-share roots, the home directory, its parents and other users' home directories, top-level directories (`/usr`, `/opt`, `D:\data`), system directories (`/etc`, `/var`, `/System`, `C:\Windows`, `C:\Program Files`), mounted volumes (`/Volumes/*`, `/mnt/*`, `/media/*`), and devices | Refused | Only `dangerously_allow_all_commands: true`, which turns the guard off |
 
-A working directory right under a root, such as `D:\RoboEnv` or `/data`, holds its
+A working directory right under a root, such as `D:\Work` or `/data`, holds its
 files like any other working directory. One that is itself a protected place, such
 as the home directory or `C:\Windows`, allows nothing inside it.
 

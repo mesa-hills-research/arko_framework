@@ -35,12 +35,12 @@ fn linux() -> Host {
             windows: false,
             ignore_case: false,
         },
-        "/home/luke/proj",
-        "/home/luke",
+        "/home/ada/proj",
+        "/home/ada",
         &["/tmp", "/var/tmp"],
         &[
-            ("HOME", "/home/luke"),
-            ("BUILD", "/home/luke/proj/build"),
+            ("HOME", "/home/ada"),
+            ("BUILD", "/home/ada/proj/build"),
             ("TMPDIR", "/tmp"),
         ],
     )
@@ -52,11 +52,11 @@ fn mac() -> Host {
             windows: false,
             ignore_case: true,
         },
-        "/Users/luke/proj",
-        "/Users/luke",
+        "/Users/ada/proj",
+        "/Users/ada",
         &["/private/var/folders/ab/xyz/T", "/tmp", "/private/tmp"],
         &[
-            ("HOME", "/Users/luke"),
+            ("HOME", "/Users/ada"),
             ("TMPDIR", "/private/var/folders/ab/xyz/T"),
         ],
     )
@@ -68,12 +68,12 @@ fn windows() -> Host {
             windows: true,
             ignore_case: true,
         },
-        r"C:\Users\luke\proj",
-        r"C:\Users\luke",
-        &[r"C:\Users\luke\AppData\Local\Temp"],
+        r"C:\Users\ada\proj",
+        r"C:\Users\ada",
+        &[r"C:\Users\ada\AppData\Local\Temp"],
         &[
-            ("USERPROFILE", r"C:\Users\luke"),
-            ("TEMP", r"C:\Users\luke\AppData\Local\Temp"),
+            ("USERPROFILE", r"C:\Users\ada"),
+            ("TEMP", r"C:\Users\ada\AppData\Local\Temp"),
             ("SystemRoot", r"C:\Windows"),
         ],
     )
@@ -331,7 +331,7 @@ fn posix_drastic_commands_are_refused() {
             (Protected, "rm -rf ~/*"),
             (Protected, "rm -rf $HOME"),
             (Protected, "rm -rf \"$HOME\"/"),
-            (Protected, "rm -rf /home/luke"),
+            (Protected, "rm -rf /home/ada"),
             (Protected, "rm -rf /home"),
             (Protected, "rm -rf /home/*"),
             (Protected, "rm -rf ~bob"),
@@ -367,7 +367,7 @@ fn posix_drastic_commands_are_refused() {
             (Protected, "rm /dev/null"),
             (Protected, "chmod -R 777 /"),
             (Protected, "chmod 000 /etc/passwd"),
-            (Protected, "chown -R luke /usr"),
+            (Protected, "chown -R ada /usr"),
             (Protected, "truncate -s 0 /etc/passwd"),
             (Protected, "mv ~ /tmp/old-home"),
             (Protected, "mv /usr /usr.bak"),
@@ -422,7 +422,7 @@ fn macos_paths_compare_without_case() {
         &mac(),
         ShellDialect::Posix,
         &[
-            (Protected, "rm -rf /USERS/LUKE"),
+            (Protected, "rm -rf /USERS/ADA"),
             (Protected, "rm -rf /Users/bob"),
             (Protected, "rm -rf /Volumes/Backup"),
             (Protected, "rm -rf /System/Library"),
@@ -432,7 +432,7 @@ fn macos_paths_compare_without_case() {
             (Allowed, "diskutil list"),
             (Allowed, "rm -rf \"$TMPDIR\"/arko-*"),
             (Allowed, "rm -rf /private/var/folders/ab/xyz/T/scratch"),
-            (Allowed, "rm -rf /Users/luke/PROJ/build"),
+            (Allowed, "rm -rf /Users/ada/PROJ/build"),
             (Outside, "rm -rf /Applications/Old.app"),
         ],
     );
@@ -453,7 +453,7 @@ fn cmd_commands() {
             (Allowed, "set OUT=dist& rd /s /q %OUT%"),
             (Allowed, "if exist build rd /s /q build"),
             (Protected, "rd /s /q C:\\"),
-            (Protected, "rmdir /S /Q c:\\users\\luke"),
+            (Protected, "rmdir /S /Q c:\\users\\ada"),
             (Protected, "del /f /s /q C:\\*"),
             (Protected, "del /f /s /q C:\\*.*"),
             (Protected, "rd /s /q %USERPROFILE%"),
@@ -467,7 +467,7 @@ fn cmd_commands() {
             (Protected, "rd /s /q \\\\server\\share"),
             (Protected, "format D: /q /y"),
             (Protected, "diskpart /s wipe.txt"),
-            (Protected, "robocopy empty C:\\Users\\luke /MIR"),
+            (Protected, "robocopy empty C:\\Users\\ada /MIR"),
             (Protected, "icacls C:\\ /grant Everyone:F /t"),
             (Protected, "takeown /f C:\\Windows /r"),
             (Protected, "@echo off & rd /s /q C:\\Users"),
@@ -476,9 +476,9 @@ fn cmd_commands() {
                 Protected,
                 "powershell -Command \"Remove-Item C:\\ -Recurse -Force\"",
             ),
-            (Outside, "rd /s /q C:\\Users\\luke\\Documents"),
+            (Outside, "rd /s /q C:\\Users\\ada\\Documents"),
             (Outside, "del D:\\data\\old\\file.txt"),
-            (Outside, "for /d %d in (C:\\Users\\luke\\*) do rd /s /q %d"),
+            (Outside, "for /d %d in (C:\\Users\\ada\\*) do rd /s /q %d"),
         ],
     );
 }
@@ -536,7 +536,7 @@ fn powershell_commands() {
             (Protected, "gci ~ | % { Remove-Item $_ -Recurse -Force }"),
             (
                 Protected,
-                "[System.IO.Directory]::Delete('C:\\Users\\luke', $true)",
+                "[System.IO.Directory]::Delete('C:\\Users\\ada', $true)",
             ),
             (Protected, "Format-Volume -DriveLetter D"),
             (Protected, "Clear-Disk -Number 1 -RemoveData"),
@@ -544,7 +544,7 @@ fn powershell_commands() {
             (Protected, "cd; Remove-Item * -Recurse -Force"),
             (Protected, "Set-Location ..; Remove-Item * -Recurse"),
             (Protected, "Remove-Item 'C:\\Program Files\\App' -Recurse"),
-            (Protected, "Move-Item C:\\Users\\luke D:\\old"),
+            (Protected, "Move-Item C:\\Users\\ada D:\\old"),
             (Protected, "cmd /c rd /s /q C:\\"),
             (Protected, encoded_command.as_str()),
             (Outside, "Remove-Item ~\\Documents -Recurse"),
@@ -574,7 +574,7 @@ fn settings_allow_outside_paths_but_never_protected_ones() {
     );
 
     let mut host = linux();
-    host.allowed = vec![AbsPath::parse(host.style, "/home/luke/.cache/app", None).unwrap()];
+    host.allowed = vec![AbsPath::parse(host.style, "/home/ada/.cache/app", None).unwrap()];
     let guard = CommandGuard::default();
     assert_eq!(
         verdict(&guard, &host, ShellDialect::Posix, "rm -rf ~/.cache/app/*"),
@@ -603,10 +603,10 @@ fn a_home_working_directory_allows_nothing_by_being_the_working_directory() {
     };
     let home = host(
         style,
-        "/home/luke",
-        "/home/luke",
+        "/home/ada",
+        "/home/ada",
         &["/tmp"],
-        &[("HOME", "/home/luke")],
+        &[("HOME", "/home/ada")],
     );
     expect(
         &home,
@@ -649,7 +649,7 @@ fn refusals_explain_the_path_and_the_variable() {
     assert!(
         refusal
             .message
-            .contains("outside the working directory `/home/luke/proj`"),
+            .contains("outside the working directory `/home/ada/proj`"),
         "{}",
         refusal.message
     );
@@ -790,7 +790,7 @@ fn rules_follow_commands_through_the_shell() {
             (false, "eval 'git push'"),
             (false, "env X=1 git push"),
             (false, "FOO=1 git push"),
-            (false, "sudo -u luke git push"),
+            (false, "sudo -u ada git push"),
             (false, "timeout 10 nice -n 5 git push"),
             (false, "ls | xargs git add"),
             (false, "find . -name '*.rs' | xargs -n 1 git add"),
@@ -869,8 +869,8 @@ fn a_rule_within_a_directory_needs_the_command_there() {
             (true, "cd scratch && git init && git commit -m x"),
             (true, "cd scratch/spike-1 && git reset --hard HEAD~1"),
             (true, "git -C scratch rebase -i HEAD~2"),
-            (true, "git -C /home/luke/proj/scratch/spike-2 commit -m x"),
-            (true, "cd /tmp && git -C /home/luke/proj/scratch log"),
+            (true, "git -C /home/ada/proj/scratch/spike-2 commit -m x"),
+            (true, "cd /tmp && git -C /home/ada/proj/scratch log"),
             (false, "git commit -m x"),
             (false, "cd scratch && cd .. && git commit -m x"),
             (false, "cd scratch && git -C .. commit -m x"),
@@ -905,27 +905,27 @@ fn another_repository_stays_elsewhere_whatever_directory_follows() {
         &[
             (
                 true,
-                "cd \"$(cat dir.txt)\" && git -C /home/luke/proj/scratch log",
+                "cd \"$(cat dir.txt)\" && git -C /home/ada/proj/scratch log",
             ),
             (
                 false,
-                "GIT_DIR=/home/luke/proj/.git git -C /home/luke/proj/scratch push",
+                "GIT_DIR=/home/ada/proj/.git git -C /home/ada/proj/scratch push",
             ),
             (
                 false,
-                "git --git-dir=/home/luke/proj/.git -C /home/luke/proj/scratch commit -m x",
+                "git --git-dir=/home/ada/proj/.git -C /home/ada/proj/scratch commit -m x",
             ),
             (
                 false,
-                "git --work-tree /home/luke/proj -C /home/luke/proj/scratch checkout .",
+                "git --work-tree /home/ada/proj -C /home/ada/proj/scratch checkout .",
             ),
             (
                 false,
-                "export GIT_DIR=/home/luke/proj/.git; git -C /home/luke/proj/scratch commit -m x",
+                "export GIT_DIR=/home/ada/proj/.git; git -C /home/ada/proj/scratch commit -m x",
             ),
             (
                 false,
-                "env GIT_WORK_TREE=/home/luke/proj git -C /home/luke/proj/scratch checkout .",
+                "env GIT_WORK_TREE=/home/ada/proj git -C /home/ada/proj/scratch checkout .",
             ),
         ],
     );
@@ -950,7 +950,7 @@ fn a_subshell_keeps_its_directory_and_variables() {
             (true, "cd scratch; f() { ls; }; git commit -m x"),
             (
                 false,
-                "(cd /home/luke/proj/scratch && cargo test); git commit -m x",
+                "(cd /home/ada/proj/scratch && cargo test); git commit -m x",
             ),
             (false, "(cd scratch) && git commit -m x"),
             (false, "(cd scratch; (cd ..)); git commit -m x"),
@@ -1096,7 +1096,7 @@ fn sudo_takes_assignments_like_env() {
             (false, "sudo X=1 git push"),
             (false, "sudo DEBIAN_FRONTEND=noninteractive git push"),
             (false, "sudo -E X=1 git push"),
-            (false, "sudo -u luke X=1 git push"),
+            (false, "sudo -u ada X=1 git push"),
         ],
     );
     expect_ruled(
@@ -1104,10 +1104,10 @@ fn sudo_takes_assignments_like_env() {
         &linux(),
         ShellDialect::Posix,
         &[
-            (true, "sudo X=1 git -C /home/luke/proj/scratch commit -m x"),
+            (true, "sudo X=1 git -C /home/ada/proj/scratch commit -m x"),
             (
                 false,
-                "sudo GIT_DIR=/home/luke/proj/.git git -C /home/luke/proj/scratch commit -m x",
+                "sudo GIT_DIR=/home/ada/proj/.git git -C /home/ada/proj/scratch commit -m x",
             ),
         ],
     );
@@ -1142,7 +1142,7 @@ fn more_wrappers_run_the_command_after_them() {
             (true, "watch -n 5 'git status && git log -1'"),
             (true, "watch -x git status"),
             (true, "script -q -c 'git log' /dev/null"),
-            (true, "su luke -c 'git status'"),
+            (true, "su ada -c 'git status'"),
             (false, "setsid git push"),
             (false, "setsid -w git push"),
             (false, "flock /tmp/lock git push"),
@@ -1165,8 +1165,8 @@ fn more_wrappers_run_the_command_after_them() {
             (false, "script -qc 'git push' log.txt"),
             (false, "script --command='git push'"),
             (false, "su -c 'git push'"),
-            (false, "su luke -c 'git push'"),
-            (false, "su -lc 'git push' luke"),
+            (false, "su ada -c 'git push'"),
+            (false, "su -lc 'git push' ada"),
             (false, "su --session-command 'git push'"),
             // Text only known when it runs can't be checked.
             (false, "watch \"$(cat command.txt)\""),
@@ -1218,29 +1218,29 @@ fn git_location_variables_mean_another_repository() {
         "GIT_WORK_TREE",
     ];
     for variable in variables {
-        let value = "/home/luke/proj/.git/x";
+        let value = "/home/ada/proj/.git/x";
         expect_ruled(
             &scratch_rules(),
             &linux(),
             ShellDialect::Posix,
             &[
-                (true, "git -C /home/luke/proj/scratch/toy add ."),
+                (true, "git -C /home/ada/proj/scratch/toy add ."),
                 (
                     false,
-                    &format!("{variable}={value} git -C /home/luke/proj/scratch/toy add ."),
+                    &format!("{variable}={value} git -C /home/ada/proj/scratch/toy add ."),
                 ),
                 (
                     false,
-                    &format!("export {variable}={value}; git -C /home/luke/proj/scratch/toy add ."),
+                    &format!("export {variable}={value}; git -C /home/ada/proj/scratch/toy add ."),
                 ),
                 (
                     false,
-                    &format!("env {variable}={value} git -C /home/luke/proj/scratch/toy add ."),
+                    &format!("env {variable}={value} git -C /home/ada/proj/scratch/toy add ."),
                 ),
                 (
                     false,
                     &format!(
-                        "strace -E {variable}={value} git -C /home/luke/proj/scratch/toy add ."
+                        "strace -E {variable}={value} git -C /home/ada/proj/scratch/toy add ."
                     ),
                 ),
             ],
@@ -1251,16 +1251,16 @@ fn git_location_variables_mean_another_repository() {
                 windows: false,
                 ignore_case: false,
             },
-            "/home/luke/proj",
-            "/home/luke",
+            "/home/ada/proj",
+            "/home/ada",
             &["/tmp"],
-            &[("HOME", "/home/luke"), (variable, value)],
+            &[("HOME", "/home/ada"), (variable, value)],
         );
         expect_ruled(
             &scratch_rules(),
             &host,
             ShellDialect::Posix,
-            &[(false, "git -C /home/luke/proj/scratch/toy add .")],
+            &[(false, "git -C /home/ada/proj/scratch/toy add .")],
         );
     }
 }
@@ -1518,17 +1518,17 @@ fn windows_top_level() -> Host {
             windows: true,
             ignore_case: true,
         },
-        r"D:\RoboEnv",
-        r"C:\Users\luke",
-        &[r"C:\Users\luke\AppData\Local\Temp"],
+        r"D:\Work",
+        r"C:\Users\ada",
+        &[r"C:\Users\ada\AppData\Local\Temp"],
         &[
-            ("USERPROFILE", r"C:\Users\luke"),
-            ("TEMP", r"C:\Users\luke\AppData\Local\Temp"),
+            ("USERPROFILE", r"C:\Users\ada"),
+            ("TEMP", r"C:\Users\ada\AppData\Local\Temp"),
         ],
     )
 }
 
-/// A workspace right under a drive's root, such as `D:\RoboEnv`, holds its
+/// A workspace right under a drive's root, such as `D:\Work`, holds its
 /// files like any other. Commands write, move and delete inside it, while
 /// other top-level directories and the drive's root stay protected.
 #[test]
@@ -1540,25 +1540,25 @@ fn a_workspace_at_the_top_of_a_drive_holds_its_files() {
         &[
             (
                 Allowed,
-                r"Set-Content -Path 'D:\RoboEnv\guardtest.tmp' -Value 'x'",
+                r"Set-Content -Path 'D:\Work\guardtest.tmp' -Value 'x'",
             ),
             (
                 Allowed,
-                r"Set-Content -Path '.scratch\trademark\raw\tmview_index.html' -Value $r.Content -Encoding utf8",
+                r"Set-Content -Path '.scratch\trademark\raw\tview_index.html' -Value $r.Content -Encoding utf8",
             ),
             (
                 Allowed,
-                r"$r.Content | Out-File -Encoding utf8 D:\RoboEnv\.scratch\trademark\raw\tmview_index.html",
+                r"$r.Content | Out-File -Encoding utf8 D:\Work\.scratch\trademark\raw\tview_index.html",
             ),
             (
                 Allowed,
-                r"python -I .scratch\trademark\scripts\tmview_run.py > .scratch\trademark\raw\tmview_studios_out.txt 2>&1",
+                r"python -I .scratch\trademark\scripts\tview_run.py > .scratch\trademark\raw\tview_studio_out.txt 2>&1",
             ),
             (
                 Allowed,
-                r"Move-Item 'Moonkite Studios Crescent Logo.png' 'assets\brand\moonkite-logo.png'",
+                r"Move-Item 'Example Studio Crescent Logo.png' 'assets\brand\example-logo.png'",
             ),
-            (Allowed, r"Remove-Item -Recurse -Force D:\RoboEnv\build"),
+            (Allowed, r"Remove-Item -Recurse -Force D:\Work\build"),
             (Outside, r"Remove-Item -Recurse -Force D:\Other\build"),
             (Protected, r"Remove-Item -Recurse -Force D:\Other"),
             (Protected, r"Remove-Item -Recurse -Force D:\"),
@@ -1568,7 +1568,7 @@ fn a_workspace_at_the_top_of_a_drive_holds_its_files() {
         &host,
         ShellDialect::Cmd,
         &[
-            (Allowed, r"del D:\RoboEnv\out\old.txt"),
+            (Allowed, r"del D:\Work\out\old.txt"),
             (Allowed, r"rd /s /q build"),
             (Outside, r"del D:\Other\old.txt"),
         ],
@@ -1604,7 +1604,7 @@ fn powershell_provider_drives() {
             (Allowed, r"Remove-Item Temp:\arko-build.log"),
             (
                 Allowed,
-                r"Remove-Item Microsoft.PowerShell.Core\FileSystem::D:\RoboEnv\out.txt",
+                r"Remove-Item Microsoft.PowerShell.Core\FileSystem::D:\Work\out.txt",
             ),
             (Outside, r"Remove-Item FileSystem::D:\Other\out.txt"),
         ],
@@ -1620,7 +1620,7 @@ fn top_level_workspaces_and_system_directories() {
         ignore_case: false,
     };
     expect(
-        &host(linux_style, "/data", "/home/luke", &["/tmp"], &[]),
+        &host(linux_style, "/data", "/home/ada", &["/tmp"], &[]),
         ShellDialect::Posix,
         &[
             (Allowed, "rm -rf build && rm -f /data/out/old.log"),
@@ -1637,8 +1637,8 @@ fn top_level_workspaces_and_system_directories() {
         &host(
             windows_style,
             r"C:\Windows",
-            r"C:\Users\luke",
-            &[r"C:\Users\luke\AppData\Local\Temp"],
+            r"C:\Users\ada",
+            &[r"C:\Users\ada\AppData\Local\Temp"],
             &[],
         ),
         ShellDialect::PowerShell,
@@ -1656,11 +1656,8 @@ fn powershell_cd_into_a_provider_drive() {
         &[
             (Outside, r"cd HKCU:\Software; Remove-Item Example -Recurse"),
             (Outside, r"Set-Location Env:; Remove-Item GH_TOKEN"),
-            (
-                Allowed,
-                r"cd FileSystem::D:\RoboEnv\out; Remove-Item old.txt",
-            ),
-            (Allowed, r"cd D:\RoboEnv\out; Remove-Item old.txt"),
+            (Allowed, r"cd FileSystem::D:\Work\out; Remove-Item old.txt"),
+            (Allowed, r"cd D:\Work\out; Remove-Item old.txt"),
         ],
     );
 }
