@@ -304,6 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tool_call_id: _,
                 tool_name,
                 output,
+                ..
             } => {
                 let display_output = if output.len() > 500 {
                     let mut end = 500;

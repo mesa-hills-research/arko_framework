@@ -11,6 +11,7 @@ pub mod definition;
 pub mod error;
 pub mod interceptor;
 pub mod middleware;
+pub mod receipt;
 pub mod registry;
 pub mod types;
 
@@ -23,6 +24,10 @@ pub use interceptor::{
 pub use middleware::{
     ToolCallContext, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
     ToolExecutionOutcome,
+};
+pub use receipt::{
+    EDIT_RECEIPT_BYTES, EDIT_RECEIPT_CONTEXT, EDIT_RECEIPT_LINE_BYTES, EDIT_RECEIPT_LINES,
+    EditHunk, EditLine, EditReceipt, LineChange, ToolReceipt,
 };
 pub use registry::ToolRegistry;
 pub use types::ToolTypeDetails;
@@ -131,6 +136,9 @@ pub trait ToolImageSink: Send + Sync {
 pub struct ToolOutput {
     pub text: String,
     pub images: Vec<ToolImage>,
+    /// What the call did, for the host, which gets it with the result event
+    /// ([`AgentEvent::ToolResult`](crate::AgentEvent)). The model doesn't.
+    pub receipt: Option<ToolReceipt>,
 }
 
 impl ToolOutput {
@@ -138,7 +146,14 @@ impl ToolOutput {
         Self {
             text: text.into(),
             images: Vec::new(),
+            receipt: None,
         }
+    }
+
+    /// This output with `receipt`.
+    pub fn with_receipt(mut self, receipt: ToolReceipt) -> Self {
+        self.receipt = Some(receipt);
+        self
     }
 
     /// Fits the images to what `model` can be sent

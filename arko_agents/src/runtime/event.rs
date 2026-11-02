@@ -142,6 +142,11 @@ pub enum AgentEvent {
         tool_call_id: Uuid,
         tool_name: String,
         output: String,
+        /// What the call did, when its tool says
+        /// ([`ToolOutput::receipt`](crate::tool::ToolOutput::receipt)), for
+        /// the host to show. `edit_file`'s says what it changed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<crate::tool::ToolReceipt>,
     },
     /// A tool result was modified by a `ToolResultInterceptor`.
     ///

@@ -42,6 +42,7 @@ impl Tool for ImageTool {
                 description: "fixture.png, 12 × 8".into(),
                 image: ai::Image::new_base64(IMAGE_DATA, "image/png"),
             }],
+            receipt: None,
         })
     }
 }
@@ -395,6 +396,7 @@ fn oversized_tool_images_are_shrunk_or_left_out_without_losing_the_rest() {
                 image: ai::Image::new_url("https://example.test/image.png"),
             },
         ],
+        receipt: None,
     };
     output.admit_images(&ai::Model::anthropic_claude_opus_5_5());
     let kept: Vec<_> = output
@@ -431,6 +433,7 @@ fn tool_images_past_the_request_count_are_left_out() {
             ToolImage::base64("first", IMAGE_DATA.into(), "image/png"),
             ToolImage::base64("second", IMAGE_DATA.into(), "image/png"),
         ],
+        receipt: None,
     };
     let room = crate::tool::ImageRoom::new(1, usize::MAX);
     output.admit_images_within(&super::tests::test_config().llm_config.model, &room);
@@ -451,6 +454,7 @@ fn tool_images_past_the_request_count_are_left_out() {
             ToolImage::base64("first", IMAGE_DATA.into(), "image/png"),
             ToolImage::base64("second", IMAGE_DATA.into(), "image/png"),
         ],
+        receipt: None,
     };
     let room = crate::tool::ImageRoom::new(10, IMAGE_DATA.len() + 5);
     output.admit_images_within(&super::tests::test_config().llm_config.model, &room);
@@ -625,6 +629,7 @@ fn google_gif_results_are_described_without_blocking_other_images() {
             ToolImage::base64("animation", "R0lGODlh".into(), "image/gif"),
             ToolImage::base64("still", IMAGE_DATA.into(), "image/png"),
         ],
+        receipt: None,
     };
     let mut other_provider = model.clone();
     other_provider.provider = ai::Provider::Anthropic;

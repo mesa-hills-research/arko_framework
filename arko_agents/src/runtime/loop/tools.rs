@@ -472,8 +472,9 @@ impl AgentLoop {
         }
     }
 
-    /// Emits `ToolResult` with the original output and, when interception
-    /// modified the result, a follow-up `ToolResultIntercepted` event.
+    /// Emits `ToolResult` with the original output and the tool's
+    /// `receipt` and, when interception modified the result, a follow-up
+    /// `ToolResultIntercepted` event.
     pub(super) async fn emit_tool_result_events(
         &self,
         tool_call_id: Uuid,
@@ -481,11 +482,13 @@ impl AgentLoop {
         original_output: &str,
         effective_output: &str,
         was_intercepted: bool,
+        receipt: Option<crate::tool::ToolReceipt>,
     ) -> Result<(), ArkoAgentsError> {
         self.emit_event(AgentEvent::ToolResult {
             tool_call_id,
             tool_name: tool_name.to_string(),
             output: original_output.to_string(),
+            receipt,
         })
         .await?;
 

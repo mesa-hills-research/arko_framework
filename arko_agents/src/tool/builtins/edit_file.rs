@@ -9,10 +9,14 @@
 //! a byte-order mark and the last line break included. A call applies in
 //! full or not at all. It reads the file, checks the match and writes the
 //! file once, and any error leaves the file as it was.
+//!
+//! Its output carries a receipt of what it changed ([`EditReceipt`]), made
+//! from the text it read and wrote, for the host to show as a diff.
 
+use crate::tool::receipt::edit_receipt;
 use crate::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    TaskContext, Tool, ToolDefinition, ToolError, ToolOutput, ToolParameterDefinition,
+    ToolParameterType, ToolReceipt, ToolTypeDetails,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -275,6 +279,16 @@ impl Tool for EditFileTool {
         context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
+        self.execute_with_output(context, params)
+            .await
+            .map(|output| output.text)
+    }
+
+    async fn execute_with_output(
+        &self,
+        context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<ToolOutput, ToolError> {
         let path = text_param(&params, PATH_PARAM_NAME)?.trim().to_string();
         if path.is_empty() {
             return Err(ToolError::ParameterValidation {
@@ -391,10 +405,18 @@ impl Tool for EditFileTool {
         tokio::fs::write(&absolute_path, contents)
             .await
             .map_err(io)?;
+        let receipt = ToolReceipt::Edit(edit_receipt(
+            text,
+            &edited,
+            &found,
+            &starts,
+            old.len(),
+            new.len(),
+        ));
 
         if replace_all {
             let lines = lines_at(&edited, &starts);
-            return Ok(format!(
+            return Ok(ToolOutput::text(format!(
                 "Replaced {} in {path}, at {}.",
                 if starts.len() == 1 {
                     "1 occurrence".to_string()
@@ -402,7 +424,8 @@ impl Tool for EditFileTool {
                     format!("{} occurrences", starts.len())
                 },
                 lines_named(&lines)
-            ));
+            ))
+            .with_receipt(receipt));
         }
         let start = starts[0];
         let first = line_at(&edited, start);
@@ -412,11 +435,12 @@ impl Tool for EditFileTool {
             line_at(&edited, start + new.len() - 1)
         };
         let shown = shown_lines(&edited, first, last);
-        Ok(if shown.is_empty() {
+        Ok(ToolOutput::text(if shown.is_empty() {
             format!("Edited {path}. It is now empty.")
         } else {
             format!("Edited {path} at {}:\n{shown}", line_range(first, last))
         })
+        .with_receipt(receipt))
     }
 }
 
@@ -451,6 +475,15 @@ mod tests {
             EditFileTool
                 .execute(&context, serde_json::from_value(params).unwrap())
                 .await
+        }
+
+        /// Calls `edit_file` with `params`, and returns its output.
+        async fn edit_output(&self, params: Value) -> ToolOutput {
+            let context = TaskContext::new(uuid::Uuid::new_v4(), "tester", "", &self.root);
+            EditFileTool
+                .execute_with_output(&context, serde_json::from_value(params).unwrap())
+                .await
+                .unwrap()
         }
 
         /// Calls `edit_file` on `name` and returns its error, checking that
@@ -563,6 +596,50 @@ mod tests {
         assert_eq!(ws.read("a.txt"), b"\xEF\xBB\xBFkey = new\n");
     }
 
+    /// The lines of an edit's receipt as a diff reads.
+    fn diff(output: &ToolOutput) -> Vec<String> {
+        let Some(ToolReceipt::Edit(receipt)) = &output.receipt else {
+            panic!("no receipt: {output:?}");
+        };
+        let mut lines = Vec::new();
+        for hunk in &receipt.hunks {
+            lines.push(format!("@{} {}", hunk.old_start, hunk.new_start));
+            for line in &hunk.lines {
+                let mark = match line.change {
+                    crate::tool::LineChange::Kept => ' ',
+                    crate::tool::LineChange::Removed => '-',
+                    crate::tool::LineChange::Added => '+',
+                };
+                lines.push(format!("{mark}{}", line.text));
+            }
+        }
+        lines
+    }
+
+    /// An edit's output has a receipt of what it changed, from the text it
+    /// read and wrote, which a file with CRLF and LF line breaks both shows
+    /// as the edit that ran.
+    #[tokio::test]
+    async fn an_edit_returns_a_receipt_of_what_it_changed() {
+        let ws = Workspace::new();
+        ws.write("a.rs", b"fn a() {\n    one();\n}\n");
+        let output = ws
+            .edit_output(json!({"path": "a.rs", "old_string": "one", "new_string": "two"}))
+            .await;
+        assert_eq!(
+            diff(&output),
+            ["@1 1", " fn a() {", "-    one();", "+    two();", " }"]
+        );
+        // `old_string` takes the file's CRLF breaks, so of the two `old`
+        // lines only the first matches.
+        ws.write("b.txt", b"old\r\nold\nend\n");
+        let output = ws
+            .edit_output(json!({"path": "b.txt", "old_string": "old\n", "new_string": "new\n", "replace_all": true}))
+            .await;
+        assert_eq!(ws.read("b.txt"), b"new\r\nold\nend\n");
+        assert_eq!(diff(&output), ["@1 1", "-old", "+new", " old", " end"]);
+    }
+
     /// Replacing many occurrences takes time in proportion to the file, not
     /// to the occurrences times the file.
     #[tokio::test]
@@ -570,13 +647,20 @@ mod tests {
         let ws = Workspace::new();
         ws.write("many.txt", "x\n".repeat(100_000).as_bytes());
         let started = std::time::Instant::now();
-        let result = ws
-            .edit(json!({"path": "many.txt", "old_string": "x", "new_string": "y", "replace_all": true}))
-            .await
-            .unwrap();
+        let output = ws
+            .edit_output(json!({"path": "many.txt", "old_string": "x", "new_string": "y", "replace_all": true}))
+            .await;
         let took = started.elapsed();
         assert!(took < std::time::Duration::from_secs(10), "{took:?}");
-        assert!(result.starts_with("Replaced 100000 occurrences in many.txt, at lines 1, 2, 3"));
+        assert!(
+            output
+                .text
+                .starts_with("Replaced 100000 occurrences in many.txt, at lines 1, 2, 3")
+        );
+        let Some(ToolReceipt::Edit(receipt)) = &output.receipt else {
+            panic!("no receipt");
+        };
+        assert!(receipt.truncated);
         assert_eq!(ws.read("many.txt"), "y\n".repeat(100_000).as_bytes());
     }
 

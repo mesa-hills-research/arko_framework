@@ -405,6 +405,7 @@ enum CallOutcome {
         raw: String,
         effective: String,
         intercepted: bool,
+        receipt: Option<crate::tool::ToolReceipt>,
     },
     Rejected(String),
     Failed(String),
@@ -578,6 +579,7 @@ impl ToolHost {
                         raw: output.text,
                         effective,
                         intercepted,
+                        receipt: output.receipt,
                     },
                     reply,
                 )
@@ -637,6 +639,7 @@ impl ToolHost {
                     raw: text.clone(),
                     effective: text.clone(),
                     intercepted: false,
+                    receipt: None,
                 },
                 served_output(text, Vec::new()),
             ),
@@ -1352,11 +1355,12 @@ impl ClaudeCodeRun {
                 )
                 .await;
             match outcome {
-                CallOutcome::Finished { raw, .. } => {
+                CallOutcome::Finished { raw, receipt, .. } => {
                     self.emit(AgentEvent::ToolResult {
                         tool_call_id: call.tool_call_id,
                         tool_name: call.tool_name.clone(),
                         output: raw,
+                        receipt,
                     })
                     .await?;
                 }
@@ -3980,6 +3984,7 @@ impl ClaudeCodeRun {
                     tool_call_id: id,
                     tool_name: name.to_string(),
                     output: text.to_string(),
+                    receipt: None,
                 })
                 .await?;
                 let _ = is_error;
@@ -3988,6 +3993,7 @@ impl ClaudeCodeRun {
                 raw,
                 effective,
                 intercepted,
+                receipt,
             }) => {
                 match &question_call {
                     Some(QuestionCall::Asked { asked, wait, .. }) => {
@@ -4024,6 +4030,7 @@ impl ClaudeCodeRun {
                     tool_call_id: id,
                     tool_name: name.to_string(),
                     output: raw.clone(),
+                    receipt,
                 })
                 .await?;
                 if intercepted && raw != effective {

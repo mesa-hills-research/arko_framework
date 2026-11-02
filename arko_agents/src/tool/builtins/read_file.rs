@@ -314,6 +314,7 @@ fn image_output(path: &str, mime_type: &str, bytes: &[u8]) -> ToolOutput {
             description: format!("{path}, {size}"),
             image: arko_ai::Image::from_bytes(bytes, mime_type),
         }],
+        receipt: None,
     }
 }
 

@@ -301,6 +301,7 @@ impl AgentLoop {
                     &raw,
                     &effective,
                     intercepted,
+                    output.receipt,
                 )
                 .await?;
                 let text = with_approval_message(effective, message_to_agent);
@@ -376,6 +377,7 @@ impl AgentLoop {
     ) -> Result<ai::ToolResult, ArkoAgentsError> {
         let tool_name = call.name.as_str();
         let images = result_images(output.images);
+        let receipt = output.receipt;
         let mut raw = output.text;
         let mut effective = effective;
         // A call of a group another call already ended (possible only
@@ -396,8 +398,15 @@ impl AgentLoop {
             })
             .await?;
         }
-        self.emit_tool_result_events(tool_call_id, tool_name, &raw, &effective, intercepted)
-            .await?;
+        self.emit_tool_result_events(
+            tool_call_id,
+            tool_name,
+            &raw,
+            &effective,
+            intercepted,
+            receipt,
+        )
+        .await?;
         let text = with_approval_message(effective, message_to_agent);
         if tool_name == COMPLETE_TASK_TOOL_NAME && open {
             self.task.set_state(TaskState::Completed { summary: raw });
@@ -766,6 +775,7 @@ impl AgentLoop {
                         received,
                         received,
                         false,
+                        None,
                     )
                     .await?;
                     ai::ToolResult::from_tool_call(ai_tool_call, received)

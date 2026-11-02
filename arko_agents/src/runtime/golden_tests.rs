@@ -209,6 +209,7 @@ impl Tool for Step {
                     description: "picture.png, 2 × 2".into(),
                     image: ai::Image::new_base64("cGl4ZWxz", "image/png"),
                 }],
+                receipt: None,
             });
         }
         self.execute(context, params).await.map(ToolOutput::text)

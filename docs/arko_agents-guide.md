@@ -105,8 +105,10 @@ first snapshot followed by changes at model-call boundaries. See
 `write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, `close_questions` and
 `message_user`.
 `edit_file` replaces one exact piece of text in a file (or every occurrence, with
-`replace_all`) and changes nothing when the text isn't there exactly once. `apply_diff`
-applies SEARCH/REPLACE blocks. An agent is
+`replace_all`) and changes nothing when the text isn't there exactly once. Its `ToolResult`
+event carries a receipt of what it changed (`ToolReceipt::Edit`), diff hunks of whole lines
+made from the text it read and wrote, which a host can show without reading the file.
+`apply_diff` applies SEARCH/REPLACE blocks. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.

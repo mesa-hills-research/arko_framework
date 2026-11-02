@@ -710,6 +710,7 @@ impl AgentLoop {
                     &raw,
                     &effective,
                     intercepted,
+                    output.receipt,
                 )
                 .await?;
                 let formatted = if is_error {
@@ -787,6 +788,7 @@ impl AgentLoop {
         intercepted: bool,
         message_to_agent_on_approval: Option<String>,
     ) -> Result<String, ArkoAgentsError> {
+        let receipt = output.receipt;
         let mut raw = output.text;
         let mut effective = effective;
         // A call of a group another call already ended (possible only
@@ -807,13 +809,21 @@ impl AgentLoop {
                 tool_call_id,
                 tool_name: tool_name.to_string(),
                 output: raw,
+                receipt,
             })
             .await?;
             self.queue_tool_images(tool_name, tool_call_id, output.images);
             return Ok(String::new());
         }
-        self.emit_tool_result_events(tool_call_id, tool_name, &raw, &effective, intercepted)
-            .await?;
+        self.emit_tool_result_events(
+            tool_call_id,
+            tool_name,
+            &raw,
+            &effective,
+            intercepted,
+            receipt,
+        )
+        .await?;
         let formatted = self.prompts().format_tool_result_as_user_message(
             tool_name,
             &effective,
