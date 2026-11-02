@@ -98,6 +98,22 @@ fn line_at(text: &str, offset: usize) -> usize {
         .count()
 }
 
+/// The lines [`line_at`] gives for each of `offsets` (sorted), in one pass
+/// over `text`.
+fn lines_at(text: &str, offsets: &[usize]) -> Vec<usize> {
+    let mut lines = Vec::with_capacity(offsets.len());
+    let (mut scanned, mut line) = (0, 1);
+    for offset in offsets {
+        line += text.as_bytes()[scanned..*offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+        scanned = *offset;
+        lines.push(line);
+    }
+    lines
+}
+
 /// `3`, `3 and 17`, `3, 17 and 40`, with at most [`LISTED_LINES`] of them
 /// (`3, 17, ... and 12 more`). `lines` is sorted, and a line listed twice
 /// is named once.
@@ -348,7 +364,7 @@ impl Tool for EditFileTool {
             }
             return Err(ToolError::ExecutionFailed(message));
         }
-        let found_lines: Vec<usize> = found.iter().map(|at| line_at(text, *at)).collect();
+        let found_lines = lines_at(text, &found);
         if found.len() > 1 && !replace_all {
             return Err(ToolError::ExecutionFailed(format!(
                 "old_string was found {} times in {path}, at {}, so the file is unchanged. Add surrounding lines to old_string to make it unique, or set replace_all to change every occurrence.",
@@ -377,7 +393,7 @@ impl Tool for EditFileTool {
             .map_err(io)?;
 
         if replace_all {
-            let lines: Vec<usize> = starts.iter().map(|at| line_at(&edited, *at)).collect();
+            let lines = lines_at(&edited, &starts);
             return Ok(format!(
                 "Replaced {} in {path}, at {}.",
                 if starts.len() == 1 {
@@ -545,6 +561,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ws.read("a.txt"), b"\xEF\xBB\xBFkey = new\n");
+    }
+
+    /// Replacing many occurrences takes time in proportion to the file, not
+    /// to the occurrences times the file.
+    #[tokio::test]
+    async fn replacing_many_occurrences_takes_time_in_proportion_to_the_file() {
+        let ws = Workspace::new();
+        ws.write("many.txt", "x\n".repeat(100_000).as_bytes());
+        let started = std::time::Instant::now();
+        let result = ws
+            .edit(json!({"path": "many.txt", "old_string": "x", "new_string": "y", "replace_all": true}))
+            .await
+            .unwrap();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        assert!(result.starts_with("Replaced 100000 occurrences in many.txt, at lines 1, 2, 3"));
+        assert_eq!(ws.read("many.txt"), "y\n".repeat(100_000).as_bytes());
     }
 
     #[tokio::test]
