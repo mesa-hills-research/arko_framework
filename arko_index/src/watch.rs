@@ -154,8 +154,8 @@ pub(crate) fn atomic_json<T: Serialize>(dir: &Path, name: &str, value: &T) -> Re
             .create(true)
             .truncate(true)
             .open(&tmp)?;
-        // For S-21956424 (r06), buffer serde's small writes, but explicitly flush
-        // before fsync/rename. Drop alone would silently discard flush errors.
+        // Buffer serde's small writes, but flush explicitly before fsync and rename.
+        // Drop alone would silently discard flush errors.
         {
             let mut buffered = BufWriter::new(&mut f);
             serde_json::to_writer(&mut buffered, value)?;

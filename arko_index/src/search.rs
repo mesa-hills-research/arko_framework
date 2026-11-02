@@ -80,8 +80,8 @@ pub fn index_with(
     if root.starts_with(&state_dir) {
         return Err("index state directory may not contain the source root".into());
     }
-    // Independent index lock as in S-21956424. Readers keep seeing the last
-    // atomic snapshot, while competing writers fail instead of sharing a temp.
+    // A lock of its own for the index. Readers keep seeing the last atomic snapshot,
+    // while competing writers fail instead of sharing a temp.
     let _lock = OpenOptions::new()
         .create(true)
         .truncate(false)
