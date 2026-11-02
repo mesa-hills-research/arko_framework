@@ -3341,7 +3341,7 @@ pub(crate) const CONTEXT_ARRIVED: &str =
 
 /// How a wait ends when a note for the agent arrives.
 pub(crate) const NOTE_ARRIVED: &str =
-    "A note for you arrived while you waited: it follows. Wait again if you still need to.";
+    "A note for you arrived while you waited. It follows. Wait again if you still need to.";
 
 /// How a wait that `signal` ended says so. A note the user typed that the
 /// runtime handed over but the model hasn't read is a note's arrival.

@@ -1699,6 +1699,11 @@ impl ClaudeCodeRun {
             Some(at) => self.task.insert_context(at, item),
             None => self.task.queue_context(item),
         }?;
+        // A call that wakes reads at once whether a typed note is what came.
+        self.context_arrivals.set_note_waits(
+            self.delivery
+                .holds_note(&self.task.pending_context_injections),
+        );
         if wakes {
             self.context_arrivals.notify();
         }

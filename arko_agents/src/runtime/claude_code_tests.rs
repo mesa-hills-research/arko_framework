@@ -6806,6 +6806,35 @@ async fn a_note_typed_during_a_wait_whose_reports_split_goes_with_its_result() {
     assert!(task.pending_context_injections.is_empty());
 }
 
+/// A call already waiting that a typed note wakes can tell at once that a
+/// note is what came.
+#[tokio::test]
+async fn a_typed_arrival_says_it_is_a_note_before_waking_calls() {
+    let fake = Fake::new(json!([]));
+    let task = Task::new(config(&fake, &[]), "Wait.".into(), fake.workspace(), None);
+    let (events, _receiver) = mpsc::channel(16);
+    let (_sender, commands) = mpsc::channel(16);
+    let mut run = super::ClaudeCodeRun::new(
+        task,
+        Arc::new(ToolRegistry::new()),
+        events,
+        commands,
+        None,
+        None,
+        None,
+    );
+    let signal = run.context_arrivals.call_signal();
+    run.queue_item(
+        None,
+        crate::PendingContext::new(crate::PendingKind::Typed, "Use tabs.", Vec::new()),
+        false,
+    );
+    tokio::time::timeout(Duration::from_secs(5), signal.arrived())
+        .await
+        .expect("the note wakes the call");
+    assert!(signal.note_waits());
+}
+
 /// A response makes two calls, and a note the user typed goes as their
 /// message with the first one's hook. Claude Code reads it only after
 /// every call of the response, so the wait the second call makes counts it
