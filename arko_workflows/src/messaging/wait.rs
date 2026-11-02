@@ -386,7 +386,10 @@ impl Tool for WaitForMessageTool {
                 // A message arriving does too, but its sender is named
                 // above.
                 if task_context.context_arrived.has_arrived() {
-                    return Ok(crate::subagents::CONTEXT_ARRIVED.to_string());
+                    return Ok(crate::subagents::context_arrived_says(
+                        &task_context.context_arrived,
+                    )
+                    .to_string());
                 }
                 if now >= deadline {
                     return Ok(format!("No messages after {}.", describe_duration(wait)));

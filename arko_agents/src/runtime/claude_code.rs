@@ -1933,6 +1933,7 @@ impl ClaudeCodeRun {
         // Claude Code has it all, so arko calls that start from now on
         // count newer context.
         self.context_arrivals.caught_up();
+        self.context_arrivals.set_note_waits(false);
         if self.task.pending_context_injections.is_empty()
             && self.task.pending_context_images.is_empty()
         {
@@ -3335,15 +3336,23 @@ impl ClaudeCodeRun {
                 }
             }
         }
-        if self
-            .delivery
-            .caught_up(&self.task.pending_context_injections)
-        {
-            // Claude Code has it all, so arko calls that start from now on
-            // count newer context.
+        self.delivery_moved();
+        Ok(text.map_or_else(cc::Hook::proceed, |text| add_context(&text)))
+    }
+
+    /// Tells arko calls what the delivery of the pending context means for
+    /// them, after a hook or a word from the CLI. Once Claude Code has it
+    /// all, calls that start count newer context only. A note sent as the
+    /// user's message isn't the model's until the CLI takes it in, which it
+    /// does after every call of the response, so until then a call that
+    /// starts, such as a wait in the same response, counts it as arrived.
+    fn delivery_moved(&self) {
+        let list = &self.task.pending_context_injections;
+        if self.delivery.caught_up(list) && !self.delivery.notes_unsettled() {
             self.context_arrivals.caught_up();
         }
-        Ok(text.map_or_else(cc::Hook::proceed, |text| add_context(&text)))
+        self.context_arrivals
+            .set_note_waits(self.delivery.holds_note(list));
     }
 
     /// The CLI reports each message it is sent by its UUID. It says `started`
@@ -3380,6 +3389,7 @@ impl ClaudeCodeRun {
             super::hook_budget::Verdict::Waiting => self.context_arrivals.notify(),
             _ => {}
         }
+        self.delivery_moved();
         Ok(())
     }
 
@@ -3652,6 +3662,7 @@ impl ClaudeCodeRun {
                             self.context_arrivals.notify();
                         }
                     }
+                    self.delivery_moved();
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                     self.report(false).await;
                     for receipt in receipts {

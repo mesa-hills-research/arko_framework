@@ -2007,9 +2007,7 @@ impl Board {
             }
             if ctx.notes.has_update(agent_name, me) {
                 return Ok(wait_result(
-                    Some(
-                        "A note for you arrived while you waited: it follows. Wait again if you still need to.",
-                    ),
+                    Some(NOTE_ARRIVED),
                     &collected,
                     &still,
                     &[],
@@ -2027,7 +2025,7 @@ impl Board {
             }
             if context_arrived.has_arrived() {
                 return Ok(wait_result(
-                    Some(CONTEXT_ARRIVED),
+                    Some(context_arrived_says(context_arrived)),
                     &collected,
                     &still,
                     &[],
@@ -3340,6 +3338,20 @@ pub(crate) const WAIT_MOVED: &str = "The user ended this wait so you can go on w
 /// How a wait ends when context (a note, a terminal update) arrives for it.
 pub(crate) const CONTEXT_ARRIVED: &str =
     "An update for you arrived while you waited. It follows. Wait again if you still need to.";
+
+/// How a wait ends when a note for the agent arrives.
+pub(crate) const NOTE_ARRIVED: &str =
+    "A note for you arrived while you waited: it follows. Wait again if you still need to.";
+
+/// How a wait that `signal` ended says so. A note the user typed that the
+/// runtime handed over but the model hasn't read is a note's arrival.
+pub(crate) fn context_arrived_says(signal: &arko_agents::ContextSignal) -> &'static str {
+    if signal.note_waits() {
+        NOTE_ARRIVED
+    } else {
+        CONTEXT_ARRIVED
+    }
+}
 
 /// A wait's items, in bytes, for a caller in Claude Code. With the status
 /// lines before them and the line after them that names the senders of the

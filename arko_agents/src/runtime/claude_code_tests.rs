@@ -6201,10 +6201,11 @@ async fn a_compaction_is_not_the_final_reply() {
 }
 
 /// A tool that says it started, then waits until context arrives for its
-/// task.
+/// task, for 20 seconds unless `limit` says otherwise.
 #[derive(Debug, Default)]
 struct WaitsForContext {
     started: tokio::sync::Notify,
+    limit: Option<Duration>,
 }
 
 #[async_trait::async_trait]
@@ -6228,8 +6229,9 @@ impl crate::tool::Tool for WaitsForContext {
         _: std::collections::HashMap<String, Value>,
     ) -> Result<String, crate::tool::ToolError> {
         self.started.notify_one();
-        match tokio::time::timeout(Duration::from_secs(20), context.context_arrived.arrived()).await
-        {
+        let limit = self.limit.unwrap_or(Duration::from_secs(20));
+        match tokio::time::timeout(limit, context.context_arrived.arrived()).await {
+            Ok(()) if context.context_arrived.note_waits() => Ok("a note arrived".into()),
             Ok(()) => Ok("context arrived".into()),
             Err(_) => Ok("no context".into()),
         }
@@ -6801,6 +6803,62 @@ async fn a_note_typed_during_a_wait_whose_reports_split_goes_with_its_result() {
     assert_eq!(fake.logged("midturn")[0]["text"], TYPED_NOTE);
     let held = held_without_note_between_parts(&task);
     assert_eq!(held, reports);
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// A response makes two calls, and a note the user typed goes as their
+/// message with the first one's hook. Claude Code reads it only after
+/// every call of the response, so the wait the second call makes counts it
+/// as arrived and returns at once, saying a note waits. Once the CLI has
+/// taken it in, a wait in the next response waits for newer context.
+#[tokio::test]
+async fn a_wait_in_the_response_whose_hook_sent_a_note_returns_at_once() {
+    let fake = Fake::new(json!([[
+        {"parallel": [
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"tool": "mcp__arko__waits_for_context", "input": {}, "continues": true},
+        ]},
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["waits_for_context", "Grep"]),
+        "Search, then wait for the reports.".into(),
+        fake.workspace(),
+        None,
+    );
+    let tool = Arc::new(WaitsForContext {
+        limit: Some(Duration::from_secs(3)),
+        ..Default::default()
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let recorder = Arc::new(Recorder::default());
+    let (events, commands, handle) = with_updates(&recorder, vec![noted("", TYPED_NOTE)]).run_task(
+        task,
+        Arc::new(registry),
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("midturn").len(), 1);
+    let waits = fake
+        .logged("post")
+        .into_iter()
+        .filter(|post| post["tool"] == "mcp__arko__waits_for_context")
+        .map(|post| post["output"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(waits, ["a note arrived", "no context"]);
+    assert_eq!(texts(&task).concat().matches(TYPED_NOTE).count(), 1);
     assert!(task.pending_context_injections.is_empty());
 }
 

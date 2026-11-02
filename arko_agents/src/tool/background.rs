@@ -18,7 +18,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::watch;
 
@@ -148,6 +148,8 @@ pub struct ContextSignal {
     source: Option<watch::Receiver<u64>>,
     /// The source's count the signal counts from.
     start: u64,
+    /// The source's word on whether a note the user typed waits.
+    note: Option<Arc<AtomicBool>>,
 }
 
 impl ContextSignal {
@@ -162,6 +164,16 @@ impl ContextSignal {
         self.source
             .as_ref()
             .is_some_and(|source| *source.borrow() != self.start)
+    }
+
+    /// Whether a note the user typed waits for the model now, for a call
+    /// that says what ended its wait. A Claude Code agent reads such a note
+    /// only after every call of the response it is in, so a call that
+    /// starts while one waits counts it as arrived.
+    pub fn note_waits(&self) -> bool {
+        self.note
+            .as_ref()
+            .is_some_and(|note| note.load(Ordering::Acquire))
     }
 
     /// Resolves once context arrives (at once if some arrived since the
@@ -198,6 +210,8 @@ pub struct ContextSource {
     /// for a later request. A call that starts counts from it, so context
     /// taken after it fires the call's signal at once.
     caught_up: Arc<AtomicU64>,
+    /// A note the user typed waits for the model.
+    note: Arc<AtomicBool>,
 }
 
 impl ContextSource {
@@ -206,6 +220,7 @@ impl ContextSource {
         Self {
             arrivals: Arc::new(watch::Sender::new(0)),
             caught_up: Arc::default(),
+            note: Arc::default(),
         }
     }
 
@@ -216,6 +231,7 @@ impl ContextSource {
         ContextSignal {
             source: Some(source),
             start,
+            note: Some(self.note.clone()),
         }
     }
 
@@ -226,6 +242,7 @@ impl ContextSource {
         ContextSignal {
             source: Some(self.arrivals.subscribe()),
             start: self.caught_up.load(Ordering::Acquire),
+            note: Some(self.note.clone()),
         }
     }
 
@@ -241,6 +258,12 @@ impl ContextSource {
     pub(crate) fn caught_up(&self) {
         self.caught_up
             .store(*self.arrivals.borrow(), Ordering::Release);
+    }
+
+    /// Whether a note the user typed waits for the model, which the
+    /// signals' [`note_waits`](ContextSignal::note_waits) report.
+    pub fn set_note_waits(&self, waits: bool) {
+        self.note.store(waits, Ordering::Release);
     }
 }
 
@@ -335,5 +358,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!source.signal().has_arrived());
+    }
+
+    #[test]
+    fn signals_report_whether_a_typed_note_waits() {
+        let source = ContextSource::new();
+        let signal = source.signal();
+        assert!(!signal.note_waits() && !ContextSignal::never().note_waits());
+        source.set_note_waits(true);
+        assert!(signal.note_waits() && source.call_signal().note_waits());
+        source.set_note_waits(false);
+        assert!(!signal.note_waits());
     }
 }

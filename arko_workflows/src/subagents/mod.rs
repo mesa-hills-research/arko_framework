@@ -51,7 +51,7 @@
 //! to a run that is gone. A message to one restarts it.
 
 mod board;
-pub(crate) use board::CONTEXT_ARRIVED;
+pub(crate) use board::context_arrived_says;
 #[cfg(any(unix, windows))]
 mod liveness;
 #[cfg(any(unix, windows))]

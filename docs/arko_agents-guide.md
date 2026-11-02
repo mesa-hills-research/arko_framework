@@ -680,9 +680,16 @@ earlier call of the turn ran, say) fires it as soon as the call starts. Both run
 it, a Claude Code agent's calls of arko tools included. Context the host's turn context
 source keeps for the boundary (`TurnContextSource::wakes_calls`) doesn't fire it.
 
+A Claude Code agent reads a note the user typed, sent as their message, only after every
+call of the response it came in. So a call that starts while such a note waits (a wait the
+model asked for after another call in the same response, say) sees the signal fire at once.
+`note_waits()` says whether a note the user typed waits for the model, so a wait can say a
+note ended it.
+
 A host or a test that runs a tool itself makes the signal with `ContextSource::new()`, sets
-the field from its `signal()`, and fires it with `notify()`. `TaskContext::new` gives a
-signal that never fires.
+the field from its `signal()`, and fires it with `notify()`, after
+`set_note_waits(true)` for a note the user typed. `TaskContext::new` gives a signal that
+never fires.
 
 ### Moving calls to the background
 

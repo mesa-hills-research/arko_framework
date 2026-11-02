@@ -2270,7 +2270,9 @@ async fn a_cut_after_a_handover_keeps_the_subagents_started_before_it() {
 }
 
 /// Moving `wait_for_agents` to the background ends it, and so does context
-/// that arrives for the run, each after the reports it collected.
+/// that arrives for the run, each after the reports it collected. Context
+/// that is a note the user typed, which the runtime handed over but the
+/// model hasn't read, ends it as a note's arrival.
 #[tokio::test]
 async fn a_wait_ends_when_moved_or_when_context_arrives() {
     // r1 works until the server is dropped, and r2 finishes at once.
@@ -2333,18 +2335,23 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
         "{result}"
     );
 
-    let arrivals = arko_agents::ContextSource::new();
-    let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
-    task_context.context_arrived = arrivals.signal();
-    let (result, ()) = within(async {
-        tokio::join!(tool.execute(&task_context, all), async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            arrivals.notify();
+    for note in [false, true] {
+        let arrivals = arko_agents::ContextSource::new();
+        let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+        task_context.context_arrived = arrivals.signal();
+        let (result, ()) = within(async {
+            tokio::join!(tool.execute(&task_context, all.clone()), async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                arrivals.set_note_waits(note);
+                arrivals.notify();
+            })
         })
-    })
-    .await;
-    assert_eq!(
-        result.unwrap(),
-        format!("{} Still running: r1.", board::CONTEXT_ARRIVED)
-    );
+        .await;
+        let said = if note {
+            board::NOTE_ARRIVED
+        } else {
+            board::CONTEXT_ARRIVED
+        };
+        assert_eq!(result.unwrap(), format!("{said} Still running: r1."));
+    }
 }
