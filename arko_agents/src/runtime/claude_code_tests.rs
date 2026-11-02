@@ -6561,10 +6561,11 @@ async fn a_part_never_acknowledged_leaves_its_note_whole_for_the_next_input() {
 /// Once the first part's call is reported, the conversation holds the part
 /// with its marker and the queue starts with the rest, in one step. Every
 /// snapshot holds the note once or not at all, and never its mark without
-/// it. Claude Code exiting with the rest in flight leaves the rest, and the
-/// typed note sent with its hook, pending in order for the next input.
+/// it. The typed note behind it goes with the first part's hook and is
+/// recorded once the CLI takes it in. Claude Code exiting with the rest in
+/// flight leaves the rest pending for the next input.
 #[tokio::test]
-async fn an_acknowledged_part_leaves_its_rest_and_the_note_behind_it_pending() {
+async fn an_acknowledged_part_leaves_its_rest_pending_and_its_note_recorded() {
     let fake = Fake::new(json!([
         [
             {"tool": "Grep", "input": {"pattern": "a"}},
@@ -6583,13 +6584,20 @@ async fn an_acknowledged_part_leaves_its_rest_and_the_note_behind_it_pending() {
     let runtime = with_updates(&recorder, vec![noted(&note, TYPED_NOTE)]);
     let mut run = start_with(task, runtime);
     until_paused(&mut run).await;
-    // The session's end puts the note in the queue.
-    let saved = saved_once(&recorder, |task| task.pending_context_injections.len() == 2).await;
+    let saved = saved_once(&recorder, |task| {
+        task.pending_context_injections.len() == 1
+            && texts(task).iter().any(|text| text.contains(TYPED_NOTE))
+    })
+    .await;
     let snapshots = recorder.snapshots();
     for (task, _) in &snapshots {
         let held = held(task);
         if task.context_marks.contains_key("notes") {
-            assert_eq!(held, format!("{note}\n\n{TYPED_NOTE}"));
+            assert!(
+                held == format!("{note}\n\n{TYPED_NOTE}")
+                    || held_without_note_between_parts(task) == note,
+                "{held}"
+            );
         } else {
             assert!(held.is_empty() || held == note, "{held}");
         }
@@ -6601,20 +6609,21 @@ async fn an_acknowledged_part_leaves_its_rest_and_the_note_behind_it_pending() {
             .is_some_and(|rest| rest.given > 0)
             && texts(task).iter().any(|text| text.ends_with(GOES_ON))
     }));
-    assert_eq!(saved.pending_context_injections.len(), 2);
     assert!(saved.pending_context_injections[0].given > 0);
-    assert_eq!(saved.pending_context_injections[1], TYPED_NOTE);
     assert_eq!(saved.context_marks.get("notes"), Some(&3));
-    assert_eq!(fake.logged("midturn").len(), 1, "sent with the rest's hook");
+    assert_eq!(
+        fake.logged("midturn").len(),
+        1,
+        "sent with the first part's hook"
+    );
     run.commands
         .send(UserCommand::ContinueAfterError { note: None })
         .await
         .unwrap();
     let (task, _) = run.finish().await;
     let input = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
-    let rest = input.find(CONTINUED).unwrap();
-    assert!(rest < input.find(TYPED_NOTE).unwrap());
-    assert_eq!(held(&task), format!("{note}\n\n{TYPED_NOTE}"));
+    assert!(input.contains(CONTINUED) && !input.contains(TYPED_NOTE));
+    assert_eq!(held_without_note_between_parts(&task), note);
 }
 
 /// Two calls that run side by side get a hook each. The later call's
@@ -6665,10 +6674,27 @@ async fn hooks_of_parallel_calls_reported_out_of_order_keep_their_order() {
     assert!(task.pending_context_injections.is_empty());
 }
 
-/// A typed note behind a long note's rest isn't sent as the user's message
-/// until a hook carries the rest, and it comes after the rest.
+/// Where each of `fake`'s log entries named `event` is in its log.
+fn logged_at(fake: &Fake, event: &str) -> Vec<usize> {
+    fake.log()
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry["event"] == event)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// `held(task)` with the typed note given between a split item's parts
+/// taken out, so the item reads whole again.
+fn held_without_note_between_parts(task: &Task) -> String {
+    held(task).replace(&format!("{GOES_ON}\n\n{TYPED_NOTE}\n\n{CONTINUED}"), "")
+}
+
+/// A typed note behind a long note goes as the user's message with the
+/// first call's hook, which carries the long note's first part, so the model
+/// reads it with that call's result. The rest comes with the next hook.
 #[tokio::test]
-async fn a_typed_note_waits_until_a_hook_carries_what_is_ahead_of_it() {
+async fn a_typed_note_goes_with_the_first_hook_while_a_split_update_waits() {
     let fake = Fake::new(json!([[
         {"tool": "Grep", "input": {"pattern": "a"}},
         {"tool": "Grep", "input": {"pattern": "b"}},
@@ -6685,29 +6711,129 @@ async fn a_typed_note_waits_until_a_hook_carries_what_is_ahead_of_it() {
     let runtime = with_updates(&recorder, vec![noted(&note, TYPED_NOTE)]);
     let (task, _) = start_with(task, runtime).finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    // Sent with the second call's hook. The fake logs it as it reads it,
-    // which can be before it reads the hook's answer.
-    let events = fake
-        .log()
-        .iter()
-        .map(|entry| entry["event"].as_str().unwrap_or_default().to_string())
-        .collect::<Vec<_>>();
-    let at = |event: &str| {
-        events
-            .iter()
-            .enumerate()
-            .filter(|(_, logged)| *logged == event)
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
-    };
-    let sent = at("midturn");
+    // Sent with the first call's hook, before the second call starts.
+    let sent = logged_at(&fake, "midturn");
     assert_eq!(sent.len(), 1);
-    assert!(sent[0] > at("pre")[1], "{events:?}");
+    assert!(sent[0] < logged_at(&fake, "pre")[1], "{:?}", fake.log());
     let hooks = hooked(&fake);
+    assert!(hooks[0].ends_with(GOES_ON));
     assert!(hooks[1].starts_with(&format!("# Workflow context update\n\n{CONTINUED}")));
     assert!(!hooks.concat().contains("Use tabs."));
-    assert_eq!(held(&task), format!("{note}\n\n{TYPED_NOTE}"));
+    // The conversation holds what the model read, in its order.
+    assert_eq!(held(&task).matches(TYPED_NOTE).count(), 1);
+    assert_eq!(held_without_note_between_parts(&task), note);
+    assert!(task.pending_context_injections.is_empty());
     assert_eq!(task.context_marks.get("notes"), Some(&3));
+}
+
+/// A source that gives `typed` as the user's note when it's first asked
+/// after `posted` is set.
+struct NoteOnceSet {
+    posted: std::sync::atomic::AtomicBool,
+    typed: &'static str,
+}
+
+impl crate::runtime::TurnContextSource for NoteOnceSet {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        self.posted
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            .then(|| noted("", self.typed))
+    }
+}
+
+/// The user types a note while an arko call waits, and the reports that end
+/// the wait are longer than a hook holds. The note goes with the call's own
+/// hook, beside the reports' first part, and the rest follows in the next.
+#[tokio::test]
+async fn a_note_typed_during_a_wait_whose_reports_split_goes_with_its_result() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__waits_for_context", "input": {}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["waits_for_context", "Grep"]),
+        "Wait for the reports.".into(),
+        fake.workspace(),
+        None,
+    );
+    let tool = Arc::new(WaitsForContext::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone());
+    let source = Arc::new(NoteOnceSet {
+        posted: false.into(),
+        typed: TYPED_NOTE,
+    });
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_turn_context(source.clone())
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    tokio::time::timeout(Duration::from_secs(20), tool.started.notified())
+        .await
+        .expect("the call runs");
+    source
+        .posted
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let reports = long_note().replace("long note", "workers' reports");
+    run.commands
+        .send(UserCommand::InjectContext {
+            content: reports.clone(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    assert_eq!(posts[0]["output"], "context arrived");
+    let hooks = hooked(&fake);
+    assert!(hooks[0].ends_with(GOES_ON) && hooks[1].contains(CONTINUED));
+    let sent = logged_at(&fake, "midturn");
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0] < logged_at(&fake, "pre")[1], "{:?}", fake.log());
+    assert_eq!(fake.logged("midturn")[0]["text"], TYPED_NOTE);
+    let held = held_without_note_between_parts(&task);
+    assert_eq!(held, reports);
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// A note the user types while the rest of a split update waits for the
+/// next hook goes with that hook, though the source was asked before the
+/// hooks caught up.
+#[tokio::test]
+async fn a_note_typed_while_a_rest_waits_goes_with_the_next_hook() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        {"tool": "Grep", "input": {"pattern": "c"}},
+        complete("Done"),
+    ]]));
+    let note = long_note();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    // The long note at the first hook, the typed one at the next.
+    let runtime = with_updates(&recorder, vec![noted(&note, ""), noted("", TYPED_NOTE)]);
+    let (task, _) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let sent = logged_at(&fake, "midturn");
+    assert_eq!(sent.len(), 1);
+    let pre = logged_at(&fake, "pre");
+    assert!(pre[1] < sent[0] && sent[0] < pre[2], "{:?}", fake.log());
+    let hooks = hooked(&fake);
+    assert!(hooks[1].starts_with(&format!("# Workflow context update\n\n{CONTINUED}")));
+    assert_eq!(held(&task), format!("{note}\n\n{TYPED_NOTE}"));
 }
 
 /// A long item saved as bare text, before items had ids, is never split

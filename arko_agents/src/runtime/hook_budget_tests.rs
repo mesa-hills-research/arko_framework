@@ -180,41 +180,103 @@ fn hooks_reported_out_of_order_leave_the_list_in_order() {
     assert!(list.items.is_empty());
 }
 
+/// A typed item goes with the first hook, beside the first part of a long
+/// item ahead of it, and the rest comes with the next hook. Nothing behind
+/// the note goes until it is done.
 #[test]
-fn a_typed_item_waits_until_the_hooks_carry_what_is_ahead_of_it() {
+fn a_typed_item_goes_with_the_first_hook_ahead_of_a_split_items_rest() {
     let mut delivery = Delivery::default();
     let mut list = List::default();
     list.push(PendingKind::Context, &"x".repeat(16_000), &["note:2"]);
     list.push(PendingKind::Typed, "Use tabs.", &["note:3"]);
     list.push(PendingKind::Context, "Later mail.", &["mail:1"]);
-    delivery.fill(&list.items, "c1").unwrap();
-    assert!(
-        delivery.due_note(&list.items).is_none(),
-        "a rest is ahead of it"
-    );
-    delivery.reported(&mut list.items, "c1");
-    let rest = delivery.fill(&list.items, "c2").unwrap();
-    assert!(rest.contains(CONTINUED));
-    assert!(
-        !rest.contains("Later mail."),
-        "nothing behind the note goes"
-    );
+    let first = delivery.fill(&list.items, "c1").unwrap();
+    assert!(first.ends_with(GOES_ON));
     assert_eq!(
         delivery.due_note(&list.items),
         Some((2, "Use tabs.".to_string()))
     );
-    delivery.note_sent("c2", "u1".into());
-    // Behind a note sent, nothing goes until it is done.
-    assert!(delivery.fill(&list.items, "c3").is_none());
-    assert!(delivery.due_note(&list.items).is_none());
+    delivery.note_sent("c1", "u1".into());
     assert_eq!(
         delivery.note_settled(&mut list.items, "u1", false),
         Verdict::Started
     );
-    let (done, _) = delivery.reported(&mut list.items, "c2");
-    assert!(done[0].text.ends_with("\n\nUse tabs."));
-    assert_eq!(done[0].ids, ["note:3"]);
-    assert_eq!(list.texts(), ["Later mail."]);
+    let (done, _) = delivery.reported(&mut list.items, "c1");
+    assert!(done[0].text.ends_with(&format!("{GOES_ON}\n\nUse tabs.")));
+    assert_eq!(done[0].ids, ["note:2", "note:3"]);
+    // The note left the list, and the rest and what was behind the note
+    // stay in their order.
+    assert_eq!(list.items.len(), 2);
+    assert!(list.items[0].given > 0);
+    assert_eq!(list.items[1].text, "Later mail.");
+    let rest = delivery.fill(&list.items, "c2").unwrap();
+    assert!(rest.contains(CONTINUED) && rest.ends_with("Later mail."));
+}
+
+/// A typed item sent waits for its verdict, and nothing behind it goes
+/// meanwhile, a later typed item included.
+#[test]
+fn behind_a_typed_item_sent_nothing_goes_until_it_is_done() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    list.push(PendingKind::Context, &"x".repeat(16_000), &[]);
+    list.push(PendingKind::Typed, "Use tabs.", &[]);
+    list.push(PendingKind::Context, "Later mail.", &[]);
+    list.push(PendingKind::Typed, "And spaces.", &[]);
+    delivery.fill(&list.items, "c1").unwrap();
+    delivery.due_note(&list.items).unwrap();
+    delivery.note_sent("c1", "u1".into());
+    delivery.reported(&mut list.items, "c1");
+    let rest = delivery.fill(&list.items, "c2").unwrap();
+    assert!(!rest.contains("Later mail."), "{rest}");
+    assert!(delivery.due_note(&list.items).is_none());
+    assert!(matches!(
+        delivery.note_settled(&mut list.items, "u1", false),
+        Verdict::Done(_)
+    ));
+    delivery.reported(&mut list.items, "c2");
+    assert_eq!(
+        body(&delivery.fill(&list.items, "c3").unwrap()),
+        "Later mail."
+    );
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((4, "And spaces.".to_string()))
+    );
+}
+
+/// What holds a hook's context back holds no typed item behind it, namely a
+/// denial's rest held for its call and a long item saved as bare text.
+#[test]
+fn a_typed_item_goes_past_context_held_back() {
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    let rest = list.push(
+        PendingKind::DenialRest { call: "d1".into() },
+        "The rest of a denial.",
+        &[],
+    );
+    delivery.hold_rest("d1", rest);
+    list.push(PendingKind::Typed, "Use tabs.", &[]);
+    assert!(delivery.fill(&list.items, "c1").is_none());
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((2, "Use tabs.".to_string()))
+    );
+
+    let mut delivery = Delivery::default();
+    let mut list = List::default();
+    list.items.push(PendingContext {
+        id: 1,
+        ..PendingContext::from("a legacy note line\n".repeat(650).as_str())
+    });
+    list.next = 1;
+    list.push(PendingKind::Typed, "Use tabs.", &[]);
+    assert!(delivery.fill(&list.items, "c1").is_none());
+    assert_eq!(
+        delivery.due_note(&list.items),
+        Some((2, "Use tabs.".to_string()))
+    );
 }
 
 #[test]
@@ -441,18 +503,21 @@ impl Random {
 /// hooks reported out of order, the CLI's verdicts in either order and
 /// sessions that end, from small to 40,000 bytes. Every hook stays within
 /// the budget, nothing in the list moves, and the records, then the next
-/// input, give back every item exactly once and in the list's order,
-/// markers taken out.
+/// input, give back every item exactly once. Context items come in the
+/// list's order, markers taken out, and typed items in theirs. A typed item
+/// may come before context ahead of it in the list, never after anything
+/// behind it.
 #[test]
 fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
     // What the runs exercised.
-    let (mut splits, mut notes, mut late, mut rests) = (0, 0, 0, 0);
+    let (mut splits, mut notes, mut late, mut rests, mut early) = (0, 0, 0, 0, 0);
     for seed in 1..=400u64 {
         let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut delivery = Delivery::default();
         let mut list = List::default();
         // The items as the model should read them, in the list's order.
         let mut expected: Vec<(u64, String)> = Vec::new();
+        let mut typed: HashSet<u64> = HashSet::new();
         let mut given: Vec<String> = Vec::new();
         // The items the records hold, part by part, in order.
         let mut order: Vec<u64> = Vec::new();
@@ -460,26 +525,54 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         let mut sent: Vec<String> = Vec::new();
         let mut calls = 0;
         for step in 0..random.below(50) + 1 {
-            // The items recorded left the list from its front, and nothing
-            // in it moved.
-            let recorded = expected.len() - list.items.len();
-            let tail = expected[recorded..]
-                .iter()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>();
+            // Nothing in the list moved, and only what a record holds left
+            // it.
             let ids = list.items.iter().map(|item| item.id).collect::<Vec<_>>();
-            assert_eq!(tail, ids, "seed {seed}, step {step}");
-            let mut seen = order.clone();
-            seen.dedup();
-            let first = expected
+            let kept = expected
                 .iter()
                 .map(|(id, _)| *id)
-                .take(seen.len())
+                .filter(|id| ids.contains(id))
                 .collect::<Vec<_>>();
-            assert_eq!(
-                seen, first,
-                "seed {seed}, step {step}: recorded out of order"
+            assert_eq!(kept, ids, "seed {seed}, step {step}");
+            assert!(
+                expected
+                    .iter()
+                    .all(|(id, _)| ids.contains(id) || order.contains(id)),
+                "seed {seed}, step {step}: an item left unrecorded"
             );
+            // Each item once, where its first part was recorded.
+            let mut seen: Vec<u64> = Vec::new();
+            for id in &order {
+                if !seen.contains(id) {
+                    seen.push(*id);
+                }
+            }
+            let place = |id: &u64| expected.iter().position(|(item, _)| item == id).unwrap();
+            for kind_typed in [false, true] {
+                let seen_of = seen
+                    .iter()
+                    .filter(|id| typed.contains(id) == kind_typed)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let first = expected
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .filter(|id| typed.contains(id) == kind_typed)
+                    .take(seen_of.len())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    seen_of, first,
+                    "seed {seed}, step {step}: recorded out of order"
+                );
+            }
+            for (at, id) in seen.iter().enumerate() {
+                if typed.contains(id) {
+                    assert!(
+                        seen[..at].iter().all(|before| place(before) < place(id)),
+                        "seed {seed}, step {step}: an item behind a typed one came first"
+                    );
+                }
+            }
             calls += 1;
             let call = format!("c{calls}");
             let op = random.below(9);
@@ -492,8 +585,15 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                 2 => {
                     for kind in [PendingKind::Context, PendingKind::Typed] {
                         if random.below(2) == 0 {
-                            let text = random.text(20_000);
+                            let is_typed = kind == PendingKind::Typed;
+                            let mut text = random.text(20_000);
+                            if is_typed {
+                                text = typed_text(list.next + 1, &text);
+                            }
                             let id = list.push(kind, &text, &[]);
+                            if is_typed {
+                                typed.insert(id);
+                            }
                             expected.push((id, text));
                         }
                     }
@@ -504,9 +604,10 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                     if let Some(rest) = rest {
                         rests += 1;
                         let at = delivery.rest_place(&list.items);
-                        // The items recorded so far left the list from its
-                        // front, so the list's place is after them.
-                        let place = expected.len() - list.items.len() + at;
+                        // Before the item now at that place, or at the end.
+                        let place = list.items.get(at).map_or(expected.len(), |item| {
+                            expected.iter().position(|(id, _)| *id == item.id).unwrap()
+                        });
                         let id = list.insert(
                             at,
                             PendingKind::DenialRest { call: call.clone() },
@@ -522,6 +623,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                     late += 1;
                     let late = unreported.remove(random.below(unreported.len()));
                     for done in delivery.reported(&mut list.items, &late).0 {
+                        early += typed_early(&done, &typed, &list, &expected);
                         order.extend(done.parts.iter().map(|part| part.item));
                         given.push(done.text);
                     }
@@ -532,6 +634,7 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
                     if let Verdict::Done(done) =
                         delivery.note_settled(&mut list.items, &uuid, cancel)
                     {
+                        early += typed_early(&done, &typed, &list, &expected);
                         order.extend(done.parts.iter().map(|part| part.item));
                         given.push(done.text);
                     }
@@ -579,12 +682,20 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         }
         delivery.settle();
         given.extend(list.items.iter().map(|item| shown_from(item, item.given)));
+        let typed_texts = expected
+            .iter()
+            .filter(|(id, _)| typed.contains(id))
+            .map(|(_, text)| text.clone())
+            .collect::<Vec<_>>();
+        let (context, typed_given) = split_typed(&given, &typed_texts);
+        assert_eq!(typed_given, typed_texts, "seed {seed}");
         let expected = expected
             .iter()
+            .filter(|(id, _)| !typed.contains(id))
             .map(|(_, text)| text.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let got = stream(&given);
+        let got = stream(&context);
         assert!(
             got == expected,
             "seed {seed}: given {} bytes, expected {}",
@@ -593,9 +704,73 @@ fn every_hook_is_within_the_budget_and_nothing_is_lost_or_reordered() {
         );
     }
     assert!(
-        splits > 100 && notes > 50 && late > 50 && rests > 50,
-        "{splits} {notes} {late} {rests}"
+        splits > 100 && notes > 50 && late > 50 && rests > 50 && early > 20,
+        "{splits} {notes} {late} {rests} {early}"
     );
+}
+
+/// How many typed items `done` holds that went while an item ahead of them
+/// in the list still waits.
+fn typed_early(
+    done: &Delivered,
+    typed: &HashSet<u64>,
+    list: &List,
+    expected: &[(u64, String)],
+) -> usize {
+    let place = |id: u64| expected.iter().position(|(item, _)| *item == id);
+    done.parts
+        .iter()
+        .filter(|part| typed.contains(&part.item))
+        .filter(|part| {
+            list.items
+                .iter()
+                .any(|item| place(item.id) < place(part.item))
+        })
+        .count()
+}
+
+/// A typed item's text, which starts with a mark no other text has, so a
+/// test can find it in what the model was given.
+fn typed_text(id: u64, text: &str) -> String {
+    format!("\u{2}typed {id}\u{2} {text}")
+}
+
+/// `texts`, what the model was given in order, with the typed items
+/// `typed` taken out (each with the separator beside it), and the typed
+/// items in the order they came. A text left with nothing but its heading
+/// is left out.
+fn split_typed(texts: &[String], typed: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut context = Vec::new();
+    let mut came = Vec::new();
+    for text in texts {
+        let headed = text.starts_with(&heading());
+        let mut rest = body(text);
+        let mut found = typed
+            .iter()
+            .filter_map(|note| rest.find(note.as_str()).map(|at| (at, note.clone())))
+            .collect::<Vec<_>>();
+        found.sort();
+        came.extend(found.iter().map(|(_, note)| note.clone()));
+        for (at, note) in found.iter().rev() {
+            let end = at + note.len();
+            let (from, to) = if rest[..*at].ends_with("\n\n") {
+                (at - 2, end)
+            } else if rest[end..].starts_with("\n\n") {
+                (*at, end + 2)
+            } else {
+                (*at, end)
+            };
+            rest.replace_range(from..to, "");
+        }
+        if !rest.is_empty() {
+            context.push(if headed {
+                format!("{}{rest}", heading())
+            } else {
+                rest
+            });
+        }
+    }
+    (context, came)
 }
 
 /// What a task holds of host item `id`, counted from its records and its
@@ -627,8 +802,9 @@ fn holdings(task: &crate::task::Task, id: &str) -> (usize, usize) {
 ///   whole in a record or waiting, and none past it,
 /// - every record is what the model was shown, a hook's text or a typed
 ///   item's message,
-/// - the conversation in the end holds the source's texts once each, in the
-///   order it handed them out.
+/// - the conversation in the end holds the source's texts once each, its
+///   context in the order it handed them out, and its typed items in
+///   theirs.
 #[test]
 fn a_task_restored_from_any_saved_state_holds_every_item_once() {
     let config = crate::agent_config::AgentConfig::builder(
@@ -706,11 +882,11 @@ fn a_task_restored_from_any_saved_state_holds_every_item_once() {
                     for kind in [PendingKind::Context, PendingKind::Typed] {
                         if random.below(3) > 0 || kind == PendingKind::Context {
                             let seq = accepted.len() as u64 + 1;
-                            let text = random.text(if kind == PendingKind::Typed {
-                                3_000
+                            let text = if kind == PendingKind::Typed {
+                                typed_text(seq, &random.text(3_000))
                             } else {
-                                30_000
-                            });
+                                random.text(30_000)
+                            };
                             queue(&mut task, seq, &kind, &text);
                             accepted.push((seq, kind, text));
                         }
@@ -832,8 +1008,17 @@ fn a_task_restored_from_any_saved_state_holds_every_item_once() {
             .map(str::to_string)
             .chain(rest)
             .collect::<Vec<_>>();
+        // The typed items in their order, and the rest in theirs.
+        let typed = accepted
+            .iter()
+            .filter(|(_, kind, _)| *kind == PendingKind::Typed)
+            .map(|(_, _, text)| text.clone())
+            .collect::<Vec<_>>();
+        let (messages, typed_given) = split_typed(&messages, &typed);
+        assert_eq!(typed_given, typed, "seed {seed}");
         let expected = accepted
             .iter()
+            .filter(|(_, kind, _)| *kind != PendingKind::Typed)
             .map(|(_, _, text)| text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");

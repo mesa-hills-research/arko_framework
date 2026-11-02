@@ -1867,9 +1867,10 @@ impl ClaudeCodeRun {
     /// a PreToolUse hook or a permission answer (`denial`), or else a
     /// PostToolUse hook's context. A PostToolUse hook carries the task's
     /// pending context from the first item not in a hook already, as much as
-    /// fits, and the source is asked for its update only once nothing waits
-    /// outside a hook. A denial too long for the budget is cut, and its rest
-    /// joins the pending context, held until the call's result. The task is
+    /// fits. The source is asked for its update once nothing waits outside
+    /// a hook, or while no typed item waits. A denial too long for the
+    /// budget is cut, and its rest joins the pending context, held until
+    /// the call's result. The task is
     /// saved with the rest before the denial goes out, since nothing could
     /// give it again. `None` when a PostToolUse hook carries nothing. The
     /// caller of a PostToolUse hook checks [`context_waits`](Self::context_waits)
@@ -1896,10 +1897,11 @@ impl ClaudeCodeRun {
                 Some(text)
             }
             None => {
-                if self
-                    .delivery
-                    .caught_up(&self.task.pending_context_injections)
-                {
+                // While context waits for later hooks, the source is asked
+                // too when no typed item waits, so a note the user typed
+                // since goes at this hook.
+                let list = &self.task.pending_context_injections;
+                if self.delivery.caught_up(list) || !self.delivery.holds_note(list) {
                     self.take_update(true);
                 }
                 call.and_then(|call| {
@@ -3310,8 +3312,10 @@ impl ClaudeCodeRun {
         }
         let call = tool_use_id.as_deref();
         let text = self.hook_text(call, None).await;
-        // What the user typed goes as their own message once the hooks carry
-        // everything ahead of it. It stays pending until both its hook is
+        // What the user typed goes as their own message at this hook, even
+        // while context ahead of it waits for later hooks (the rest of a
+        // split item, a held denial's rest, a long item saved as bare
+        // text). It stays pending until both its hook is
         // acknowledged and the CLI took the message into the turn (see
         // `note_settled`).
         if let Some(call) = call

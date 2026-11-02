@@ -1127,8 +1127,9 @@ Besides answers to the waiting states, a running task accepts:
   workflow marks the newest note (`notes`) and recovers a run's notes from that mark.
   `TurnContext::user_content` is the part of an update the user typed themselves (a
   workflow's operator notes), which follows `content` in the same message. During a turn, a
-  Claude Code agent gets it as a message from the user (`ClaudeSession::send_human`) at a
-  tool boundary, once the hooks carry everything queued before it. It stays pending, and
+  Claude Code agent gets it as a message from the user (`ClaudeSession::send_human`) at the
+  next tool boundary, even while context queued before it waits for later hooks (the rest
+  of a split update, for one). It stays pending, and
   nothing behind it goes, until both its hook is acknowledged and the CLI says it took the
   message into the turn (`started`, at the next tool boundary). The CLI says `completed`
   only when that turn ends, which counts too when no `started` came before it. One the CLI

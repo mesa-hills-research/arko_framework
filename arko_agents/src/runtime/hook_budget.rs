@@ -21,6 +21,11 @@
 //!    ([`unidentified`](crate::PendingContext::unidentified)) is never
 //!    split, and waits whole for the next input.
 //!
+//! A typed item goes as the user's message at the first hook after it joins
+//! the list, even while context ahead of it waits for later hooks, so the
+//! model reads it with that call's result. Nothing behind it goes until it
+//! is done.
+//!
 //! A hook leaves the list as it was. Once Claude Code reports its call's
 //! results, in the order the hooks were given, the hook's text joins the
 //! conversation with a record of the items it held, and in the same step a
@@ -224,6 +229,11 @@ impl Delivery {
             .is_none_or(|item| self.waits_for_input(item))
     }
 
+    /// Whether a typed item waits in `list`, sent or not.
+    pub(super) fn holds_note(&self, list: &[PendingContext]) -> bool {
+        list.iter().any(|item| self.typed(item))
+    }
+
     /// Where a denial's rest joins the list, behind the items in hooks, an
     /// item whose first part the model has read, and the rests already at
     /// the front, ahead of what waits.
@@ -301,16 +311,16 @@ impl Delivery {
         Some(text)
     }
 
-    /// The typed item that goes now as the user's message, once the hooks
-    /// carry everything ahead of it, with its text. It is sent with
+    /// The typed item that goes now as the user's message, with its text.
+    /// It goes at the first hook after it joins the list, whatever context
+    /// is ahead of it, since its message has no budget of its own to wait
+    /// for. Typed items go one at a time, in order. It is sent with
     /// [`note_sent`](Self::note_sent) or goes as context with
     /// [`note_unsent`](Self::note_unsent).
     pub(super) fn due_note(&mut self, list: &[PendingContext]) -> Option<(u64, String)> {
         // Behind a typed item sent, nothing goes until it is done.
-        let item = list
-            .iter()
-            .find(|item| self.in_flight_end(item.id) != Some(item.text.len()))?;
-        if !self.typed(item) || self.sent(item.id) {
+        let item = list.iter().find(|item| self.typed(item))?;
+        if self.sent(item.id) {
             return None;
         }
         self.sending = Some(item.id);
