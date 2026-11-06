@@ -1634,6 +1634,215 @@ async fn a_response_older_than_the_announcement_does_not_repeat_it() {
     .await;
 }
 
+/// Every account exhausted, then `renew` lets one serve again without a
+/// response accepted (returning that account's id), and it's refused at
+/// once. That's announced again, once.
+async fn announced_again_after(renew: impl FnOnce(&ChatGptAccounts, &Mock) -> &'static str) {
+    let mock = Mock::start().await;
+    let (accounts, events) = pool(&mock);
+    let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+    let config = GenerationConfig::default();
+    let now = unix_now();
+    mock.expect([
+        answer(PRIMARY, "/responses", 429, &usage_limit(now + 3600)),
+        answer(SECONDARY, "/responses", 429, &usage_limit(now + 7200)),
+    ]);
+    accounts
+        .generate_text(&conversation(), &config)
+        .await
+        .unwrap_err();
+    assert_eq!(all_exhausted_count(&take(&events)), 1);
+
+    let renewed = renew(&accounts, &mock);
+    mock.expect([answer(
+        renewed,
+        "/responses",
+        429,
+        &usage_limit(unix_now() + 3600),
+    )]);
+    for _ in 0..2 {
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit(), "{error}");
+    }
+    let events = take(&events);
+    assert_eq!(all_exhausted_count(&events), 1, "{events:#?}");
+    assert_eq!(mock.unanswered(), 0);
+}
+
+#[tokio::test]
+async fn every_account_exhausted_again_after_mark_usable_is_announced_once() {
+    within(announced_again_after(|accounts, _| {
+        accounts.mark_usable("primary").unwrap();
+        PRIMARY
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn every_account_exhausted_again_after_an_account_is_added_is_announced_once() {
+    within(announced_again_after(|accounts, mock| {
+        let mut list = accounts.accounts().to_vec();
+        list.push(account("third", THIRD, &mock.url));
+        accounts.set_accounts(list).unwrap();
+        THIRD
+    }))
+    .await;
+}
+
+/// An account marked usable after a request's last refusal, before that
+/// request gives up, is not announced as exhausted with the others, and
+/// serves the next request.
+#[tokio::test]
+async fn an_account_marked_usable_as_a_request_gives_up_is_not_announced_exhausted() {
+    within(async {
+        let mock = Mock::start().await;
+        let events: Events = Arc::default();
+        let list: Arc<Mutex<Option<ChatGptAccounts>>> = Arc::default();
+        let (recorded, marker) = (events.clone(), list.clone());
+        let accounts = ChatGptAccounts::new([
+            account("primary", PRIMARY, &mock.url),
+            account("secondary", SECONDARY, &mock.url),
+        ])
+        .unwrap()
+        .with_status_check_interval(Duration::from_secs(3600))
+        .with_usage_url(format!("{}/wham/usage", mock.url))
+        .with_observer(move |event| {
+            recorded.lock().unwrap().push(event.clone());
+            // The operator marks the primary usable as the secondary is
+            // refused, after the request tried both.
+            if matches!(event, ChatGptAccountEvent::Exhausted { account, .. } if account == "secondary")
+            {
+                let accounts = marker.lock().unwrap().clone();
+                if let Some(accounts) = accounts {
+                    accounts.mark_usable("primary").unwrap();
+                }
+            }
+        });
+        *list.lock().unwrap() = Some(accounts.clone());
+        let config = GenerationConfig::default();
+        let now = unix_now();
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(now + 3600)),
+            answer(SECONDARY, "/responses", 429, &usage_limit(now + 7200)),
+        ]);
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit(), "{error}");
+        let seen = take(&events);
+        assert!(
+            matches!(
+                seen[..],
+                [
+                    ChatGptAccountEvent::Exhausted { .. },
+                    ChatGptAccountEvent::Exhausted { .. },
+                    ChatGptAccountEvent::Usable {
+                        reason: UsableReason::MarkedUsable,
+                        ..
+                    }
+                ]
+            ),
+            "{seen:#?}"
+        );
+
+        mock.expect([answer(PRIMARY, "/responses", 200, &turn("enc_a", "a"))]);
+        let response = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        assert_eq!(response.model_call_usage.account.as_deref(), Some("primary"));
+
+        // Nothing was announced, so every account exhausted now is news.
+        mock.expect([answer(
+            PRIMARY,
+            "/responses",
+            429,
+            &usage_limit(unix_now() + 3600),
+        )]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert_eq!(all_exhausted_count(&take(&events)), 1);
+        assert_eq!(mock.unanswered(), 0);
+        // (The observer holds a clone of the list.)
+        list.lock().unwrap().take();
+    })
+    .await;
+}
+
+/// A check whose answer comes after a trial of the account failed for good
+/// leaves the account aside.
+#[tokio::test]
+async fn a_check_older_than_a_failed_trial_leaves_the_account_aside() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let clock = Arc::new(Mutex::new(SystemTime::now()));
+        accounts.clock = Some(clock.clone());
+        let config = GenerationConfig::default();
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_0", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        mock.take();
+        take(&events);
+
+        // A check starts, and its answer (allowed) comes late.
+        mock.expect([
+            answer(PRIMARY, "/wham/usage", 200, &usage_status(true, false))
+                .after(Duration::from_millis(500)),
+        ]);
+        let check = {
+            let accounts = accounts.clone();
+            tokio::spawn(async move { accounts.check_now().await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Meanwhile the reset time passes, and trying the primary fails for
+        // good.
+        *clock.lock().unwrap() += Duration::from_secs(660);
+        mock.expect([
+            answer(
+                PRIMARY,
+                "/responses",
+                403,
+                r#"{"error":{"code":"permission_denied","message":"no"}}"#,
+            ),
+            answer(SECONDARY, "/responses", 200, &turn("enc_1", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        check.await.unwrap();
+
+        // The check's answer is older than that failure.
+        assert_eq!(accounts.statuses()[0].retry, None);
+        mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_2", "s"))]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        let tried: Vec<String> = responses(&mock.take())
+            .iter()
+            .map(|seen| seen.account.clone())
+            .collect();
+        assert_eq!(tried, [PRIMARY, SECONDARY, SECONDARY]);
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
 /// Statuses read an account whose reset time passed as the next request
 /// does, as one it tries.
 #[tokio::test]
