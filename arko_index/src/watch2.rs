@@ -1313,6 +1313,18 @@ impl Watcher2 {
     /// `snap.pending`.
     fn next_pending(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         self.write_report()?;
+        let found = self.wait_and_reconcile(timeout);
+        if found.is_err() {
+            // The events are out of the kernel's queue, and the pass may have stopped
+            // midway, so the next call reconciles the whole tree.
+            self.pending_full = true;
+        }
+        found
+    }
+
+    /// Waits up to `timeout` for events, reconciles what they touched, and returns the
+    /// index of the first undelivered delta.
+    fn wait_and_reconcile(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         let undelivered = |w: &Self| w.snap.pending.iter().position(|d| d.sequence > w.delivered);
         if let Some(i) = undelivered(self) {
             return Ok(Some(i));
@@ -1554,6 +1566,28 @@ mod tests {
         let mut w = Watcher2::open(r, state.path(), &options).unwrap();
         assert_eq!(drain(&mut w, &mut model, idle), 0);
         drop(w);
+        assert_eq!(model, fresh(r));
+    }
+
+    #[test]
+    fn a_failed_pass_leaves_its_changes_for_the_next_call() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::write(r.join("a.rs"), "fn a() {}\n").unwrap();
+        let idle = Duration::from_millis(400);
+        let mut model = Map::new();
+        let mut w = Watcher2::open(r, state.path(), &Options::default()).unwrap();
+        drain(&mut w, &mut model, idle);
+        // The record store can't be written, so the next pass fails after its events
+        // were read from the kernel.
+        let path = state.path().join(&w.snap.store);
+        let writable = std::mem::replace(&mut w.store.file, File::open(&path).unwrap());
+        std::fs::write(r.join("a.rs"), "fn a() { changed(); }\n").unwrap();
+        assert!(w.next_change(idle).is_err());
+        w.store.file = writable;
+        // Nothing touches the tree again, and the change still arrives.
+        assert_eq!(drain(&mut w, &mut model, idle), 1);
         assert_eq!(model, fresh(r));
     }
 
