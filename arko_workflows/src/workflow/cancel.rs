@@ -258,37 +258,35 @@ impl RunControl {
     /// stands). During a wrap-up the wrap-up's stop is made instead, which
     /// came first. Returns whether this call stopped the run.
     pub fn stop(&self, cause: CancelCause) -> bool {
+        // `state` changes only here, under this lock.
         let mut wrap_up = self.wrap_up.lock();
+        if self.is_stopped() {
+            return false;
+        }
         let cause = wrap_up.take().map_or(cause, |wrap_up| wrap_up.cause);
         let timestamp = chrono::Utc::now();
-        let mut made = None;
-        let stopped = self.state.send_if_modified(|state| {
-            if state.is_some() {
-                return false;
-            }
-            made = Some(cause.clone());
-            *state = Some(Cancellation { cause, timestamp });
-            true
-        });
-        drop(wrap_up);
-        if let Some(cause) = made {
-            {
-                let mut host_stop = self.host_stop.lock();
-                if host_stop.is_none() {
-                    *host_stop = StopRecord::of_cause(&cause, timestamp);
-                }
-            }
-            self.fire_tools_stop(cause.agent_reason());
-            *self.stopped_at.lock() = Some(tokio::time::Instant::now());
-            // Queued before any agent takes its next step, and the driver's own
-            // (awaited) CancelTask covers a full command channel.
-            for sender in self.agents.lock().values() {
-                if let Some(sender) = sender.upgrade() {
-                    let _ = sender.try_send(UserCommand::CancelTask);
-                }
+        // Its record and time first, so that whoever sees the stop finds them.
+        {
+            let mut host_stop = self.host_stop.lock();
+            if host_stop.is_none() {
+                *host_stop = StopRecord::of_cause(&cause, timestamp);
             }
         }
-        stopped
+        *self.stopped_at.lock() = Some(tokio::time::Instant::now());
+        self.state.send_replace(Some(Cancellation {
+            cause: cause.clone(),
+            timestamp,
+        }));
+        drop(wrap_up);
+        self.fire_tools_stop(cause.agent_reason());
+        // Queued before any agent takes its next step, and the driver's own
+        // (awaited) CancelTask covers a full command channel.
+        for sender in self.agents.lock().values() {
+            if let Some(sender) = sender.upgrade() {
+                let _ = sender.try_send(UserCommand::CancelTask);
+            }
+        }
+        true
     }
 
     pub fn cancellation(&self) -> Option<Cancellation> {

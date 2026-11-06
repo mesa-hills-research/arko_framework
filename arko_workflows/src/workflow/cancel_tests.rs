@@ -877,3 +877,29 @@ fn checkpoints_and_results_record_the_cancellation() {
     .unwrap();
     assert!(result.cancellation.is_none());
 }
+
+/// A stop is published with its record and its time, so a run that sees the
+/// stop finds who asked for it, and its wind-down's deadline.
+#[test]
+fn a_stop_is_seen_with_its_record() {
+    for _ in 0..2_000 {
+        let control = Arc::new(RunControl::new(Duration::from_secs(1)));
+        let run = uuid::Uuid::new_v4();
+        let reader = std::thread::spawn({
+            let control = control.clone();
+            move || {
+                while !control.is_stopped() {
+                    std::hint::spin_loop();
+                }
+                (
+                    control.stopped_by(run, &AgentRunStatus::Cancelled),
+                    control.stopped_at(),
+                )
+            }
+        });
+        assert!(control.stop(CancelCause::Requested));
+        let (stopped_by, stopped_at) = reader.join().unwrap();
+        assert!(stopped_by.is_some(), "the stop was seen before its record");
+        assert!(stopped_at.is_some(), "the stop was seen before its time");
+    }
+}
