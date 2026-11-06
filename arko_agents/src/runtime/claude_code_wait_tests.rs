@@ -269,3 +269,44 @@ async fn a_decision_after_a_cancel_leaves_the_task_cancelled() {
         "the call ran"
     );
 }
+
+/// Set while a call waits for approval (as `AgentHandle::wait` does for a
+/// spawned agent), `HostDecisions` stops the approval's timeout. Real
+/// time, with the shortest timeout there is.
+#[tokio::test]
+async fn host_decisions_set_during_an_approval_wait_stop_its_timeout() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "cargo test"}},
+        complete("Tested"),
+    ]]));
+    let mut config = approving(&fake);
+    config.user_command_timeout_seconds = Some(1);
+    let task = Task::new(config, "Run the tests.".into(), fake.workspace(), None);
+    let decisions = HostDecisions::new(false);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_host_decisions(decisions.clone());
+    let mut run = start_with(task, runtime);
+    let call = awaited(&run.events_until(awaits_approval).await);
+    decisions.set(true);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // A run whose approval timed out may have finished already.
+    let _ = run
+        .commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: call,
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await;
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let permissions = fake.logged("permission");
+    assert_eq!(
+        permissions[0]["answer"]["behavior"], "allow",
+        "{permissions:#?}"
+    );
+}

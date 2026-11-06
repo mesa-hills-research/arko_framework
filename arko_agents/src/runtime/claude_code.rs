@@ -730,7 +730,7 @@ struct Approval {
     name: String,
     input: Value,
     reply: oneshot::Sender<cc::PermissionDecision>,
-    deadline: Option<tokio::time::Instant>,
+    wait: CommandWait,
 }
 
 /// A compaction of the session's conversation with Claude Code's
@@ -2458,7 +2458,7 @@ impl ClaudeCodeRun {
             let approval_deadline = self
                 .approval
                 .as_ref()
-                .and_then(|approval| approval.deadline);
+                .and_then(|approval| approval.wait.deadline(&self.host_decisions));
             tokio::select! {
                 biased;
                 command = self.commands.recv() => {
@@ -2555,7 +2555,7 @@ impl ClaudeCodeRun {
             Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
             Some(UserCommand::HostDeciding) => {
                 if let Some(approval) = &mut self.approval {
-                    approval.deadline = None;
+                    approval.wait = CommandWait::HostDeciding;
                 }
             }
             Some(UserCommand::ApproveToolUse {
@@ -3138,17 +3138,14 @@ impl ClaudeCodeRun {
             tool_not_auto_approved: !config.should_auto_approve_tool(&name),
             path_outside_workspace: outside,
         };
-        let deadline = config
-            .user_command_timeout_seconds
-            .filter(|_| !self.host_decisions.get())
-            .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+        let wait = CommandWait::start(config.user_command_timeout_seconds, &self.host_decisions);
         self.approval = Some(Approval {
             tool_use_id: request.tool_use_id.clone(),
             id,
             name: name.clone(),
             input: request.input.clone(),
             reply,
-            deadline,
+            wait,
         });
         self.emit(AgentEvent::ToolCallAwaitingApproval {
             tool_call_id: id,
@@ -3269,7 +3266,15 @@ impl ClaudeCodeRun {
     }
 
     async fn approval_timed_out(&mut self) -> Result<(), ArkoAgentsError> {
-        let Some(approval) = self.approval.take() else {
+        // The host may have taken over the run's decisions since the timer
+        // was set.
+        let now = tokio::time::Instant::now();
+        let Some(approval) = self.approval.take_if(|approval| {
+            approval
+                .wait
+                .deadline(&self.host_decisions)
+                .is_some_and(|deadline| deadline <= now)
+        }) else {
             return Ok(());
         };
         let seconds = self
