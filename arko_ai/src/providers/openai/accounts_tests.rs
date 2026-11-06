@@ -1519,6 +1519,121 @@ async fn a_check_older_than_a_refusal_leaves_the_account_aside() {
     .await;
 }
 
+fn all_exhausted_count(events: &[ChatGptAccountEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, ChatGptAccountEvent::AllExhausted { .. }))
+        .count()
+}
+
+/// Every account exhausted again, while a response of the account that came
+/// back still streams, is announced again.
+#[tokio::test]
+async fn every_account_exhausted_again_is_announced_again() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let clock = Arc::new(Mutex::new(SystemTime::now()));
+        accounts.clock = Some(clock.clone());
+        let config = GenerationConfig::default();
+        let now = unix_now();
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(now + 600)),
+            answer(SECONDARY, "/responses", 429, &usage_limit(now + 3 * 86_400)),
+        ]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert_eq!(all_exhausted_count(&take(&events)), 1);
+
+        // The primary's reset time passes, and it takes a long request back.
+        *clock.lock().unwrap() += Duration::from_secs(660);
+        mock.expect([answer(PRIMARY, "/responses", 200, &turn("enc_a", "a"))
+            .ending_after(Duration::from_millis(500))]);
+        let mut long = accounts
+            .generate_stream(&conversation(), &config)
+            .await
+            .unwrap();
+        assert!(matches!(
+            take(&events)[..],
+            [ChatGptAccountEvent::Usable { .. }]
+        ));
+
+        // Before that response ends, the primary is refused again.
+        mock.expect([answer(
+            PRIMARY,
+            "/responses",
+            429,
+            &usage_limit(unix_now() + 3600),
+        )]);
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit(), "{error}");
+        let events = take(&events);
+        assert!(
+            matches!(
+                events[..],
+                [
+                    ChatGptAccountEvent::Exhausted { .. },
+                    ChatGptAccountEvent::AllExhausted { .. }
+                ]
+            ),
+            "{events:#?}"
+        );
+        while let Some(event) = long.next().await {
+            event.unwrap();
+        }
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
+/// A response accepted before every account was exhausted, ending after the
+/// announcement, doesn't make the next request announce it again.
+#[tokio::test]
+async fn a_response_older_than_the_announcement_does_not_repeat_it() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let config = GenerationConfig::default();
+        let now = unix_now();
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_a", "a"))
+                .ending_after(Duration::from_millis(300)),
+            answer(PRIMARY, "/responses", 429, &usage_limit(now + 7200)),
+            answer(SECONDARY, "/responses", 429, &usage_limit(now + 3600)),
+        ]);
+        let mut long = accounts
+            .generate_stream(&conversation(), &config)
+            .await
+            .unwrap();
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit(), "{error}");
+        assert_eq!(all_exhausted_count(&take(&events)), 1);
+        while let Some(event) = long.next().await {
+            event.unwrap();
+        }
+
+        // Requests still fail at once, and nobody hears it again.
+        let error = accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit(), "{error}");
+        assert_eq!(all_exhausted_count(&take(&events)), 0);
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
 fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEvent> {
     events
         .iter()

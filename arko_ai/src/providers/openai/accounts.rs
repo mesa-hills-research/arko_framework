@@ -576,8 +576,8 @@ struct PoolState {
     origins: HashMap<u64, usize>,
     /// Accounts that served a response in this process.
     served: BTreeSet<usize>,
-    /// [`ChatGptAccountEvent::AllExhausted`] was sent and no account has
-    /// served since.
+    /// [`ChatGptAccountEvent::AllExhausted`] was sent, and no account has
+    /// been taken back or added since.
     all_exhausted_sent: bool,
     /// The last [stamp](Self::stamp) handed out.
     stamps: u64,
@@ -599,6 +599,8 @@ impl PoolState {
     fn add(&mut self, account: ChatGptAccount) -> usize {
         self.list.push(account);
         self.accounts.push(AccountState::default());
+        // It serves, so every account exhausted after this is news.
+        self.all_exhausted_sent = false;
         self.list.len() - 1
     }
 
@@ -1114,6 +1116,7 @@ impl ChatGptAccounts {
                     account: label.into(),
                     reason: UsableReason::MarkedUsable,
                 });
+                state.all_exhausted_sent = false;
             }
         }
         self.emit(events);
@@ -1326,7 +1329,13 @@ impl ChatGptAccounts {
                 .iter()
                 .filter_map(|index| state.accounts[*index].block.as_ref()?.until)
                 .min();
-            if !state.all_exhausted_sent {
+            // An account marked usable since this request was refused serves,
+            // so then not every account is exhausted.
+            let none_serving = state
+                .order
+                .iter()
+                .all(|index| state.accounts[*index].block.is_some());
+            if none_serving && !state.all_exhausted_sent {
                 state.all_exhausted_sent = true;
                 events.push(ChatGptAccountEvent::AllExhausted {
                     resets_at: earliest,
@@ -1387,6 +1396,7 @@ impl ChatGptAccounts {
                     account: label.clone(),
                     reason: block.retry.unwrap_or(UsableReason::Retried),
                 });
+                state.all_exhausted_sent = false;
             }
             // Before the first request, the first account is the one in use.
             let first = state.first();
@@ -1416,7 +1426,6 @@ impl ChatGptAccounts {
         {
             let mut state = self.lock();
             state.served.insert(index);
-            state.all_exhausted_sent = false;
             // The response's own usage is reported as it came, and the account's
             // state follows it only if no newer report was applied.
             if let Some(usage) = &response.model_call_usage.plan_usage {

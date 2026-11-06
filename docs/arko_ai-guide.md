@@ -711,7 +711,8 @@ account is usable, so the agent's retry goes there. When every account is set as
 request fails with a `usage_limit_reached` error whose `retry_after` is the earliest known
 reset (the agent pauses until then, as with one account), and
 `ChatGptAccountEvent::AllExhausted` is sent once. Later requests fail at once without
-being sent.
+being sent. It's sent again only after an account has been taken back (or added) and
+every account is set aside once more.
 
 #### Coming back
 
