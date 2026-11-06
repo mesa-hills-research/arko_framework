@@ -497,8 +497,7 @@ pub fn build(
         .read(true)
         .write(true)
         .open(state_dir.join(".index.lock"))?;
-    lock.try_lock_exclusive()
-        .map_err(|e| format!("index state already in use: {e}"))?;
+    crate::fsio::lock_or_in_use(&lock, "index state")?;
     File::options()
         .create(true)
         .truncate(false)
@@ -953,17 +952,27 @@ fn write_progress(
     atomic_write(state_dir, PROGRESS, &serde_json::to_vec(&record)?)
 }
 
-/// Whether an embedding run holds the state directory's embedding lock.
-fn embedding_active(state_dir: &Path) -> bool {
-    let Ok(file) = File::open(state_dir.join(EMBED_LOCK)) else {
-        return false;
-    };
-    match FileExt::try_lock_shared(&file) {
-        Ok(()) => {
-            let _ = FileExt::unlock(&file);
-            false
+/// The state directory's embedding lock, probed without waiting.
+enum EmbedLock {
+    /// An embedding run holds it.
+    Held,
+    /// No run holds it, and until this is dropped none can start, because the shared
+    /// lock taken here (when the lock file exists) stays held.
+    Free { _shared: Option<File> },
+}
+impl EmbedLock {
+    fn probe(state_dir: &Path) -> Self {
+        let Ok(file) = File::open(state_dir.join(EMBED_LOCK)) else {
+            return Self::Free { _shared: None };
+        };
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Self::Free {
+                _shared: Some(file),
+            },
+            Err(e) if crate::fsio::is_contended(&e) => Self::Held,
+            // A file system without working locks has no run holding one either.
+            Err(_) => Self::Free { _shared: None },
         }
-        Err(_) => true,
     }
 }
 
@@ -993,12 +1002,12 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 ///
 /// The run returns when every chunk has a vector (except texts over the model's input
 /// limit), at its token cap ([`DenseBuild::max_tokens`]), when [`DenseBuild::stop`] is
-/// set ([`EmbedStats::stopped`]), or when a newer generation is published
-/// ([`EmbedStats::superseded`]). What it embedded stays in the cache, so a later run
-/// continues without paying for it again. Only the embedder, the cap, the progress
-/// callback and the stop flag of `dense` apply. The quantization, vector index and
-/// embedded text are the generation's. An error when the generation has no embeddings
-/// or embeds with another model.
+/// set while texts are left to send ([`EmbedStats::stopped`]), or when a newer
+/// generation is published ([`EmbedStats::superseded`]). What it embedded stays in
+/// the cache, so a later run continues without paying for it again. Only the
+/// embedder, the cap, the progress callback and the stop flag of `dense` apply. The
+/// quantization, vector index and embedded text are the generation's. An error when
+/// the generation has no embeddings or embeds with another model.
 pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Error> {
     embed_run(state_dir, dense, None)
 }
@@ -1022,7 +1031,7 @@ fn embed_run(
     // A build may publish a newer generation and remove this one before the run has
     // read it, so the run is superseded, not failed.
     let read = || -> Result<_, Error> {
-        let generation = Generation::open_at(state_dir, &name)?;
+        let generation = Generation::open_named(state_dir, &name)?;
         let Some(info) = generation.stored_dense_info()? else {
             return Ok((generation, None));
         };
@@ -1189,10 +1198,6 @@ fn embed_run(
                         if let Some(callback) = d.progress {
                             callback(&progress);
                         }
-                        if stop_requested() {
-                            stopped = true;
-                            return Ok(Flow::Stop);
-                        }
                         if superseded() {
                             was_superseded = true;
                             return Ok(Flow::Stop);
@@ -1200,6 +1205,7 @@ fn embed_run(
                         Ok(Flow::Continue)
                     },
                 )?;
+                stopped = totals.stopped;
             }
         }
     }
@@ -1569,209 +1575,246 @@ fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
     Ok(out)
 }
 
-/// The current generation of an index2 state directory, opened for reading. Every
-/// read goes to the generation `CURRENT2` named when it was opened, so lexical and
-/// dense results of one search come from the same build.
-pub(crate) struct Generation {
-    state_dir: PathBuf,
-    name: String,
-    dir: PathBuf,
-    meta: Meta,
-}
-impl Generation {
-    pub(crate) fn open(state_dir: &Path) -> Result<Self, Error> {
-        Self::open_at(state_dir, &current_generation(state_dir)?)
-    }
+pub(crate) use current::{Generation, read_current};
 
-    /// The generation named `name`.
-    fn open_at(state_dir: &Path, name: &str) -> Result<Self, Error> {
-        let dir = state_dir.join(name);
-        let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
-        if meta.version != 2 {
-            return Err("unsupported index version".into());
-        }
-        Ok(Self {
-            state_dir: state_dir.to_path_buf(),
-            name: name.to_owned(),
-            dir,
-            meta,
-        })
-    }
+/// The current generation is read only through [`read_current`], so every reader
+/// starts over when a build publishes a new generation during its read.
+mod current {
+    use super::*;
 
-    /// The embeddings of this generation, if it has them, with their coverage now, being the
-    /// latest embedding run's, when it ran on this generation. Read before the store
-    /// is opened, since a run records the coverage after it commits the store.
-    pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
-        let mut info = self.stored_dense_info()?;
-        if let Some(info) = &mut info
-            && let Some(run) = read_progress(&self.state_dir)
-            && run.generation == self.name
-        {
-            info.embedded = run.progress.embedded_docs;
-            info.state = run.state;
-        }
-        Ok(info)
+    /// The current generation of an index2 state directory, opened for reading. Every
+    /// read goes to the generation `CURRENT2` named when it was opened, so lexical and
+    /// dense results of one search come from the same build.
+    pub(crate) struct Generation {
+        // Private, so only this module builds one.
+        state_dir: PathBuf,
+        pub(super) name: String,
+        pub(super) dir: PathBuf,
+        pub(super) meta: Meta,
     }
-
-    /// The generation's `dense.json`, as its build wrote it.
-    fn stored_dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
-        match std::fs::read(self.dir.join("dense.json")) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            // Missing from a generation built with embeddings means a build removed the
-            // generation, and the error makes a search start over on the new one.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.meta.dense => Ok(None),
-            Err(e) => Err(e.into()),
+    impl Generation {
+        /// The current generation, for [`read_current`] only.
+        fn open(state_dir: &Path) -> Result<Self, Error> {
+            Self::open_named(state_dir, &current_generation(state_dir)?)
         }
-    }
 
-    /// The vector store of this generation's embeddings, read-only. It holds the
-    /// vectors the generation's coverage counts, and can hold others, namely those of chunks
-    /// an older generation had, until the run for this one removes them.
-    pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<CaprockStore, Error> {
-        check_dense_format(info)?;
-        if !info.store.starts_with("vectors-") || info.store.contains(['/', '\\']) {
-            return Err(format!("bad vector store name {:?}", info.store).into());
+        /// The generation named `name`. For an embedding run, which stays on its
+        /// generation and ends as superseded when a newer one is published, and for tests.
+        pub(super) fn open_named(state_dir: &Path, name: &str) -> Result<Self, Error> {
+            let dir = state_dir.join(name);
+            let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
+            if meta.version != 2 {
+                return Err("unsupported index version".into());
+            }
+            Ok(Self {
+                state_dir: state_dir.to_path_buf(),
+                name: name.to_owned(),
+                dir,
+                meta,
+            })
         }
-        let dir = self.state_dir.join(&info.store);
-        let store = CaprockStore::open(&dir)
-            .map_err(|e| format!("{e} (rebuild the index to restore its vector store)"))?;
-        if !store.matches(&info.store_config()) {
-            return Err(format!(
+
+        /// The embeddings of this generation, if it has them, with their coverage now, being the
+        /// latest embedding run's, when it ran on this generation. Read before the store
+        /// is opened, since a run records the coverage after it commits the store.
+        pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
+            self.dense_info_with(read_progress(&self.state_dir).as_ref())
+        }
+
+        /// [`Generation::dense_info`] with the latest run's record, read by the caller.
+        pub(super) fn dense_info_with(
+            &self,
+            run: Option<&RunRecord>,
+        ) -> Result<Option<DenseIndexInfo>, Error> {
+            let mut info = self.stored_dense_info()?;
+            if let Some(info) = &mut info
+                && let Some(run) = run.filter(|r| r.generation == self.name)
+            {
+                info.embedded = run.progress.embedded_docs;
+                info.state = run.state;
+            }
+            Ok(info)
+        }
+
+        /// The generation's `dense.json`, as its build wrote it.
+        pub(super) fn stored_dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
+            match std::fs::read(self.dir.join("dense.json")) {
+                Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+                // Missing from a generation built with embeddings means a build removed the
+                // generation, and the error makes a search start over on the new one.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.meta.dense => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        /// The vector store of this generation's embeddings, read-only. It holds the
+        /// vectors the generation's coverage counts, and can hold others, namely those of chunks
+        /// an older generation had, until the run for this one removes them.
+        pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<CaprockStore, Error> {
+            check_dense_format(info)?;
+            if !info.store.starts_with("vectors-") || info.store.contains(['/', '\\']) {
+                return Err(format!("bad vector store name {:?}", info.store).into());
+            }
+            let dir = self.state_dir.join(&info.store);
+            let store = CaprockStore::open(&dir)
+                .map_err(|e| format!("{e} (rebuild the index to restore its vector store)"))?;
+            if !store.matches(&info.store_config()) {
+                return Err(format!(
                 "the vector store {} does not hold this index's model and settings ({}). Rebuild the index",
                 dir.display(),
                 info.embedder.display()
             )
             .into());
-        }
-        // A replacement store (a run repairing an unusable one) is empty until the run
-        // fills it and records its coverage, so refuse it rather than find nothing. A run
-        // that removed vectors of this generation works for a newer one, and the
-        // search starts over on that.
-        if (store.len() as u64) < info.embedded {
-            return Err(format!(
+            }
+            // A replacement store (a run repairing an unusable one) is empty until the run
+            // fills it and records its coverage, so refuse it rather than find nothing. A run
+            // that removed vectors of this generation works for a newer one, and the
+            // search starts over on that.
+            if (store.len() as u64) < info.embedded {
+                return Err(format!(
                 "the vector store {} holds {} of this index's {} vectors (an embedding run is replacing it, or one stopped while it did). Rebuild the index",
                 dir.display(),
                 store.len(),
                 info.embedded
             )
             .into());
+            }
+            Ok(store)
         }
-        Ok(store)
-    }
 
-    /// The doc of each vector id (`None` for an id this generation lacks).
-    pub(crate) fn docs_of(&self, ids: &[VectorId]) -> Result<Vec<Option<u32>>, Error> {
-        let file = File::open(self.dir.join("vkeys.dat"))?;
-        let n = file.metadata()?.len() / VKEY_BYTES as u64;
-        let mut entry = [0u8; VKEY_BYTES];
-        ids.iter()
-            .map(|&id| {
-                let (mut lo, mut hi) = (0, n);
-                while lo < hi {
-                    let mid = (lo + hi) / 2;
-                    read_exact_at(&file, &mut entry, mid * VKEY_BYTES as u64)?;
-                    let at = u128::from_be_bytes(entry[..16].try_into().unwrap());
-                    match at.cmp(&id) {
-                        std::cmp::Ordering::Less => lo = mid + 1,
-                        std::cmp::Ordering::Greater => hi = mid,
-                        std::cmp::Ordering::Equal => return Ok(Some(read_u32(&entry, 16))),
+        /// The doc of each vector id (`None` for an id this generation lacks).
+        pub(crate) fn docs_of(&self, ids: &[VectorId]) -> Result<Vec<Option<u32>>, Error> {
+            let file = File::open(self.dir.join("vkeys.dat"))?;
+            let n = file.metadata()?.len() / VKEY_BYTES as u64;
+            let mut entry = [0u8; VKEY_BYTES];
+            ids.iter()
+                .map(|&id| {
+                    let (mut lo, mut hi) = (0, n);
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        read_exact_at(&file, &mut entry, mid * VKEY_BYTES as u64)?;
+                        let at = u128::from_be_bytes(entry[..16].try_into().unwrap());
+                        match at.cmp(&id) {
+                            std::cmp::Ordering::Less => lo = mid + 1,
+                            std::cmp::Ordering::Greater => hi = mid,
+                            std::cmp::Ordering::Equal => return Ok(Some(read_u32(&entry, 16))),
+                        }
                     }
+                    Ok(None)
+                })
+                .collect()
+        }
+
+        /// The best `k` docs for `query` by BM25 among those whose file passes `filter`.
+        pub(crate) fn lexical(
+            &self,
+            query: &str,
+            k: usize,
+            filter: &Filter,
+        ) -> Result<Vec<(u32, f64)>, Error> {
+            let meta = &self.meta;
+            let dir = &self.dir;
+            let average = f64::from_bits(meta.average_bits);
+            let n_docs = meta.docs as f64;
+            let idx = TermIndex::read(&dir.join("terms.idx"))?;
+            let terms = File::open(dir.join("terms.dat"))?;
+            let terms_len = terms.metadata()?.len();
+            let query: BTreeSet<_> = tokens(query).into_iter().collect();
+            // Same accumulation order per document as search::search (query terms ascending).
+            let mut found = Vec::new();
+            for t in &query {
+                if let Some(hit) = lookup(&idx, &terms, terms_len, t)? {
+                    found.push(hit);
                 }
-                Ok(None)
-            })
-            .collect()
+            }
+            if found.is_empty() || k == 0 {
+                return Ok(Vec::new());
+            }
+            // A filter is applied per file, as (first doc, passes) of each file, by doc.
+            let allowed: Option<Vec<(u32, bool)>> = if filter.is_empty() {
+                None
+            } else {
+                Some(
+                    read_files(dir)?
+                        .into_iter()
+                        .map(|(first, path)| {
+                            let language = crate::syntax::language(Path::new(&path));
+                            (first, filter.matches(&path, language))
+                        })
+                        .collect(),
+                )
+            };
+            let allow = |doc: u32| -> bool {
+                allowed.as_ref().is_none_or(|files| {
+                    let i = files.partition_point(|(first, _)| *first <= doc);
+                    i > 0 && files[i - 1].1
+                })
+            };
+            let post = File::open(dir.join("post.dat"))?;
+            let lens_raw = std::fs::read(dir.join("lens.dat"))?;
+            let postings: u64 = found.iter().map(|&(df, _, _)| u64::from(df)).sum();
+            let mut scores = if postings.saturating_mul(8) >= meta.docs {
+                Scores::Dense(vec![0.0; meta.docs as usize], Vec::new())
+            } else {
+                Scores::Sparse(FxMap::default())
+            };
+            let mut buf = Vec::new();
+            for (df, off, len) in found {
+                buf.resize(len as usize, 0);
+                read_exact_at(&post, &mut buf, off)?;
+                let df = df as f64;
+                let idf = (1.0 + (n_docs - df + 0.5) / (df + 0.5)).ln();
+                let mut pos = 0;
+                let mut doc = 0u64;
+                while pos < buf.len() {
+                    doc += get_varint(&buf, &mut pos)?;
+                    let tf = get_varint(&buf, &mut pos)?;
+                    let d = doc as usize;
+                    let dlen = read_u32(&lens_raw, d * 4);
+                    let norm = 1.2 * (0.25 + 0.75 * dlen as f64 / average.max(1.0));
+                    scores.add(d as u32, idf * tf as f64 * 2.2 / (tf as f64 + norm));
+                }
+            }
+            Ok(scores.top(k, &allow))
+        }
+
+        /// The chunks of `docs`, in the given order.
+        pub(crate) fn chunks(&self, docs: &[u32]) -> Result<Vec<Chunk>, Error> {
+            let offs = File::open(self.dir.join("docs.off"))?;
+            let store = File::open(self.dir.join("docs.dat"))?;
+            let mut out = Vec::with_capacity(docs.len());
+            for &d in docs {
+                if u64::from(d) >= self.meta.docs {
+                    return Err(format!("doc {d} is not in the index").into());
+                }
+                let mut o = [0u8; 16];
+                read_exact_at(&offs, &mut o, u64::from(d) * 8)?;
+                let (s, e) = (read_u64(&o, 0), read_u64(&o, 8));
+                let mut j = vec![0u8; (e - s) as usize];
+                read_exact_at(&store, &mut j, s)?;
+                out.push(serde_json::from_slice(&j)?);
+            }
+            Ok(out)
+        }
     }
 
-    /// The best `k` docs for `query` by BM25 among those whose file passes `filter`.
-    pub(crate) fn lexical(
-        &self,
-        query: &str,
-        k: usize,
-        filter: &Filter,
-    ) -> Result<Vec<(u32, f64)>, Error> {
-        let meta = &self.meta;
-        let dir = &self.dir;
-        let average = f64::from_bits(meta.average_bits);
-        let n_docs = meta.docs as f64;
-        let idx = TermIndex::read(&dir.join("terms.idx"))?;
-        let terms = File::open(dir.join("terms.dat"))?;
-        let terms_len = terms.metadata()?.len();
-        let query: BTreeSet<_> = tokens(query).into_iter().collect();
-        // Same accumulation order per document as search::search (query terms ascending).
-        let mut found = Vec::new();
-        for t in &query {
-            if let Some(hit) = lookup(&idx, &terms, terms_len, t)? {
-                found.push(hit);
+    /// Reads the current generation with `read`. When a build publishes a new generation
+    /// during the read, the result may be of a removed generation or mixed with the new
+    /// one's vectors, so the read is done again on the new one, up to twice.
+    pub(crate) fn read_current<T>(
+        state_dir: &Path,
+        mut read: impl FnMut(&Generation) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let current = || std::fs::read_to_string(state_dir.join("CURRENT2")).ok();
+        let mut attempt = 0;
+        loop {
+            let before = current();
+            let result = Generation::open(state_dir).and_then(|g| read(&g));
+            if attempt == 2 || current() == before {
+                return result;
             }
+            attempt += 1;
         }
-        if found.is_empty() || k == 0 {
-            return Ok(Vec::new());
-        }
-        // A filter is applied per file, as (first doc, passes) of each file, by doc.
-        let allowed: Option<Vec<(u32, bool)>> = if filter.is_empty() {
-            None
-        } else {
-            Some(
-                read_files(dir)?
-                    .into_iter()
-                    .map(|(first, path)| {
-                        let language = crate::syntax::language(Path::new(&path));
-                        (first, filter.matches(&path, language))
-                    })
-                    .collect(),
-            )
-        };
-        let allow = |doc: u32| -> bool {
-            allowed.as_ref().is_none_or(|files| {
-                let i = files.partition_point(|(first, _)| *first <= doc);
-                i > 0 && files[i - 1].1
-            })
-        };
-        let post = File::open(dir.join("post.dat"))?;
-        let lens_raw = std::fs::read(dir.join("lens.dat"))?;
-        let postings: u64 = found.iter().map(|&(df, _, _)| u64::from(df)).sum();
-        let mut scores = if postings.saturating_mul(8) >= meta.docs {
-            Scores::Dense(vec![0.0; meta.docs as usize], Vec::new())
-        } else {
-            Scores::Sparse(FxMap::default())
-        };
-        let mut buf = Vec::new();
-        for (df, off, len) in found {
-            buf.resize(len as usize, 0);
-            read_exact_at(&post, &mut buf, off)?;
-            let df = df as f64;
-            let idf = (1.0 + (n_docs - df + 0.5) / (df + 0.5)).ln();
-            let mut pos = 0;
-            let mut doc = 0u64;
-            while pos < buf.len() {
-                doc += get_varint(&buf, &mut pos)?;
-                let tf = get_varint(&buf, &mut pos)?;
-                let d = doc as usize;
-                let dlen = read_u32(&lens_raw, d * 4);
-                let norm = 1.2 * (0.25 + 0.75 * dlen as f64 / average.max(1.0));
-                scores.add(d as u32, idf * tf as f64 * 2.2 / (tf as f64 + norm));
-            }
-        }
-        Ok(scores.top(k, &allow))
-    }
-
-    /// The chunks of `docs`, in the given order.
-    pub(crate) fn chunks(&self, docs: &[u32]) -> Result<Vec<Chunk>, Error> {
-        let offs = File::open(self.dir.join("docs.off"))?;
-        let store = File::open(self.dir.join("docs.dat"))?;
-        let mut out = Vec::with_capacity(docs.len());
-        for &d in docs {
-            if u64::from(d) >= self.meta.docs {
-                return Err(format!("doc {d} is not in the index").into());
-            }
-            let mut o = [0u8; 16];
-            read_exact_at(&offs, &mut o, u64::from(d) * 8)?;
-            let (s, e) = (read_u64(&o, 0), read_u64(&o, 8));
-            let mut j = vec![0u8; (e - s) as usize];
-            read_exact_at(&store, &mut j, s)?;
-            out.push(serde_json::from_slice(&j)?);
-        }
-        Ok(out)
     }
 }
 
@@ -1780,27 +1823,6 @@ impl Generation {
 /// embedded.
 pub fn dense_info(state_dir: &Path) -> Result<Option<DenseIndexInfo>, Error> {
     read_current(state_dir, |g| g.dense_info())
-}
-
-/// Reads the current generation with `read`, starting over when a build publishes a
-/// new generation and removes the one being read.
-fn read_current<T>(
-    state_dir: &Path,
-    read: impl Fn(&Generation) -> Result<T, Error>,
-) -> Result<T, Error> {
-    let current = || std::fs::read_to_string(state_dir.join("CURRENT2")).ok();
-    for attempt in 0.. {
-        let before = current();
-        match Generation::open(state_dir).and_then(|g| read(&g)) {
-            Err(e)
-                if attempt < 2
-                    && e.downcast_ref::<std::io::Error>()
-                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                    && current() != before => {}
-            result => return result,
-        }
-    }
-    unreachable!()
 }
 
 /// The current generation of an index and how far its embedding has come
@@ -1827,13 +1849,24 @@ pub struct IndexStatus {
 
 /// The current generation, its embedding coverage, and whether a run is embedding it.
 pub fn status(state_dir: &Path) -> Result<IndexStatus, Error> {
+    status_with(state_dir, || {})
+}
+
+/// [`status`], calling `after_read` once the run's record is read, so a test can end a
+/// run at that point.
+fn status_with(state_dir: &Path, after_read: impl Fn()) -> Result<IndexStatus, Error> {
     read_current(state_dir, |g| {
+        // Taken first and held while the run's record is read once, so no run starts or
+        // ends in between, and a run that just ended doesn't read as one that died.
+        let lock = EmbedLock::probe(state_dir);
         let run = read_progress(state_dir).filter(|r| r.generation == g.name);
+        let dense = g.dense_info_with(run.as_ref())?;
+        after_read();
         Ok(IndexStatus {
             generation: g.name.clone(),
             docs: g.meta.docs,
-            dense: g.dense_info()?,
-            embedding: embedding_active(state_dir),
+            dense,
+            embedding: matches!(lock, EmbedLock::Held),
             stopped: run.as_ref().and_then(|r| r.stopped.clone()),
             progress: run.map(|r| r.progress),
         })
@@ -1843,18 +1876,24 @@ pub fn status(state_dir: &Path) -> Result<IndexStatus, Error> {
 /// The ten best chunks for `query` by BM25 (lexical). [`hybrid::search`](crate::hybrid::search)
 /// also searches embeddings, filters, and returns more or fewer results.
 pub fn search(state_dir: &Path, query: &str) -> Result<Vec<Chunk>, Error> {
-    let generation = Generation::open(state_dir)?;
-    let best: Vec<u32> = generation
-        .lexical(query, 10, &Filter::default())?
-        .into_iter()
-        .map(|(d, _)| d)
-        .collect();
-    generation.chunks(&best)
+    read_current(state_dir, |generation| {
+        let best: Vec<u32> = generation
+            .lexical(query, 10, &Filter::default())?
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        generation.chunks(&best)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The current generation, held past the read, as no reader can.
+    fn open_current(state: &Path) -> Generation {
+        Generation::open_named(state, &current_generation(state).unwrap()).unwrap()
+    }
 
     fn not_found(e: Error) -> bool {
         e.downcast_ref::<std::io::Error>()
@@ -1873,7 +1912,7 @@ mod tests {
         let dense = BuildOptions::default().with_dense(DenseBuild::new(&embedder));
         let options = Options::default();
         build(root.path(), state.path(), &options, &dense).unwrap();
-        let old = Generation::open(state.path()).unwrap();
+        let old = open_current(state.path());
         assert!(old.meta.dense && old.dense_info().unwrap().is_some());
         build(root.path(), state.path(), &options, &dense).unwrap();
         assert!(!old.dir.exists());
@@ -1887,8 +1926,69 @@ mod tests {
             &BuildOptions::default(),
         )
         .unwrap();
-        let lexical = Generation::open(state.path()).unwrap();
+        let lexical = open_current(state.path());
         assert!(!lexical.meta.dense && lexical.dense_info().unwrap().is_none());
         assert!(dense_info(state.path()).unwrap().is_none());
+    }
+
+    /// A read during which a build publishes a new generation is done again on it, even
+    /// when the read itself succeeded.
+    #[test]
+    fn a_read_during_a_publish_is_done_again_on_the_new_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn journal() {}\n").unwrap();
+        let (options, lexical) = (Options::default(), BuildOptions::default());
+        build(root.path(), state.path(), &options, &lexical).unwrap();
+        let built = std::cell::Cell::new(false);
+        let read = read_current(state.path(), |g| {
+            if !built.replace(true) {
+                build(root.path(), state.path(), &options, &lexical)?;
+            }
+            Ok(g.name.clone())
+        })
+        .unwrap();
+        assert_eq!(read, current_generation(state.path()).unwrap());
+    }
+
+    /// A run that ends while a status is read reads as running, as it was when the status
+    /// took its snapshot, never as a run that died with the generation half embedded.
+    #[test]
+    fn a_run_ending_during_a_status_read_reads_as_running() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+        let wait = Duration::from_secs(30);
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn journal() {}\n").unwrap();
+        let e = crate::dense::HashEmbedder::new(32);
+        let later = BuildOptions::default().with_dense(DenseBuild::new(&e).with_embed_later(true));
+        build(root.path(), state.path(), &Options::default(), &later).unwrap();
+        let (at_last, reached) = mpsc::channel();
+        let (go, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (ended, end) = mpsc::channel();
+        // The run waits after it records its last request, still embedding.
+        let progress = |p: &EmbedProgress| {
+            assert_eq!(p.embedded_docs, p.docs);
+            at_last.send(()).unwrap();
+            gate.lock().unwrap().recv_timeout(wait).unwrap();
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let run = embed(state.path(), &DenseBuild::new(&e).with_progress(&progress));
+                ended.send(run.map_err(|e| e.to_string())).unwrap();
+            });
+            reached.recv_timeout(wait).unwrap();
+            let s = status_with(state.path(), || {
+                // The run ends once the status has read its record.
+                go.send(()).unwrap();
+                let run = end.recv_timeout(wait).unwrap().unwrap();
+                assert_eq!(run.embedded_docs, run.docs);
+            })
+            .unwrap();
+            assert_eq!(s.dense.unwrap().state, EmbedState::Embedding);
+            assert!(s.embedding, "a finished run read as dead");
+        });
     }
 }

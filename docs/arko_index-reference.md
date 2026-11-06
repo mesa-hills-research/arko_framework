@@ -521,14 +521,14 @@ components, so `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/ne
 | `dense::render_with(chunk, chunk_text, EmbedText)`, `EmbedText` | The embedded text with the parts `EmbedText` names, `Source` (the trimmed source alone), `PathSource` (path line and source) or `PathScopeSource` (the default, `render`'s text). `as_str` and `FromStr` use `source`, `path-source`, `path-scope-source`. |
 | `dense::embed_query(embedder, query)` | The query's vector and billed tokens, for `SearchRequest::query_vector`. |
 | `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`, with `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `vector_index` (`Flat` when absent), `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
-| `dense::DenseBuild` | One build's or run's embedding, with `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`, so `build` embeds before it returns), `stop` (`None`, or a `StopSignal` that, once stopped, makes the run stop after its current request), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
+| `dense::DenseBuild` | One build's or run's embedding, with `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`, so `build` embeds before it returns), `stop` (`None`, or a `StopSignal` that, once stopped, makes the run stop before its next request, so a run with nothing left to send finishes), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
 | `dense::EmbedStats` | `BuildStats::dense` and `index2::embed`'s result, with `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`, `superseded` (a newer generation was published), `stopped`. A build with `embed_later` reports what it published, `embedded_docs` chunks with a vector already, and `texts - cached` texts to embed. |
 | `dense::local::LocalEmbedder::load(model, dir)` | Feature `local-embed`. Loads a `LocalModel` from `dir` (`config.json`, `tokenizer.json`, `model.safetensors`), each file checked by size and SHA-256, in the default precision (int8). `load_with_precision(model, dir, precision)` picks it. `load_on(model, dir, precision, device)` runs it on a `Device`, and `load_placed(model, dir, precision, &placement)` on a device found before. `with_threads(n)` (default `threads()`), `with_batch_tokens(n)` (tokens per forward pass, 8,192 on the CPU and 4,096 with padding on a GPU), `model()`, `precision()`, `threads()`, `batch_tokens()`, `device()` (`CPU`, `CUDA: NAME` or `wgpu: NAME (API, type)`), `on_gpu()`, `batch_stats()` (forward passes, sequences, tokens and padded tokens since loading). Implements `Embedder`, with 256 texts and 8,192 tokens per request on the CPU, 1,024 texts and eight passes of tokens on a GPU, a longer text alone, whole texts (one longer than the model's `max_tokens` is embedded in windows of that many tokens, each with the special tokens and the query prefix, and its vector is their mean weighted by text tokens, at unit length), query and document prefixes, unit vectors, `tokens` = tokens processed. `LocalModel::limits()` gives the limits without loading. |
 | `dense::local::Precision` | The arithmetic a model runs in, on the CPU `Int8` (the default, with the linear layers after attention on 7-bit weights per output channel, 8-bit activations per token, exact integer sums) or `F32`, on a GPU `F32`, `F16` or `Bf16` (CUDA only), where every matrix product takes the 16-bit type. `as_str` and `FromStr` use `int8`, `f32`, `f16` and `bf16`, and `runs_on_cpu`, `runs_on_gpu` say where it runs. Part of the model descriptor. |
 | `dense::local::Device` | Where a model runs, with `Auto` (the default, which takes the CPU for int8, CUDA or a discrete wgpu GPU for f32 when the build and machine have one, else the CPU, and a GPU for f16 and bf16), `Cpu`, `Gpu` (CUDA, else any wgpu GPU), `Cuda`, `Wgpu`. `as_str` and `FromStr` use `auto`, `cpu`, `gpu`, `cuda`, `wgpu`. `default_precision()` is int8 for `Auto` and `Cpu`, and f32 on a GPU. |
 | `dense::local::Placement` | The device a `Device` and precision come to on this machine, found without loading the model, with `find(device, precision)` (an error when the named device can't run it), `cpu()`, `on_gpu()`, `name()`, `limits(model)` (the request limits the model will report there). |
 | `dense::local::LocalModel` | A pinned model, with `name`, `repo`, `revision` (a commit), `dimensions`, `max_tokens`, `query_prefix`, `document_prefix`, `licence`, `architecture` (`JinaBert`, `NomicBert`), `pooling` (`Mean`, `Cls`), `files`, with `descriptor(precision)` (provider `local`, the repository as model, the commit as revision with `+int8`, `+f16` or `+bf16` appended for those precisions, input types when the prefixes differ), `for_descriptor` (the model and precision), `download_size`. `MODELS` lists `CODE_RANK_EMBED` (the `DEFAULT_MODEL`) and `JINA_CODE_V2`, and `find(name)` matches a name or repository. |
-| `dense::StopSignal` | Asks a run to stop after its current request, with `new`, `stop(reason)` (the first reason is kept, and it returns whether this call stopped it), `is_stopped`, `reason`. Shared between threads. |
+| `dense::StopSignal` | Asks a run to stop before its next request, with `new`, `stop(reason)` (the first reason is kept, and it returns whether this call stopped it), `is_stopped`, `reason`. Shared between threads. |
 | `dense::EmbedState` | How far a generation's embedding has come (`DenseIndexInfo::state`), with `Embedding`, `Complete` (the default, and what a generation written before runs existed reads as), `CapReached`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
 | `vector::CaprockStore` | The store, on Caprock, with `create(dir, &StoreConfig)`, `open_for(dir, &StoreConfig)` (for writing, an error for another model or settings), `open(dir)` (read-only, the last persisted state), `matches(&StoreConfig)`, `compact()`. One writer per directory, any number of readers. A search returns at most 1,000 hits (Caprock's limit). |
@@ -682,7 +682,10 @@ append-only record store with each file version's chunks, and a write-ahead jour
 (`watch2.wal`) appended and fdatasync'ed before a delta is delivered. inotify events
 and metadata reconciliation (size, mtime, ctime, inode, device, with the racy-git rule)
 decide which files to read, so a commit costs in proportion to the change, not the
-repository.
+repository. A pass that fails leaves its changes for the next call, which reconciles
+the whole tree. A delta that `next_change_to` fails to write stays undelivered, and the
+next call writes it again in full, so a stream whose write failed may hold part of a
+line before it.
 
 A change that keeps a chunk's ID but alters its bytes or any other field (range, lines,
 scope, symbol path) emits `changed`, and a content-ID change emits remove plus add. Exact
@@ -730,9 +733,12 @@ with it), and the embedding model saved there (choose one with `index2 --embed` 
 and a thread of the watcher embeds each new generation, a run after each rebuild,
 continuing a run a rebuild superseded. stderr gets a line per rebuild,
 `arko_index: index rebuilt: N chunks; dense: E have vectors, T distinct texts to embed`,
-and a progress line per embedding request. On a start with an existing index the thread
-continues its embedding, and a new index is built at the first quiet poll. A signal, or
-an error that ends the watcher, stops the embedding after its current request.
+and a progress line per embedding request. A rebuild that fails prints
+`arko_index: index rebuild: <error>` and is tried again at the first quiet poll five
+seconds later. On a start with an existing index the thread continues its embedding,
+and the index is rebuilt at the first quiet poll, because a change acknowledged before
+the last process rebuilt for it isn't delivered again. A signal, or an error that ends
+the watcher, stops the embedding after its current request.
 
 ### The background run
 
@@ -942,7 +948,9 @@ directory that holds it) and `report.json` (the last walk's report).
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
 Writers take an advisory lock on the state (the marker, or `.index.lock`), so a second
-writer fails fast. An embedding run takes `.embed.lock` and waits for one in progress.
+writer fails fast with an error that downcasts to `arko_index::StateInUse`. Any other
+lock failure, such as a file system without working locks, is reported as it is. An
+embedding run takes `.embed.lock` and waits for one in progress.
 Commits write a temporary file, fsync it, rename it and fsync the directory (on Unix).
 
 ### Compatibility

@@ -68,6 +68,8 @@ pub(crate) struct RunTotals {
     pub requests: u64,
     pub tokens: u64,
     pub cap_reached: bool,
+    /// The stop ended the run while a text was left to send.
+    pub stopped: bool,
     pub not_embedded: u64,
     pub not_embedded_tokens: u64,
     pub too_long: u64,
@@ -86,6 +88,7 @@ pub(crate) type Records = [([u8; 32], Vec<f32>)];
 /// Embeds the texts of `spool` that `wanted` accepts and the cache lacks into the cache,
 /// calling `after` with each request's records (already in the cache) and the run's
 /// totals so far. `after` returning [`Flow::Stop`] ends the run after that request.
+/// `stopped` ends it before the next request, and only while a text is left to send.
 /// At the cap, the texts left are counted (no request is sent), unless `stopped`.
 pub(crate) fn embed_spool(
     spool: File,
@@ -97,6 +100,8 @@ pub(crate) fn embed_spool(
     after: &mut dyn FnMut(&Records, &RunTotals) -> Result<Flow, Error>,
 ) -> Result<RunTotals, Error> {
     let limits = embedder.limits();
+    // `EmbedLimits::new` keeps it at least 1, but the field is public.
+    let max_items = limits.max_items.max(1);
     let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, spool));
     // (hash, text, counted tokens), in spool order.
     let mut queue: VecDeque<([u8; 32], String, u64)> = VecDeque::new();
@@ -116,9 +121,9 @@ pub(crate) fn embed_spool(
         Ok(counts)
     };
     loop {
-        if !exhausted && queue.len() < limits.max_items {
+        if !exhausted && queue.len() < max_items {
             let mut fresh = Vec::new();
-            while !exhausted && queue.len() + fresh.len() < limits.max_items {
+            while !exhausted && queue.len() + fresh.len() < max_items {
                 match reader.next()? {
                     Some((h, t)) if wanted(&h) && !cache.contains(&h) => fresh.push((h, t)),
                     Some(_) => {}
@@ -149,10 +154,16 @@ pub(crate) fn embed_spool(
             }
             continue;
         }
+        // A text is left to send, so this is where a stop ends the run. A stop that
+        // comes during the last request finds nothing left, and the run finishes.
+        if stopped() {
+            totals.stopped = true;
+            break;
+        }
         // The longest prefix within the request limits, at least the first text...
         let (mut n, mut sum) = (0usize, 0u64);
         for (_, _, t) in &queue {
-            if n == limits.max_items
+            if n == max_items
                 || *t > limits.max_input_tokens
                 || (n > 0 && sum + t > limits.max_request_tokens)
             {
@@ -218,7 +229,7 @@ pub(crate) fn embed_spool(
         let mut more = true;
         while more && !stopped() {
             let mut rest = Vec::new();
-            while more && rest.len() < limits.max_items {
+            while more && rest.len() < max_items {
                 match reader.next()? {
                     Some((h, t)) if wanted(&h) && !cache.contains(&h) => rest.push((h, t)),
                     Some(_) => {}

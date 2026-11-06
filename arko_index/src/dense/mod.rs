@@ -190,7 +190,7 @@ impl ModelDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EmbedLimits {
-    /// Texts per request.
+    /// Texts per request, where 0 counts as 1.
     pub max_items: usize,
     /// Total tokens per request (by [`Embedder::count_tokens`]). A text over it but
     /// within `max_input_tokens` goes in a request of its own.
@@ -436,8 +436,9 @@ pub struct DenseBuild<'a> {
     /// published, leaving the embedding to [`index2::embed`](crate::index2::embed).
     /// With `false` (the default), the build embeds after publishing, before it returns.
     pub embed_later: bool,
-    /// When it is stopped, the run stops after its current request and records the
-    /// reason. The vectors paid for are kept, and a later run continues.
+    /// When it is stopped, the run stops before its next request and records the
+    /// reason. The vectors paid for are kept, and a later run continues. A run with
+    /// nothing left to send finishes.
     pub stop: Option<&'a StopSignal>,
 }
 impl<'a> DenseBuild<'a> {
@@ -494,7 +495,7 @@ impl<'a> DenseBuild<'a> {
     }
 }
 
-/// Asks an embedding run to stop after its current request ([`DenseBuild::stop`]), with
+/// Asks an embedding run to stop before its next request ([`DenseBuild::stop`]), with
 /// a reason the run records for [`index2::status`](crate::index2::status). Shared
 /// between threads, such as a signal handler or a thread watching the program that started
 /// the run.
@@ -593,7 +594,8 @@ pub struct EmbedStats {
     /// The run stopped because a newer generation was published. The run for that
     /// generation takes over, with what this one embedded in the cache.
     pub superseded: bool,
-    /// The run stopped when [`DenseBuild::stop`] was stopped. A later run continues.
+    /// The run stopped when [`DenseBuild::stop`] was stopped, with texts left to embed.
+    /// A later run continues.
     pub stopped: bool,
 }
 impl EmbedStats {

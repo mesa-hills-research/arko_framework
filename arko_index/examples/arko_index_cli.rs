@@ -23,7 +23,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use support::process::{self, Owner};
 fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
@@ -699,16 +699,31 @@ struct Keeper<'a> {
     index: Option<&'a Path>,
     flags: &'a Flags,
     options: &'a Options,
-    dirty: bool,
+    staleness: Staleness,
     wake: Option<std::sync::mpsc::Sender<()>>,
 }
+
+/// Whether the `--index` state needs a rebuild.
+enum Staleness {
+    Current,
+    Stale,
+    /// The last rebuild failed, and the first quiet poll from this instant tries again.
+    RetryAt(Instant),
+}
+
+/// How long a failed rebuild waits before it's tried again.
+const REBUILD_RETRY: Duration = Duration::from_secs(5);
+
 impl Keeper<'_> {
     /// The watcher delivered a delta.
     fn changed(&mut self) {
-        self.dirty = self.index.is_some();
+        // A failed rebuild keeps its pause, so a busy tree doesn't hammer it.
+        if self.index.is_some() && matches!(self.staleness, Staleness::Current) {
+            self.staleness = Staleness::Stale;
+        }
     }
     /// A poll found the tree quiet, so rebuild the index if it changed. A failed rebuild is
-    /// reported, and the next delta tries again.
+    /// reported, and tried again after a pause.
     fn quiet(&mut self) {
         if let Err(e) = self.rebuild() {
             eprintln!("arko_index: index rebuild: {e}");
@@ -718,9 +733,19 @@ impl Keeper<'_> {
         let Some(index) = self.index else {
             return Ok(());
         };
-        if !std::mem::take(&mut self.dirty) {
-            return Ok(());
+        match self.staleness {
+            Staleness::Current => return Ok(()),
+            Staleness::RetryAt(at) if Instant::now() < at => return Ok(()),
+            Staleness::Stale | Staleness::RetryAt(_) => {}
         }
+        let built = self.build(index);
+        self.staleness = match built {
+            Ok(()) => Staleness::Current,
+            Err(_) => Staleness::RetryAt(Instant::now() + REBUILD_RETRY),
+        };
+        built
+    }
+    fn build(&self, index: &Path) -> Result<(), Error> {
         let config = DenseConfig::load(index)?;
         let embedder = config
             .as_ref()
@@ -768,18 +793,18 @@ fn keep_index(
             index,
             flags,
             options,
-            dirty: false,
+            staleness: Staleness::Current,
             wake: None,
         };
         if let Some(index) = index {
             let (wake, woken) = std::sync::mpsc::channel::<()>();
-            // An index that exists resumes its embedding now, and a new one is built when
-            // the tree is first quiet.
+            // An index that exists resumes its embedding now. Every start rebuilds when the
+            // tree is first quiet, because a delta is acknowledged once it's printed, so a
+            // change the last process didn't rebuild for doesn't come again.
             if arko_index::index2::status(index).is_ok() {
                 let _ = wake.send(());
-            } else {
-                keeper.dirty = true;
             }
+            keeper.staleness = Staleness::Stale;
             keeper.wake = Some(wake);
             scope.spawn(move || {
                 while woken.recv().is_ok() {

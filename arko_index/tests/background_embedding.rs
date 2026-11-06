@@ -635,6 +635,44 @@ fn a_stopped_run_continues_and_a_lexical_build_waits_for_a_run_to_yield() {
     assert_eq!(d.embedded_docs, d.docs);
 }
 
+/// A stop that comes while the last request is under way finds nothing left, so the
+/// run finishes and the generation is complete.
+#[test]
+fn a_stop_during_the_last_request_leaves_the_generation_complete() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    // How many requests the tree takes, from a run of its own.
+    let counting = tempfile::tempdir().unwrap();
+    let open = SlowEmbedder::open();
+    let requests = build(root.path(), counting.path(), Some(DenseBuild::new(&open)))
+        .dense
+        .unwrap()
+        .requests;
+    assert!(requests > 1);
+    let e = SlowEmbedder::new();
+    build_lexical_first(root.path(), state.path(), &e);
+    let stop = StopSignal::new();
+    std::thread::scope(|scope| {
+        let run =
+            scope.spawn(|| index2::embed(state.path(), &DenseBuild::new(&e).with_stop(&stop)));
+        e.allow(requests - 1);
+        e.wait_for_request(requests);
+        assert!(stop.stop("asked to stop"));
+        e.allow(1);
+        let s = run.join().unwrap().unwrap();
+        assert_eq!((s.requests, s.embedded_docs), (requests, s.docs));
+        assert!(!s.stopped, "nothing was left to stop");
+    });
+    let status = index2::status(state.path()).unwrap();
+    let info = status.dense.unwrap();
+    assert_eq!(
+        (info.state, info.embedded),
+        (EmbedState::Complete, info.docs)
+    );
+    assert_eq!(status.stopped, None);
+}
+
 /// A host keeps the index current from a watcher's deltas, rebuilding on each, while
 /// one thread embeds, and each run goes until it finishes or a newer generation is
 /// published, and then the next run starts.
@@ -961,4 +999,119 @@ fn the_owner_comes_from_the_flag_then_the_environment() {
     let s = index2(Some("0"));
     assert_eq!(s["dense"]["state"], "complete");
     assert_eq!(s["dense"]["embedded"], s["docs"]);
+}
+
+/// A CLI process started by a test, with its stderr read line by line on a thread.
+/// Dropping it, panics included, stops and reaps the process and joins the reader.
+#[cfg(unix)]
+struct Running {
+    child: std::process::Child,
+    reader: Option<std::thread::JoinHandle<()>>,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+#[cfg(unix)]
+impl Running {
+    fn spawn(command: &mut std::process::Command) -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (send, lines) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            reader: Some(reader),
+            lines,
+        }
+    }
+    /// Waits for a stderr line holding `what`, failing at `deadline`.
+    fn wait_for(&self, what: &str, deadline: Instant) {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(what) => return,
+                Ok(_) => {}
+                Err(_) => panic!("no stderr line with {what:?} in time"),
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for Running {
+    fn drop(&mut self) {
+        // A watcher stops after its current batch on SIGTERM. One that hasn't within
+        // five seconds is killed.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // The process is gone, so its stderr is closed and the reader ends.
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// The CLI's watcher with `--index` rebuilds the index once the tree is quiet, and a
+/// rebuild that fails is tried again with no further change to the tree.
+#[cfg(unix)]
+#[test]
+fn the_watchers_index_rebuild_retries_after_a_failure() {
+    use fs2::FileExt;
+    let root = tempfile::tempdir().unwrap();
+    let watch_state = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // The polling watcher, which every platform has. `watch2` keeps the index the same way.
+    let watcher = Running::spawn(
+        std::process::Command::new(cli())
+            .arg("watch")
+            .arg("--index")
+            .arg(index.path())
+            .arg(root.path())
+            .arg(watch_state.path()),
+    );
+    watcher.wait_for("index rebuilt", deadline);
+    // Another build holds the index while the tree changes, so the rebuild fails.
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(index.path().join(".index.lock"))
+        .unwrap();
+    held.lock_exclusive().unwrap();
+    write(
+        root.path(),
+        "src/net/backoff.rs",
+        "pub fn jittered_backoff_millis() -> u64 {\n    7\n}\n",
+    );
+    watcher.wait_for("index rebuild:", deadline);
+    drop(held);
+    // Nothing touches the tree again, and a later attempt rebuilds the index.
+    let found = || {
+        index2::search(index.path(), "jittered_backoff_millis")
+            .is_ok_and(|hits| hits.iter().any(|h| h.path == "src/net/backoff.rs"))
+    };
+    let retried = Instant::now() + Duration::from_secs(15);
+    while !found() {
+        assert!(
+            Instant::now() < retried,
+            "the failed rebuild was never tried again"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

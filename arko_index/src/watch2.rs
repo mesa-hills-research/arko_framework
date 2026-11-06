@@ -35,7 +35,6 @@ use crate::{
     files::{FileRules, Report, SkipReason, Skipped},
     par,
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -666,8 +665,7 @@ impl Watcher2 {
             .read(true)
             .write(true)
             .open(dir.join(".arko-index-state"))?;
-        lock.try_lock_exclusive()
-            .map_err(|e| format!("watch state already in use: {e}"))?;
+        crate::fsio::lock_or_in_use(&lock, "watch state")?;
         let root_name = root.to_str().ok_or("root must be UTF-8")?.to_owned();
         let engine = format!(
             "{}-max{}",
@@ -1100,7 +1098,13 @@ impl Watcher2 {
                             }
                         }
                         Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        // Gone, or a directory on its path became a file. The events
+                        // for either bring a pass that sees the tree as it is now.
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                            ) => {}
                         Err(e) => return Err(e.into()),
                     }
                 }
@@ -1313,6 +1317,18 @@ impl Watcher2 {
     /// `snap.pending`.
     fn next_pending(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         self.write_report()?;
+        let found = self.wait_and_reconcile(timeout);
+        if found.is_err() {
+            // The events are out of the kernel's queue, and the pass may have stopped
+            // midway, so the next call reconciles the whole tree.
+            self.pending_full = true;
+        }
+        found
+    }
+
+    /// Waits up to `timeout` for events, reconciles what they touched, and returns the
+    /// index of the first undelivered delta.
+    fn wait_and_reconcile(&mut self, timeout: Duration) -> Result<Option<usize>, Error> {
         let undelivered = |w: &Self| w.snap.pending.iter().position(|d| d.sequence > w.delivered);
         if let Some(i) = undelivered(self) {
             return Ok(Some(i));
@@ -1384,8 +1400,9 @@ impl Watcher2 {
             return Ok(None);
         };
         let d = &self.snap.pending[i];
-        self.delivered = d.sequence;
+        // A failed write leaves the delta undelivered, so the next call offers it again.
         write_delta(&self.store, d, out)?;
+        self.delivered = d.sequence;
         Ok(Some(d.sequence))
     }
 
@@ -1555,6 +1572,48 @@ mod tests {
         assert_eq!(drain(&mut w, &mut model, idle), 0);
         drop(w);
         assert_eq!(model, fresh(r));
+    }
+
+    #[test]
+    fn a_failed_pass_leaves_its_changes_for_the_next_call() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::write(r.join("a.rs"), "fn a() {}\n").unwrap();
+        let idle = Duration::from_millis(400);
+        let mut model = Map::new();
+        let mut w = Watcher2::open(r, state.path(), &Options::default()).unwrap();
+        drain(&mut w, &mut model, idle);
+        // The record store can't be written, so the next pass fails after its events
+        // were read from the kernel.
+        let path = state.path().join(&w.snap.store);
+        let writable = std::mem::replace(&mut w.store.file, File::open(&path).unwrap());
+        std::fs::write(r.join("a.rs"), "fn a() { changed(); }\n").unwrap();
+        assert!(w.next_change(idle).is_err());
+        w.store.file = writable;
+        // Nothing touches the tree again, and the change still arrives.
+        assert_eq!(drain(&mut w, &mut model, idle), 1);
+        assert_eq!(model, fresh(r));
+    }
+
+    #[test]
+    fn a_delta_whose_write_failed_is_offered_again() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let mut w = Watcher2::open(root.path(), state.path(), &Options::default()).unwrap();
+        assert!(w.next_change_to(Duration::ZERO, &mut Closed).is_err());
+        let d = w.next_change(Duration::ZERO).unwrap();
+        assert_eq!(d.map(|d| d.sequence), Some(1), "the delta is offered again");
     }
 
     #[test]

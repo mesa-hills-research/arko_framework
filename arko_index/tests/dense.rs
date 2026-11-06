@@ -69,7 +69,8 @@ impl Embedder for TestEmbedder {
         if self.fail_from_request.is_some_and(|f| n >= f) {
             return Err("simulated provider outage".into());
         }
-        assert!(texts.len() <= self.limits.max_items);
+        // A limit of 0 means 1, as `EmbedLimits::new` makes it.
+        assert!(texts.len() <= self.limits.max_items.max(1));
         if kind == InputKind::Document {
             self.texts
                 .lock()
@@ -631,6 +632,31 @@ impl Embedder for RebuildingEmbedder<'_> {
         }
         self.inner.embed(texts, kind)
     }
+}
+
+/// An embedder whose limits allow no texts per request still embeds, one text per
+/// request.
+#[test]
+fn a_limit_of_no_texts_per_request_sends_one_at_a_time() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let mut e = TestEmbedder::new("model-a", 32);
+    e.limits.max_items = 0;
+    let (done, finished) = std::sync::mpsc::channel();
+    let (r, s) = (root.path().to_path_buf(), state.path().to_path_buf());
+    std::thread::spawn(move || {
+        let built = build_with(&r, &s, Some(&e), None, 1)
+            .map(|b| b.dense.unwrap())
+            .map_err(|e| e.to_string());
+        let _ = done.send(built);
+    });
+    let d = finished
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the build never finished")
+        .unwrap();
+    assert_eq!(d.embedded_docs, d.docs);
+    assert_eq!(d.requests, d.new);
 }
 
 /// A search that was reading a generation when a build published a new one and
