@@ -88,6 +88,9 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 /// The answer to a permission request while the run stops.
 const STOPPING: &str = "The agent is stopping.";
 
+/// Why a call whose permission request Claude Code withdrew didn't run.
+const WITHDRAWN: &str = "Claude Code no longer waits for this call's approval, so it didn't run.";
+
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
@@ -729,8 +732,28 @@ struct Approval {
     id: Uuid,
     name: String,
     input: Value,
+    /// The `AwaitingToolApproval` the task is in while this call is the
+    /// oldest that waits.
+    awaiting: TaskState,
     reply: oneshot::Sender<cc::PermissionDecision>,
     wait: CommandWait,
+}
+
+/// The call whose permission request Claude Code no longer waits on (it
+/// withdrew the request, or the request's handler was dropped), once one is.
+fn withdrawn(approvals: &mut [Approval]) -> impl Future<Output = Uuid> + '_ {
+    std::future::poll_fn(move |cx| {
+        approvals
+            .iter_mut()
+            .find_map(|approval| {
+                approval
+                    .reply
+                    .poll_closed(cx)
+                    .is_ready()
+                    .then_some(approval.id)
+            })
+            .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+    })
 }
 
 /// A compaction of the session's conversation with Claude Code's
@@ -883,7 +906,10 @@ pub(super) struct ClaudeCodeRun {
     /// The report request reached the model in this turn (a denied call's
     /// result, or a user message).
     report_delivered: bool,
-    approval: Option<Approval>,
+    /// The calls waiting for approval, oldest first. Claude Code 2.1.309
+    /// asks permission for a response's read-only calls side by side, so
+    /// several can wait at once.
+    approvals: Vec<Approval>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
@@ -1024,7 +1050,7 @@ impl ClaudeCodeRun {
             question_calls: HashMap::new(),
             questions_numbered: 0,
             report_delivered: false,
-            approval: None,
+            approvals: Vec::new(),
             pause_after_turn: None,
             tool_errors: Vec::new(),
             api_error: None,
@@ -2456,9 +2482,10 @@ impl ClaudeCodeRun {
         let mut cli_exited = false;
         let end = loop {
             let approval_deadline = self
-                .approval
-                .as_ref()
-                .and_then(|approval| approval.wait.deadline(&self.host_decisions));
+                .approvals
+                .iter()
+                .filter_map(|approval| approval.wait.deadline(&self.host_decisions))
+                .min();
             tokio::select! {
                 biased;
                 command = self.commands.recv() => {
@@ -2476,7 +2503,10 @@ impl ClaudeCodeRun {
                     self.handle_request(request, &session).await?;
                 }
                 _ = sleep_until(approval_deadline), if approval_deadline.is_some() => {
-                    self.approval_timed_out().await?;
+                    self.approvals_timed_out().await?;
+                }
+                id = withdrawn(&mut self.approvals), if !self.approvals.is_empty() => {
+                    self.approval_withdrawn(id).await?;
                 }
                 _ = sleep_until(self.slowed.front().map(|(deadline, ..)| *deadline)), if !self.slowed.is_empty() => {
                     let now = tokio::time::Instant::now();
@@ -2515,7 +2545,7 @@ impl ClaudeCodeRun {
             self.compaction = None;
         }
         self.flush_usage().await?;
-        self.drop_approval();
+        self.drop_approvals();
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
         self.await_note_verdicts(&mut session).await?;
@@ -2543,7 +2573,7 @@ impl ClaudeCodeRun {
                 this.stopping = Some(stopping);
             }
             // A decision that comes later finds no call waiting.
-            this.drop_approval();
+            this.drop_approvals();
             match stopping {
                 Stopping::Cancel => this.calls_stop.stop("Task cancelled."),
                 Stopping::Suspend => this.calls_stop.stop("Task suspended."),
@@ -2554,7 +2584,7 @@ impl ClaudeCodeRun {
             Some(UserCommand::InjectContext { content }) => self.queue_context(content, true),
             Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
             Some(UserCommand::HostDeciding) => {
-                if let Some(approval) = &mut self.approval {
+                for approval in &mut self.approvals {
                     approval.wait = CommandWait::HostDeciding;
                 }
             }
@@ -2580,9 +2610,17 @@ impl ClaudeCodeRun {
                     .await?
             }
             Some(UserCommand::SubmitBatchToolApprovals { decisions, .. }) => {
-                if let Some(id) = self.approval.as_ref().map(|approval| approval.id)
-                    && let Some(decision) = decisions.get(&id).cloned()
-                {
+                // Each call it names that waits, oldest first.
+                let named = self
+                    .approvals
+                    .iter()
+                    .filter_map(|approval| {
+                        decisions
+                            .get(&approval.id)
+                            .map(|decision| (approval.id, decision.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (id, decision) in named {
                     match decision {
                         super::command::ToolApprovalDecision::Approve {
                             custom_tool_output,
@@ -3138,31 +3176,52 @@ impl ClaudeCodeRun {
             tool_not_auto_approved: !config.should_auto_approve_tool(&name),
             path_outside_workspace: outside,
         };
-        let wait = CommandWait::start(config.user_command_timeout_seconds, &self.host_decisions);
-        self.approval = Some(Approval {
+        let approval = Approval {
             tool_use_id: request.tool_use_id.clone(),
             id,
             name: name.clone(),
             input: request.input.clone(),
+            awaiting: TaskState::AwaitingToolApproval {
+                tool_call_id: id,
+                tool_name: name.clone(),
+                parameters: params.clone(),
+                tool_description: description.clone(),
+                approval_reason: reason.clone(),
+            },
             reply,
-            wait,
-        });
+            wait: CommandWait::start(config.user_command_timeout_seconds, &self.host_decisions),
+        };
+        // Claude Code asks about a call again only after it gave up on its
+        // first request, which takes no answer.
+        match self.approvals.iter_mut().find(|waiting| waiting.id == id) {
+            Some(waiting) => drop(std::mem::replace(waiting, approval)),
+            None => self.approvals.push(approval),
+        }
         self.emit(AgentEvent::ToolCallAwaitingApproval {
-            tool_call_id: id,
-            tool_name: name.clone(),
-            parameters: params.clone(),
-            tool_description: description.clone(),
-            approval_reason: reason.clone(),
-        })
-        .await?;
-        self.set_state(TaskState::AwaitingToolApproval {
             tool_call_id: id,
             tool_name: name,
             parameters: params,
             tool_description: description,
             approval_reason: reason,
         })
-        .await
+        .await?;
+        self.approvals_changed().await
+    }
+
+    /// Sets the task's state from the calls that wait for approval, naming
+    /// the oldest. A run that is ending keeps its state.
+    async fn approvals_changed(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.ending() {
+            return Ok(());
+        }
+        let state = self
+            .approvals
+            .first()
+            .map_or(TaskState::InProgress, |approval| approval.awaiting.clone());
+        if state != self.task.current_state {
+            self.set_state(state).await?;
+        }
+        Ok(())
     }
 
     async fn decide_approval(
@@ -3173,25 +3232,21 @@ impl ClaudeCodeRun {
         message_to_agent: Option<String>,
         reason: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
-        if self
-            .approval
-            .as_ref()
-            .is_none_or(|approval| approval.id != id)
-        {
+        let Some(index) = self.approvals.iter().position(|approval| approval.id == id) else {
             log::warn!(
                 "Task {}: no call {id} awaits approval. Ignored.",
                 self.task.id
             );
             return Ok(());
-        }
-        let approval = self.approval.take().expect("checked");
+        };
+        let approval = self.approvals.remove(index);
         // The task ended (a middleware or another call ended it), so the
         // call doesn't run, and its end stands.
         if self.ending() {
             let _ = approval.reply.send(cc::PermissionDecision::deny(STOPPING));
             return Ok(());
         }
-        self.set_state(TaskState::InProgress).await?;
+        self.approvals_changed().await?;
         let call = approval.tool_use_id.clone();
         if !approve {
             let reason = reason.unwrap_or_else(|| "The user rejected this call.".into());
@@ -3265,47 +3320,67 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    async fn approval_timed_out(&mut self) -> Result<(), ArkoAgentsError> {
-        // The host may have taken over the run's decisions since the timer
-        // was set.
+    /// Rejects the calls whose approval timed out. The host may have taken
+    /// over the run's decisions since the timer was set, and then none has.
+    async fn approvals_timed_out(&mut self) -> Result<(), ArkoAgentsError> {
         let now = tokio::time::Instant::now();
-        let Some(approval) = self.approval.take_if(|approval| {
-            approval
-                .wait
-                .deadline(&self.host_decisions)
-                .is_some_and(|deadline| deadline <= now)
-        }) else {
+        let host = &self.host_decisions;
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|approval| {
+                approval
+                    .wait
+                    .deadline(host)
+                    .is_some_and(|deadline| deadline <= now)
+            });
+        self.approvals = waiting;
+        if due.is_empty() {
             return Ok(());
-        };
+        }
         let seconds = self
             .task
             .agent_config
             .user_command_timeout_seconds
             .unwrap_or_default();
-        let reason = format!(
-            "Human approval timed out after {seconds} seconds, so this call was not run. You can call it again if it is still needed."
-        );
-        self.emit(AgentEvent::ToolRejected {
-            tool_call_id: approval.id,
-            tool_name: approval.name.clone(),
-            reason: Some(reason.clone()),
-        })
-        .await?;
-        let reason = self
-            .hook_text(approval.tool_use_id.as_deref(), Some(reason))
-            .await
-            .unwrap_or_default();
-        let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
-        if self.ending() {
-            return Ok(());
+        for approval in due {
+            let reason = format!(
+                "Human approval timed out after {seconds} seconds, so this call was not run. You can call it again if it is still needed."
+            );
+            self.emit(AgentEvent::ToolRejected {
+                tool_call_id: approval.id,
+                tool_name: approval.name.clone(),
+                reason: Some(reason.clone()),
+            })
+            .await?;
+            let reason = self
+                .hook_text(approval.tool_use_id.as_deref(), Some(reason))
+                .await
+                .unwrap_or_default();
+            let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
         }
-        self.set_state(TaskState::InProgress).await
+        self.approvals_changed().await
     }
 
-    /// Answers the call that waits for approval, as the run stops or its
+    /// Claude Code no longer waits for call `id`'s approval, so the host
+    /// hears that it didn't run.
+    async fn approval_withdrawn(&mut self, id: Uuid) -> Result<(), ArkoAgentsError> {
+        let Some(index) = self.approvals.iter().position(|approval| approval.id == id) else {
+            return Ok(());
+        };
+        let approval = self.approvals.remove(index);
+        self.emit(AgentEvent::ToolRejected {
+            tool_call_id: id,
+            tool_name: approval.name,
+            reason: Some(WITHDRAWN.to_string()),
+        })
+        .await?;
+        self.approvals_changed().await
+    }
+
+    /// Answers every call that waits for approval, as the run stops or its
     /// session ends.
-    fn drop_approval(&mut self) {
-        if let Some(approval) = self.approval.take() {
+    fn drop_approvals(&mut self) {
+        for approval in self.approvals.drain(..) {
             let _ = approval.reply.send(cc::PermissionDecision::deny(STOPPING));
         }
     }

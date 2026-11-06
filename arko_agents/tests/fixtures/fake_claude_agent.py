@@ -52,6 +52,18 @@ the next turn's index). Steps:
                                          reported afterwards in this order
   a tool step with "sleep_before": 1.5   waits this many seconds before the
                                          call, also in "parallel"
+  {"ask_together": [tool steps], "withdraw": [1], "withdraw_after": 0.5}
+                                         calls that ask for permission side by
+                                         side, as Claude Code 2.1.309 does for
+                                         read-only calls. Each one's PreToolUse
+                                         hook runs, then every permission
+                                         request goes out before any answer is
+                                         read. "withdraw" names the calls whose
+                                         request is withdrawn with a
+                                         control_cancel_request, after
+                                         "withdraw_after" seconds, and they
+                                         don't run. Then the calls run and
+                                         report in order
   {"exit": 3}                            the CLI crashes
   a tool step with "crash": "pre"        the CLI crashes once the call is
                                          allowed, before it runs; "post":
@@ -251,15 +263,30 @@ def answer_usage(request_id):
             "error": "Unsupported control request subtype: get_usage"}})
 
 
-def ask(request):
+def request(body):
+    """Sends a control request, and returns its ID."""
     state["counter"] += 1
     request_id = "cli_%d" % state["counter"]
-    send({"type": "control_request", "request_id": request_id, "request": request})
-    while True:
+    send({"type": "control_request", "request_id": request_id, "request": body})
+    return request_id
+
+
+def answers(request_ids):
+    """The answers to these control requests, by ID, in whatever order they
+    come. Other messages are handled meanwhile."""
+    got = {}
+    while len(got) < len(request_ids):
         message = read()
-        if message.get("type") == "control_response" and message["response"]["request_id"] == request_id:
-            return message["response"].get("response")
-        handle(message)
+        if message.get("type") == "control_response" and message["response"]["request_id"] in request_ids:
+            got[message["response"]["request_id"]] = message["response"].get("response")
+        else:
+            handle(message)
+    return got
+
+
+def ask(body):
+    request_id = request(body)
+    return answers([request_id])[request_id]
 
 
 def next_turn(advance=True):
@@ -378,9 +405,9 @@ def hook(event, fields, tool_use_id):
                 "tool_use_id": tool_use_id}) or {}
 
 
-def call_tool(step, index, report=True):
-    """Runs a tool step's call and its hooks, then reports its result, or
-    returns the result message to report later when `report` is false."""
+def start_call(step, index):
+    """A tool step's call and its PreToolUse hook. Returns what the rest of
+    the call needs."""
     time.sleep(step.get("sleep_before", 0))
     name, tool_input = step["tool"], step.get("input", {})
     tool_use_id = step.get("id", "toolu_%d_%d" % (state["message"] + 1, index))
@@ -388,17 +415,32 @@ def call_tool(step, index, report=True):
     pre = hook("PreToolUse", {"tool_name": name, "tool_input": tool_input}, tool_use_id)
     log("pre", tool=name, answer=pre)
     decision = pre.get("hookSpecificOutput", {})
-    verdict = decision.get("permissionDecision")
-    output, is_error = None, False
     # Like Claude Code, the call runs with the input a hook or a permission
     # answer replaced, and the PostToolUse hook gets that input.
     if decision.get("updatedInput") is not None:
         tool_input = decision["updatedInput"]
+    return {"name": name, "input": tool_input, "id": tool_use_id, "decision": decision}
+
+
+def permission_request(call):
+    return {"subtype": "can_use_tool", "tool_name": call["name"], "input": call["input"],
+            "tool_use_id": call["id"], "permission_suggestions": []}
+
+
+def call_tool(step, index, report=True, started=None, permission=None):
+    """Runs a tool step's call and its hooks, then reports its result, or
+    returns the result message to report later when `report` is false. A call
+    `started` already, whose permission request was answered `permission`,
+    goes on from there."""
+    call = started or start_call(step, index)
+    name, tool_input, tool_use_id = call["name"], call["input"], call["id"]
+    decision = call["decision"]
+    verdict = decision.get("permissionDecision")
+    output, is_error = None, False
     if verdict == "deny":
         output, is_error = decision.get("permissionDecisionReason", ""), True
     elif verdict == "ask":
-        answer = ask({"subtype": "can_use_tool", "tool_name": name, "input": tool_input,
-                      "tool_use_id": tool_use_id, "permission_suggestions": []})
+        answer = permission if started else ask(permission_request(call))
         log("permission", tool=name, answer=answer)
         if answer.get("behavior") != "allow":
             output, is_error = answer.get("message", ""), True
@@ -605,6 +647,25 @@ def turn(text, message_uuid=None):
             for number in step.get("report", range(len(results))):
                 send(results[number])
             take_in_notes()
+        if "ask_together" in step:
+            calls = [dict(call, id=call.get("id", "toolu_a%d_%d" % (index, number)))
+                     for number, call in enumerate(step["ask_together"])]
+            started = [start_call(call, index) for call in calls]
+            asked = {number: request(permission_request(call))
+                     for number, call in enumerate(started)
+                     if call["decision"].get("permissionDecision") == "ask"}
+            withdrawn = set(step.get("withdraw", []))
+            if withdrawn:
+                time.sleep(step.get("withdraw_after", 0))
+                for number in withdrawn:
+                    send({"type": "control_cancel_request", "request_id": asked[number]})
+            got = answers([request_id for number, request_id in asked.items()
+                           if number not in withdrawn])
+            for number, call in enumerate(calls):
+                # A call whose request was withdrawn was aborted, so it fails.
+                permission = ({"behavior": "deny", "message": "withdrawn"} if number in withdrawn
+                              else got.get(asked.get(number)))
+                call_tool(call, index, started=started[number], permission=permission)
     send({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
           "session_id": SESSION, "duration_ms": 5, "result": final,
           "usage": usage(steps[-1] if steps else {}, 5)})

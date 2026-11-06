@@ -6,6 +6,7 @@
 use super::*;
 use crate::runtime::HostDecisions;
 use crate::task::ErrorRecoveryCause;
+use std::collections::HashMap;
 use tokio::time::Instant as TokioInstant;
 
 const TIMEOUT: u64 = 100;
@@ -308,5 +309,205 @@ async fn host_decisions_set_during_an_approval_wait_stop_its_timeout() {
     assert_eq!(
         permissions[0]["answer"]["behavior"], "allow",
         "{permissions:#?}"
+    );
+}
+
+/// `Read`, which needs approval, for an agent of `fake`.
+fn approving_reads(fake: &Fake) -> crate::agent_config::AgentConfig {
+    let mut config = config(fake, &["Read"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Read".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    config
+}
+
+/// Two reads that ask for approval side by side.
+fn two_reads() -> Fake {
+    Fake::new(json!([[
+        {"ask_together": [
+            {"tool": "Read", "input": {"file_path": "a.txt"}},
+            {"tool": "Read", "input": {"file_path": "b.txt"}},
+        ]},
+        complete("Read them"),
+    ]]))
+}
+
+/// The calls awaiting approval, by the file each reads, once `count` wait.
+async fn awaited_reads(run: &mut Run, count: usize) -> BTreeMap<String, uuid::Uuid> {
+    let mut waiting = BTreeMap::new();
+    while waiting.len() < count {
+        let events = run.events_until(awaits_approval).await;
+        let Some(AgentEvent::ToolCallAwaitingApproval {
+            tool_call_id,
+            parameters,
+            ..
+        }) = events.last()
+        else {
+            panic!("{events:#?}");
+        };
+        waiting.insert(
+            parameters["file_path"].as_str().unwrap().to_string(),
+            *tool_call_id,
+        );
+    }
+    waiting
+}
+
+/// Claude Code 2.1.309 asks permission for a response's read-only calls
+/// side by side. Each call waits for its own decision.
+#[tokio::test]
+async fn calls_asking_permission_together_each_wait_for_their_own_decision() {
+    let fake = two_reads();
+    let task = Task::new(
+        approving_reads(&fake),
+        "Read both files.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let waiting = awaited_reads(&mut run, 2).await;
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: waiting["a.txt"],
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    run.commands
+        .send(UserCommand::RejectToolUse {
+            tool_call_id: waiting["b.txt"],
+            reason: Some("Not b.".into()),
+        })
+        .await
+        .unwrap();
+    let (task, events) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let permissions = fake.logged("permission");
+    assert_eq!(
+        permissions[0]["answer"]["behavior"], "allow",
+        "{permissions:#?}"
+    );
+    assert_eq!(permissions[1]["answer"]["behavior"], "deny");
+    assert_eq!(permissions[1]["answer"]["message"], "Not b.");
+    // After the approval, the state names the call still waiting, unless
+    // it was the oldest all along, then none.
+    let states = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingToolApproval {
+                tool_call_id, ..
+            }) => Some(Some(*tool_call_id)),
+            AgentEvent::TaskStateChanged(TaskState::InProgress) => Some(None),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match states.as_slice() {
+        [None] => {}
+        [Some(next), None] => assert_eq!(*next, waiting["b.txt"]),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// One batch of decisions decides every call it names that waits.
+#[tokio::test]
+async fn a_batch_decides_every_call_it_names() {
+    let fake = two_reads();
+    let task = Task::new(
+        approving_reads(&fake),
+        "Read both files.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let waiting = awaited_reads(&mut run, 2).await;
+    let decisions = HashMap::from([
+        (
+            waiting["a.txt"],
+            crate::runtime::command::ToolApprovalDecision::Approve {
+                custom_tool_output: None,
+                message_to_agent: None,
+            },
+        ),
+        (
+            waiting["b.txt"],
+            crate::runtime::command::ToolApprovalDecision::Reject {
+                reason: Some("Not b.".into()),
+            },
+        ),
+    ]);
+    run.commands
+        .send(UserCommand::SubmitBatchToolApprovals {
+            batch_id: uuid::Uuid::new_v4(),
+            decisions,
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let permissions = fake.logged("permission");
+    assert_eq!(
+        permissions[0]["answer"]["behavior"], "allow",
+        "{permissions:#?}"
+    );
+    assert_eq!(permissions[1]["answer"]["message"], "Not b.");
+}
+
+/// A permission request Claude Code withdraws (as it does for a call it
+/// aborts) ends that call's wait. The host hears that the call didn't run,
+/// and the task goes on.
+#[tokio::test]
+async fn a_permission_request_claude_code_withdraws_ends_its_wait() {
+    let fake = Fake::new(json!([[
+        {"ask_together": [{"tool": "Read", "input": {"file_path": "a.txt"}}],
+         "withdraw": [0], "withdraw_after": 0.5},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        approving_reads(&fake),
+        "Read the file.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => Some(*tool_call_id),
+            _ => None,
+        })
+        .expect("a call awaited approval");
+    let rejected = events.iter().position(|event| {
+        matches!(event, AgentEvent::ToolRejected { tool_call_id, .. } if *tool_call_id == call)
+    });
+    let resumed = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::TaskStateChanged(TaskState::InProgress)));
+    let completed = events.iter().position(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::Completed { .. })
+        )
+    });
+    assert!(
+        rejected.is_some() && resumed.is_some() && resumed < completed,
+        "{events:#?}"
     );
 }
