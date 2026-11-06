@@ -1001,46 +1001,91 @@ fn the_owner_comes_from_the_flag_then_the_environment() {
     assert_eq!(s["dense"]["embedded"], s["docs"]);
 }
 
+/// A CLI process started by a test, with its stderr read line by line on a thread.
+/// Dropping it, panics included, stops and reaps the process and joins the reader.
+#[cfg(unix)]
+struct Running {
+    child: std::process::Child,
+    reader: Option<std::thread::JoinHandle<()>>,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+#[cfg(unix)]
+impl Running {
+    fn spawn(command: &mut std::process::Command) -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (send, lines) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            reader: Some(reader),
+            lines,
+        }
+    }
+    /// Waits for a stderr line holding `what`, failing at `deadline`.
+    fn wait_for(&self, what: &str, deadline: Instant) {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(what) => return,
+                Ok(_) => {}
+                Err(_) => panic!("no stderr line with {what:?} in time"),
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for Running {
+    fn drop(&mut self) {
+        // A watcher stops after its current batch on SIGTERM. One that hasn't within
+        // five seconds is killed.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // The process is gone, so its stderr is closed and the reader ends.
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
 /// The CLI's watcher with `--index` rebuilds the index once the tree is quiet, and a
 /// rebuild that fails is tried again with no further change to the tree.
 #[cfg(unix)]
 #[test]
 fn the_watchers_index_rebuild_retries_after_a_failure() {
     use fs2::FileExt;
-    use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
     let root = tempfile::tempdir().unwrap();
     let watch_state = tempfile::tempdir().unwrap();
     let index = tempfile::tempdir().unwrap();
     corpus(root.path());
-    let mut child = Command::new(cli())
-        .arg("watch2")
-        .arg("--index")
-        .arg(index.path())
-        .arg(root.path())
-        .arg(watch_state.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let (lines, read) = std::sync::mpsc::channel();
-    let stderr = child.stderr.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if lines.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let wait_for = |what: &str| loop {
-        let line = read
-            .recv_timeout(Duration::from_secs(30))
-            .unwrap_or_else(|_| panic!("no line with {what:?}"));
-        if line.contains(what) {
-            break;
-        }
-    };
-    wait_for("index rebuilt");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // The polling watcher, which every platform has. `watch2` keeps the index the same way.
+    let watcher = Running::spawn(
+        std::process::Command::new(cli())
+            .arg("watch")
+            .arg("--index")
+            .arg(index.path())
+            .arg(root.path())
+            .arg(watch_state.path()),
+    );
+    watcher.wait_for("index rebuilt", deadline);
     // Another build holds the index while the tree changes, so the rebuild fails.
     let held = fs::OpenOptions::new()
         .create(true)
@@ -1054,24 +1099,19 @@ fn the_watchers_index_rebuild_retries_after_a_failure() {
         "src/net/backoff.rs",
         "pub fn jittered_backoff_millis() -> u64 {\n    7\n}\n",
     );
-    wait_for("index rebuild:");
+    watcher.wait_for("index rebuild:", deadline);
     drop(held);
     // Nothing touches the tree again, and a later attempt rebuilds the index.
     let found = || {
         index2::search(index.path(), "jittered_backoff_millis")
             .is_ok_and(|hits| hits.iter().any(|h| h.path == "src/net/backoff.rs"))
     };
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let rebuilt = loop {
-        if found() {
-            break true;
-        }
-        if Instant::now() > deadline {
-            break false;
-        }
+    let retried = Instant::now() + Duration::from_secs(15);
+    while !found() {
+        assert!(
+            Instant::now() < retried,
+            "the failed rebuild was never tried again"
+        );
         std::thread::sleep(Duration::from_millis(100));
-    };
-    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
-    child.wait().unwrap();
-    assert!(rebuilt, "the failed rebuild was never tried again");
+    }
 }
