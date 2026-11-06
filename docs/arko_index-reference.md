@@ -733,9 +733,12 @@ with it), and the embedding model saved there (choose one with `index2 --embed` 
 and a thread of the watcher embeds each new generation, a run after each rebuild,
 continuing a run a rebuild superseded. stderr gets a line per rebuild,
 `arko_index: index rebuilt: N chunks; dense: E have vectors, T distinct texts to embed`,
-and a progress line per embedding request. On a start with an existing index the thread
-continues its embedding, and a new index is built at the first quiet poll. A signal, or
-an error that ends the watcher, stops the embedding after its current request.
+and a progress line per embedding request. A rebuild that fails prints
+`arko_index: index rebuild: <error>` and is tried again at the first quiet poll five
+seconds later. On a start with an existing index the thread continues its embedding,
+and the index is rebuilt at the first quiet poll, because a change acknowledged before
+the last process rebuilt for it isn't delivered again. A signal, or an error that ends
+the watcher, stops the embedding after its current request.
 
 ### The background run
 
