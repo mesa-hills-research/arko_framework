@@ -1634,6 +1634,33 @@ async fn a_response_older_than_the_announcement_does_not_repeat_it() {
     .await;
 }
 
+/// Statuses read an account whose reset time passed as the next request
+/// does, as one it tries.
+#[tokio::test]
+async fn statuses_show_an_account_whose_reset_time_passed_as_tried_next() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, _events) = pool(&mock);
+        let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let clock = Arc::new(Mutex::new(SystemTime::now()));
+        accounts.clock = Some(clock.clone());
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(accounts.statuses()[0].retry, None);
+        *clock.lock().unwrap() += Duration::from_secs(660);
+        let status = &accounts.statuses()[0];
+        assert!(status.exhausted);
+        assert_eq!(status.retry, Some(UsableReason::ResetTimePassed));
+    })
+    .await;
+}
+
 fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEvent> {
     events
         .iter()

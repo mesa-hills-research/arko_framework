@@ -990,7 +990,10 @@ impl ChatGptAccounts {
 
     /// Every account's state, in order of preference.
     pub fn statuses(&self) -> Vec<ChatGptAccountStatus> {
-        let state = self.lock();
+        let now = self.now();
+        let mut state = self.lock();
+        // As the next request sees them.
+        Self::expire(&mut state, now);
         self.statuses_of(&state)
     }
 
