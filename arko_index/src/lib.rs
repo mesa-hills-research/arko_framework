@@ -28,5 +28,6 @@ mod tokenize;
 #[cfg(target_os = "linux")]
 pub mod watch2;
 pub use files::{FileRules, Report, SkipReason, Skipped};
+pub use fsio::StateInUse;
 #[cfg(unix)]
 pub use scan::{bench_scan, bench_scan_with};

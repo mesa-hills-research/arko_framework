@@ -4,7 +4,6 @@ use crate::{
     files::{FileRules, Report, read_dir, write_report},
     watch::atomic_json,
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -88,9 +87,7 @@ pub fn index_with(
         .read(true)
         .write(true)
         .open(state_dir.join(".index.lock"))?;
-    _lock
-        .try_lock_exclusive()
-        .map_err(|e| format!("index state already in use: {e}"))?;
+    crate::fsio::lock_or_in_use(&_lock, "index state")?;
     // Directory marker is also recognized by chunk_dir and independent watcher instances.
     File::options()
         .create(true)

@@ -945,7 +945,9 @@ directory that holds it) and `report.json` (the last walk's report).
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
 Writers take an advisory lock on the state (the marker, or `.index.lock`), so a second
-writer fails fast. An embedding run takes `.embed.lock` and waits for one in progress.
+writer fails fast with an error that downcasts to `arko_index::StateInUse`. Any other
+lock failure, such as a file system without working locks, is reported as it is. An
+embedding run takes `.embed.lock` and waits for one in progress.
 Commits write a temporary file, fsync it, rename it and fsync the directory (on Unix).
 
 ### Compatibility

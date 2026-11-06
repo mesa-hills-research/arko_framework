@@ -408,3 +408,42 @@ fn deeply_nested_ast_descent_is_stack_bounded() {
     }
     assert_eq!(p, text.len());
 }
+
+/// A state directory whose lock another holder has fails to open with
+/// `StateInUse`, for the indexes and both watchers.
+#[test]
+fn a_held_state_lock_is_in_use() {
+    use fs2::FileExt;
+    let in_use = |e: Error| {
+        assert!(e.downcast_ref::<arko_index::StateInUse>().is_some(), "{e}");
+    };
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let hold = |name: &str| {
+        let file = std::fs::File::create(state.path().join(name)).unwrap();
+        file.lock_exclusive().unwrap();
+        file
+    };
+    let held = hold(".index.lock");
+    in_use(arko_index::search::index(root.path(), state.path(), &Options::default()).unwrap_err());
+    let settings = arko_index::index2::BuildOptions::default();
+    in_use(
+        arko_index::index2::build(root.path(), state.path(), &Options::default(), &settings)
+            .err()
+            .unwrap(),
+    );
+    drop(held);
+    let _held = hold(".arko-index-state");
+    in_use(
+        open_watch(root.path(), state.path(), &Options::default())
+            .err()
+            .unwrap(),
+    );
+    #[cfg(target_os = "linux")]
+    in_use(
+        arko_index::watch2::Watcher2::open(root.path(), state.path(), &Options::default())
+            .err()
+            .unwrap(),
+    );
+}

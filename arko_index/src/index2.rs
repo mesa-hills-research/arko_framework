@@ -497,8 +497,7 @@ pub fn build(
         .read(true)
         .write(true)
         .open(state_dir.join(".index.lock"))?;
-    lock.try_lock_exclusive()
-        .map_err(|e| format!("index state already in use: {e}"))?;
+    crate::fsio::lock_or_in_use(&lock, "index state")?;
     File::options()
         .create(true)
         .truncate(false)
@@ -963,7 +962,8 @@ fn embedding_active(state_dir: &Path) -> bool {
             let _ = FileExt::unlock(&file);
             false
         }
-        Err(_) => true,
+        // A file system without working locks has no run holding one either.
+        Err(e) => crate::fsio::is_contended(&e),
     }
 }
 

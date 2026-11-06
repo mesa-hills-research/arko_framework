@@ -2,7 +2,6 @@ use crate::{
     bench_v1::{Chunk, Delta, Error, Options},
     files::{FileData, FileRules, Report, read_dir, write_report},
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -244,8 +243,7 @@ impl Watcher {
             .read(true)
             .write(true)
             .open(dir.join(".arko-index-state"))?;
-        lock.try_lock_exclusive()
-            .map_err(|e| format!("watch state already in use: {e}"))?;
+        crate::fsio::lock_or_in_use(&lock, "watch state")?;
         lock.sync_all()?;
         let root_name = root
             .to_str()

@@ -35,7 +35,6 @@ use crate::{
     files::{FileRules, Report, SkipReason, Skipped},
     par,
 };
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -666,8 +665,7 @@ impl Watcher2 {
             .read(true)
             .write(true)
             .open(dir.join(".arko-index-state"))?;
-        lock.try_lock_exclusive()
-            .map_err(|e| format!("watch state already in use: {e}"))?;
+        crate::fsio::lock_or_in_use(&lock, "watch state")?;
         let root_name = root.to_str().ok_or("root must be UTF-8")?.to_owned();
         let engine = format!(
             "{}-max{}",
