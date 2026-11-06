@@ -88,6 +88,10 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 /// The answer to a permission request while the run stops.
 const STOPPING: &str = "The agent is stopping.";
 
+/// Why a call that waited for approval didn't run when its session ended.
+const SESSION_ENDED: &str =
+    "The Claude Code session ended while this call waited for approval, so it didn't run.";
+
 /// Why a call whose permission request Claude Code withdrew didn't run.
 const WITHDRAWN: &str = "Claude Code no longer waits for this call's approval, so it didn't run.";
 
@@ -2604,7 +2608,13 @@ impl ClaudeCodeRun {
             self.compaction = None;
         }
         self.flush_usage().await?;
-        self.drop_approvals();
+        // Calls still waiting (a subagent's, past its turn's end) end with
+        // the session. A run that ends tells no one.
+        if self.ending() {
+            self.drop_approvals();
+        } else {
+            self.reject_approvals(SESSION_ENDED).await?;
+        }
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
         self.await_note_verdicts(&mut session).await?;
@@ -3270,9 +3280,16 @@ impl ClaudeCodeRun {
     }
 
     /// Sets the task's state from the calls that wait for approval, naming
-    /// the oldest. A run that is ending keeps its state.
+    /// the oldest. Approvals own only being in progress and awaiting a call's
+    /// approval, so a run that is ending, or a wait for another decision,
+    /// keeps its state.
     async fn approvals_changed(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.ending() {
+        if self.ending()
+            || !matches!(
+                self.task.current_state,
+                TaskState::InProgress | TaskState::AwaitingToolApproval { .. }
+            )
+        {
             return Ok(());
         }
         let state = self
@@ -3429,13 +3446,34 @@ impl ClaudeCodeRun {
             return Ok(());
         };
         let approval = self.approvals.remove(index);
+        self.reject_approval(approval, WITHDRAWN).await?;
+        self.approvals_changed().await
+    }
+
+    /// Rejects every call that waits for approval as the session ends, so
+    /// the host hears of each before the task's next state.
+    async fn reject_approvals(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
+        for approval in std::mem::take(&mut self.approvals) {
+            self.reject_approval(approval, reason).await?;
+        }
+        self.approvals_changed().await
+    }
+
+    /// Tells the host that `approval`'s call didn't run, for `reason`, and
+    /// Claude Code too if it still waits for the answer.
+    async fn reject_approval(
+        &mut self,
+        approval: Approval,
+        reason: &str,
+    ) -> Result<(), ArkoAgentsError> {
         self.emit(AgentEvent::ToolRejected {
-            tool_call_id: id,
+            tool_call_id: approval.id,
             tool_name: approval.name,
-            reason: Some(WITHDRAWN.to_string()),
+            reason: Some(reason.to_string()),
         })
         .await?;
-        self.approvals_changed().await
+        let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
+        Ok(())
     }
 
     /// Answers every call that waits for approval, as the run stops or its
@@ -5285,6 +5323,10 @@ impl ClaudeCodeRun {
         if self.ending() {
             return Ok(SessionEnd::Stop);
         }
+        // The calls waiting for approval end with the session, each told
+        // before the failure's state, whether or not Claude Code's requests
+        // for them have gone yet.
+        self.reject_approvals(SESSION_ENDED).await?;
         // A pause the turn asked for belongs to it, and goes with the
         // failure that ended it rather than with a later turn's end.
         let message = match self.pause_after_turn.take() {

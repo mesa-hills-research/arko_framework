@@ -63,7 +63,10 @@ the next turn's index). Steps:
                                          control_cancel_request, after
                                          "withdraw_after" seconds, and they
                                          don't run. Then the calls run and
-                                         report in order
+                                         report in order, or with
+                                         "exit_after_requests": 3 the CLI exits
+                                         with that code 0.2 seconds after the
+                                         requests, without their answers
   {"exit": 3}                            the CLI crashes
   a tool step with "crash": "pre"        the CLI crashes once the call is
                                          allowed, before it runs; "post":
@@ -659,6 +662,9 @@ def turn(text, message_uuid=None):
                 time.sleep(step.get("withdraw_after", 0))
                 for number in withdrawn:
                     send({"type": "control_cancel_request", "request_id": asked[number]})
+            if "exit_after_requests" in step:
+                time.sleep(0.2)
+                sys.exit(step["exit_after_requests"])
             got = answers([request_id for number, request_id in asked.items()
                            if number not in withdrawn])
             for number, call in enumerate(calls):

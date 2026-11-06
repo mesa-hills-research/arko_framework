@@ -511,3 +511,50 @@ async fn a_permission_request_claude_code_withdraws_ends_its_wait() {
         "{events:#?}"
     );
 }
+
+/// Calls waiting for approval when Claude Code exits are each reported as
+/// not run, before the task pauses for the failure, whatever order the
+/// session's teardown drops their requests in.
+#[tokio::test]
+async fn calls_waiting_for_approval_when_claude_code_exits_are_each_rejected() {
+    for _ in 0..5 {
+        let fake = Fake::new(json!([[
+            {"ask_together": [
+                {"tool": "Read", "input": {"file_path": "a.txt"}},
+                {"tool": "Read", "input": {"file_path": "b.txt"}},
+            ], "exit_after_requests": 3},
+        ]]));
+        let task = Task::new(
+            approving_reads(&fake),
+            "Read both files.".into(),
+            fake.workspace(),
+            None,
+        );
+        let mut run = start(task);
+        let waiting = awaited_reads(&mut run, 2).await;
+        let events = run
+            .events_until(|event| {
+                matches!(
+                    event,
+                    AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+                )
+            })
+            .await;
+        for id in waiting.values() {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ToolRejected { tool_call_id, .. } if tool_call_id == id
+                )),
+                "no rejection for {id} before the pause: {events:#?}"
+            );
+        }
+        run.commands.send(UserCommand::CancelTask).await.unwrap();
+        let (task, _) = run.finish().await;
+        assert!(
+            matches!(task.current_state, TaskState::Cancelled { .. }),
+            "{:?}",
+            task.current_state
+        );
+    }
+}
