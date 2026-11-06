@@ -726,6 +726,63 @@ struct Call {
     input: Value,
 }
 
+/// Why a turn asked to pause, weakest first, so that the derived order is
+/// the priority and the strongest cause stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PauseCause {
+    /// A monitor (plan usage, cache efficiency), which its event already
+    /// reported.
+    Monitor,
+    /// A tool error under `ToolErrorPolicy::PauseAndAwaitApproval`.
+    ToolError,
+    /// The execution middleware's decision, or its failure.
+    Middleware,
+    /// The host holds the next request
+    /// ([`TurnContextSource::hold_request`](super::TurnContextSource::hold_request)).
+    BudgetHold,
+}
+
+impl From<PauseCause> for ErrorRecoveryCause {
+    fn from(cause: PauseCause) -> Self {
+        match cause {
+            PauseCause::Monitor => Self::Monitor,
+            PauseCause::ToolError => Self::ToolError,
+            PauseCause::Middleware => Self::Middleware,
+            PauseCause::BudgetHold => Self::BudgetExceeded,
+        }
+    }
+}
+
+/// The pause a turn asked for, applied when it ends. The strongest cause
+/// stands, and the reasons of every offer go with it, in order. The turn's
+/// tool errors are kept apart (`ClaudeCodeRun::tool_errors`), as they are
+/// reported on their own unless a tool error is the pause's cause.
+#[derive(Debug, Default)]
+struct TurnPause(Option<(PauseCause, Vec<String>)>);
+
+impl TurnPause {
+    fn offer(&mut self, cause: PauseCause, reason: Option<String>) {
+        let reason = reason.filter(|reason| !reason.trim().is_empty());
+        match &mut self.0 {
+            None => self.0 = Some((cause, reason.into_iter().collect())),
+            Some((standing, reasons)) => {
+                *standing = (*standing).max(cause);
+                if let Some(reason) = reason.filter(|reason| !reasons.contains(reason)) {
+                    reasons.push(reason);
+                }
+            }
+        }
+    }
+
+    fn cause(&self) -> Option<PauseCause> {
+        self.0.as_ref().map(|(cause, _)| *cause)
+    }
+
+    fn take(&mut self) -> Option<(PauseCause, Vec<String>)> {
+        self.0.take()
+    }
+}
+
 /// A call waiting for approval in a permission request.
 struct Approval {
     tool_use_id: Option<String>,
@@ -911,7 +968,7 @@ pub(super) struct ClaudeCodeRun {
     /// several can wait at once.
     approvals: Vec<Approval>,
     /// A pause the turn's calls asked for, applied when the turn ends.
-    pause_after_turn: Option<(String, ErrorRecoveryCause)>,
+    pause_after_turn: TurnPause,
     /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
     /// (each with its call), reported with the tool-error pause at the
     /// turn's end, as arko's own runtime reports them, once.
@@ -1051,7 +1108,7 @@ impl ClaudeCodeRun {
             questions_numbered: 0,
             report_delivered: false,
             approvals: Vec::new(),
-            pause_after_turn: None,
+            pause_after_turn: TurnPause::default(),
             tool_errors: Vec::new(),
             api_error: None,
             error_kind: None,
@@ -2366,6 +2423,8 @@ impl ClaudeCodeRun {
         (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
         self.retrying_since = None;
+        // A pause belongs to the turn that asked for it.
+        self.pause_after_turn = TurnPause::default();
         self.streamed_bytes = (0, 0);
         // Message IDs are a launch's own, so what an earlier launch streamed
         // says nothing about this one's messages.
@@ -3090,13 +3149,15 @@ impl ClaudeCodeRun {
                 message_to_agent,
                 reason,
             }) => {
-                self.pause_after_turn = Some((reason, ErrorRecoveryCause::Middleware));
+                self.pause_after_turn
+                    .offer(PauseCause::Middleware, Some(reason));
                 let _ = session.interrupt().await;
                 (refused(name, &message_to_agent), message_to_agent)
             }
             Err(error) => {
                 let reason = format!("The execution middleware failed before '{name}': {error}");
-                self.pause_after_turn = Some((reason.clone(), ErrorRecoveryCause::Middleware));
+                self.pause_after_turn
+                    .offer(PauseCause::Middleware, Some(reason.clone()));
                 let _ = session.interrupt().await;
                 (refused(name, &reason), reason)
             }
@@ -3415,13 +3476,13 @@ impl ClaudeCodeRun {
                 .after(&execution, &context, ToolExecutionOutcome::Success(&output))
                 .await
             {
-                self.pause_after_turn = Some((
-                    format!(
+                self.pause_after_turn.offer(
+                    PauseCause::Middleware,
+                    Some(format!(
                         "The execution middleware failed after '{}': {error}",
                         call.name
-                    ),
-                    ErrorRecoveryCause::Middleware,
-                ));
+                    )),
+                );
             }
         }
         // While context waits for a later input, the hook carries none of it
@@ -3610,10 +3671,11 @@ impl ClaudeCodeRun {
                     }
                 }
                 // Over the host's budget, so the turn ends here, held.
-                if self.pause_after_turn.is_none()
+                if self.pause_after_turn.cause() != Some(PauseCause::BudgetHold)
                     && let Some(reason) = self.held_request()
                 {
-                    self.pause_after_turn = Some((reason, ErrorRecoveryCause::BudgetExceeded));
+                    self.pause_after_turn
+                        .offer(PauseCause::BudgetHold, Some(reason));
                     let _ = session.interrupt().await;
                 }
                 // A subagent's messages are its own conversation.
@@ -4231,9 +4293,7 @@ impl ClaudeCodeRun {
                     // stands, and the error is reported on its own then.
                     ToolErrorPolicy::PauseAndAwaitApproval => {
                         self.tool_errors.push((error.clone(), id));
-                        if self.pause_after_turn.is_none() {
-                            self.pause_after_turn = Some((error, ErrorRecoveryCause::ToolError));
-                        }
+                        self.pause_after_turn.offer(PauseCause::ToolError, None);
                         let _ = session.interrupt().await;
                     }
                     ToolErrorPolicy::FailTask => {
@@ -4275,7 +4335,8 @@ impl ClaudeCodeRun {
                     reason: Some(message),
                 })
                 .await?;
-                self.pause_after_turn = Some((reason, ErrorRecoveryCause::Middleware));
+                self.pause_after_turn
+                    .offer(PauseCause::Middleware, Some(reason));
                 let _ = session.interrupt().await;
             }
         }
@@ -4708,13 +4769,13 @@ impl ClaudeCodeRun {
         match threshold.action {
             crate::agent_config::PlanUsageAction::Pause => {
                 if first {
-                    self.pause_after_turn = Some((
-                        format!(
+                    self.pause_after_turn.offer(
+                        PauseCause::Monitor,
+                        Some(format!(
                             "Plan usage reached {:.1}% of the {window} usage-limit window (threshold {:.1}%).",
                             reached.used_percent, threshold.percent
-                        ),
-                        ErrorRecoveryCause::Monitor,
-                    ));
+                        )),
+                    );
                     let _ = session.interrupt().await;
                 }
             }
@@ -4801,15 +4862,15 @@ impl ClaudeCodeRun {
         match low(config.pause_below) {
             Some(threshold) if !self.cache_pause_episode => {
                 self.cache_pause_episode = true;
-                self.pause_after_turn = Some((
-                    format!(
+                self.pause_after_turn.offer(
+                    PauseCause::Monitor,
+                    Some(format!(
                         "Prompt cache efficiency fell to {:.1}% over the last {} calls (threshold {:.1}%).",
                         efficiency.rolling * 100.0,
                         efficiency.calls,
                         threshold * 100.0
-                    ),
-                    ErrorRecoveryCause::Monitor,
-                ));
+                    )),
+                );
                 self.cache_interrupt = true;
                 self.emit(AgentEvent::CacheEfficiencyLow {
                     rolling_efficiency: efficiency.rolling,
@@ -4913,12 +4974,7 @@ impl ClaudeCodeRun {
         self.discard_unfinished_stream().await?;
         let api_error = self.api_error.take();
         let ending = self.ending();
-        if ending
-            || !matches!(
-                self.pause_after_turn,
-                Some((_, ErrorRecoveryCause::ToolError))
-            )
-        {
+        if ending || self.pause_after_turn.cause() != Some(PauseCause::ToolError) {
             // No tool-error pause reports them, so each is reported on its own.
             self.report_tool_errors().await?;
         }
@@ -4937,51 +4993,56 @@ impl ClaudeCodeRun {
                 self.add_compaction_note()?;
             } else {
                 self.held_calls.clear();
-                if self.pause_after_turn.is_none() {
+                if self.pause_after_turn.cause().is_none() {
                     self.compaction_failed(result).await?;
                 }
             }
             // Its note (or the report request) goes out with the task's
             // input, after the pause the turn asked for if it did.
-            if self.pause_after_turn.is_none() {
+            if self.pause_after_turn.cause().is_none() {
                 return self.send_unsent(session).await;
             }
         }
-        if let Some((reason, cause)) = self.pause_after_turn.take() {
-            if matches!(cause, ErrorRecoveryCause::BudgetExceeded) {
-                self.hold(reason).await?;
-                return Ok(Some(SessionEnd::Wait));
-            }
-            if matches!(cause, ErrorRecoveryCause::Monitor) {
-                // As for other agents, a pause under the pausing error
-                // policies, the task returned interrupted under the others.
-                self.pause_on_error(reason, cause).await?;
-                self.task.monitor_pause = matches!(
-                    self.task.current_state,
-                    TaskState::AwaitingErrorRecoveryApproval { .. }
-                );
-                return Ok(Some(
-                    if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
-                        SessionEnd::Stop
-                    } else {
-                        SessionEnd::Wait
-                    },
-                ));
-            }
-            if cause == ErrorRecoveryCause::ToolError && !tool_error_pause.is_empty() {
-                // Every failure, the call named when it is the only one.
-                let tool_call_id = match tool_error_pause.as_slice() {
-                    [(_, id)] => Some(*id),
-                    _ => None,
-                };
-                let message = tool_error_pause
-                    .into_iter()
-                    .map(|(message, _)| message)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.pause_for_call(message, cause, tool_call_id).await?;
-            } else {
-                self.pause(reason, cause).await?;
+        if let Some((cause, reasons)) = self.pause_after_turn.take() {
+            match cause {
+                PauseCause::BudgetHold => {
+                    self.hold(reasons.join("\n")).await?;
+                    return Ok(Some(SessionEnd::Wait));
+                }
+                PauseCause::Monitor => {
+                    // As for other agents, a pause under the pausing error
+                    // policies, the task returned interrupted under the others.
+                    self.pause_on_error(reasons.join("\n"), cause.into())
+                        .await?;
+                    self.task.monitor_pause = matches!(
+                        self.task.current_state,
+                        TaskState::AwaitingErrorRecoveryApproval { .. }
+                    );
+                    return Ok(Some(
+                        if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                            SessionEnd::Stop
+                        } else {
+                            SessionEnd::Wait
+                        },
+                    ));
+                }
+                PauseCause::ToolError => {
+                    // Every failure, then any other reason the turn gave, and
+                    // the call named when it is the only failure.
+                    let tool_call_id = match tool_error_pause.as_slice() {
+                        [(_, id)] => Some(*id),
+                        _ => None,
+                    };
+                    let message = tool_error_pause
+                        .into_iter()
+                        .map(|(message, _)| message)
+                        .chain(reasons)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.pause_for_call(message, cause.into(), tool_call_id)
+                        .await?;
+                }
+                PauseCause::Middleware => self.pause(reasons.join("\n"), cause.into()).await?,
             }
             return Ok(Some(SessionEnd::Wait));
         }
@@ -5224,6 +5285,15 @@ impl ClaudeCodeRun {
         if self.ending() {
             return Ok(SessionEnd::Stop);
         }
+        // A pause the turn asked for belongs to it, and goes with the
+        // failure that ended it rather than with a later turn's end.
+        let message = match self.pause_after_turn.take() {
+            Some((_, reasons)) if !reasons.is_empty() => format!(
+                "{message}\nBefore that, the turn asked to pause.\n{}",
+                reasons.join("\n")
+            ),
+            _ => message,
+        };
         // A plan limit Claude Code reported reached. The pause waits for its
         // reset (a workflow's automatic recovery waits until then).
         if let Some(Some(resets_at)) = self.limit_reached

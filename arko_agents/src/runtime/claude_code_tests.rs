@@ -3597,6 +3597,161 @@ async fn plan_usage_is_reported_and_the_threshold_pauses() {
     );
 }
 
+/// A turn that asks for two pauses (here the plan-usage threshold's, then
+/// the host's hold on the next request) pauses once, for the stronger
+/// cause, and says both reasons.
+#[tokio::test]
+async fn a_budget_hold_stands_over_a_monitor_pause_in_the_same_turn() {
+    let fake = Fake::new(json!([[
+        {"rate_limit": {"status": "allowed_warning", "rateLimitType": "five_hour",
+                        "unifiedWindows": windows(0.9, 0.2)}},
+        {"text": "Working."},
+    ]]));
+    let mut config = config(&fake, &["Grep"]);
+    config.monitoring.plan_usage = Some(crate::agent_config::PlanUsageThreshold {
+        percent: 80.0,
+        action: crate::agent_config::PlanUsageAction::Pause,
+    });
+    let task = Task::new(config, "Search.".into(), fake.workspace(), None);
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(HoldAfterFirst {
+            asked: Default::default(),
+            hold: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }),
+    );
+    let mut run = start_with(task, runtime);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    let Some(AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+        cause,
+        error_message,
+        ..
+    })) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(*cause, crate::task::ErrorRecoveryCause::BudgetExceeded);
+    assert!(
+        error_message.contains("Budget exceeded."),
+        "{error_message}"
+    );
+    assert!(
+        error_message.contains("Plan usage reached"),
+        "{error_message}"
+    );
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    run.finish().await;
+}
+
+/// A pause the turn asked for goes with the failure of a session that ended
+/// before the turn did, and not with a later turn's end.
+#[tokio::test]
+async fn a_pause_goes_with_the_failure_of_a_session_that_ended_before_its_turn() {
+    let fake = Fake::new(json!([
+        [
+            {"rate_limit": {"status": "allowed_warning", "rateLimitType": "five_hour",
+                            "unifiedWindows": windows(0.9, 0.2)}},
+            {"exit": 3},
+        ],
+        [{"text": "Working."}],
+        [complete("done")],
+    ]));
+    let mut config = config(&fake, &[]);
+    config.monitoring.plan_usage = Some(crate::agent_config::PlanUsageThreshold {
+        percent: 80.0,
+        action: crate::agent_config::PlanUsageAction::Pause,
+    });
+    let task = Task::new(config, "Search.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let paused = |event: &AgentEvent| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    };
+    let events = run.events_until(paused).await;
+    let Some(AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+        error_message,
+        ..
+    })) = events.last()
+    else {
+        unreachable!()
+    };
+    assert!(error_message.contains("exited"), "{error_message}");
+    assert!(
+        error_message.contains("Plan usage reached"),
+        "{error_message}"
+    );
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    let events = run
+        .events_until(|event| {
+            paused(event)
+                || matches!(
+                    event,
+                    AgentEvent::TaskStateChanged(TaskState::Completed { .. })
+                )
+        })
+        .await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TaskStateChanged(TaskState::Completed { .. }))
+        ),
+        "{events:#?}"
+    );
+    run.finish().await;
+}
+
+/// Of the pauses a turn asks for, the strongest cause stands whatever their
+/// order, and every reason goes with it once.
+#[test]
+fn the_strongest_pause_cause_stands_in_any_order() {
+    use super::{PauseCause, TurnPause};
+    let causes = [
+        PauseCause::Monitor,
+        PauseCause::ToolError,
+        PauseCause::Middleware,
+        PauseCause::BudgetHold,
+    ];
+    for first in causes {
+        for second in causes {
+            let mut pause = TurnPause::default();
+            pause.offer(first, Some(format!("{first:?}")));
+            pause.offer(second, Some(format!("{second:?}")));
+            pause.offer(first, Some(format!("{first:?}")));
+            pause.offer(second, Some("  ".into()));
+            let (cause, reasons) = pause.take().unwrap();
+            assert_eq!(cause, first.max(second));
+            let mut expected = vec![format!("{first:?}")];
+            if second != first {
+                expected.push(format!("{second:?}"));
+            }
+            assert_eq!(reasons, expected);
+        }
+    }
+    assert_eq!(
+        PauseCause::BudgetHold.max(PauseCause::Middleware),
+        PauseCause::BudgetHold
+    );
+    assert_eq!(
+        PauseCause::Middleware.max(PauseCause::ToolError),
+        PauseCause::Middleware
+    );
+    assert_eq!(
+        PauseCause::ToolError.max(PauseCause::Monitor),
+        PauseCause::ToolError
+    );
+}
+
 /// The plan usage events a run reported.
 fn plan_usage_events(events: &[AgentEvent]) -> Vec<&arko_ai::PlanUsage> {
     events
