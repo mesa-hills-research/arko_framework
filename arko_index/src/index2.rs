@@ -952,18 +952,27 @@ fn write_progress(
     atomic_write(state_dir, PROGRESS, &serde_json::to_vec(&record)?)
 }
 
-/// Whether an embedding run holds the state directory's embedding lock.
-fn embedding_active(state_dir: &Path) -> bool {
-    let Ok(file) = File::open(state_dir.join(EMBED_LOCK)) else {
-        return false;
-    };
-    match FileExt::try_lock_shared(&file) {
-        Ok(()) => {
-            let _ = FileExt::unlock(&file);
-            false
+/// The state directory's embedding lock, probed without waiting.
+enum EmbedLock {
+    /// An embedding run holds it.
+    Held,
+    /// No run holds it, and until this is dropped none can start, because the shared
+    /// lock taken here (when the lock file exists) stays held.
+    Free { _shared: Option<File> },
+}
+impl EmbedLock {
+    fn probe(state_dir: &Path) -> Self {
+        let Ok(file) = File::open(state_dir.join(EMBED_LOCK)) else {
+            return Self::Free { _shared: None };
+        };
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Self::Free {
+                _shared: Some(file),
+            },
+            Err(e) if crate::fsio::is_contended(&e) => Self::Held,
+            // A file system without working locks has no run holding one either.
+            Err(_) => Self::Free { _shared: None },
         }
-        // A file system without working locks has no run holding one either.
-        Err(e) => crate::fsio::is_contended(&e),
     }
 }
 
@@ -1609,10 +1618,17 @@ mod current {
         /// latest embedding run's, when it ran on this generation. Read before the store
         /// is opened, since a run records the coverage after it commits the store.
         pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
+            self.dense_info_with(read_progress(&self.state_dir).as_ref())
+        }
+
+        /// [`Generation::dense_info`] with the latest run's record, read by the caller.
+        pub(super) fn dense_info_with(
+            &self,
+            run: Option<&RunRecord>,
+        ) -> Result<Option<DenseIndexInfo>, Error> {
             let mut info = self.stored_dense_info()?;
             if let Some(info) = &mut info
-                && let Some(run) = read_progress(&self.state_dir)
-                && run.generation == self.name
+                && let Some(run) = run.filter(|r| r.generation == self.name)
             {
                 info.embedded = run.progress.embedded_docs;
                 info.state = run.state;
@@ -1834,12 +1850,15 @@ pub struct IndexStatus {
 /// The current generation, its embedding coverage, and whether a run is embedding it.
 pub fn status(state_dir: &Path) -> Result<IndexStatus, Error> {
     read_current(state_dir, |g| {
+        // Taken first and held while the run's record is read once, so no run starts or
+        // ends in between, and a run that just ended doesn't read as one that died.
+        let lock = EmbedLock::probe(state_dir);
         let run = read_progress(state_dir).filter(|r| r.generation == g.name);
         Ok(IndexStatus {
             generation: g.name.clone(),
             docs: g.meta.docs,
-            dense: g.dense_info()?,
-            embedding: embedding_active(state_dir),
+            dense: g.dense_info_with(run.as_ref())?,
+            embedding: matches!(lock, EmbedLock::Held),
             stopped: run.as_ref().and_then(|r| r.stopped.clone()),
             progress: run.map(|r| r.progress),
         })
