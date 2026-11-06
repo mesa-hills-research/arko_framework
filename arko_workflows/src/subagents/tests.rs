@@ -1615,6 +1615,134 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
     assert_eq!(record.isolated.as_ref().unwrap().path, path);
 }
 
+/// A provider whose removals wait until the test lets them go on, and fail
+/// when `fails` is set.
+#[derive(Default)]
+struct HeldFolders {
+    root: std::path::PathBuf,
+    fails: bool,
+    removing: tokio::sync::Notify,
+    go_on: tokio::sync::Notify,
+    removed: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for HeldFolders {
+    async fn create(&self, request: &WorkspaceRequest) -> Result<IsolatedWorkspace, String> {
+        let path = self.root.join(&request.handle);
+        std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+        Ok(IsolatedWorkspace::at(path))
+    }
+
+    async fn remove(&self, workspace: &IsolatedWorkspace) -> Result<(), String> {
+        self.removed.fetch_add(1, Ordering::SeqCst);
+        self.removing.notify_one();
+        self.go_on.notified().await;
+        if self.fails {
+            return Err("it has changes that aren't committed".to_string());
+        }
+        std::fs::remove_dir_all(&workspace.path).map_err(|error| error.to_string())
+    }
+}
+
+/// A workflow whose lead started r1 in an isolated workspace of `provider`
+/// and waited for it to finish.
+async fn finished_isolated_run(
+    workspace: &Workspace,
+    provider: Arc<HeldFolders>,
+) -> (Workflow, ResponsesServer) {
+    let server = serve(vec![(
+        "lead",
+        vec![
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Build it.", "isolated": true }),
+            ),
+            wait(),
+        ],
+    )])
+    .await;
+    let config = SubagentsConfig::default().workspace_provider(provider);
+    let workflow = builder(&server, workspace, config).build().unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Finished);
+    (workflow, server)
+}
+
+/// A message that comes while stop_agent removes a run's workspace doesn't
+/// start the run again there, and the run stays closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_during_a_workspace_removal_leaves_the_run_closed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let lead = run.caller_run_id;
+    let stopping = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(provider.removing.notified()).await;
+    let sent = workflow.message_subagent("r1", "More.", "Your lead sent you a message:", "");
+    provider.go_on.notify_one();
+    let removed = within(stopping).await.unwrap().unwrap();
+    assert!(removed.contains("Removed r1's workspace"), "{removed}");
+    assert!(
+        sent.as_ref()
+            .is_err_and(|error| error.contains("workspace was removed")),
+        "the run was started again in the workspace being removed: {sent:?}"
+    );
+    until(|| !ctx.registry.is_running(run.run_id)).await;
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+    assert_eq!(
+        bodies_of(&server, "r1").len(),
+        1,
+        "r1 made no request after its run"
+    );
+    // A second removal is refused without asking the provider again.
+    let again = ctx.subagents.stop(&ctx, lead, "r1", "", true).await;
+    assert!(
+        again
+            .as_ref()
+            .is_err_and(|error| error.contains("removed already")),
+        "{again:?}"
+    );
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 1);
+}
+
+/// A removal that fails leaves the run as it was, and a message continues
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_removal_leaves_the_run_as_it_was() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        fails: true,
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let ctx = workflow.context().clone();
+    let lead = workflow.subagents()[0].caller_run_id;
+    provider.go_on.notify_one();
+    let removed = within(ctx.subagents.stop(&ctx, lead, "r1", "", true)).await;
+    assert!(
+        removed
+            .as_ref()
+            .is_err_and(|error| error.contains("aren't committed")),
+        "{removed:?}"
+    );
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Finished);
+    let sent = workflow.message_subagent("r1", "More.", "Your lead sent you a message:", "");
+    assert!(sent.is_ok(), "{sent:?}");
+    until(|| bodies_of(&server, "r1").len() == 2).await;
+}
+
 /// The user messages a request sends, joined.
 fn user_text(body: &str) -> String {
     let body: Value = serde_json::from_str(body).unwrap();

@@ -1016,7 +1016,8 @@ impl Board {
     }
 
     /// Launches run `run_id` (`launch` says how), or queues it while
-    /// [`SubagentsConfig::max_running`] runs are running.
+    /// [`SubagentsConfig::max_running`] runs are running. A closed run
+    /// stays closed.
     fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
         self.launch_if(ctx, run_id, launch, false);
     }
@@ -1036,7 +1037,7 @@ impl Board {
             let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id) else {
                 return;
             };
-            if record.state == SubagentState::Running
+            if matches!(record.state, SubagentState::Running | SubagentState::Closed)
                 || (queued_only && record.state != SubagentState::Queued)
             {
                 return;
@@ -2643,19 +2644,45 @@ impl Board {
             .and_then(|config| config.workspace_provider.clone())
             .ok_or("isolated workspaces are not available in this workflow")?;
         let workspace = run.isolated.clone().expect("checked above");
-        provider.remove(&workspace).await?;
-        {
+        // Closed before the removal, so that no message starts it again in a
+        // workspace being removed. A removal that fails opens it again.
+        let before = {
             let mut state = self.state.lock();
-            if let Some(record) = state
+            let Some(record) = state
                 .runs
                 .iter_mut()
                 .find(|record| record.run_id == run.run_id)
-            {
-                record.state = SubagentState::Closed;
-                record.since = Utc::now();
+            else {
+                return Err(format!("there is no agent run {handle}"));
+            };
+            match record.state {
+                SubagentState::Closed => {
+                    return Err(format!("{handle}'s workspace was removed already"));
+                }
+                now if now.is_active() => {
+                    return Err(format!("{handle} started again, so its workspace stays"));
+                }
+                _ => {}
             }
-        }
+            let before = (record.state, record.since);
+            record.state = SubagentState::Closed;
+            record.since = Utc::now();
+            before
+        };
         self.bump();
+        if let Err(error) = provider.remove(&workspace).await {
+            {
+                let mut state = self.state.lock();
+                if let Some(record) = state.runs.iter_mut().find(|record| {
+                    record.run_id == run.run_id && record.state == SubagentState::Closed
+                }) {
+                    (record.state, record.since) = before;
+                }
+            }
+            self.bump();
+            self.save_soon(ctx);
+            return Err(error);
+        }
         if let Some(record) = self.record(run.run_id) {
             self.emit(&record, SubagentEventKind::WorkspaceRemoved);
         }

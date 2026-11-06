@@ -458,7 +458,8 @@ pub enum SubagentState {
     /// [`Workflow::resume_subagents`](crate::Workflow::resume_subagents) or a
     /// message restarts it.
     Interrupted,
-    /// Its isolated workspace was removed. It can't run again.
+    /// Its isolated workspace was removed, or is being removed. It can't run
+    /// again.
     Closed,
 }
 
