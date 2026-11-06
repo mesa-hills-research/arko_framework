@@ -1402,8 +1402,9 @@ impl Watcher2 {
             return Ok(None);
         };
         let d = &self.snap.pending[i];
-        self.delivered = d.sequence;
+        // A failed write leaves the delta undelivered, so the next call offers it again.
         write_delta(&self.store, d, out)?;
+        self.delivered = d.sequence;
         Ok(Some(d.sequence))
     }
 
@@ -1595,6 +1596,26 @@ mod tests {
         // Nothing touches the tree again, and the change still arrives.
         assert_eq!(drain(&mut w, &mut model, idle), 1);
         assert_eq!(model, fresh(r));
+    }
+
+    #[test]
+    fn a_delta_whose_write_failed_is_offered_again() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let mut w = Watcher2::open(root.path(), state.path(), &Options::default()).unwrap();
+        assert!(w.next_change_to(Duration::ZERO, &mut Closed).is_err());
+        let d = w.next_change(Duration::ZERO).unwrap();
+        assert_eq!(d.map(|d| d.sequence), Some(1), "the delta is offered again");
     }
 
     #[test]

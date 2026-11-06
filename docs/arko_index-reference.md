@@ -682,7 +682,10 @@ append-only record store with each file version's chunks, and a write-ahead jour
 (`watch2.wal`) appended and fdatasync'ed before a delta is delivered. inotify events
 and metadata reconciliation (size, mtime, ctime, inode, device, with the racy-git rule)
 decide which files to read, so a commit costs in proportion to the change, not the
-repository.
+repository. A pass that fails leaves its changes for the next call, which reconciles
+the whole tree. A delta that `next_change_to` fails to write stays undelivered, and the
+next call writes it again in full, so a stream whose write failed may hold part of a
+line before it.
 
 A change that keeps a chunk's ID but alters its bytes or any other field (range, lines,
 scope, symbol path) emits `changed`, and a content-ID change emits remove plus add. Exact
