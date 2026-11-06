@@ -1100,7 +1100,13 @@ impl Watcher2 {
                             }
                         }
                         Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        // Gone, or a directory on its path became a file. The events
+                        // for either bring a pass that sees the tree as it is now.
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                            ) => {}
                         Err(e) => return Err(e.into()),
                     }
                 }
