@@ -1391,16 +1391,78 @@ impl Task {
     /// conversation. The runtime calls this during a handover. The caller
     /// adds the fresh conversation's first message.
     pub fn start_fresh_conversation(&mut self) -> usize {
-        let replaced = self.conversation.messages.len();
-        self.conversation.messages.clear();
-        self.conversation.openai_turn_state = None;
-        self.runtime_messages.clear();
-        self.runtime_text_messages.clear();
-        self.refused_input = None;
-        self.user_message_count = 0;
-        self.conversation_usage_start = self.usage_history.len();
-        self.conversation_model_call_start = self.model_call_usage_history.len();
-        self.latest_request = RequestRecord::NoRequest;
+        // Every field is named, so that a new one has to say whether a fresh
+        // conversation keeps it.
+        let Task {
+            conversation,
+            runtime_messages,
+            runtime_text_messages,
+            refused_input,
+            user_message_count,
+            conversation_usage_start,
+            conversation_model_call_start,
+            latest_request,
+            usage_history,
+            model_call_usage_history,
+            // `reset_context_records` below resets these.
+            context_records: _,
+            context_records_from: _,
+            pending_context_injections: _,
+            // The task's own record, which outlives its conversations.
+            id: _,
+            agent_config_id: _,
+            agent_config: _,
+            initial_task_prompt: _,
+            initial_task_images: _,
+            current_state: _,
+            start_time: _,
+            end_time: _,
+            developer_env_details: _,
+            current_working_directory: _,
+            parent: _,
+            handovers: _,
+            handover_requested: _,
+            initial_prompt_ids: _,
+            unavailable_images: _,
+            next_context_item: _,
+            pending_context_images: _,
+            context_marks: _,
+            questions: _,
+            reconfigured: _,
+            reply_optional: _,
+            plan_usage_threshold_reported: _,
+            // Claude Code's session, which its runtime resets after the
+            // handover.
+            claude_code_session: _,
+            claude_code_directory: _,
+            claude_code_synced: _,
+            claude_code_prompt_changed: _,
+            claude_code_entries: _,
+            claude_code_resume_at: _,
+            claude_code_fork_of: _,
+            // A fresh conversation keeps these as they are.
+            running_tool_calls: _,
+            pending_native_tool_results: _,
+            pending_native_tool_calls: _,
+            pending_tool_images: _,
+            pending_text_tool_results: _,
+            deferred_tool_errors: _,
+            fallback_for: _,
+            fallback_calls: _,
+            monitor_pause: _,
+            context_size_unknown: _,
+            cache_window_start: _,
+        } = self;
+        let replaced = conversation.messages.len();
+        conversation.messages.clear();
+        conversation.openai_turn_state = None;
+        runtime_messages.clear();
+        runtime_text_messages.clear();
+        *refused_input = None;
+        *user_message_count = 0;
+        *conversation_usage_start = usage_history.len();
+        *conversation_model_call_start = model_call_usage_history.len();
+        *latest_request = RequestRecord::NoRequest;
         self.reset_context_records();
         replaced
     }
