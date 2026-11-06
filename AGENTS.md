@@ -29,6 +29,12 @@
   checkpoints written by earlier versions have to load in later ones, so give new fields
   serde defaults and keep reading old ones. arko_index's on-disk data (index and watcher
   state) has no compatibility guarantee while the crate is unpublished.
+- A function that readies a struct for a new phase (a fresh conversation, a new session, a
+  reopen) names every field in a pattern without `..`, so a new field fails to build there
+  until someone decides whether that phase resets it. Bind the fields that stay as
+  `field: _`, with a short reason where it isn't plain. A struct with many fields and
+  several such boundaries groups the fields that end together into a struct of their own,
+  reset with `Default::default()`.
 - Commit subjects name the crate when a change is in one (`arko_agents: ...`) and are plain
   sentences otherwise, as `git log` shows. Messages are public, so they say what changed and
   why for any user of the project. Every word a user reads (errors, tool descriptions, the
