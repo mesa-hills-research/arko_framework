@@ -190,7 +190,7 @@ impl ModelDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EmbedLimits {
-    /// Texts per request.
+    /// Texts per request, where 0 counts as 1.
     pub max_items: usize,
     /// Total tokens per request (by [`Embedder::count_tokens`]). A text over it but
     /// within `max_input_tokens` goes in a request of its own.

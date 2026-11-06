@@ -100,6 +100,8 @@ pub(crate) fn embed_spool(
     after: &mut dyn FnMut(&Records, &RunTotals) -> Result<Flow, Error>,
 ) -> Result<RunTotals, Error> {
     let limits = embedder.limits();
+    // `EmbedLimits::new` keeps it at least 1, but the field is public.
+    let max_items = limits.max_items.max(1);
     let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, spool));
     // (hash, text, counted tokens), in spool order.
     let mut queue: VecDeque<([u8; 32], String, u64)> = VecDeque::new();
@@ -119,9 +121,9 @@ pub(crate) fn embed_spool(
         Ok(counts)
     };
     loop {
-        if !exhausted && queue.len() < limits.max_items {
+        if !exhausted && queue.len() < max_items {
             let mut fresh = Vec::new();
-            while !exhausted && queue.len() + fresh.len() < limits.max_items {
+            while !exhausted && queue.len() + fresh.len() < max_items {
                 match reader.next()? {
                     Some((h, t)) if wanted(&h) && !cache.contains(&h) => fresh.push((h, t)),
                     Some(_) => {}
@@ -161,7 +163,7 @@ pub(crate) fn embed_spool(
         // The longest prefix within the request limits, at least the first text...
         let (mut n, mut sum) = (0usize, 0u64);
         for (_, _, t) in &queue {
-            if n == limits.max_items
+            if n == max_items
                 || *t > limits.max_input_tokens
                 || (n > 0 && sum + t > limits.max_request_tokens)
             {
@@ -227,7 +229,7 @@ pub(crate) fn embed_spool(
         let mut more = true;
         while more && !stopped() {
             let mut rest = Vec::new();
-            while more && rest.len() < limits.max_items {
+            while more && rest.len() < max_items {
                 match reader.next()? {
                     Some((h, t)) if wanted(&h) && !cache.contains(&h) => rest.push((h, t)),
                     Some(_) => {}
