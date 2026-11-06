@@ -31,7 +31,7 @@ use crate::freshness::ActorId;
 use crate::hooks::context::HookContext;
 use crate::hooks::{HookPoint, HookResult};
 use crate::memory::tools::*;
-use crate::messaging::registry::WaitReason;
+use crate::messaging::registry::{ClaimRefused, StartRefused, WaitReason};
 use crate::messaging::tools::*;
 use crate::persistence::PersistenceManager;
 use crate::policy::{
@@ -4534,13 +4534,10 @@ impl WorkflowEngine {
             &task.current_working_directory,
             RunRole::of(ctx, depth, task.id),
         )?;
-        // Continued once at a time.
-        if !ctx.registry.start_unless_running(task.id, agent_name) {
-            return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running already",
-                task.id
-            )));
-        }
+        // Continued once at a time, and never once closed.
+        ctx.registry
+            .start_unless_running(task.id, agent_name)
+            .map_err(|refused| refused.error(task.id))?;
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
         ctx.messages.settle_run(agent_name, &task, &[], false);
@@ -4786,13 +4783,10 @@ impl WorkflowEngine {
             &task.current_working_directory,
             RunRole::of(ctx, depth, task.id),
         )?;
-        // Resumed once at a time.
-        if !ctx.registry.start_unless_running(task.id, agent_name) {
-            return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running already",
-                task.id
-            )));
-        }
+        // Resumed once at a time, and never once closed.
+        ctx.registry
+            .start_unless_running(task.id, agent_name)
+            .map_err(|refused| refused.error(task.id))?;
         // Resumed without a prompt, so the messages it doesn't hold arrive as
         // context updates.
         let run = self.launch(
@@ -5092,9 +5086,12 @@ impl WorkflowEngine {
                     }
                     break (claim, current, registry, skill_prompt_context, task);
                 }
-                Err(Some(recovering)) if recovery.wait => {
+                Err(ClaimRefused::Recovering(recovering)) if recovery.wait => {
                     recovery_ended(recovering).await;
                     waited = true;
+                }
+                Err(ClaimRefused::Refused(StartRefused::Closed)) => {
+                    return Err(StartRefused::Closed.error(agent_run_id));
                 }
                 Err(_) => return Err(running()),
             }

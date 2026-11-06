@@ -2645,7 +2645,11 @@ impl Board {
             .ok_or("isolated workspaces are not available in this workflow")?;
         let workspace = run.isolated.clone().expect("checked above");
         // Closed before the removal, so that no message starts it again in a
-        // workspace being removed. A removal that fails opens it again.
+        // workspace being removed, and closed in the registry too, so that
+        // no continuation, resume or recovery the host asks for does. The
+        // registry is asked under the board's lock, so a run it starts in
+        // between is seen here, and a launch of the board's waits for both. A
+        // removal that fails opens it again.
         let before = {
             let mut state = self.state.lock();
             let Some(record) = state
@@ -2664,6 +2668,9 @@ impl Board {
                 }
                 _ => {}
             }
+            if ctx.registry.close(run.run_id).is_err() {
+                return Err(format!("{handle} started again, so its workspace stays"));
+            }
             let before = (record.state, record.since);
             record.state = SubagentState::Closed;
             record.since = Utc::now();
@@ -2677,6 +2684,7 @@ impl Board {
                     record.run_id == run.run_id && record.state == SubagentState::Closed
                 }) {
                     (record.state, record.since) = before;
+                    ctx.registry.reopen(run.run_id);
                 }
             }
             self.bump();

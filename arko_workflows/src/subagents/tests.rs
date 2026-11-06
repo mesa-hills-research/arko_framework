@@ -1743,6 +1743,107 @@ async fn a_failed_removal_leaves_the_run_as_it_was() {
     until(|| bodies_of(&server, "r1").len() == 2).await;
 }
 
+/// The host can't continue a run while stop_agent removes its workspace,
+/// so the run makes no request there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_continuation_cannot_start_a_run_while_its_workspace_is_removed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    let ctx = workflow.context().clone();
+    let removal = tokio::spawn(async move {
+        ctx.subagents
+            .stop(&ctx, run.caller_run_id, "r1", "", true)
+            .await
+    });
+    within(provider.removing.notified()).await;
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    provider.go_on.notify_one();
+    within(removal).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            &continued,
+            Err(crate::WorkflowError::BuilderInvalid(error)) if error.contains("workspace was removed")
+        ),
+        "a run was continued during its workspace's removal: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+}
+
+/// The host can't continue a run whose workspace was removed, also after
+/// the workflow resumed from a checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_continuation_cannot_start_a_closed_run() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let server = serve(vec![(
+        "lead",
+        vec![
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Build it.", "isolated": true }),
+            ),
+            wait(),
+        ],
+    )])
+    .await;
+    let config = || SubagentsConfig::default().workspace_provider(provider.clone());
+    let workflow = builder(&server, &workspace, config())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    provider.go_on.notify_one();
+    let ctx = workflow.context();
+    let removed = within(ctx.subagents.stop(ctx, run.caller_run_id, "r1", "", true))
+        .await
+        .unwrap();
+    assert!(removed.contains("Removed r1's workspace"), "{removed}");
+    let refused = |continued: &Result<AgentResult, crate::WorkflowError>| {
+        matches!(
+            continued,
+            Err(crate::WorkflowError::BuilderInvalid(error)) if error.contains("workspace was removed")
+        )
+    };
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    assert!(
+        refused(&continued),
+        "a closed run was continued: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let resumed = builder(&server, &workspace, config())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+    assert_eq!(resumed.subagents()[0].state, SubagentState::Closed);
+    let continued = within(resumed.continue_agent(&previous, "More.")).await;
+    assert!(
+        refused(&continued),
+        "a closed run was continued after a resume: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+}
+
 /// The user messages a request sends, joined.
 fn user_text(body: &str) -> String {
     let body: Value = serde_json::from_str(body).unwrap();
