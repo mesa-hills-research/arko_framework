@@ -791,6 +791,16 @@ impl Workflow {
         self.cancel_handle().stop_agent(agent_name, request, intent)
     }
 
+    /// What tells a host's wait inside one of agent run `agent_run_id`'s tool
+    /// calls (a hook asking its user, say) to end, because the run is being
+    /// stopped or has ended. `None` when the run isn't running.
+    pub fn run_stopping(
+        &self,
+        agent_run_id: uuid::Uuid,
+    ) -> Option<crate::workflow::cancel::RunStopping> {
+        self.context.run_control.run_stopping(agent_run_id)
+    }
+
     /// Whether a graceful stop's wrap-up is under way. The run is stopping
     /// but not stopped yet ([`is_cancelled`](Self::is_cancelled) is still
     /// `false`).

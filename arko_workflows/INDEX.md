@@ -600,6 +600,21 @@ The runs inside the run's tool calls (agents it delegated to with `run_workflow_
 
 `stop_run` returns `false`, changing nothing, when the run isn't running, is a review, or the workflow is stopped, and when the run is being stopped already and `request` has a wrap-up too. A request without a wrap-up during the run's wrap-up cancels it at once, and the first stop's record stands. A workflow stop during the run's wrap-up gives the run the workflow's notice as well, and the run's own record stands on its result. `stop_agent` stops each running run of the agent this way, and returns `AgentNotFound` for an unknown agent.
 
+A host that waits inside a run's tool call, such as a start hook asking its user, should end its wait when the run is being stopped. `Workflow::run_stopping` says when.
+
+```rust
+// Workflow. None when the run isn't running
+fn run_stopping(&self, agent_run_id: Uuid) -> Option<RunStopping>;
+
+// workflow::cancel (re-exported at the root and in the prelude)
+impl RunStopping {
+    fn is_stopping(&self) -> bool;
+    async fn stopped(&mut self); // resolves once is_stopping holds
+}
+```
+
+`is_stopping` holds once the run's own stop or a wrap-up of the workflow begins, once the workflow winds the run down for any reason (its stop, an exceeded budget, a fail-fast batch), and once the run has ended. A run started again under the same ID has a stop state of its own.
+
 #### Retire or relaunch
 
 `intent` is saved on the run's `StopRecord` and says what the host means to do with the run:

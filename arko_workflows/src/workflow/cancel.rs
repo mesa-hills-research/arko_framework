@@ -170,6 +170,11 @@ struct RunEntry {
     /// Set, with the reason, once the run's own stop cancels it. Its driver
     /// winds it down within the grace period.
     cancel: watch::Sender<Option<String>>,
+    /// Whether the workflow is winding this launch down. A tool that waits
+    /// (`wait_for_message`) watches it, since the runtime reads the
+    /// `CancelTask` it is sent only once the tool call returns. A new launch
+    /// of the run starts with its own.
+    stopping: watch::Sender<bool>,
     /// A completion verifier's review, which is never stopped alone.
     review: bool,
     /// The run's own stop, once the host asked for one.
@@ -194,10 +199,9 @@ pub(crate) struct RunControl {
     state: watch::Sender<Option<Cancellation>>,
     /// Command channels of the run's agents, to tell them to stop at once.
     agents: parking_lot::Mutex<HashMap<uuid::Uuid, mpsc::WeakSender<UserCommand>>>,
-    /// Per agent run, whether the workflow is stopping it. A tool that
-    /// waits (`wait_for_message`) watches it, since the runtime reads the
-    /// `CancelTask` it is sent only once the tool call returns.
-    stopping: parking_lot::Mutex<HashMap<uuid::Uuid, watch::Sender<bool>>>,
+    /// The "being stopped" flag of a run that isn't running, which never
+    /// changes.
+    not_running: watch::Sender<bool>,
     grace_period: Duration,
     /// When the run stopped, for the drivers' wind-down deadlines.
     stopped_at: parking_lot::Mutex<Option<tokio::time::Instant>>,
@@ -226,7 +230,7 @@ impl RunControl {
         Self {
             state: watch::Sender::new(None),
             agents: parking_lot::Mutex::new(HashMap::new()),
-            stopping: parking_lot::Mutex::new(HashMap::new()),
+            not_running: watch::Sender::new(false),
             grace_period,
             stopped_at: parking_lot::Mutex::new(None),
             stop_saved: AtomicBool::new(false),
@@ -353,7 +357,6 @@ impl RunControl {
         }
         runs.remove(&task_id);
         self.agents.lock().remove(&task_id);
-        self.stopping.lock().remove(&task_id);
     }
 
     /// Records agent run `task_id` as running from its launch (`review` means a
@@ -409,6 +412,7 @@ impl RunControl {
                 parent,
                 tools,
                 cancel: watch::Sender::new(cancel),
+                stopping: watch::Sender::new(false),
                 review,
                 stop,
             },
@@ -689,29 +693,79 @@ impl RunControl {
         }
     }
 
-    /// Marks agent run `task_id` as being stopped by the workflow (the run
-    /// may go on). Its waits end.
+    /// Marks the running launch of agent run `task_id` as being stopped by
+    /// the workflow (the run may go on). Its waits end.
     pub fn stop_agent(&self, task_id: uuid::Uuid) {
-        self.stopping
-            .lock()
-            .entry(task_id)
-            .or_insert_with(|| watch::Sender::new(false))
-            .send_replace(true);
+        if let Some(entry) = self.runs.lock().get(&task_id) {
+            entry.stopping.send_replace(true);
+        }
     }
 
-    /// Whether agent run `task_id` is being stopped, now and as it changes.
+    /// Whether the running launch of agent run `task_id` is being stopped,
+    /// now and as it changes. For a run that isn't running (a tool called
+    /// outside a launch) it reads `false` and never changes.
     pub fn agent_stopping(&self, task_id: uuid::Uuid) -> watch::Receiver<bool> {
-        self.stopping
-            .lock()
-            .entry(task_id)
-            .or_insert_with(|| watch::Sender::new(false))
-            .subscribe()
+        match self.runs.lock().get(&task_id) {
+            Some(entry) => entry.stopping.subscribe(),
+            None => self.not_running.subscribe(),
+        }
+    }
+
+    /// What tells a wait inside agent run `task_id`'s tool call to end, or
+    /// `None` when the run isn't running.
+    pub fn run_stopping(&self, task_id: uuid::Uuid) -> Option<RunStopping> {
+        self.runs.lock().get(&task_id).map(|entry| RunStopping {
+            winding_down: entry.stopping.subscribe(),
+            tools: entry.tools.signal(),
+        })
     }
 
     /// True once, for the first caller after the run stopped. The caller
     /// saves the checkpoint recording the stop.
     pub fn claim_stop_save(&self) -> bool {
         self.is_stopped() && !self.stop_saved.swap(true, Ordering::AcqRel)
+    }
+}
+
+/// Whether an agent run is being stopped, now and as it changes, for a host
+/// that waits inside one of the run's tool calls (in a hook, say) and ends
+/// its wait then. From
+/// [`Workflow::run_stopping`](crate::Workflow::run_stopping).
+#[derive(Clone)]
+pub struct RunStopping {
+    /// Set once the workflow winds the run down, and closed once it ends.
+    winding_down: watch::Receiver<bool>,
+    /// The run's tools' stop signal, which fires when a wrap-up of the
+    /// workflow or the run's own stop begins.
+    tools: arko_agents::StopSignal,
+}
+
+impl RunStopping {
+    /// Whether the run is being stopped (a wrap-up or its own stop began, or
+    /// the workflow winds it down for any reason), or has ended.
+    pub fn is_stopping(&self) -> bool {
+        let winding_down = *self.winding_down.borrow();
+        winding_down || self.winding_down.has_changed().is_err() || self.tools.is_stopping()
+    }
+
+    /// Resolves once [`is_stopping`](Self::is_stopping) holds.
+    pub async fn stopped(&mut self) {
+        while !self.is_stopping() {
+            tokio::select! {
+                // A run that ended closes the channel, which the check sees.
+                _ = self.winding_down.changed() => {}
+                () = self.tools.stopping() => {}
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for RunStopping {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunStopping")
+            .field("is_stopping", &self.is_stopping())
+            .finish()
     }
 }
 

@@ -903,3 +903,63 @@ fn a_stop_is_seen_with_its_record() {
         assert!(stopped_at.is_some(), "the stop was seen before its time");
     }
 }
+
+/// A run started again under its ID before its old launch unregistered
+/// isn't told that it's being stopped, so its waits go on.
+#[test]
+fn a_relaunch_is_not_stopping_because_its_old_launch_was() {
+    let control = RunControl::new(Duration::from_secs(1));
+    let run = uuid::Uuid::new_v4();
+    let (_, old) = control.begin_run(run, false, None);
+    control.stop_agent(run);
+    let (_, _new) = control.begin_run(run, false, None);
+    control.unregister(run, old);
+    assert!(
+        !*control.agent_stopping(run).borrow(),
+        "the new launch is told it's being stopped"
+    );
+}
+
+/// A host's wait inside a run's tool call ends when the run's own stop
+/// begins (with a wrap-up too), when the workflow stops or winds the run
+/// down, and when the run ends.
+#[tokio::test]
+async fn a_host_wait_ends_when_its_run_is_stopped() {
+    let control = Arc::new(RunControl::new(Duration::from_secs(1)));
+    assert!(
+        control.run_stopping(uuid::Uuid::new_v4()).is_none(),
+        "a run that isn't running has nothing to wait for"
+    );
+    let waiting = |run: uuid::Uuid| {
+        let mut stopping = control.run_stopping(run).unwrap();
+        assert!(!stopping.is_stopping());
+        tokio::spawn(async move {
+            stopping.stopped().await;
+            stopping.is_stopping()
+        })
+    };
+    let wrapped = uuid::Uuid::new_v4();
+    control.begin_run(wrapped, false, None);
+    let wait = waiting(wrapped);
+    let record = StopRecord::of_cause(&CancelCause::Requested, chrono::Utc::now()).unwrap();
+    assert!(matches!(
+        control.begin_run_stop(wrapped, record, Some("Wrap up.".to_string())),
+        RunStopBegun::WrapUp(_)
+    ));
+    assert!(within(wait).await.unwrap(), "its own stop with a wrap-up");
+    let wound = uuid::Uuid::new_v4();
+    control.begin_run(wound, false, None);
+    let wait = waiting(wound);
+    control.stop_agent(wound);
+    assert!(within(wait).await.unwrap(), "wound down");
+    let ended = uuid::Uuid::new_v4();
+    let (_, launch) = control.begin_run(ended, false, None);
+    let wait = waiting(ended);
+    control.unregister(ended, launch);
+    assert!(within(wait).await.unwrap(), "ended");
+    let last = uuid::Uuid::new_v4();
+    control.begin_run(last, false, None);
+    let wait = waiting(last);
+    control.stop(CancelCause::Requested);
+    assert!(within(wait).await.unwrap(), "the workflow stopped");
+}

@@ -57,7 +57,7 @@ pub mod workflow;
 pub mod python;
 
 pub use error::WorkflowError;
-pub use workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
+pub use workflow::cancel::{CancelCause, Cancellation, RunStopping, WorkflowCancelHandle};
 pub use workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
 pub use workflow::event_stream::EventReceiver;
 pub use workflow::result::{AgentResult, AgentRunStatus, TaskInfo, WorkflowEvent, WorkflowResult};
@@ -109,7 +109,9 @@ pub mod prelude {
         VerificationDecision, VerificationKind, VerificationRecord,
     };
     pub use crate::voting::{BallotConfig, BallotResult, CastVote, TieBreak, VoteOption};
-    pub use crate::workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
+    pub use crate::workflow::cancel::{
+        CancelCause, Cancellation, RunStopping, WorkflowCancelHandle,
+    };
     pub use crate::workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
     pub use crate::workflow::event_stream::EventReceiver;
     pub use crate::workflow::result::{
