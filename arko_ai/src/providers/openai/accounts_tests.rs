@@ -1661,6 +1661,68 @@ async fn statuses_show_an_account_whose_reset_time_passed_as_tried_next() {
     .await;
 }
 
+/// A reset time from a usage check past what a clock can hold sets nothing,
+/// instead of failing the request, and one in milliseconds is capped.
+#[tokio::test]
+async fn a_reset_time_out_of_range_is_ignored_or_capped() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, _events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        let refused_until = accounts.statuses()[0].resets_at;
+        let mut status: Value = serde_json::from_str(&usage_status(false, false)).unwrap();
+        status["rate_limit"]["primary_window"]["reset_at"] = json!(u64::MAX);
+        mock.expect([answer(PRIMARY, "/wham/usage", 200, &status.to_string())]);
+        let statuses = accounts.check_now().await;
+        assert!(statuses[0].exhausted && statuses[0].retry.is_none());
+        assert_eq!(statuses[0].resets_at, refused_until);
+
+        status["rate_limit"]["primary_window"]["reset_at"] = json!(unix_now() * 1000);
+        mock.expect([answer(PRIMARY, "/wham/usage", 200, &status.to_string())]);
+        let statuses = accounts.check_now().await;
+        let latest =
+            SystemTime::now() + crate::retry::MAX_SERVER_DELAY_HINT + Duration::from_secs(60);
+        assert!(statuses[0].resets_at.is_some_and(|at| at <= latest));
+    })
+    .await;
+}
+
+/// A check interval too long to add to a clock means no checks, rather than
+/// a failure at the first refusal.
+#[tokio::test]
+async fn an_interval_too_long_for_the_clock_never_checks() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, _events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::MAX);
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "s")),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b2", "s")),
+        ]);
+        for _ in 0..2 {
+            let response = accounts
+                .generate_text(&conversation(), &GenerationConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.model_call_usage.account.as_deref(),
+                Some("secondary")
+            );
+        }
+        assert!(mock.take().iter().all(|seen| seen.method == "POST"));
+    })
+    .await;
+}
+
 fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEvent> {
     events
         .iter()

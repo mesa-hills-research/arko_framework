@@ -39,6 +39,7 @@ use crate::{
     error::{Error, ErrorKind},
     providers::{GenerationResponse, ProviderClient, StreamEvent},
     reasoning::ReasoningArtifact,
+    retry::MAX_SERVER_DELAY_HINT,
     usage::{PlanCredits, PlanUsage, PlanUsageWindow},
 };
 use futures::{
@@ -393,7 +394,8 @@ impl ChatGptUsageStatus {
         )
     }
 
-    /// The latest reset time of a window that is used up.
+    /// The latest reset time of a window that is used up. `None` also for
+    /// one too far ahead for the clock.
     fn exhausted_until(&self) -> Option<SystemTime> {
         [&self.primary, &self.secondary]
             .into_iter()
@@ -401,7 +403,7 @@ impl ChatGptUsageStatus {
             .filter(|window| window.used_percent >= 100.0)
             .filter_map(|window| window.resets_at)
             .max()
-            .map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
+            .and_then(|at| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(at)))
     }
 }
 
@@ -852,7 +854,8 @@ impl ChatGptAccounts {
     /// checked on the usage endpoint (default 5 minutes). Checks happen as
     /// requests are made, never in the background.
     pub fn with_status_check_interval(mut self, interval: Duration) -> Self {
-        self.status_check_interval = interval;
+        // (At most about 136 years, so adding it to a time can't overflow.)
+        self.status_check_interval = interval.min(Duration::from_secs(u32::MAX.into()));
         self
     }
 
@@ -1255,7 +1258,8 @@ impl ChatGptAccounts {
                     && let Some(block) = account_state.block.as_mut()
                     && let Some(until) = exhausted_until.filter(|at| *at > now)
                 {
-                    block.until = Some(until);
+                    // Capped as a refusal's reset time is.
+                    block.until = Some(until.min(now + MAX_SERVER_DELAY_HINT));
                 }
                 if current && let Some(block) = account_state.block.as_mut() {
                     block.next_check = now + self.status_check_interval;
