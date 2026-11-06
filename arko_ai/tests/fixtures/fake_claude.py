@@ -1,7 +1,8 @@
 """A stand-in for the `claude` CLI that speaks its stream-json control protocol.
 
-Each user message is a command: "permission", "hook", "tools", "slow" (waits
-for an interrupt), "exit" (crashes); anything else is echoed back.
+Each user message is a command. "permission", "hook" and "tools" ask the host,
+"hang" and "panic" call the in-process tool of that name on the server "work",
+"slow" waits for an interrupt and "exit" crashes. Anything else is echoed back.
 """
 import json
 import sys
@@ -67,6 +68,12 @@ def turn(text):
             mcp({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                  "params": {"name": "add", "arguments": {"a": 2, "b": 3}}}),
         ])
+    elif text in ("hang", "panic"):
+        # Input that comes while the host answers is still handled, so an
+        # "exit" sent meanwhile crashes the CLI mid-call.
+        out = json.dumps(ask({"subtype": "mcp_message", "server_name": "work",
+                              "message": {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                          "params": {"name": text, "arguments": {}}}}))
     elif text == "slow":
         while True:
             message = read()

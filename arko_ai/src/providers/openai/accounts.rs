@@ -39,6 +39,7 @@ use crate::{
     error::{Error, ErrorKind},
     providers::{GenerationResponse, ProviderClient, StreamEvent},
     reasoning::ReasoningArtifact,
+    retry::MAX_SERVER_DELAY_HINT,
     usage::{PlanCredits, PlanUsage, PlanUsageWindow},
 };
 use futures::{
@@ -393,7 +394,8 @@ impl ChatGptUsageStatus {
         )
     }
 
-    /// The latest reset time of a window that is used up.
+    /// The latest reset time of a window that is used up. `None` also for
+    /// one too far ahead for the clock.
     fn exhausted_until(&self) -> Option<SystemTime> {
         [&self.primary, &self.secondary]
             .into_iter()
@@ -401,7 +403,7 @@ impl ChatGptUsageStatus {
             .filter(|window| window.used_percent >= 100.0)
             .filter_map(|window| window.resets_at)
             .max()
-            .map(|at| SystemTime::UNIX_EPOCH + Duration::from_secs(at))
+            .and_then(|at| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(at)))
     }
 }
 
@@ -496,6 +498,10 @@ struct Block {
 #[derive(Debug, Default)]
 struct AccountState {
     block: Option<Block>,
+    /// How many times the backend refused the account, or trying it again
+    /// failed for good. A check that started before the latest of these
+    /// leaves whether it's set aside to that one.
+    refusals: u64,
     plan_usage: Option<PlanUsage>,
     usage: Option<ChatGptUsageStatus>,
     checked_at: Option<SystemTime>,
@@ -572,8 +578,8 @@ struct PoolState {
     origins: HashMap<u64, usize>,
     /// Accounts that served a response in this process.
     served: BTreeSet<usize>,
-    /// [`ChatGptAccountEvent::AllExhausted`] was sent and no account has
-    /// served since.
+    /// [`ChatGptAccountEvent::AllExhausted`] was sent, and no account has
+    /// been taken back or added since.
     all_exhausted_sent: bool,
     /// The last [stamp](Self::stamp) handed out.
     stamps: u64,
@@ -595,6 +601,8 @@ impl PoolState {
     fn add(&mut self, account: ChatGptAccount) -> usize {
         self.list.push(account);
         self.accounts.push(AccountState::default());
+        // It serves, so every account exhausted after this is news.
+        self.all_exhausted_sent = false;
         self.list.len() - 1
     }
 
@@ -846,7 +854,8 @@ impl ChatGptAccounts {
     /// checked on the usage endpoint (default 5 minutes). Checks happen as
     /// requests are made, never in the background.
     pub fn with_status_check_interval(mut self, interval: Duration) -> Self {
-        self.status_check_interval = interval;
+        // (At most about 136 years, so adding it to a time can't overflow.)
+        self.status_check_interval = interval.min(Duration::from_secs(u32::MAX.into()));
         self
     }
 
@@ -984,7 +993,10 @@ impl ChatGptAccounts {
 
     /// Every account's state, in order of preference.
     pub fn statuses(&self) -> Vec<ChatGptAccountStatus> {
-        let state = self.lock();
+        let now = self.now();
+        let mut state = self.lock();
+        // As the next request sees them.
+        Self::expire(&mut state, now);
         self.statuses_of(&state)
     }
 
@@ -1020,16 +1032,14 @@ impl ChatGptAccounts {
     /// backend accepts it. Waits for a check under way.
     pub async fn check_now(&self) -> Vec<ChatGptAccountStatus> {
         let _checking = self.check_lock.lock().await;
-        let checked: Vec<usize> = {
+        let checked: Vec<(usize, u64)> = {
             let state = self.lock();
             state
                 .order
                 .iter()
-                .copied()
-                .filter(|index| {
-                    let account = &state.accounts[*index];
-                    account.block.is_some() || account.drawing_credits
-                })
+                .map(|index| (*index, &state.accounts[*index]))
+                .filter(|(_, account)| account.block.is_some() || account.drawing_credits)
+                .map(|(index, account)| (index, account.refusals))
                 .collect()
         };
         self.check(&checked).await;
@@ -1112,6 +1122,7 @@ impl ChatGptAccounts {
                     account: label.into(),
                     reason: UsableReason::MarkedUsable,
                 });
+                state.all_exhausted_sent = false;
             }
         }
         self.emit(events);
@@ -1184,7 +1195,7 @@ impl ChatGptAccounts {
     /// another request is checking.
     async fn run_due_checks(&self) {
         let now = self.now();
-        let due: Vec<usize> = {
+        let due: Vec<(usize, u64)> = {
             let mut state = self.lock();
             Self::expire(&mut state, now);
             let first_usable = state
@@ -1194,13 +1205,14 @@ impl ChatGptAccounts {
                 .unwrap_or(state.order.len());
             state.order[..first_usable]
                 .iter()
-                .copied()
-                .filter(|index| {
-                    state.accounts[*index]
+                .map(|index| (*index, &state.accounts[*index]))
+                .filter(|(_, account)| {
+                    account
                         .block
                         .as_ref()
                         .is_some_and(|block| block.retry.is_none() && block.next_check <= now)
                 })
+                .map(|(index, account)| (index, account.refusals))
                 .collect()
         };
         if due.is_empty() {
@@ -1212,10 +1224,12 @@ impl ChatGptAccounts {
         self.check(&due).await;
     }
 
-    /// Checks `indices` on the usage endpoint, one at a time. An account a
-    /// check allows, or can't decide on, is tried by the next request.
-    async fn check(&self, indices: &[usize]) {
-        for &index in indices {
+    /// Checks `accounts` on the usage endpoint, one at a time. An account a
+    /// check allows, or can't decide on, is tried by the next request. Each
+    /// account comes with its [refusals](AccountState::refusals) when the
+    /// check was decided on.
+    async fn check(&self, accounts: &[(usize, u64)]) {
+        for &(index, refusals) in accounts {
             let account = self.account(index);
             let result = fetch_usage(&account.client, &self.usage_url).await;
             let now = self.now();
@@ -1236,13 +1250,18 @@ impl ChatGptAccounts {
             {
                 let mut state = self.lock();
                 let account_state = &mut state.accounts[index];
-                if usable == Some(false)
+                // A refusal during the check is newer than its answer, which
+                // then counts only as a usage report.
+                let current = account_state.refusals == refusals;
+                if current
+                    && usable == Some(false)
                     && let Some(block) = account_state.block.as_mut()
                     && let Some(until) = exhausted_until.filter(|at| *at > now)
                 {
-                    block.until = Some(until);
+                    // Capped as a refusal's reset time is.
+                    block.until = Some(until.min(now + MAX_SERVER_DELAY_HINT));
                 }
-                if let Some(block) = account_state.block.as_mut() {
+                if current && let Some(block) = account_state.block.as_mut() {
                     block.next_check = now + self.status_check_interval;
                     block.retry = match usable {
                         Some(true) => Some(UsableReason::StatusCheck),
@@ -1276,6 +1295,7 @@ impl ChatGptAccounts {
             // (An account removed or replaced meanwhile is not reported.)
             let listed = state.is_listed(index);
             let account = &mut state.accounts[index];
+            account.refusals += 1;
             let previous = account.block.take();
             let until = error
                 .retry_after()
@@ -1316,7 +1336,13 @@ impl ChatGptAccounts {
                 .iter()
                 .filter_map(|index| state.accounts[*index].block.as_ref()?.until)
                 .min();
-            if !state.all_exhausted_sent {
+            // An account marked usable since this request was refused serves,
+            // so then not every account is exhausted.
+            let none_serving = state
+                .order
+                .iter()
+                .all(|index| state.accounts[*index].block.is_some());
+            if none_serving && !state.all_exhausted_sent {
                 state.all_exhausted_sent = true;
                 events.push(ChatGptAccountEvent::AllExhausted {
                     resets_at: earliest,
@@ -1377,6 +1403,7 @@ impl ChatGptAccounts {
                     account: label.clone(),
                     reason: block.retry.unwrap_or(UsableReason::Retried),
                 });
+                state.all_exhausted_sent = false;
             }
             // Before the first request, the first account is the one in use.
             let first = state.first();
@@ -1406,7 +1433,6 @@ impl ChatGptAccounts {
         {
             let mut state = self.lock();
             state.served.insert(index);
-            state.all_exhausted_sent = false;
             // The response's own usage is reported as it came, and the account's
             // state follows it only if no newer report was applied.
             if let Some(usage) = &response.model_call_usage.plan_usage {
@@ -1519,10 +1545,13 @@ impl ChatGptAccounts {
             self.label(index)
         );
         let now = self.now();
-        if let Some(block) = self.lock().accounts[index].block.as_mut() {
+        let mut state = self.lock();
+        let account = &mut state.accounts[index];
+        if let Some(block) = account.block.as_mut() {
             block.retry = None;
             block.next_check = now + self.status_check_interval;
             block.until = block.until.filter(|until| *until > now);
+            account.refusals += 1;
         }
     }
 

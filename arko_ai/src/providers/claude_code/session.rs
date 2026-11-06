@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
 use crate::process_tree::ProcessTree;
 
@@ -125,7 +127,9 @@ struct Handlers {
 /// The CLI runs in a process group of its own (a job object on Windows)
 /// with the programs it starts, such as a Bash call's commands. Closing or
 /// dropping the session stops them all, a command left running in the
-/// background included. On Windows the CLI starts without a console window.
+/// background included, and drops the answers to the CLI's requests still
+/// under way, such as an in-process tool's call. On Windows the CLI starts
+/// without a console window.
 pub struct ClaudeSession {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Child,
@@ -384,7 +388,7 @@ impl ClaudeSession {
                 }
             }
         };
-        self.reader.abort();
+        // Dropping the session at the end stops the reader.
         Ok(status?)
     }
 
@@ -428,6 +432,15 @@ impl ClaudeSession {
         ClaudeError::Exited {
             stderr: self.stderr.lock().unwrap().trim().to_string(),
         }
+    }
+}
+
+impl Drop for ClaudeSession {
+    /// Ends what the session started. The tree goes first, while the CLI is
+    /// still uncollected, and the reader takes the answers under way with it.
+    fn drop(&mut self) {
+        self.tree.kill();
+        self.reader.abort();
     }
 }
 
@@ -479,7 +492,11 @@ async fn read_stdout(
     session_id: Arc<StdMutex<Option<String>>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
-    let in_flight: Arc<StdMutex<HashMap<String, JoinHandle<()>>>> = Arc::default();
+    // The tasks answering the CLI's control requests. The set goes with the
+    // reader, ended or aborted, and aborts those still running, whose
+    // answers can't reach the CLI any more.
+    let mut answering = JoinSet::new();
+    let mut by_id: HashMap<String, AbortHandle> = HashMap::new();
     while let Ok(Some(line)) = lines.next_line().await {
         log::trace!(target: WIRE_LOG, "<- {line}");
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -509,11 +526,19 @@ async fn read_stdout(
             Some("control_request") => {
                 let id = value["request_id"].as_str().unwrap_or_default().to_string();
                 let request = value["request"].clone();
-                let (handlers, stdin, registry) =
-                    (handlers.clone(), stdin.clone(), in_flight.clone());
+                let (handlers, stdin) = (handlers.clone(), stdin.clone());
                 let task_id = id.clone();
-                let task = tokio::spawn(async move {
-                    let response = match answer(&handlers, request).await {
+                // Answers that ended leave as the next request comes.
+                while answering.try_join_next().is_some() {}
+                by_id.retain(|_, task| !task.is_finished());
+                let task = answering.spawn(async move {
+                    // A handler that panics still answers, or the CLI would
+                    // wait for it until its own limit.
+                    let answered = AssertUnwindSafe(answer(&handlers, request))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| Err("the host failed while answering".into()));
+                    let response = match answered {
                         Ok(response) => json!({
                             "type": "control_response",
                             "response": {"subtype": "success", "request_id": task_id, "response": response},
@@ -524,16 +549,12 @@ async fn read_stdout(
                         }),
                     };
                     let _ = write_line(&stdin, &response).await;
-                    registry.lock().unwrap().remove(&task_id);
                 });
-                in_flight.lock().unwrap().insert(id, task);
+                by_id.insert(id, task);
             }
             Some("control_cancel_request") => {
                 // The CLI gave up on the request, and it expects no answer.
-                if let Some(task) = value["request_id"]
-                    .as_str()
-                    .and_then(|id| in_flight.lock().unwrap().remove(id))
-                {
+                if let Some(task) = value["request_id"].as_str().and_then(|id| by_id.remove(id)) {
                     task.abort();
                 }
             }

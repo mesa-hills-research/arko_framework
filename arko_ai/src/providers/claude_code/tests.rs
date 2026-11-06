@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -286,6 +288,113 @@ async fn a_crash_reports_the_cli_error() {
         session.interrupt().await,
         Err(ClaudeError::Exited { stderr }) if stderr.contains("boom")
     ));
+}
+
+/// A tool whose call runs until it's dropped, counting the calls running.
+struct Hang(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ClaudeTool for Hang {
+    fn name(&self) -> String {
+        "hang".into()
+    }
+    fn description(&self) -> String {
+        "Runs until it's stopped.".into()
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+    async fn call(&self, _arguments: Value) -> ToolOutput {
+        struct Running(Arc<AtomicUsize>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let _running = Running(self.0.clone());
+        std::future::pending().await
+    }
+}
+
+/// Whether `running` reaches `count` within five seconds.
+async fn reaches(running: &AtomicUsize, count: usize) -> bool {
+    for _ in 0..500 {
+        if running.load(Ordering::SeqCst) == count {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// A control request still being answered when its session ends stops with
+/// it, whether the session is closed, dropped, or the CLI exits.
+#[tokio::test]
+async fn an_answer_under_way_stops_when_its_session_ends() {
+    let running = Arc::new(AtomicUsize::new(0));
+    let options = || ClaudeOptions {
+        tool_servers: vec![Arc::new(
+            ToolServer::new("work").tool(Arc::new(Hang(running.clone()))),
+        )],
+        ..fake()
+    };
+
+    let session = ClaudeSession::start(options()).await.unwrap();
+    session.send("hang").await.unwrap();
+    assert!(reaches(&running, 1).await);
+    session.close().await.unwrap();
+    assert!(reaches(&running, 0).await, "the call outlived close");
+
+    let session = ClaudeSession::start(options()).await.unwrap();
+    session.send("hang").await.unwrap();
+    assert!(reaches(&running, 1).await);
+    drop(session);
+    assert!(
+        reaches(&running, 0).await,
+        "the call outlived the dropped session"
+    );
+
+    let mut session = ClaudeSession::start(options()).await.unwrap();
+    session.send("hang").await.unwrap();
+    assert!(reaches(&running, 1).await);
+    session.send("exit").await.unwrap();
+    assert!(session.receive_turn().await.is_err());
+    assert!(reaches(&running, 0).await, "the call outlived the CLI");
+}
+
+struct Panics;
+
+#[async_trait]
+impl ClaudeTool for Panics {
+    fn name(&self) -> String {
+        "panic".into()
+    }
+    fn description(&self) -> String {
+        "Fails.".into()
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+    async fn call(&self, _arguments: Value) -> ToolOutput {
+        panic!("the tool failed")
+    }
+}
+
+/// A handler that panics answers with an error, so the CLI's turn goes on.
+#[tokio::test]
+async fn a_handler_that_panics_answers_with_an_error() {
+    let mut session = ClaudeSession::start(ClaudeOptions {
+        tool_servers: vec![Arc::new(ToolServer::new("work").tool(Arc::new(Panics)))],
+        ..fake()
+    })
+    .await
+    .unwrap();
+    session.send("panic").await.unwrap();
+    let turn = tokio::time::timeout(Duration::from_secs(10), session.receive_turn())
+        .await
+        .expect("the CLI got an answer");
+    assert_eq!(result_json(&turn.unwrap())["subtype"], "error");
 }
 
 #[tokio::test]
