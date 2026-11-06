@@ -502,19 +502,36 @@ async fn answer_budget_hold(
     Ok(())
 }
 
-/// The error-recovery state of one drive of an agent.
+/// Where an agent is with an error-recovery pause. A runtime reports a
+/// pause as the state change that gives its cause and an error needing a
+/// decision, in either order.
 #[derive(Default)]
-struct RecoveryState {
-    /// The cause of the error-recovery pause the agent is in (its latest
-    /// state, or the state it was resumed in), if it is in one. An error it
-    /// reports needing a decision is about that pause.
-    paused: Option<arko_agents::ErrorRecoveryCause>,
-    /// That pause's error kind, when it recorded one.
-    paused_kind: Option<arko_ai::ErrorKind>,
+enum Pause {
+    #[default]
+    None,
+    /// In a pause with this cause (its latest state, or the state it was
+    /// resumed in). An error it reports needing a decision is about that
+    /// pause. It lasts until the task leaves the pause, since a runtime may
+    /// report the error again.
+    Cause(PauseCause),
     /// An error needing a decision that arrived before the state change
     /// giving its cause, answered once that pause arrives, so the decision
     /// doesn't depend on the order a runtime reports them in.
-    unanswered: Option<String>,
+    ErrorFirst(String),
+}
+
+/// The cause of an error-recovery pause, with its error kind when it
+/// recorded one.
+#[derive(Clone)]
+struct PauseCause {
+    cause: arko_agents::ErrorRecoveryCause,
+    kind: Option<arko_ai::ErrorKind>,
+}
+
+/// The error-recovery state of one drive of an agent.
+#[derive(Default)]
+struct RecoveryState {
+    pause: Pause,
     /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
     recovered: u32,
     /// Pauses in a row without a model response in between.
@@ -1096,19 +1113,21 @@ fn message_ids(ids: &[uuid::Uuid]) -> Vec<String> {
 /// workflow's error recovery policy and the pause's cause. It continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
 /// run (inside another agent's tool call) can't pause, so it fails instead.
+#[allow(clippy::too_many_arguments)]
 async fn answer_recovery_pause(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     error: String,
+    paused: PauseCause,
     recovery: &mut RecoveryState,
     nested: bool,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
     ctx: &Arc<SharedContext>,
 ) -> Result<(), WorkflowError> {
-    let cause = recovery
-        .paused
-        .clone()
-        .unwrap_or(arko_agents::ErrorRecoveryCause::Unknown);
+    let PauseCause {
+        cause,
+        kind: error_kind,
+    } = paused;
     if cause == arko_agents::ErrorRecoveryCause::BudgetExceeded {
         return answer_budget_hold(agent_name, agent_run_id, error, nested, cmd_tx, ctx).await;
     }
@@ -1132,7 +1151,7 @@ async fn answer_recovery_pause(
             AgentPause::ErrorRecovery {
                 error,
                 cause,
-                error_kind: recovery.paused_kind,
+                error_kind,
             },
         )
         .await;
@@ -1219,7 +1238,7 @@ async fn answer_recovery_pause(
                 AgentPause::ErrorRecovery {
                     error,
                     cause,
-                    error_kind: recovery.paused_kind,
+                    error_kind,
                 },
             )
             .await
@@ -1269,8 +1288,9 @@ pub(crate) async fn drive_event_loop(
         persistence,
     };
     let mut recovery = RecoveryState {
-        paused_kind: paused.as_ref().and_then(|(_, kind)| *kind),
-        paused: paused.map(|(cause, _)| cause),
+        pause: paused.map_or(Pause::None, |(cause, kind)| {
+            Pause::Cause(PauseCause { cause, kind })
+        }),
         ..RecoveryState::default()
     };
     let run_stop = ctx.run_control.run_cancel(agent_run_id);
@@ -1358,9 +1378,7 @@ async fn drive_events(
         if let AgentEvent::TaskStateChanged(state) = &event
             && !matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. })
         {
-            recovery.paused = None;
-            recovery.paused_kind = None;
-            recovery.unanswered = None;
+            recovery.pause = Pause::None;
         }
         match event {
             AgentEvent::ToolCallAwaitingApproval {
@@ -1486,13 +1504,17 @@ async fn drive_events(
                 error_kind,
                 ..
             }) => {
-                recovery.paused = Some(cause.clone());
-                recovery.paused_kind = error_kind;
-                if let Some(error) = recovery.unanswered.take() {
+                let paused = PauseCause {
+                    cause: cause.clone(),
+                    kind: error_kind,
+                };
+                let earlier = std::mem::replace(&mut recovery.pause, Pause::Cause(paused.clone()));
+                if let Pause::ErrorFirst(error) = earlier {
                     answer_recovery_pause(
                         agent_name,
                         agent_run_id,
                         error,
+                        paused,
                         recovery,
                         nested,
                         cmd_tx,
@@ -1506,22 +1528,26 @@ async fn drive_events(
                 requires_approval_to_retry: true,
                 error_message,
                 ..
-            } => {
-                if recovery.paused.is_some() {
+            } => match &recovery.pause {
+                Pause::Cause(paused) => {
+                    let paused = paused.clone();
                     answer_recovery_pause(
                         agent_name,
                         agent_run_id,
                         error_message,
+                        paused,
                         recovery,
                         nested,
                         cmd_tx,
                         ctx,
                     )
                     .await?;
-                } else {
-                    recovery.unanswered = Some(error_message);
                 }
-            }
+                // The latest error stands until its pause arrives.
+                Pause::None | Pause::ErrorFirst(_) => {
+                    recovery.pause = Pause::ErrorFirst(error_message);
+                }
+            },
 
             AgentEvent::UserQuestionsAsked {
                 questions,
@@ -1782,15 +1808,15 @@ async fn answer_saved_wait(
             cause,
             error_kind,
         } => {
-            let mut recovery = RecoveryState {
-                paused: Some(cause.clone()),
-                paused_kind: *error_kind,
-                ..RecoveryState::default()
-            };
+            let mut recovery = RecoveryState::default();
             answer_recovery_pause(
                 agent_name,
                 agent_run_id,
                 error_message.clone(),
+                PauseCause {
+                    cause: cause.clone(),
+                    kind: *error_kind,
+                },
                 &mut recovery,
                 nested,
                 cmd_tx,
