@@ -1457,6 +1457,68 @@ async fn a_retry_that_fails_for_good_returns_that_failure_and_waits_for_a_check(
     .await;
 }
 
+/// A check whose answer comes after a newer refusal leaves the account aside.
+#[tokio::test]
+async fn a_check_older_than_a_refusal_leaves_the_account_aside() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let clock = Arc::new(Mutex::new(SystemTime::now()));
+        accounts.clock = Some(clock.clone());
+        let config = GenerationConfig::default();
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_0", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        mock.take();
+        take(&events);
+
+        // A check starts, and its answer (allowed) comes late.
+        mock.expect([
+            answer(PRIMARY, "/wham/usage", 200, &usage_status(true, false))
+                .after(Duration::from_millis(500)),
+        ]);
+        let check = {
+            let accounts = accounts.clone();
+            tokio::spawn(async move { accounts.check_now().await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Meanwhile the reset time passes, and a request to the primary is
+        // refused again.
+        *clock.lock().unwrap() += Duration::from_secs(660);
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 7200)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_1", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        check.await.unwrap();
+
+        // The check's answer is older than that refusal.
+        assert_eq!(accounts.statuses()[0].retry, None);
+        mock.expect([answer(SECONDARY, "/responses", 200, &turn("enc_2", "s"))]);
+        accounts
+            .generate_text(&conversation(), &config)
+            .await
+            .unwrap();
+        let tried: Vec<String> = responses(&mock.take())
+            .iter()
+            .map(|seen| seen.account.clone())
+            .collect();
+        assert_eq!(tried, [PRIMARY, SECONDARY, SECONDARY]);
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
 fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEvent> {
     events
         .iter()
