@@ -833,12 +833,11 @@ impl arko_agents::TaskSnapshotSink for LatestTask {
 /// the registry until its outcome is recorded (and saved, where that
 /// follows), so no other run of its ID starts meanwhile.
 pub(crate) struct ReportInFlight {
-    context: Arc<SharedContext>,
-    persistence: Option<Arc<PersistenceManager>>,
-    previous: AgentResult,
-    open: bool,
+    /// Declared first, so that a dropped report puts the run back before
+    /// its ID is released.
+    put_back: PutBack,
     /// The run's mark in the registry, until its outcome is recorded.
-    reserved: Option<ReportReservation>,
+    reserved: ReportReservation,
 }
 
 /// A run's mark in the registry as running to write a report on request.
@@ -866,14 +865,16 @@ impl ReportInFlight {
             .lock()
             .insert(previous.agent_run_id, ReportState::default());
         Self {
-            context: ctx.clone(),
-            persistence,
-            previous: previous.clone(),
-            open: true,
-            reserved: Some(ReportReservation {
+            put_back: PutBack {
+                context: ctx.clone(),
+                persistence,
+                previous: previous.clone(),
+                armed: true,
+            },
+            reserved: ReportReservation {
                 context: ctx.clone(),
                 agent_run_id: previous.agent_run_id,
-            }),
+            },
         }
     }
 
@@ -881,31 +882,54 @@ impl ReportInFlight {
     /// it as any run is at its end, saved and checkpointed with persistence,
     /// by a task of its own, which runs to its end whatever becomes of the
     /// caller (see [`ReportCommit`]). Returns that task.
-    fn came(&mut self, result: AgentResult) -> tokio::task::JoinHandle<()> {
-        self.open = false;
+    fn came(self, result: AgentResult) -> tokio::task::JoinHandle<()> {
+        let Self {
+            mut put_back,
+            reserved,
+        } = self;
+        put_back.armed = false;
         let commit = ReportCommit {
-            context: self.context.clone(),
-            persistence: self.persistence.clone(),
+            context: put_back.context.clone(),
+            persistence: put_back.persistence.clone(),
             result,
-            recorded: false,
-            settled: false,
-            _reserved: self.reserved.take(),
+            step: CommitStep::Unrecorded,
+            _reserved: reserved,
         };
         let task = tokio::spawn(commit.run());
         #[cfg(test)]
-        if let Some(persistence) = &self.persistence {
+        if let Some(persistence) = &put_back.persistence {
             persistence.spawned_report_commit(&task);
         }
         task
     }
 
-    /// Puts the run back as it was before the report, in memory, keeping
-    /// the model calls and the context its report run took (see
-    /// [`report_rollback`]), from the result it ended in, else from the
-    /// latest task its runtime reported (a run that never ended, such as one
-    /// aborted). With persistence, the next checkpoint saves it.
-    fn restore(&mut self) {
-        if !std::mem::take(&mut self.open) {
+    /// The report didn't come. Puts the run back now (see [`PutBack`]), and
+    /// returns its ID's mark, for the caller to hold until the checkpoint
+    /// recording the run put back is saved.
+    fn put_back(self) -> ReportReservation {
+        let Self { put_back, reserved } = self;
+        drop(put_back);
+        reserved
+    }
+}
+
+/// Puts a run that wrote no report back as it was before the request, as
+/// it drops, unless the report came.
+struct PutBack {
+    context: Arc<SharedContext>,
+    persistence: Option<Arc<PersistenceManager>>,
+    previous: AgentResult,
+    armed: bool,
+}
+
+impl Drop for PutBack {
+    /// Puts the run back in memory, keeping the model calls and the
+    /// context its report run took (see [`report_rollback`]), from the result
+    /// it ended in, else from the latest task its runtime reported (a run
+    /// that never ended, such as one aborted). With persistence, the next
+    /// checkpoint saves it.
+    fn drop(&mut self) {
+        if !self.armed {
             return;
         }
         let ctx = &self.context;
@@ -938,18 +962,14 @@ impl ReportInFlight {
                 .settle_run(&self.previous.agent_name, task, &[], false);
         }
     }
-
-    /// Lets other runs of its ID start, once the run's outcome is recorded.
-    fn release(&mut self) {
-        self.reserved = None;
-    }
 }
 
-impl Drop for ReportInFlight {
-    /// Puts the run back, then unmarks it (as its fields drop).
-    fn drop(&mut self) {
-        self.restore();
-    }
+/// How far the record of a report that came has got. Its result is
+/// recorded before the run's messages and mail are settled.
+enum CommitStep {
+    Unrecorded,
+    Recorded,
+    Settled,
 }
 
 /// The record of a report that came (see [`ReportInFlight::came`]), owned
@@ -962,12 +982,9 @@ struct ReportCommit {
     context: Arc<SharedContext>,
     persistence: Option<Arc<PersistenceManager>>,
     result: AgentResult,
-    /// Whether the result is recorded.
-    recorded: bool,
-    /// Whether the run's messages and mail are settled.
-    settled: bool,
+    step: CommitStep,
     /// Unmarks the run as it drops, after the commit's own drop.
-    _reserved: Option<ReportReservation>,
+    _reserved: ReportReservation,
 }
 
 impl ReportCommit {
@@ -982,7 +999,7 @@ impl ReportCommit {
             Some(persistence) => persistence.record_result(&ctx, self.result.clone()).await,
             None => record_result(&ctx, self.result.clone()),
         }
-        self.recorded = true;
+        self.step = CommitStep::Recorded;
         self.settle();
         if let Some(persistence) = &self.persistence
             && let Err(error) = persistence.auto_checkpoint(&ctx).await
@@ -994,11 +1011,10 @@ impl ReportCommit {
         }
     }
 
-    /// Settles the run's messages and mail by its result, once.
+    /// Settles the run's messages and mail by its recorded result. Marked
+    /// settled first, so a panic here isn't settled twice.
     fn settle(&mut self) {
-        if std::mem::replace(&mut self.settled, true) {
-            return;
-        }
+        self.step = CommitStep::Settled;
         let ctx = &self.context;
         let result = &self.result;
         if let Ok(task) = result.task() {
@@ -1013,16 +1029,21 @@ impl Drop for ReportCommit {
     fn drop(&mut self) {
         let id = self.result.agent_run_id;
         self.context.reports_in_flight.lock().remove(&id);
-        if !std::mem::replace(&mut self.recorded, true) {
-            record_result(&self.context, self.result.clone());
-            if let Some(persistence) = &self.persistence {
-                persistence.mark_task_changed(
-                    id,
-                    "its report came, but the task saving it ended before it did",
-                );
+        match self.step {
+            CommitStep::Unrecorded => {
+                self.step = CommitStep::Recorded;
+                record_result(&self.context, self.result.clone());
+                if let Some(persistence) = &self.persistence {
+                    persistence.mark_task_changed(
+                        id,
+                        "its report came, but the task saving it ended before it did",
+                    );
+                }
+                self.settle();
             }
+            CommitStep::Recorded => self.settle(),
+            CommitStep::Settled => {}
         }
-        self.settle();
     }
 }
 
@@ -4350,7 +4371,7 @@ impl WorkflowEngine {
         // come back to the caller at once, and the report run is never
         // saved. Whatever ends the call first (an error, or the call
         // dropped), the run is put back as it was.
-        let mut in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
+        let in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
         ctx.messages.settle_run(agent_name, &task, &[], false);
@@ -4380,7 +4401,9 @@ impl WorkflowEngine {
                 Ok(result)
             }
             Err(error) => {
-                in_flight.restore();
+                // The run's ID stays marked until the checkpoint saves the run
+                // put back.
+                let _reserved = in_flight.put_back();
                 if let Some(persistence) = &self.persistence
                     && let Err(error) = persistence.auto_checkpoint(ctx).await
                 {
@@ -4390,7 +4413,6 @@ impl WorkflowEngine {
                         previous.agent_run_id
                     );
                 }
-                in_flight.release();
                 Err(error)
             }
         }
