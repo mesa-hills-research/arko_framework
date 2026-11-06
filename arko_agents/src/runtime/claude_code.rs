@@ -85,6 +85,9 @@ const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report 
 
 const TASK_COMPLETE: &str = "The task is complete; end your turn without calling tools.";
 
+/// The answer to a permission request while the run stops.
+const STOPPING: &str = "The agent is stopping.";
+
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
@@ -391,11 +394,11 @@ impl cc::PermissionHandler for PermissionForwarder {
             .send(HostRequest::Permission { request, reply })
             .is_err()
         {
-            return cc::PermissionDecision::deny("The agent is stopping.");
+            return cc::PermissionDecision::deny(STOPPING);
         }
         answer
             .await
-            .unwrap_or_else(|_| cc::PermissionDecision::deny("The agent is stopping."))
+            .unwrap_or_else(|_| cc::PermissionDecision::deny(STOPPING))
     }
 }
 
@@ -1073,6 +1076,11 @@ impl ClaudeCodeRun {
             .send(event)
             .await
             .map_err(|error| ArkoAgentsError::ChannelSend(format!("{error:?}")))
+    }
+
+    /// The host stopped the run, or the task ended.
+    fn ending(&self) -> bool {
+        self.stopping.is_some() || self.task.current_state.is_terminal()
     }
 
     async fn set_state(&mut self, state: TaskState) -> Result<(), ArkoAgentsError> {
@@ -2455,7 +2463,7 @@ impl ClaudeCodeRun {
                 biased;
                 command = self.commands.recv() => {
                     self.handle_command(command, &session).await?;
-                    if self.stopping.is_some() || self.task.current_state.is_terminal() {
+                    if self.ending() {
                         // Calls held by the SlowDown don't run.
                         for (_, reply, _) in self.slowed.drain(..) {
                             let _ = reply.send(cc::Hook::deny_tool(
@@ -2484,7 +2492,7 @@ impl ClaudeCodeRun {
                 message = session.next_message() => match message {
                     None => {
                         cli_exited = true;
-                        if self.task.current_state.is_terminal() || self.stopping.is_some() {
+                        if self.ending() {
                             break SessionEnd::Stop;
                         }
                         break self.session_failed("Claude Code exited during the turn.".into()).await?;
@@ -2507,11 +2515,7 @@ impl ClaudeCodeRun {
             self.compaction = None;
         }
         self.flush_usage().await?;
-        if let Some(approval) = self.approval.take() {
-            let _ = approval
-                .reply
-                .send(cc::PermissionDecision::deny("The agent is stopping."));
-        }
+        self.drop_approval();
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
         self.await_note_verdicts(&mut session).await?;
@@ -2538,6 +2542,8 @@ impl ClaudeCodeRun {
             if this.stopping.is_none() {
                 this.stopping = Some(stopping);
             }
+            // A decision that comes later finds no call waiting.
+            this.drop_approval();
             match stopping {
                 Stopping::Cancel => this.calls_stop.stop("Task cancelled."),
                 Stopping::Suspend => this.calls_stop.stop("Task suspended."),
@@ -3074,6 +3080,10 @@ impl ClaudeCodeRun {
         request: cc::PermissionRequest,
         reply: oneshot::Sender<cc::PermissionDecision>,
     ) -> Result<(), ArkoAgentsError> {
+        if self.ending() {
+            let _ = reply.send(cc::PermissionDecision::deny(STOPPING));
+            return Ok(());
+        }
         let known = request
             .tool_use_id
             .as_ref()
@@ -3178,6 +3188,12 @@ impl ClaudeCodeRun {
             return Ok(());
         }
         let approval = self.approval.take().expect("checked");
+        // The task ended (a middleware or another call ended it), so the
+        // call doesn't run, and its end stands.
+        if self.ending() {
+            let _ = approval.reply.send(cc::PermissionDecision::deny(STOPPING));
+            return Ok(());
+        }
         self.set_state(TaskState::InProgress).await?;
         let call = approval.tool_use_id.clone();
         if !approve {
@@ -3275,7 +3291,18 @@ impl ClaudeCodeRun {
             .await
             .unwrap_or_default();
         let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
+        if self.ending() {
+            return Ok(());
+        }
         self.set_state(TaskState::InProgress).await
+    }
+
+    /// Answers the call that waits for approval, as the run stops or its
+    /// session ends.
+    fn drop_approval(&mut self) {
+        if let Some(approval) = self.approval.take() {
+            let _ = approval.reply.send(cc::PermissionDecision::deny(STOPPING));
+        }
     }
 
     /// After a call ran, the middleware's `after` for a built-in, and
@@ -4805,7 +4832,7 @@ impl ClaudeCodeRun {
         self.retrying_since = None;
         self.discard_unfinished_stream().await?;
         let api_error = self.api_error.take();
-        let ending = self.stopping.is_some() || self.task.current_state.is_terminal();
+        let ending = self.ending();
         if ending
             || !matches!(
                 self.pause_after_turn,
@@ -5114,7 +5141,7 @@ impl ClaudeCodeRun {
     /// The session failed (it exited, or a turn ended in an error Claude
     /// Code's own retries didn't recover from), so the error policy decides.
     async fn session_failed(&mut self, message: String) -> Result<SessionEnd, ArkoAgentsError> {
-        if self.stopping.is_some() || self.task.current_state.is_terminal() {
+        if self.ending() {
             return Ok(SessionEnd::Stop);
         }
         // A plan limit Claude Code reported reached. The pause waits for its

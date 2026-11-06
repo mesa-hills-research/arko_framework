@@ -1,7 +1,7 @@
-//! The Claude Code runtime's waits for the host's decisions, with the
-//! opt-in `user_command_timeout_seconds`. A wait for an answer or a
-//! recovery decision comes before any session, so these run on paused time
-//! and start no CLI.
+//! The Claude Code runtime's waits for the host's decisions. A wait for an
+//! answer or a recovery decision comes before any session, so its tests run
+//! on paused time and start no CLI. A call's wait for approval runs in a
+//! session, against the fake CLI.
 
 use super::*;
 use crate::runtime::HostDecisions;
@@ -198,5 +198,74 @@ async fn a_command_timeout_too_long_for_the_clock_leaves_the_wait_untimed() {
         matches!(task.current_state, TaskState::Cancelled { .. }),
         "{:?}",
         task.current_state
+    );
+}
+
+/// `Bash`, which needs approval, for an agent of `fake`.
+fn approving(fake: &Fake) -> crate::agent_config::AgentConfig {
+    let mut config = config(fake, &["Bash"]);
+    config.tool_config.tool_specific_configs.insert(
+        "Bash".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    config
+}
+
+/// The ID of the call the last event says awaits approval.
+fn awaited(events: &[AgentEvent]) -> uuid::Uuid {
+    match events.last() {
+        Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) => *tool_call_id,
+        _ => panic!("{events:#?}"),
+    }
+}
+
+fn awaits_approval(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::ToolCallAwaitingApproval { .. })
+}
+
+/// A decision that comes after the host cancelled the task, before the
+/// turn ended, leaves it cancelled, and the call doesn't run.
+#[tokio::test]
+async fn a_decision_after_a_cancel_leaves_the_task_cancelled() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "cargo test"}},
+        complete("Tested"),
+    ]]));
+    let task = Task::new(
+        approving(&fake),
+        "Run the tests.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let call = awaited(&run.events_until(awaits_approval).await);
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    run.commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id: call,
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Cancelled { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let permissions = fake.logged("permission");
+    assert_eq!(
+        permissions[0]["answer"]["behavior"], "deny",
+        "{permissions:#?}"
+    );
+    assert!(
+        fake.logged("post")
+            .iter()
+            .all(|post| post["output"] != "builtin Bash ran"),
+        "the call ran"
     );
 }
