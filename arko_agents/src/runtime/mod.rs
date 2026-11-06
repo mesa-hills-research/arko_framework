@@ -19,6 +19,7 @@ use arko_ai::LLMClient;
 
 mod claude_code;
 pub mod command;
+mod command_wait;
 pub mod event;
 mod hook_budget;
 mod r#loop;

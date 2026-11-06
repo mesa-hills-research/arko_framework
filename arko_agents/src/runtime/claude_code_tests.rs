@@ -24,6 +24,9 @@ use crate::tool::ToolRegistry;
 #[path = "claude_code_latest_request_tests.rs"]
 mod latest_request;
 
+#[path = "claude_code_wait_tests.rs"]
+mod waits;
+
 /// A fake CLI with its script, log and turn counter in a fresh directory.
 struct Fake {
     dir: PathBuf,

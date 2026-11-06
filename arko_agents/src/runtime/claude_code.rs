@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use super::ContextImage;
 use super::command::UserCommand;
+use super::command_wait::CommandWait;
 use super::event::AgentEvent;
 use super::hook_budget::Delivery;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
@@ -1484,17 +1485,18 @@ impl ClaudeCodeRun {
     /// Waits for the command that ends an answer or error-recovery wait.
     /// Returns false when the task stops instead.
     async fn wait_for_decision(&mut self) -> Result<bool, ArkoAgentsError> {
+        // One deadline for the whole wait, which nothing the wait takes
+        // moves.
+        let timeout = self.task.agent_config.user_command_timeout_seconds;
+        let mut wait = CommandWait::start(timeout, &self.host_decisions);
         loop {
-            let deadline = self
-                .task
-                .agent_config
-                .user_command_timeout_seconds
-                .filter(|_| !self.host_decisions.get())
-                .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
-            let command = match deadline {
+            let command = match wait.deadline(&self.host_decisions) {
                 Some(deadline) => {
                     match tokio::time::timeout_at(deadline, self.commands.recv()).await {
                         Ok(command) => command,
+                        // The host took over the run's decisions during the
+                        // wait, so it isn't timed any more.
+                        Err(_) if wait.deadline(&self.host_decisions).is_none() => continue,
                         Err(_) => {
                             self.set_state(TaskState::Interrupted {
                                 reason: "No decision arrived before the command timeout.".into(),
@@ -1515,7 +1517,7 @@ impl ClaudeCodeRun {
             };
             match (self.task.current_state.clone(), command) {
                 (_, UserCommand::InjectContext { content }) => self.queue_context(content, true),
-                (_, UserCommand::HostDeciding) => {}
+                (_, UserCommand::HostDeciding) => wait = CommandWait::HostDeciding,
                 (_, UserCommand::RequestHandover) => self.note_handover_request().await?,
                 (_, UserCommand::CancelTask) => {
                     self.set_state(TaskState::Cancelled {

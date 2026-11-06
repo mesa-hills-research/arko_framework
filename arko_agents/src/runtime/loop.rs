@@ -1,4 +1,5 @@
 use super::command::{ToolApprovalDecision, UserCommand};
+use super::command_wait::CommandWait;
 use super::event::{AgentEvent, ShortenReason};
 use super::result_budget;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
@@ -69,11 +70,10 @@ mod decisions;
 mod resume;
 mod text;
 use decisions::*;
-mod wait;
-use wait::*;
 mod boundary;
 mod keep_warm;
 mod start;
+mod wait;
 
 /// Where the loop of [`AgentLoop::run`] goes after a phase of a pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,8 +146,9 @@ pub struct AgentLoop {
     /// The state the last `TaskStateChanged` reported, so a state reported
     /// by one path isn't reported again by another.
     last_reported_state: std::sync::Mutex<Option<TaskState>>,
-    /// The wait for a command the task is in, with its deadline.
-    command_wait: CommandWait,
+    /// The wait for a command the task is in, with its deadline. `None`
+    /// between waits.
+    command_wait: Option<CommandWait>,
     /// While set, the host decides every wait of the run and none is timed.
     pub(super) host_decisions: super::HostDecisions,
     #[cfg(test)]
@@ -288,7 +289,7 @@ impl AgentLoop {
             suspended_tools: false,
             details_sent_with: None,
             last_reported_state: std::sync::Mutex::new(None),
-            command_wait: CommandWait::NotStarted,
+            command_wait: None,
             host_decisions: super::HostDecisions::default(),
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
