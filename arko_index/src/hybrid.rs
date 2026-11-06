@@ -18,7 +18,7 @@
 use crate::{
     bench_v1::{Chunk, Error},
     dense::{DenseIndexInfo, Embedder, ModelDescriptor, embed_query},
-    index2::{Generation, check_dense_format},
+    index2::{Generation, check_dense_format, read_current},
     vector::{Filter, VectorStore},
 };
 use serde::{Deserialize, Serialize};
@@ -286,34 +286,24 @@ pub fn search(
     // generation. The query is embedded (and billed) once.
     let mut embedded: Option<(ModelDescriptor, Vec<f32>)> = None;
     let mut query_tokens = 0;
-    let current = || std::fs::read_to_string(state_dir.join("CURRENT2")).ok();
-    for attempt in 0.. {
-        let before = current();
-        let result = search_once(
-            state_dir,
+    read_current(state_dir, |generation| {
+        search_once(
+            generation,
             request,
             embedder,
             &mut embedded,
             &mut query_tokens,
-        );
-        let retry = attempt < 2
-            && (result.is_err() || request.mode != Mode::Lexical)
-            && current() != before;
-        if !retry {
-            return result;
-        }
-    }
-    unreachable!()
+        )
+    })
 }
 
 fn search_once(
-    state_dir: &Path,
+    generation: &Generation,
     request: &SearchRequest,
     embedder: Option<&dyn Embedder>,
     embedded: &mut Option<(ModelDescriptor, Vec<f32>)>,
     query_tokens: &mut u64,
 ) -> Result<SearchResults, Error> {
-    let generation = Generation::open(state_dir)?;
     let info = generation.dense_info()?;
     let limit = request.limit;
     let ranked: Vec<(u32, f64, Option<usize>, Option<usize>)> = match request.mode {
