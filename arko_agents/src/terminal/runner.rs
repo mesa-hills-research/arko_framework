@@ -339,6 +339,12 @@ pub(super) async fn run(
     if let Some(stop) = stop {
         data.lock().unwrap().decide(stop);
     }
+    #[cfg(test)]
+    let barrier = data.lock().unwrap().end_barrier.clone();
+    #[cfg(test)]
+    if let Some(barrier) = barrier {
+        barrier.hold().await;
+    }
     requests_task.abort();
     let _ = requests_task.await;
     process.group.kill();

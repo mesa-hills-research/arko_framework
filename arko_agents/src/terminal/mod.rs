@@ -352,7 +352,41 @@ struct JobData {
     /// [`finish`](Self::finish). Not saved, so a job that never finishes is
     /// running on disk and interrupted at the next open.
     ending: Option<JobState>,
+    /// Holds the job's runner at its end decision, for a test.
+    #[cfg(test)]
+    end_barrier: Option<Arc<EndBarrier>>,
 }
+
+/// Holds a job's runner at its end decision, once it has marked the job
+/// ending and before it winds it down, so a test can act in between. Each
+/// side waits a bounded time, so a test that fails doesn't hang the job.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct EndBarrier {
+    reached: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl EndBarrier {
+    /// The runner's side, until the test releases it.
+    async fn hold(&self) {
+        self.reached.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.released.notified()).await;
+    }
+
+    /// Waits until the runner is held at its end decision.
+    pub(super) async fn reached(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.reached.notified())
+            .await
+            .expect("the job reached its end decision");
+    }
+
+    pub(super) fn release(&self) {
+        self.released.notify_one();
+    }
+}
+
 impl JobData {
     fn new(record: Record) -> Self {
         Self {
@@ -363,6 +397,8 @@ impl JobData {
             note: None,
             monitor: None,
             ending: None,
+            #[cfg(test)]
+            end_barrier: None,
         }
     }
 
