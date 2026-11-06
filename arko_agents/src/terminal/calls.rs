@@ -548,7 +548,8 @@ impl TerminalManager {
         let job = self.owned(owner, id)?;
         {
             let mut data = job.data.lock().unwrap();
-            if data.record.state.is_terminal() {
+            // A job that is ending wasn't stopped by anyone.
+            if !data.running() {
                 return Err(TerminalError::Finished);
             }
             data.stopped_by.get_or_insert(cause);
@@ -621,6 +622,13 @@ async fn run_call(
             },
         }
     };
+    // The job is ending from now on, a stopped call during its grace too.
+    data.lock().unwrap().decide(match &finished {
+        Some(Ok(output)) if output.is_error => JobState::Failed,
+        Some(Ok(_)) => JobState::Succeeded,
+        Some(Err(_)) => JobState::Failed,
+        None => JobState::Cancelled,
+    });
     let ending = match finished {
         Some(Ok(output)) => Ending::Returned {
             output,
@@ -671,7 +679,6 @@ async fn run_call(
             .collect();
         data.record.output_end = bytes.len() as u64;
         data.record.log_truncated = log_truncated;
-        data.record.revision += 1;
         let (state, error) = match &ending {
             Ending::Returned {
                 stopped: false,
@@ -699,18 +706,13 @@ async fn run_call(
                 Some("the call failed unexpectedly".to_string()),
             ),
         };
-        data.record.state = state;
-        data.record.error = error;
         if let Err(error) = &logged {
             log::warn!(
                 "Terminal job {}: could not write the moved call's result: {error}",
                 data.record.job_id
             );
         }
-        if let Err(error) = persist(&config, &data.record) {
-            data.record.state = JobState::Failed;
-            data.record.error = Some(format!("could not persist terminal result: {error}"));
-        }
+        let snapshot = data.finish(&config, state, error);
         let tool_name = data
             .record
             .call
@@ -728,17 +730,16 @@ async fn run_call(
             &log_path,
             log_truncated,
         ));
-        let snapshot = data
-            .snapshot(&config, None, config.excerpt_bytes)
-            .expect("valid output window");
         data.last_event = Some(snapshot.clone());
-        (data.record.owner, snapshot, stopped_by)
+        (
+            data.record.owner,
+            snapshot,
+            wakes_owner(data.record.held, stopped_by),
+        )
     };
     if let Some(manager) = manager.upgrade() {
-        let (owner, snapshot, stopped_by) = final_notice;
-        // The user's stop, and a stop because the owner's run ended, wake
-        // no one.
-        if !matches!(stopped_by, Some(StopCause::User | StopCause::OwnerEnded)) {
+        let (owner, snapshot, wakes) = final_notice;
+        if wakes {
             let _ = manager.finished.send(JobFinished {
                 owner,
                 job_id: snapshot.job_id,
@@ -748,6 +749,13 @@ async fn run_call(
         manager.deliver(owner, snapshot);
     }
     changed.send_replace(data.lock().unwrap().record.revision);
+}
+
+/// Whether a job that ended wakes its owner. A held job's call has its
+/// result, and a stop by the user or because the owner's run ended wakes no
+/// one.
+pub(super) fn wakes_owner(held: bool, stopped_by: Option<StopCause>) -> bool {
+    !held && !matches!(stopped_by, Some(StopCause::User | StopCause::OwnerEnded))
 }
 
 /// Writes `body` to the job's log, at most the configured log size.

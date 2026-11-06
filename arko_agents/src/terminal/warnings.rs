@@ -225,12 +225,7 @@ impl TerminalManager {
             if data.record.monitor.is_none() {
                 return Err(TerminalError::Invalid(format!("job {id} isn't a monitor")));
             }
-            let running = data.record.state == JobState::Running;
-            if data
-                .monitor
-                .as_ref()
-                .is_none_or(|arming| !running || arming.ending)
-            {
+            if data.monitor.is_none() || !data.running() {
                 return Err(TerminalError::Finished);
             }
             // Saved first, so a rearm that fails changes nothing.

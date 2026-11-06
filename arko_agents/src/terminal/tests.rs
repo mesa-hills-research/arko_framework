@@ -1803,6 +1803,92 @@ async fn the_jobs_a_shutdown_stopped_are_listed_at_the_next_open() {
     assert!(again.interrupted_at_open().is_empty(), "listed once");
 }
 
+/// A job whose command exited by itself, still draining its output when
+/// the host shuts down, isn't listed as stopped by the shutdown. (Here a
+/// descendant in a session of its own keeps the output open, so the drain
+/// runs its full second.)
+#[cfg(unix)]
+#[tokio::test]
+async fn a_job_that_exited_before_a_shutdown_is_not_listed_as_stopped() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("closed");
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let id = manager
+        .start(
+            &f.context(),
+            &f.command(
+                "import subprocess\n\
+                 subprocess.Popen(['sleep', '3'], start_new_session=True)\n\
+                 print('started', flush=True)",
+            ),
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .job_id;
+    timeout(Duration::from_secs(10), async {
+        while !manager
+            .status(f.owner, id, None)
+            .unwrap()
+            .output
+            .text
+            .contains("started")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The command has exited, and its job drains for a second.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    manager.shutdown().await;
+    drop(manager);
+    let reopened = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    assert!(
+        reopened.interrupted_at_open().is_empty(),
+        "{:?}",
+        reopened.interrupted_at_open()
+    );
+}
+
+/// A stop that comes while a job whose command exited by itself is still
+/// draining is refused, so the job's end isn't put down to it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_while_an_exited_job_drains_is_refused() {
+    let f = Fixture::new(|_| {});
+    let id = f
+        .python(
+            "import subprocess\n\
+             subprocess.Popen(['sleep', '3'], start_new_session=True)\n\
+             print('started', flush=True)",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .job_id;
+    f.until(id, |snapshot| snapshot.output.text.contains("started"))
+        .await;
+    // The command has exited, and its job drains for a second.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(matches!(
+        f.manager.stop_for_user(f.owner, id),
+        Err(TerminalError::Finished)
+    ));
+    let end = f.finished(id).await;
+    assert!(
+        end.error
+            .as_deref()
+            .is_none_or(|error| !error.contains("stopped by the user")),
+        "{end:?}"
+    );
+}
+
 /// The directory opens again as soon as a shutdown returns, also when a
 /// job's task hadn't run to its end by then (here the clock jumps past the
 /// shutdown's waits before a call that ignores its stop is dropped).
