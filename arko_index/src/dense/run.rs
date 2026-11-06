@@ -68,6 +68,8 @@ pub(crate) struct RunTotals {
     pub requests: u64,
     pub tokens: u64,
     pub cap_reached: bool,
+    /// The stop ended the run while a text was left to send.
+    pub stopped: bool,
     pub not_embedded: u64,
     pub not_embedded_tokens: u64,
     pub too_long: u64,
@@ -86,6 +88,7 @@ pub(crate) type Records = [([u8; 32], Vec<f32>)];
 /// Embeds the texts of `spool` that `wanted` accepts and the cache lacks into the cache,
 /// calling `after` with each request's records (already in the cache) and the run's
 /// totals so far. `after` returning [`Flow::Stop`] ends the run after that request.
+/// `stopped` ends it before the next request, and only while a text is left to send.
 /// At the cap, the texts left are counted (no request is sent), unless `stopped`.
 pub(crate) fn embed_spool(
     spool: File,
@@ -148,6 +151,12 @@ pub(crate) fn embed_spool(
                 break;
             }
             continue;
+        }
+        // A text is left to send, so this is where a stop ends the run. A stop that
+        // comes during the last request finds nothing left, and the run finishes.
+        if stopped() {
+            totals.stopped = true;
+            break;
         }
         // The longest prefix within the request limits, at least the first text...
         let (mut n, mut sum) = (0usize, 0u64);

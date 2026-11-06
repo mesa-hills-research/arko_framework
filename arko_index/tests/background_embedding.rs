@@ -635,6 +635,44 @@ fn a_stopped_run_continues_and_a_lexical_build_waits_for_a_run_to_yield() {
     assert_eq!(d.embedded_docs, d.docs);
 }
 
+/// A stop that comes while the last request is under way finds nothing left, so the
+/// run finishes and the generation is complete.
+#[test]
+fn a_stop_during_the_last_request_leaves_the_generation_complete() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    // How many requests the tree takes, from a run of its own.
+    let counting = tempfile::tempdir().unwrap();
+    let open = SlowEmbedder::open();
+    let requests = build(root.path(), counting.path(), Some(DenseBuild::new(&open)))
+        .dense
+        .unwrap()
+        .requests;
+    assert!(requests > 1);
+    let e = SlowEmbedder::new();
+    build_lexical_first(root.path(), state.path(), &e);
+    let stop = StopSignal::new();
+    std::thread::scope(|scope| {
+        let run =
+            scope.spawn(|| index2::embed(state.path(), &DenseBuild::new(&e).with_stop(&stop)));
+        e.allow(requests - 1);
+        e.wait_for_request(requests);
+        assert!(stop.stop("asked to stop"));
+        e.allow(1);
+        let s = run.join().unwrap().unwrap();
+        assert_eq!((s.requests, s.embedded_docs), (requests, s.docs));
+        assert!(!s.stopped, "nothing was left to stop");
+    });
+    let status = index2::status(state.path()).unwrap();
+    let info = status.dense.unwrap();
+    assert_eq!(
+        (info.state, info.embedded),
+        (EmbedState::Complete, info.docs)
+    );
+    assert_eq!(status.stopped, None);
+}
+
 /// A host keeps the index current from a watcher's deltas, rebuilding on each, while
 /// one thread embeds, and each run goes until it finishes or a newer generation is
 /// published, and then the next run starts.

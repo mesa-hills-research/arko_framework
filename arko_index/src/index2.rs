@@ -993,12 +993,12 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 ///
 /// The run returns when every chunk has a vector (except texts over the model's input
 /// limit), at its token cap ([`DenseBuild::max_tokens`]), when [`DenseBuild::stop`] is
-/// set ([`EmbedStats::stopped`]), or when a newer generation is published
-/// ([`EmbedStats::superseded`]). What it embedded stays in the cache, so a later run
-/// continues without paying for it again. Only the embedder, the cap, the progress
-/// callback and the stop flag of `dense` apply. The quantization, vector index and
-/// embedded text are the generation's. An error when the generation has no embeddings
-/// or embeds with another model.
+/// set while texts are left to send ([`EmbedStats::stopped`]), or when a newer
+/// generation is published ([`EmbedStats::superseded`]). What it embedded stays in
+/// the cache, so a later run continues without paying for it again. Only the
+/// embedder, the cap, the progress callback and the stop flag of `dense` apply. The
+/// quantization, vector index and embedded text are the generation's. An error when
+/// the generation has no embeddings or embeds with another model.
 pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Error> {
     embed_run(state_dir, dense, None)
 }
@@ -1189,10 +1189,6 @@ fn embed_run(
                         if let Some(callback) = d.progress {
                             callback(&progress);
                         }
-                        if stop_requested() {
-                            stopped = true;
-                            return Ok(Flow::Stop);
-                        }
                         if superseded() {
                             was_superseded = true;
                             return Ok(Flow::Stop);
@@ -1200,6 +1196,7 @@ fn embed_run(
                         Ok(Flow::Continue)
                     },
                 )?;
+                stopped = totals.stopped;
             }
         }
     }
