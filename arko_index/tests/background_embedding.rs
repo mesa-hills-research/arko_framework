@@ -20,7 +20,7 @@ use std::{
     path::Path,
     sync::{
         Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -671,43 +671,6 @@ fn a_stop_during_the_last_request_leaves_the_generation_complete() {
         (EmbedState::Complete, info.docs)
     );
     assert_eq!(status.stopped, None);
-}
-
-/// A status read while runs end shows each run working or done, never a generation
-/// left embedding by a run that no longer holds the lock.
-#[test]
-fn a_status_read_as_a_run_ends_never_shows_it_dead() {
-    let root = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
-    corpus(root.path());
-    let e = HashEmbedder::new(DIMS);
-    build(root.path(), state.path(), Some(DenseBuild::new(&e)));
-    let store = state
-        .path()
-        .join(index2::dense_info(state.path()).unwrap().unwrap().store);
-    let done = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        let reader = scope.spawn(|| {
-            let mut dead = 0;
-            while !done.load(Ordering::SeqCst) {
-                let s = index2::status(state.path()).unwrap();
-                if s.dense.unwrap().state == EmbedState::Embedding
-                    && !s.embedding
-                    && s.stopped.is_none()
-                {
-                    dead += 1;
-                }
-            }
-            dead
-        });
-        for _ in 0..200 {
-            // Without its vector store, the next run fills a new one from the cache.
-            fs::remove_dir_all(&store).unwrap();
-            index2::embed(state.path(), &DenseBuild::new(&e)).unwrap();
-        }
-        done.store(true, Ordering::SeqCst);
-        assert_eq!(reader.join().unwrap(), 0, "a finished run read as dead");
-    });
 }
 
 /// A host keeps the index current from a watcher's deltas, rebuilding on each, while

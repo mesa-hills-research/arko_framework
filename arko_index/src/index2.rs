@@ -1849,15 +1849,23 @@ pub struct IndexStatus {
 
 /// The current generation, its embedding coverage, and whether a run is embedding it.
 pub fn status(state_dir: &Path) -> Result<IndexStatus, Error> {
+    status_with(state_dir, || {})
+}
+
+/// [`status`], calling `after_read` once the run's record is read, so a test can end a
+/// run at that point.
+fn status_with(state_dir: &Path, after_read: impl Fn()) -> Result<IndexStatus, Error> {
     read_current(state_dir, |g| {
         // Taken first and held while the run's record is read once, so no run starts or
         // ends in between, and a run that just ended doesn't read as one that died.
         let lock = EmbedLock::probe(state_dir);
         let run = read_progress(state_dir).filter(|r| r.generation == g.name);
+        let dense = g.dense_info_with(run.as_ref())?;
+        after_read();
         Ok(IndexStatus {
             generation: g.name.clone(),
             docs: g.meta.docs,
-            dense: g.dense_info_with(run.as_ref())?,
+            dense,
             embedding: matches!(lock, EmbedLock::Held),
             stopped: run.as_ref().and_then(|r| r.stopped.clone()),
             progress: run.map(|r| r.progress),
@@ -1941,5 +1949,46 @@ mod tests {
         })
         .unwrap();
         assert_eq!(read, current_generation(state.path()).unwrap());
+    }
+
+    /// A run that ends while a status is read reads as running, as it was when the status
+    /// took its snapshot, never as a run that died with the generation half embedded.
+    #[test]
+    fn a_run_ending_during_a_status_read_reads_as_running() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+        let wait = Duration::from_secs(30);
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn journal() {}\n").unwrap();
+        let e = crate::dense::HashEmbedder::new(32);
+        let later = BuildOptions::default().with_dense(DenseBuild::new(&e).with_embed_later(true));
+        build(root.path(), state.path(), &Options::default(), &later).unwrap();
+        let (at_last, reached) = mpsc::channel();
+        let (go, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (ended, end) = mpsc::channel();
+        // The run waits after it records its last request, still embedding.
+        let progress = |p: &EmbedProgress| {
+            assert_eq!(p.embedded_docs, p.docs);
+            at_last.send(()).unwrap();
+            gate.lock().unwrap().recv_timeout(wait).unwrap();
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let run = embed(state.path(), &DenseBuild::new(&e).with_progress(&progress));
+                ended.send(run.map_err(|e| e.to_string())).unwrap();
+            });
+            reached.recv_timeout(wait).unwrap();
+            let s = status_with(state.path(), || {
+                // The run ends once the status has read its record.
+                go.send(()).unwrap();
+                let run = end.recv_timeout(wait).unwrap().unwrap();
+                assert_eq!(run.embedded_docs, run.docs);
+            })
+            .unwrap();
+            assert_eq!(s.dense.unwrap().state, EmbedState::Embedding);
+            assert!(s.embedding, "a finished run read as dead");
+        });
     }
 }
