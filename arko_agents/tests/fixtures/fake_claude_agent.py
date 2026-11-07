@@ -66,7 +66,11 @@ the next turn's index). Steps:
                                          report in order, or with
                                          "exit_after_requests": 3 the CLI exits
                                          with that code 0.2 seconds after the
-                                         requests, without their answers
+                                         requests, without their answers, or
+                                         with "result_after_requests": "text"
+                                         the turn ends 0.2 seconds after the
+                                         requests in a sign-in error with that
+                                         text
   {"exit": 3}                            the CLI crashes
   a tool step with "crash": "pre"        the CLI crashes once the call is
                                          allowed, before it runs; "post":
@@ -665,6 +669,13 @@ def turn(text, message_uuid=None):
             if "exit_after_requests" in step:
                 time.sleep(0.2)
                 sys.exit(step["exit_after_requests"])
+            if "result_after_requests" in step:
+                time.sleep(0.2)
+                send({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+                      "session_id": SESSION, "duration_ms": 5,
+                      "result": step["result_after_requests"],
+                      "api_error_status": 401, "terminal_reason": "api_error"})
+                return
             got = answers([request_id for number, request_id in asked.items()
                            if number not in withdrawn])
             for number, call in enumerate(calls):

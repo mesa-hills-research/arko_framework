@@ -558,3 +558,63 @@ async fn calls_waiting_for_approval_when_claude_code_exits_are_each_rejected() {
         );
     }
 }
+
+/// Calls still waiting for approval when a turn ends in a pause (a
+/// subagent's, say) are each rejected as the session ends, and the pause
+/// stays.
+#[tokio::test]
+async fn calls_waiting_for_approval_when_a_turn_ends_in_a_pause_are_each_rejected() {
+    let fake = Fake::new(json!([[
+        {"ask_together": [
+            {"tool": "Read", "input": {"file_path": "a.txt"}},
+            {"tool": "Read", "input": {"file_path": "b.txt"}},
+        ], "result_after_requests": "Not signed in"},
+    ]]));
+    let task = Task::new(
+        approving_reads(&fake),
+        "Read both files.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let waiting = awaited_reads(&mut run, 2).await;
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            run.events_until(|event| matches!(event, AgentEvent::ToolRejected { .. }))
+                .await,
+        );
+    }
+    for id in waiting.values() {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolRejected { tool_call_id, .. } if tool_call_id == id
+            )),
+            "no rejection for {id}: {events:#?}"
+        );
+    }
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let (task, tail) = run.finish().await;
+    let after_pause = events
+        .iter()
+        .chain(&tail)
+        .skip_while(|event| {
+            !matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !after_pause.is_empty(),
+        "the turn did not pause: {events:#?}"
+    );
+    assert!(
+        !after_pause
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TaskStateChanged(TaskState::InProgress))),
+        "the pause was replaced: {after_pause:#?}"
+    );
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+}
