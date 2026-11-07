@@ -1755,6 +1755,44 @@ async fn a_removal_is_saved_before_the_workspace_goes() {
     );
 }
 
+/// A stop_agent call dropped while its removal is saved, before the provider
+/// is asked, leaves the run as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_dropped_while_its_removal_is_saved_leaves_the_run_as_it_was() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) =
+        finished_isolated_run(&workspace, provider.clone(), Some(&run_dir)).await;
+    // The saves the run's end started are written by now, so the next is
+    // the removal's.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let lead = run.caller_run_id;
+    let pause = ctx.persistence.as_ref().unwrap().pause_next_build();
+    let removal = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(pause.reached.notified()).await;
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    pause.resume.notify_one();
+    provider.go_on.notify_one();
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 0);
+    let state = workflow.subagents()[0].state;
+    let again = within(ctx.subagents.stop(&ctx, lead, "r1", "", true)).await;
+    assert!(
+        state == SubagentState::Finished && again.is_ok(),
+        "the provider was never asked, the run is {state:?}, the workspace exists: {}, and a second stop gave {again:?}",
+        run.workspace.is_dir()
+    );
+}
+
 /// A removal that can't be saved leaves the workspace, and the run as it
 /// was.
 #[tokio::test(flavor = "multi_thread")]

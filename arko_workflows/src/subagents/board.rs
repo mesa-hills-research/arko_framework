@@ -2656,9 +2656,9 @@ impl Board {
         // registry is asked under the board's lock, so a run the host starts
         // in between is seen here, and the board's own launches wait for the
         // same lock. It's saved before the workspace goes, so a workflow that
-        // ends meanwhile resumes it closed. A removal that fails opens it
-        // again.
-        let before = {
+        // ends meanwhile resumes it closed. A removal that fails, or a call
+        // dropped before the provider is asked, opens it again.
+        let mut claim = {
             let mut state = self.state.lock();
             let Some(record) = state
                 .runs
@@ -2681,28 +2681,31 @@ impl Board {
             }
             let before = (record.state, record.since);
             move_to(record, SubagentState::Closed);
-            before
+            RemovalClaim {
+                board: self,
+                ctx,
+                run_id: run.run_id,
+                before: Some(before),
+            }
         };
         self.bump();
         let removed = match save(ctx, true).await {
-            Ok(()) => provider.remove(&workspace).await,
+            Ok(()) => {
+                // Dropped from here on, the call leaves the run closed, since
+                // the provider may have begun.
+                let before = claim.before.take();
+                let removed = provider.remove(&workspace).await;
+                if removed.is_err() {
+                    claim.before = before;
+                }
+                removed
+            }
             Err(error) => Err(format!(
                 "{handle}'s workspace stays, because the workflow couldn't be saved: {error}"
             )),
         };
         if let Err(error) = removed {
-            {
-                let mut state = self.state.lock();
-                if let Some(record) = state
-                    .runs
-                    .iter_mut()
-                    .find(|record| record.run_id == run.run_id)
-                {
-                    reopen_after_failed_removal(ctx, record, before);
-                }
-            }
-            self.bump();
-            self.save_soon(ctx);
+            claim.reopen();
             return Err(error);
         }
         if let Some(record) = self.record(run.run_id) {
@@ -2855,6 +2858,44 @@ impl Board {
     }
 }
 
+/// A workspace removal's claim on the run it closed. Dropped, or told to
+/// reopen, while it holds the run's state from before the claim, it opens
+/// the run again.
+struct RemovalClaim<'a> {
+    board: &'a Board,
+    ctx: &'a Arc<SharedContext>,
+    run_id: Uuid,
+    /// The run's state and time before it was closed. Taken out while the
+    /// provider removes the workspace.
+    before: Option<(SubagentState, chrono::DateTime<Utc>)>,
+}
+
+impl RemovalClaim<'_> {
+    fn reopen(&mut self) {
+        let Some(before) = self.before.take() else {
+            return;
+        };
+        {
+            let mut state = self.board.state.lock();
+            if let Some(record) = state
+                .runs
+                .iter_mut()
+                .find(|record| record.run_id == self.run_id)
+            {
+                reopen_after_failed_removal(self.ctx, record, before);
+            }
+        }
+        self.board.bump();
+        self.board.save_soon(self.ctx);
+    }
+}
+
+impl Drop for RemovalClaim<'_> {
+    fn drop(&mut self) {
+        self.reopen();
+    }
+}
+
 /// Saves the workflow, its board with it, in the live checkpoint while runs
 /// are live, else in a checkpoint if the workflow saves them by itself. A
 /// `durable` live checkpoint is flushed to disk with its directory.
@@ -2882,9 +2923,9 @@ fn move_to(record: &mut SubagentRecord, state: SubagentState) -> bool {
     true
 }
 
-/// Takes `record`, closed for a removal of its workspace that failed, back
-/// to its state and time `before` the removal, and opens its run in the
-/// registry again, so the board and the registry agree.
+/// Takes `record`, closed for a removal of its workspace that failed or
+/// never began, back to its state and time `before` the removal, and opens
+/// its run in the registry again, so the board and the registry agree.
 fn reopen_after_failed_removal(
     ctx: &SharedContext,
     record: &mut SubagentRecord,
