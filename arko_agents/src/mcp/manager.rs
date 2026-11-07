@@ -191,10 +191,21 @@ pub(crate) mod tests {
         if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
             return true;
         }
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| Some(stat.rsplit_once(')')?.1.trim_start().starts_with('Z')))
-            .unwrap_or(false)
+        // One that ended but wasn't collected is a zombie, state Z. Linux says
+        // so in /proc. macOS has no /proc, and ps says the same there.
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            return stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+            })
     }
 
     /// Kills the program a test started if the test fails with it running.
