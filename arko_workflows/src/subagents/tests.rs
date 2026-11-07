@@ -1618,12 +1618,12 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
 /// A provider whose removals wait until the test lets them go on, and fail
 /// when `fails` is set.
 #[derive(Default)]
-struct HeldFolders {
-    root: std::path::PathBuf,
-    fails: bool,
-    removing: tokio::sync::Notify,
-    go_on: tokio::sync::Notify,
-    removed: AtomicUsize,
+pub(super) struct HeldFolders {
+    pub(super) root: std::path::PathBuf,
+    pub(super) fails: bool,
+    pub(super) removing: tokio::sync::Notify,
+    pub(super) go_on: tokio::sync::Notify,
+    pub(super) removed: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -1646,10 +1646,11 @@ impl WorkspaceProvider for HeldFolders {
 }
 
 /// A workflow whose lead started r1 in an isolated workspace of `provider`
-/// and waited for it to finish.
-async fn finished_isolated_run(
+/// and waited for it to finish, saved in `run_dir` when one is given.
+pub(super) async fn finished_isolated_run(
     workspace: &Workspace,
     provider: Arc<HeldFolders>,
+    run_dir: Option<&std::path::Path>,
 ) -> (Workflow, ResponsesServer) {
     let server = serve(vec![(
         "lead",
@@ -1663,7 +1664,11 @@ async fn finished_isolated_run(
     )])
     .await;
     let config = SubagentsConfig::default().workspace_provider(provider);
-    let workflow = builder(&server, workspace, config).build().unwrap();
+    let mut workflow = builder(&server, workspace, config);
+    if let Some(run_dir) = run_dir {
+        workflow = workflow.persistence(PersistenceConfig::new(run_dir));
+    }
+    let workflow = workflow.build().unwrap();
     within(workflow.run_agent("lead", "Delegate."))
         .await
         .unwrap();
@@ -1680,7 +1685,7 @@ async fn a_message_during_a_workspace_removal_leaves_the_run_closed() {
         root: workspace.0.join("isolated"),
         ..HeldFolders::default()
     });
-    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
     let ctx = workflow.context().clone();
     let run = workflow.subagents()[0].clone();
     let lead = run.caller_run_id;
@@ -1726,7 +1731,7 @@ async fn a_failed_removal_leaves_the_run_as_it_was() {
         fails: true,
         ..HeldFolders::default()
     });
-    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
     let ctx = workflow.context().clone();
     let lead = workflow.subagents()[0].caller_run_id;
     provider.go_on.notify_one();
@@ -1752,7 +1757,7 @@ async fn a_host_continuation_cannot_start_a_run_while_its_workspace_is_removed()
         root: workspace.0.join("isolated"),
         ..HeldFolders::default()
     });
-    let (workflow, server) = finished_isolated_run(&workspace, provider.clone()).await;
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
     let run = workflow.subagents()[0].clone();
     let previous = workflow.agent_result(run.run_id).unwrap();
     let ctx = workflow.context().clone();
