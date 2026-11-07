@@ -31,7 +31,7 @@ use crate::freshness::ActorId;
 use crate::hooks::context::HookContext;
 use crate::hooks::{HookPoint, HookResult};
 use crate::memory::tools::*;
-use crate::messaging::registry::WaitReason;
+use crate::messaging::registry::{ClaimRefused, StartRefused, WaitReason};
 use crate::messaging::tools::*;
 use crate::persistence::PersistenceManager;
 use crate::policy::{
@@ -502,19 +502,36 @@ async fn answer_budget_hold(
     Ok(())
 }
 
-/// The error-recovery state of one drive of an agent.
+/// Where an agent is with an error-recovery pause. A runtime reports a
+/// pause as the state change that gives its cause and an error needing a
+/// decision, in either order.
 #[derive(Default)]
-struct RecoveryState {
-    /// The cause of the error-recovery pause the agent is in (its latest
-    /// state, or the state it was resumed in), if it is in one. An error it
-    /// reports needing a decision is about that pause.
-    paused: Option<arko_agents::ErrorRecoveryCause>,
-    /// That pause's error kind, when it recorded one.
-    paused_kind: Option<arko_ai::ErrorKind>,
+enum Pause {
+    #[default]
+    None,
+    /// In a pause with this cause (its latest state, or the state it was
+    /// resumed in). An error it reports needing a decision is about that
+    /// pause. It lasts until the task leaves the pause, since a runtime may
+    /// report the error again.
+    Cause(PauseCause),
     /// An error needing a decision that arrived before the state change
     /// giving its cause, answered once that pause arrives, so the decision
     /// doesn't depend on the order a runtime reports them in.
-    unanswered: Option<String>,
+    ErrorFirst(String),
+}
+
+/// The cause of an error-recovery pause, with its error kind when it
+/// recorded one.
+#[derive(Clone)]
+struct PauseCause {
+    cause: arko_agents::ErrorRecoveryCause,
+    kind: Option<arko_ai::ErrorKind>,
+}
+
+/// The error-recovery state of one drive of an agent.
+#[derive(Default)]
+struct RecoveryState {
+    pause: Pause,
     /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
     recovered: u32,
     /// Pauses in a row without a model response in between.
@@ -833,12 +850,11 @@ impl arko_agents::TaskSnapshotSink for LatestTask {
 /// the registry until its outcome is recorded (and saved, where that
 /// follows), so no other run of its ID starts meanwhile.
 pub(crate) struct ReportInFlight {
-    context: Arc<SharedContext>,
-    persistence: Option<Arc<PersistenceManager>>,
-    previous: AgentResult,
-    open: bool,
+    /// Declared first, so that a dropped report puts the run back before
+    /// its ID is released.
+    put_back: PutBack,
     /// The run's mark in the registry, until its outcome is recorded.
-    reserved: Option<ReportReservation>,
+    reserved: ReportReservation,
 }
 
 /// A run's mark in the registry as running to write a report on request.
@@ -866,14 +882,16 @@ impl ReportInFlight {
             .lock()
             .insert(previous.agent_run_id, ReportState::default());
         Self {
-            context: ctx.clone(),
-            persistence,
-            previous: previous.clone(),
-            open: true,
-            reserved: Some(ReportReservation {
+            put_back: PutBack {
+                context: ctx.clone(),
+                persistence,
+                previous: previous.clone(),
+                armed: true,
+            },
+            reserved: ReportReservation {
                 context: ctx.clone(),
                 agent_run_id: previous.agent_run_id,
-            }),
+            },
         }
     }
 
@@ -881,31 +899,54 @@ impl ReportInFlight {
     /// it as any run is at its end, saved and checkpointed with persistence,
     /// by a task of its own, which runs to its end whatever becomes of the
     /// caller (see [`ReportCommit`]). Returns that task.
-    fn came(&mut self, result: AgentResult) -> tokio::task::JoinHandle<()> {
-        self.open = false;
+    fn came(self, result: AgentResult) -> tokio::task::JoinHandle<()> {
+        let Self {
+            mut put_back,
+            reserved,
+        } = self;
+        put_back.armed = false;
         let commit = ReportCommit {
-            context: self.context.clone(),
-            persistence: self.persistence.clone(),
+            context: put_back.context.clone(),
+            persistence: put_back.persistence.clone(),
             result,
-            recorded: false,
-            settled: false,
-            _reserved: self.reserved.take(),
+            step: CommitStep::Unrecorded,
+            _reserved: reserved,
         };
         let task = tokio::spawn(commit.run());
         #[cfg(test)]
-        if let Some(persistence) = &self.persistence {
+        if let Some(persistence) = &put_back.persistence {
             persistence.spawned_report_commit(&task);
         }
         task
     }
 
-    /// Puts the run back as it was before the report, in memory, keeping
-    /// the model calls and the context its report run took (see
-    /// [`report_rollback`]), from the result it ended in, else from the
-    /// latest task its runtime reported (a run that never ended, such as one
-    /// aborted). With persistence, the next checkpoint saves it.
-    fn restore(&mut self) {
-        if !std::mem::take(&mut self.open) {
+    /// The report didn't come. Puts the run back now (see [`PutBack`]), and
+    /// returns its ID's mark, for the caller to hold until the checkpoint
+    /// recording the run put back is saved.
+    fn put_back(self) -> ReportReservation {
+        let Self { put_back, reserved } = self;
+        drop(put_back);
+        reserved
+    }
+}
+
+/// Puts a run that wrote no report back as it was before the request, as
+/// it drops, unless the report came.
+struct PutBack {
+    context: Arc<SharedContext>,
+    persistence: Option<Arc<PersistenceManager>>,
+    previous: AgentResult,
+    armed: bool,
+}
+
+impl Drop for PutBack {
+    /// Puts the run back in memory, keeping the model calls and the
+    /// context its report run took (see [`report_rollback`]), from the result
+    /// it ended in, else from the latest task its runtime reported (a run
+    /// that never ended, such as one aborted). With persistence, the next
+    /// checkpoint saves it.
+    fn drop(&mut self) {
+        if !self.armed {
             return;
         }
         let ctx = &self.context;
@@ -938,18 +979,14 @@ impl ReportInFlight {
                 .settle_run(&self.previous.agent_name, task, &[], false);
         }
     }
-
-    /// Lets other runs of its ID start, once the run's outcome is recorded.
-    fn release(&mut self) {
-        self.reserved = None;
-    }
 }
 
-impl Drop for ReportInFlight {
-    /// Puts the run back, then unmarks it (as its fields drop).
-    fn drop(&mut self) {
-        self.restore();
-    }
+/// How far the record of a report that came has got. Its result is
+/// recorded before the run's messages and mail are settled.
+enum CommitStep {
+    Unrecorded,
+    Recorded,
+    Settled,
 }
 
 /// The record of a report that came (see [`ReportInFlight::came`]), owned
@@ -962,12 +999,9 @@ struct ReportCommit {
     context: Arc<SharedContext>,
     persistence: Option<Arc<PersistenceManager>>,
     result: AgentResult,
-    /// Whether the result is recorded.
-    recorded: bool,
-    /// Whether the run's messages and mail are settled.
-    settled: bool,
+    step: CommitStep,
     /// Unmarks the run as it drops, after the commit's own drop.
-    _reserved: Option<ReportReservation>,
+    _reserved: ReportReservation,
 }
 
 impl ReportCommit {
@@ -982,7 +1016,7 @@ impl ReportCommit {
             Some(persistence) => persistence.record_result(&ctx, self.result.clone()).await,
             None => record_result(&ctx, self.result.clone()),
         }
-        self.recorded = true;
+        self.step = CommitStep::Recorded;
         self.settle();
         if let Some(persistence) = &self.persistence
             && let Err(error) = persistence.auto_checkpoint(&ctx).await
@@ -994,11 +1028,10 @@ impl ReportCommit {
         }
     }
 
-    /// Settles the run's messages and mail by its result, once.
+    /// Settles the run's messages and mail by its recorded result. Marked
+    /// settled first, so a panic here isn't settled twice.
     fn settle(&mut self) {
-        if std::mem::replace(&mut self.settled, true) {
-            return;
-        }
+        self.step = CommitStep::Settled;
         let ctx = &self.context;
         let result = &self.result;
         if let Ok(task) = result.task() {
@@ -1013,16 +1046,21 @@ impl Drop for ReportCommit {
     fn drop(&mut self) {
         let id = self.result.agent_run_id;
         self.context.reports_in_flight.lock().remove(&id);
-        if !std::mem::replace(&mut self.recorded, true) {
-            record_result(&self.context, self.result.clone());
-            if let Some(persistence) = &self.persistence {
-                persistence.mark_task_changed(
-                    id,
-                    "its report came, but the task saving it ended before it did",
-                );
+        match self.step {
+            CommitStep::Unrecorded => {
+                self.step = CommitStep::Recorded;
+                record_result(&self.context, self.result.clone());
+                if let Some(persistence) = &self.persistence {
+                    persistence.mark_task_changed(
+                        id,
+                        "its report came, but the task saving it ended before it did",
+                    );
+                }
+                self.settle();
             }
+            CommitStep::Recorded => self.settle(),
+            CommitStep::Settled => {}
         }
-        self.settle();
     }
 }
 
@@ -1075,19 +1113,21 @@ fn message_ids(ids: &[uuid::Uuid]) -> Vec<String> {
 /// workflow's error recovery policy and the pause's cause. It continues (after
 /// a wait), fails the task, or pauses the agent for its caller. A `nested`
 /// run (inside another agent's tool call) can't pause, so it fails instead.
+#[allow(clippy::too_many_arguments)]
 async fn answer_recovery_pause(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     error: String,
+    paused: PauseCause,
     recovery: &mut RecoveryState,
     nested: bool,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
     ctx: &Arc<SharedContext>,
 ) -> Result<(), WorkflowError> {
-    let cause = recovery
-        .paused
-        .clone()
-        .unwrap_or(arko_agents::ErrorRecoveryCause::Unknown);
+    let PauseCause {
+        cause,
+        kind: error_kind,
+    } = paused;
     if cause == arko_agents::ErrorRecoveryCause::BudgetExceeded {
         return answer_budget_hold(agent_name, agent_run_id, error, nested, cmd_tx, ctx).await;
     }
@@ -1111,7 +1151,7 @@ async fn answer_recovery_pause(
             AgentPause::ErrorRecovery {
                 error,
                 cause,
-                error_kind: recovery.paused_kind,
+                error_kind,
             },
         )
         .await;
@@ -1198,7 +1238,7 @@ async fn answer_recovery_pause(
                 AgentPause::ErrorRecovery {
                     error,
                     cause,
-                    error_kind: recovery.paused_kind,
+                    error_kind,
                 },
             )
             .await
@@ -1248,8 +1288,9 @@ pub(crate) async fn drive_event_loop(
         persistence,
     };
     let mut recovery = RecoveryState {
-        paused_kind: paused.as_ref().and_then(|(_, kind)| *kind),
-        paused: paused.map(|(cause, _)| cause),
+        pause: paused.map_or(Pause::None, |(cause, kind)| {
+            Pause::Cause(PauseCause { cause, kind })
+        }),
         ..RecoveryState::default()
     };
     let run_stop = ctx.run_control.run_cancel(agent_run_id);
@@ -1337,9 +1378,7 @@ async fn drive_events(
         if let AgentEvent::TaskStateChanged(state) = &event
             && !matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. })
         {
-            recovery.paused = None;
-            recovery.paused_kind = None;
-            recovery.unanswered = None;
+            recovery.pause = Pause::None;
         }
         match event {
             AgentEvent::ToolCallAwaitingApproval {
@@ -1465,13 +1504,17 @@ async fn drive_events(
                 error_kind,
                 ..
             }) => {
-                recovery.paused = Some(cause.clone());
-                recovery.paused_kind = error_kind;
-                if let Some(error) = recovery.unanswered.take() {
+                let paused = PauseCause {
+                    cause: cause.clone(),
+                    kind: error_kind,
+                };
+                let earlier = std::mem::replace(&mut recovery.pause, Pause::Cause(paused.clone()));
+                if let Pause::ErrorFirst(error) = earlier {
                     answer_recovery_pause(
                         agent_name,
                         agent_run_id,
                         error,
+                        paused,
                         recovery,
                         nested,
                         cmd_tx,
@@ -1485,22 +1528,26 @@ async fn drive_events(
                 requires_approval_to_retry: true,
                 error_message,
                 ..
-            } => {
-                if recovery.paused.is_some() {
+            } => match &recovery.pause {
+                Pause::Cause(paused) => {
+                    let paused = paused.clone();
                     answer_recovery_pause(
                         agent_name,
                         agent_run_id,
                         error_message,
+                        paused,
                         recovery,
                         nested,
                         cmd_tx,
                         ctx,
                     )
                     .await?;
-                } else {
-                    recovery.unanswered = Some(error_message);
                 }
-            }
+                // The latest error stands until its pause arrives.
+                Pause::None | Pause::ErrorFirst(_) => {
+                    recovery.pause = Pause::ErrorFirst(error_message);
+                }
+            },
 
             AgentEvent::UserQuestionsAsked {
                 questions,
@@ -1761,15 +1808,15 @@ async fn answer_saved_wait(
             cause,
             error_kind,
         } => {
-            let mut recovery = RecoveryState {
-                paused: Some(cause.clone()),
-                paused_kind: *error_kind,
-                ..RecoveryState::default()
-            };
+            let mut recovery = RecoveryState::default();
             answer_recovery_pause(
                 agent_name,
                 agent_run_id,
                 error_message.clone(),
+                PauseCause {
+                    cause: cause.clone(),
+                    kind: *error_kind,
+                },
                 &mut recovery,
                 nested,
                 cmd_tx,
@@ -4350,7 +4397,7 @@ impl WorkflowEngine {
         // come back to the caller at once, and the report run is never
         // saved. Whatever ends the call first (an error, or the call
         // dropped), the run is put back as it was.
-        let mut in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
+        let in_flight = ReportInFlight::begin(ctx, self.persistence.clone(), previous);
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
         ctx.messages.settle_run(agent_name, &task, &[], false);
@@ -4380,7 +4427,9 @@ impl WorkflowEngine {
                 Ok(result)
             }
             Err(error) => {
-                in_flight.restore();
+                // The run's ID stays marked until the checkpoint saves the run
+                // put back.
+                let _reserved = in_flight.put_back();
                 if let Some(persistence) = &self.persistence
                     && let Err(error) = persistence.auto_checkpoint(ctx).await
                 {
@@ -4390,7 +4439,6 @@ impl WorkflowEngine {
                         previous.agent_run_id
                     );
                 }
-                in_flight.release();
                 Err(error)
             }
         }
@@ -4486,13 +4534,10 @@ impl WorkflowEngine {
             &task.current_working_directory,
             RunRole::of(ctx, depth, task.id),
         )?;
-        // Continued once at a time.
-        if !ctx.registry.start_unless_running(task.id, agent_name) {
-            return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running already",
-                task.id
-            )));
-        }
+        // Continued once at a time, and never once closed.
+        ctx.registry
+            .start_unless_running(task.id, agent_name)
+            .map_err(|refused| refused.error(task.id))?;
         // What the task holds, recorded again for a task saved before
         // messages recorded who holds them.
         ctx.messages.settle_run(agent_name, &task, &[], false);
@@ -4738,13 +4783,10 @@ impl WorkflowEngine {
             &task.current_working_directory,
             RunRole::of(ctx, depth, task.id),
         )?;
-        // Resumed once at a time.
-        if !ctx.registry.start_unless_running(task.id, agent_name) {
-            return Err(WorkflowError::BuilderInvalid(format!(
-                "agent run {} is running already",
-                task.id
-            )));
-        }
+        // Resumed once at a time, and never once closed.
+        ctx.registry
+            .start_unless_running(task.id, agent_name)
+            .map_err(|refused| refused.error(task.id))?;
         // Resumed without a prompt, so the messages it doesn't hold arrive as
         // context updates.
         let run = self.launch(
@@ -5044,9 +5086,12 @@ impl WorkflowEngine {
                     }
                     break (claim, current, registry, skill_prompt_context, task);
                 }
-                Err(Some(recovering)) if recovery.wait => {
+                Err(ClaimRefused::Recovering(recovering)) if recovery.wait => {
                     recovery_ended(recovering).await;
                     waited = true;
+                }
+                Err(ClaimRefused::Refused(StartRefused::Closed)) => {
+                    return Err(StartRefused::Closed.error(agent_run_id));
                 }
                 Err(_) => return Err(running()),
             }

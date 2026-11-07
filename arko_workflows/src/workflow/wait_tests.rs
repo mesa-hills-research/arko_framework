@@ -87,6 +87,7 @@ fn run(workflow: &Workflow, agent: &str) -> Run {
     context
         .messages
         .register_run(agent, id, sender.clone(), &[]);
+    context.run_control.begin_run(id, false, None);
     context.run_control.register(id, &sender);
     Run {
         id,
@@ -518,6 +519,7 @@ async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
     context
         .messages
         .register_run("lead", lead, sender.clone(), &[]);
+    context.run_control.begin_run(lead, false, None);
     context.run_control.register(lead, &sender);
     let worker = run(&workflow, "worker");
     send(&workflow, &worker, "worker", "lead", "Seen already.").await;

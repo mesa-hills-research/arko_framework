@@ -1663,6 +1663,74 @@ async fn a_checkpoint_built_across_a_rollback_gives_the_held_message_once() {
     assert_eq!(input.matches("Use British spelling.").count(), 1, "{input}");
 }
 
+/// A report that didn't come keeps its run's ID until the checkpoint that
+/// saves the run put back is written. A call dropped while it waits for
+/// that checkpoint lets the run go on, and the message its report run held
+/// back is given once.
+#[tokio::test]
+async fn a_report_dropped_while_its_put_back_is_saved_releases_the_run() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server = released_report_server(release.clone(), refused).await;
+    let workflow = Arc::new(
+        report_builder(&server, &run_dir)
+            .agent("peer", agent_config("Peer"))
+            .build()
+            .unwrap(),
+    );
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let report = tokio::spawn({
+        let (workflow, first) = (workflow.clone(), first.clone());
+        async move { workflow.request_report(&first, None).await }
+    });
+    server.wait_for_requests(2).await;
+    workflow
+        .context()
+        .messages
+        .send("peer", None, "main", "Use British spelling.".into(), vec![])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let pause = workflow.engine.persistence().unwrap().pause_next_build();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+        .await
+        .unwrap();
+    // Put back as it was, holding the message, its ID still marked while
+    // the checkpoint is written.
+    let restored = workflow.agent_result(first.agent_run_id).unwrap();
+    assert!(
+        !restored
+            .task()
+            .unwrap()
+            .pending_context_injections
+            .is_empty()
+    );
+    assert!(!report.is_finished());
+    let held = tokio::time::timeout(
+        Duration::from_secs(10),
+        workflow.continue_agent(&restored, "Go on."),
+    )
+    .await
+    .expect("a run whose ID is held is refused at once")
+    .unwrap_err();
+    assert!(held.to_string().contains("running already"), "{held}");
+    report.abort();
+    assert!(report.await.unwrap_err().is_cancelled());
+    let went_on = tokio::time::timeout(
+        Duration::from_secs(10),
+        workflow.continue_agent(&restored, "Go on."),
+    )
+    .await
+    .expect("the run goes on")
+    .unwrap();
+    assert_eq!(went_on.status, AgentRunStatus::Completed);
+    let input = bodies(&server).pop().unwrap()["input"].to_string();
+    assert_eq!(input.matches("Use British spelling.").count(), 1, "{input}");
+    assert!(!input.contains(REQUESTED), "{input}");
+}
+
 /// A report that came whose task can't be saved (nor at the checkpoint
 /// after it) leaves checkpoints with the run's older saved task and the
 /// messages its end held. A resume gives the peer's message the report run

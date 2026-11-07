@@ -600,6 +600,21 @@ The runs inside the run's tool calls (agents it delegated to with `run_workflow_
 
 `stop_run` returns `false`, changing nothing, when the run isn't running, is a review, or the workflow is stopped, and when the run is being stopped already and `request` has a wrap-up too. A request without a wrap-up during the run's wrap-up cancels it at once, and the first stop's record stands. A workflow stop during the run's wrap-up gives the run the workflow's notice as well, and the run's own record stands on its result. `stop_agent` stops each running run of the agent this way, and returns `AgentNotFound` for an unknown agent.
 
+A host that waits inside a run's tool call, such as a start hook asking its user, should end its wait when the run is being stopped. `Workflow::run_stopping` says when.
+
+```rust
+// Workflow. None when the run isn't running
+fn run_stopping(&self, agent_run_id: Uuid) -> Option<RunStopping>;
+
+// workflow::cancel (re-exported at the root and in the prelude)
+impl RunStopping {
+    fn is_stopping(&self) -> bool;
+    async fn stopped(&mut self); // resolves once is_stopping holds
+}
+```
+
+`is_stopping` holds once the run's own stop or a wrap-up of the workflow begins, once the workflow winds the run down for any reason (its stop, an exceeded budget, a fail-fast batch), and once the run has ended. A run started again under the same ID has a stop state of its own.
+
 #### Retire or relaunch
 
 `intent` is saved on the run's `StopRecord` and says what the host means to do with the run:
@@ -889,7 +904,7 @@ The tool name constants are `subagents::START_AGENT_TOOL_NAME` and the like, all
 | `message_agent` | Callers and subagents | Required `to` (`lead`, a run id such as `r1`, or a run ID) and `message`. | Where the message went, read at the recipient's next step, or the run it continued or restarted. Refused for a run that isn't the sender's lead, subagent or linked peer, over the peer cap, and for a run that can't go on (closed, retired by the host, or failed in a way a message can't continue). |
 | `wait_for_agents` | Callers and subagents | Optional `runs` (ids separated by commas, of the caller's own runs or of peers its lead linked it with, default all of the caller's own, and any other id is refused at once), `all: bool`, `timeout_seconds`. | The reports and messages themselves, whole, in the order they came, after a status line that names the runs still running. For an agent that runs in Claude Code, which shows only a short preview of a result over 50,000 characters, a result stays under about 40,000 bytes. Mail that doesn't fit stays in the mailbox and the result ends with a line naming who sent it. The next context update brings it, or the next wait. Such a wait ends as soon as the result is full, and a report that alone is over the limit comes as its first part, with its file and the line to read on from. Other agents get every item whole. Ends when a run waited for ends (each of them, with `all`), at any message or question, when a note arrives, when other context arrives for the run, apart from `workflow-context` notices (`An update for you arrived while you waited. It follows. Wait again if you still need to.`), when the host moves it to the background (`The user ended this wait so you can go on with other work. Reports and messages from your agent runs reach you as notes as they come.`), when the run or the workflow stops, or at the time limit (`Nothing new in N s.`). The limit is the agent's `wait_for_message` limit, and the model may only shorten it. Recovered by running again. |
 | `list_agents` | Callers | None. | Each of the caller's runs, with its id, agent, state and for how long (a queued run's place in line, and for a run waiting for subagents of its own, which ones, as `running (waiting for r5, r6)`), where it works (with the branch), its task, its report or error once it ended, its peers, the messages it hasn't read yet, and its cost so far. Recovered by running again. |
-| `stop_agent` | Callers | Required `run`. Optional `reason` and `remove_workspace: bool` (with a provider). | A running subagent gets a two-minute wrap-up (`StopRequest::operator`, with intent `Relaunch`) to save its progress and report, and its report then reaches the lead as a stop. A queued one is stopped before it starts. The subagent's own active subagents are stopped with it, and the result names them. With `remove_workspace`, once the run has ended, the provider removes its workspace and the record becomes `Closed`. |
+| `stop_agent` | Callers | Required `run`. Optional `reason` and `remove_workspace: bool` (with a provider). | A running subagent gets a two-minute wrap-up (`StopRequest::operator`, with intent `Relaunch`) to save its progress and report, and its report then reaches the lead as a stop. A queued one is stopped before it starts. The subagent's own active subagents are stopped with it, and the result names them. With `remove_workspace`, once the run has ended, the record becomes `Closed` and is saved, then the provider removes its workspace. A closed run never runs again. Messages to it are refused, and so are the host's continuations, resumes and recoveries of it (`BuilderInvalid`), also after a resume of the workflow. A report on request still runs, since its only call is the report. A removal that fails leaves the run as it was. The run stays as it was too, and the provider isn't asked, when the workflow can't be saved first or the call is dropped before then. |
 | `link_agents` | Callers, with peer messages on | Required `runs`, two or more ids. | The runs may now message each other. |
 
 A subagent's initial prompt is its task, then a section saying it is agent run `rN` started by its lead, how to message the lead and wait for it, to keep its report under about 16 KB with long detail in a file, and where it works (an isolated workspace's `description` included).

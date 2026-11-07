@@ -1615,6 +1615,379 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
     assert_eq!(record.isolated.as_ref().unwrap().path, path);
 }
 
+/// A provider whose removals wait until the test lets them go on, and fail
+/// when `fails` is set.
+#[derive(Default)]
+pub(super) struct HeldFolders {
+    pub(super) root: std::path::PathBuf,
+    pub(super) fails: bool,
+    pub(super) removing: tokio::sync::Notify,
+    pub(super) go_on: tokio::sync::Notify,
+    pub(super) removed: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for HeldFolders {
+    async fn create(&self, request: &WorkspaceRequest) -> Result<IsolatedWorkspace, String> {
+        let path = self.root.join(&request.handle);
+        std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+        Ok(IsolatedWorkspace::at(path))
+    }
+
+    async fn remove(&self, workspace: &IsolatedWorkspace) -> Result<(), String> {
+        self.removed.fetch_add(1, Ordering::SeqCst);
+        self.removing.notify_one();
+        self.go_on.notified().await;
+        if self.fails {
+            return Err("it has changes that aren't committed".to_string());
+        }
+        std::fs::remove_dir_all(&workspace.path).map_err(|error| error.to_string())
+    }
+}
+
+/// A workflow whose lead started r1 in an isolated workspace of `provider`
+/// and waited for it to finish, saved in `run_dir` when one is given.
+pub(super) async fn finished_isolated_run(
+    workspace: &Workspace,
+    provider: Arc<HeldFolders>,
+    run_dir: Option<&std::path::Path>,
+) -> (Workflow, ResponsesServer) {
+    let server = serve(vec![(
+        "lead",
+        vec![
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Build it.", "isolated": true }),
+            ),
+            wait(),
+        ],
+    )])
+    .await;
+    let config = SubagentsConfig::default().workspace_provider(provider);
+    let mut workflow = builder(&server, workspace, config);
+    if let Some(run_dir) = run_dir {
+        workflow = workflow.persistence(PersistenceConfig::new(run_dir));
+    }
+    let workflow = workflow.build().unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Finished);
+    (workflow, server)
+}
+
+/// A message that comes while stop_agent removes a run's workspace doesn't
+/// start the run again there, and the run stays closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_during_a_workspace_removal_leaves_the_run_closed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let lead = run.caller_run_id;
+    let stopping = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(provider.removing.notified()).await;
+    let sent = workflow.message_subagent("r1", "More.", "Your lead sent you a message:", "");
+    provider.go_on.notify_one();
+    let removed = within(stopping).await.unwrap().unwrap();
+    assert!(removed.contains("Removed r1's workspace"), "{removed}");
+    assert!(
+        sent.as_ref()
+            .is_err_and(|error| error.contains("workspace was removed")),
+        "the run was started again in the workspace being removed: {sent:?}"
+    );
+    until(|| !ctx.registry.is_running(run.run_id)).await;
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+    assert_eq!(
+        bodies_of(&server, "r1").len(),
+        1,
+        "r1 made no request after its run"
+    );
+    // A second removal is refused without asking the provider again.
+    let again = ctx.subagents.stop(&ctx, lead, "r1", "", true).await;
+    assert!(
+        again
+            .as_ref()
+            .is_err_and(|error| error.contains("removed already")),
+        "{again:?}"
+    );
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 1);
+}
+
+/// A removal is saved before the workspace goes, so a workflow that ends
+/// during the removal resumes with the run closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_is_saved_before_the_workspace_goes() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) =
+        finished_isolated_run(&workspace, provider.clone(), Some(&run_dir)).await;
+    let ctx = workflow.context().clone();
+    let lead = workflow.subagents()[0].caller_run_id;
+    let removal = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(provider.removing.notified()).await;
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let saved =
+        crate::persistence::PersistenceManager::load_checkpoint(&run_dir.join(latest.trim()))
+            .await
+            .unwrap();
+    provider.go_on.notify_one();
+    within(removal).await.unwrap().unwrap();
+    let state = saved.subagents.map(|board| board.runs[0].state);
+    assert_eq!(
+        state,
+        Some(SubagentState::Closed),
+        "a workflow that ended while the workspace was removed would resume the run"
+    );
+}
+
+/// A stop_agent call dropped while its removal is saved, before the provider
+/// is asked, leaves the run as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_dropped_while_its_removal_is_saved_leaves_the_run_as_it_was() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) =
+        finished_isolated_run(&workspace, provider.clone(), Some(&run_dir)).await;
+    // The saves the run's end started are written by now, so the next is
+    // the removal's.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let lead = run.caller_run_id;
+    let pause = ctx.persistence.as_ref().unwrap().pause_next_build();
+    let removal = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(pause.reached.notified()).await;
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    pause.resume.notify_one();
+    provider.go_on.notify_one();
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 0);
+    let state = workflow.subagents()[0].state;
+    let again = within(ctx.subagents.stop(&ctx, lead, "r1", "", true)).await;
+    assert!(
+        state == SubagentState::Finished && again.is_ok(),
+        "the provider was never asked, the run is {state:?}, the workspace exists: {}, and a second stop gave {again:?}",
+        run.workspace.is_dir()
+    );
+}
+
+/// A removal that can't be saved leaves the workspace, and the run as it
+/// was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_that_cant_be_saved_leaves_the_workspace() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) =
+        finished_isolated_run(&workspace, provider.clone(), Some(&run_dir)).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    // A file where the checkpoints go, so none can be written.
+    std::fs::remove_dir_all(&run_dir).unwrap();
+    std::fs::write(&run_dir, "").unwrap();
+    provider.go_on.notify_one();
+    let removed = within(ctx.subagents.stop(&ctx, run.caller_run_id, "r1", "", true)).await;
+    assert!(
+        removed
+            .as_ref()
+            .is_err_and(|error| error.contains("couldn't be saved")),
+        "{removed:?}"
+    );
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 0);
+    assert!(run.workspace.is_dir());
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Finished);
+}
+
+/// A lead's stop_agent call saves the workflow and removes the workspace
+/// from inside the lead's own run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leads_stop_agent_removes_a_workspace_in_a_workflow_that_saves() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    provider.go_on.notify_one();
+    let server = serve(vec![(
+        "lead",
+        vec![
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Build it.", "isolated": true }),
+            ),
+            wait(),
+            (
+                "stop_agent",
+                json!({ "run": "r1", "remove_workspace": true }),
+            ),
+        ],
+    )])
+    .await;
+    let config = SubagentsConfig::default().workspace_provider(provider.clone());
+    let workflow = builder(&server, &workspace, config)
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 1);
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+}
+
+/// A removal that fails leaves the run as it was, and a message continues
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_removal_leaves_the_run_as_it_was() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        fails: true,
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+    let ctx = workflow.context().clone();
+    let lead = workflow.subagents()[0].caller_run_id;
+    provider.go_on.notify_one();
+    let removed = within(ctx.subagents.stop(&ctx, lead, "r1", "", true)).await;
+    assert!(
+        removed
+            .as_ref()
+            .is_err_and(|error| error.contains("aren't committed")),
+        "{removed:?}"
+    );
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Finished);
+    let sent = workflow.message_subagent("r1", "More.", "Your lead sent you a message:", "");
+    assert!(sent.is_ok(), "{sent:?}");
+    until(|| bodies_of(&server, "r1").len() == 2).await;
+}
+
+/// The host can't continue a run while stop_agent removes its workspace,
+/// so the run makes no request there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_continuation_cannot_start_a_run_while_its_workspace_is_removed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    let ctx = workflow.context().clone();
+    let removal = tokio::spawn(async move {
+        ctx.subagents
+            .stop(&ctx, run.caller_run_id, "r1", "", true)
+            .await
+    });
+    within(provider.removing.notified()).await;
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    provider.go_on.notify_one();
+    within(removal).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            &continued,
+            Err(crate::WorkflowError::BuilderInvalid(error)) if error.contains("workspace was removed")
+        ),
+        "a run was continued during its workspace's removal: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+}
+
+/// The host can't continue a run whose workspace was removed, also after
+/// the workflow resumed from a checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_continuation_cannot_start_a_closed_run() {
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let server = serve(vec![(
+        "lead",
+        vec![
+            (
+                "start_agent",
+                json!({ "agent": "worker", "task": "Build it.", "isolated": true }),
+            ),
+            wait(),
+        ],
+    )])
+    .await;
+    let config = || SubagentsConfig::default().workspace_provider(provider.clone());
+    let workflow = builder(&server, &workspace, config())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    provider.go_on.notify_one();
+    let ctx = workflow.context();
+    let removed = within(ctx.subagents.stop(ctx, run.caller_run_id, "r1", "", true))
+        .await
+        .unwrap();
+    assert!(removed.contains("Removed r1's workspace"), "{removed}");
+    let refused = |continued: &Result<AgentResult, crate::WorkflowError>| {
+        matches!(
+            continued,
+            Err(crate::WorkflowError::BuilderInvalid(error)) if error.contains("workspace was removed")
+        )
+    };
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    assert!(
+        refused(&continued),
+        "a closed run was continued: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let resumed = builder(&server, &workspace, config())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+    assert_eq!(resumed.subagents()[0].state, SubagentState::Closed);
+    let continued = within(resumed.continue_agent(&previous, "More.")).await;
+    assert!(
+        refused(&continued),
+        "a closed run was continued after a resume: {:?}",
+        continued.as_ref().map(|result| &result.status)
+    );
+    assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+}
+
 /// The user messages a request sends, joined.
 fn user_text(body: &str) -> String {
     let body: Value = serde_json::from_str(body).unwrap();
@@ -2354,4 +2727,31 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
         };
         assert_eq!(result.unwrap(), format!("{said} Still running: r1."));
     }
+}
+
+/// A stop_agent call dropped once the provider was asked leaves the run
+/// closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_dropped_while_the_provider_removes_leaves_the_run_closed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    let removal = tokio::spawn({
+        let ctx = ctx.clone();
+        let lead = run.caller_run_id;
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(provider.removing.notified()).await;
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    provider.go_on.notify_one();
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    assert!(continued.is_err(), "a run being removed was continued");
 }

@@ -358,23 +358,17 @@ impl Board {
         self.bump();
     }
 
-    /// Saves the change soon, with the live checkpoint while runs are live,
-    /// else with a checkpoint.
+    /// Saves the change soon, as [`save`] does.
     fn save_soon(&self, ctx: &Arc<SharedContext>) {
-        let Some(persistence) = ctx.persistence.clone() else {
+        if ctx.persistence.is_none() {
             return;
-        };
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let ctx = ctx.clone();
         runtime.spawn(async move {
-            let saved = if persistence.has_live_runs() {
-                persistence.write_live_checkpoint(&ctx, false).await
-            } else {
-                persistence.auto_checkpoint(&ctx).await
-            };
-            if let Err(error) = saved {
+            if let Err(error) = save(&ctx, false).await {
                 log::warn!(
                     "Workflow '{}': could not save the subagents' state: {error}",
                     ctx.workflow_name
@@ -1016,9 +1010,10 @@ impl Board {
     }
 
     /// Launches run `run_id` (`launch` says how), or queues it while
-    /// [`SubagentsConfig::max_running`] runs are running.
-    fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
-        self.launch_if(ctx, run_id, launch, false);
+    /// [`SubagentsConfig::max_running`] runs are running, and returns
+    /// whether it did. A closed run stays closed.
+    fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) -> bool {
+        self.launch_if(ctx, run_id, launch, false)
     }
 
     fn launch_if(
@@ -1027,33 +1022,40 @@ impl Board {
         run_id: Uuid,
         launch: PendingLaunch,
         queued_only: bool,
-    ) {
+    ) -> bool {
         let max = self.config.as_ref().and_then(|config| config.max_running);
         let resumed = matches!(launch, PendingLaunch::Resume { .. });
         let (record, started) = {
             let mut state = self.state.lock();
             let running = self.places_taken(&state);
             let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id) else {
-                return;
+                return false;
             };
             if record.state == SubagentState::Running
                 || (queued_only && record.state != SubagentState::Queued)
             {
-                return;
+                return false;
             }
             let has_place = max.is_none_or(|max| running < max.get());
             let runtime = tokio::runtime::Handle::try_current().ok();
-            record.since = Utc::now();
+            let starts = has_place && runtime.is_some();
+            let next = if starts {
+                SubagentState::Running
+            } else {
+                SubagentState::Queued
+            };
+            // A closed run stays closed.
+            if !move_to(record, next) {
+                return false;
+            }
             record.stopped_by_caller = None;
             record.stop_requested = None;
             record.error = None;
-            if has_place && runtime.is_some() {
-                record.state = SubagentState::Running;
+            if starts {
                 record.pending = None;
                 self.starting.lock().insert(run_id, None);
                 (record.clone(), runtime)
             } else {
-                record.state = SubagentState::Queued;
                 record.pending = Some(launch.clone());
                 (record.clone(), None)
             }
@@ -1062,7 +1064,7 @@ impl Board {
         let Some(runtime) = started else {
             self.emit(&record, SubagentEventKind::Queued);
             self.save_soon(ctx);
-            return;
+            return true;
         };
         self.emit(
             &record,
@@ -1074,6 +1076,7 @@ impl Board {
         );
         let driver = runtime.spawn(drive(ctx.clone(), run_id, launch));
         self.drivers.lock().insert(run_id, driver.abort_handle());
+        true
     }
 
     /// Starts the queued runs that have a place now, oldest first.
@@ -1393,20 +1396,19 @@ impl Board {
                 message: String::new(),
             });
             if run.state == SubagentState::Queued {
-                // Its place comes in turn.
+                // Its place comes in turn, unless it started or stopped since.
                 let mut state = self.state.lock();
-                if let Some(record) = state
-                    .runs
-                    .iter_mut()
-                    .find(|record| record.run_id == run.run_id)
-                {
+                if let Some(record) = state.runs.iter_mut().find(|record| {
+                    record.run_id == run.run_id && record.state == SubagentState::Queued
+                }) {
                     record.pending = Some(launch);
+                    resumed.push(run.handle);
                 }
-                resumed.push(run.handle);
                 continue;
             }
-            self.launch(ctx, run.run_id, launch);
-            resumed.push(run.handle);
+            if self.launch(ctx, run.run_id, launch) {
+                resumed.push(run.handle);
+            }
         }
         self.start_queued(ctx);
         resumed
@@ -1465,12 +1467,18 @@ impl Board {
             else {
                 return;
             };
-            // A run a stop of the workflow ended has its stop news already.
-            if record.state == SubagentState::Stopped {
+            // Only a run still in the state it was chosen in is stopped. One a
+            // stop of the workflow ended has its stop news already, and one a
+            // removal closed or a message started since stays as it is.
+            if record.state != orphan.state
+                || !matches!(
+                    orphan.state,
+                    SubagentState::Interrupted | SubagentState::Queued
+                )
+            {
                 return;
             }
-            record.state = SubagentState::Stopped;
-            record.since = Utc::now();
+            move_to(record, SubagentState::Stopped);
             record.error = Some(reason.clone());
             record.pending = None;
             record.asking = false;
@@ -2240,8 +2248,7 @@ impl Board {
             let record = state.runs.iter_mut().find(|run| run.run_id == run_id)?;
             match record.state {
                 SubagentState::Queued => {
-                    record.state = SubagentState::Stopped;
-                    record.since = Utc::now();
+                    move_to(record, SubagentState::Stopped);
                     record.error = Some(reason.clone());
                     record.pending = None;
                     record.asking = false;
@@ -2643,23 +2650,67 @@ impl Board {
             .and_then(|config| config.workspace_provider.clone())
             .ok_or("isolated workspaces are not available in this workflow")?;
         let workspace = run.isolated.clone().expect("checked above");
-        provider.remove(&workspace).await?;
-        {
+        // Closed before the removal, so that no message starts it again in a
+        // workspace being removed, and closed in the registry too, so that
+        // no continuation, resume or recovery the host asks for does. The
+        // registry is asked under the board's lock, so a run the host starts
+        // in between is seen here, and the board's own launches wait for the
+        // same lock. It's saved before the workspace goes, so a workflow that
+        // ends meanwhile resumes it closed. A removal that fails, or a call
+        // dropped before the provider is asked, opens it again.
+        let mut claim = {
             let mut state = self.state.lock();
-            if let Some(record) = state
+            let Some(record) = state
                 .runs
                 .iter_mut()
                 .find(|record| record.run_id == run.run_id)
-            {
-                record.state = SubagentState::Closed;
-                record.since = Utc::now();
+            else {
+                return Err(format!("there is no agent run {handle}"));
+            };
+            match record.state {
+                SubagentState::Closed => {
+                    return Err(format!("{handle}'s workspace was removed already"));
+                }
+                now if now.is_active() => {
+                    return Err(format!("{handle} started again, so its workspace stays"));
+                }
+                _ => {}
             }
-        }
+            if ctx.registry.close(run.run_id).is_err() {
+                return Err(format!("{handle} started again, so its workspace stays"));
+            }
+            let before = (record.state, record.since);
+            move_to(record, SubagentState::Closed);
+            RemovalClaim {
+                board: self,
+                ctx,
+                run_id: run.run_id,
+                before: Some(before),
+            }
+        };
         self.bump();
+        let removed = match save(ctx, true).await {
+            Ok(()) => {
+                // Dropped from here on, the call leaves the run closed, since
+                // the provider may have begun.
+                let before = claim.before.take();
+                let removed = provider.remove(&workspace).await;
+                if removed.is_err() {
+                    claim.before = before;
+                }
+                removed
+            }
+            Err(error) => Err(format!(
+                "{handle}'s workspace stays, because the workflow couldn't be saved: {error}"
+            )),
+        };
+        if let Err(error) = removed {
+            claim.reopen();
+            return Err(error);
+        }
         if let Some(record) = self.record(run.run_id) {
             self.emit(&record, SubagentEventKind::WorkspaceRemoved);
         }
-        self.save_soon(ctx);
         let branch = workspace.branch.map_or_else(String::new, |branch| {
             format!(" Its branch `{branch}` stays.")
         });
@@ -2807,14 +2858,96 @@ impl Board {
     }
 }
 
+/// A workspace removal's claim on the run it closed. Dropped, or told to
+/// reopen, while it holds the run's state from before the claim, it opens
+/// the run again.
+struct RemovalClaim<'a> {
+    board: &'a Board,
+    ctx: &'a Arc<SharedContext>,
+    run_id: Uuid,
+    /// The run's state and time before it was closed. Taken out while the
+    /// provider removes the workspace.
+    before: Option<(SubagentState, chrono::DateTime<Utc>)>,
+}
+
+impl RemovalClaim<'_> {
+    fn reopen(&mut self) {
+        let Some(before) = self.before.take() else {
+            return;
+        };
+        {
+            let mut state = self.board.state.lock();
+            if let Some(record) = state
+                .runs
+                .iter_mut()
+                .find(|record| record.run_id == self.run_id)
+            {
+                reopen_after_failed_removal(self.ctx, record, before);
+            }
+        }
+        self.board.bump();
+        self.board.save_soon(self.ctx);
+    }
+}
+
+impl Drop for RemovalClaim<'_> {
+    fn drop(&mut self) {
+        self.reopen();
+    }
+}
+
+/// Saves the workflow, its board with it, in the live checkpoint while runs
+/// are live, else in a checkpoint if the workflow saves them by itself. A
+/// `durable` live checkpoint is flushed to disk with its directory.
+async fn save(ctx: &SharedContext, durable: bool) -> Result<(), WorkflowError> {
+    let Some(persistence) = &ctx.persistence else {
+        return Ok(());
+    };
+    if persistence.has_live_runs() {
+        persistence.write_live_checkpoint(ctx, durable).await
+    } else {
+        persistence.auto_checkpoint(ctx).await
+    }
+}
+
+/// Moves `record` to `state`, as every change of a record's state on the
+/// board does, and returns whether it moved. A closed record stays closed,
+/// since its workspace is removed or being removed. Only
+/// [`reopen_after_failed_removal`] takes a record out of `Closed`.
+fn move_to(record: &mut SubagentRecord, state: SubagentState) -> bool {
+    if record.state == SubagentState::Closed {
+        return false;
+    }
+    record.state = state;
+    record.since = Utc::now();
+    true
+}
+
+/// Takes `record`, closed for a removal of its workspace that failed or
+/// never began, back to its state and time `before` the removal, and opens
+/// its run in the registry again, so the board and the registry agree.
+fn reopen_after_failed_removal(
+    ctx: &SharedContext,
+    record: &mut SubagentRecord,
+    before: (SubagentState, chrono::DateTime<Utc>),
+) {
+    debug_assert_eq!(record.state, SubagentState::Closed);
+    record.state = before.0;
+    record.since = before.1;
+    ctx.registry.reopen(record.run_id);
+}
+
+/// Settles `record` in `state` with its run's `report` and `error`. A
+/// closed record stays as it is.
 fn settle_record(
     record: &mut SubagentRecord,
     state: SubagentState,
     report: Option<String>,
     error: Option<String>,
 ) {
-    record.state = state;
-    record.since = Utc::now();
+    if !move_to(record, state) {
+        return;
+    }
     if report.is_some() {
         record.report = report;
     }
@@ -2999,10 +3132,9 @@ fn settle_restored(
         let result = results
             .iter()
             .find(|result| result.agent_run_id == record.run_id);
-        record.since = Utc::now();
         record.asking = false;
         if let Some(stop) = record.stop_requested.take() {
-            record.state = SubagentState::Stopped;
+            move_to(record, SubagentState::Stopped);
             record.pending = None;
             record.error = Some(stop.reason.clone());
             news.push((
@@ -3018,7 +3150,7 @@ fn settle_restored(
         }
         match result.map(|result| (&result.status, result)) {
             Some((AgentRunStatus::Completed, result)) if result.stopped_by.is_none() => {
-                record.state = SubagentState::Finished;
+                move_to(record, SubagentState::Finished);
                 record.report = Some(result.summary.clone());
                 news.push((
                     record.clone(),
@@ -3033,14 +3165,16 @@ fn settle_restored(
             Some((AgentRunStatus::Cancelled | AgentRunStatus::Completed, result))
                 if result.stopped_by.is_some() =>
             {
-                record.state = SubagentState::Stopped;
+                move_to(record, SubagentState::Stopped);
                 record.error = result.stopped_by.as_ref().map(|stop| stop.reason.clone());
             }
             Some((AgentRunStatus::Failed, result)) => {
-                record.state = SubagentState::Failed;
+                move_to(record, SubagentState::Failed);
                 record.error = result.error.clone();
             }
-            _ => record.state = SubagentState::Interrupted,
+            _ => {
+                move_to(record, SubagentState::Interrupted);
+            }
         }
     }
     // News the lead never got, so it gets it now.
@@ -3679,6 +3813,168 @@ mod record_tests {
     }
 }
 
+/// A run that changes between a resume's choice of the runs it stops as
+/// orphans and their stop.
+#[cfg(test)]
+mod orphan_stop_tests {
+    use super::super::tests::{
+        HeldFolders, bodies_of, builder, finished_isolated_run, until, within,
+    };
+    use super::*;
+    use crate::persistence::PersistenceConfig;
+    use crate::test_support::Workspace;
+
+    /// Makes r1 an interrupted subagent of a lead that finished, as a resume
+    /// finds it, and returns that lead and the orphans the resume stops.
+    fn orphan_of_a_finished_lead(ctx: &SharedContext) -> (Uuid, Vec<SubagentRecord>) {
+        let lead = Uuid::new_v4();
+        {
+            let mut state = ctx.subagents.state.lock();
+            let mut record = state.runs[0].clone();
+            record.run_id = lead;
+            record.handle = "r2".to_string();
+            record.isolated = None;
+            record.state = SubagentState::Finished;
+            state.runs[0].caller_run_id = lead;
+            state.runs[0].state = SubagentState::Interrupted;
+            state.runs.push(record);
+        }
+        let interrupted = ctx
+            .subagents
+            .records()
+            .into_iter()
+            .filter(|run| run.state == SubagentState::Interrupted)
+            .collect();
+        let (relaunched, orphans) = ctx.subagents.split_orphans(interrupted);
+        assert!(relaunched.is_empty());
+        assert_eq!(orphans.len(), 1);
+        (lead, orphans)
+    }
+
+    /// A run whose workspace is removed after it was chosen stays closed,
+    /// also once the workflow resumes from a checkpoint, so the host can't
+    /// continue it in the removed workspace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_closed_after_it_was_chosen_as_an_orphan_stays_closed() {
+        let workspace = Workspace::new();
+        let run_dir = workspace.0.join(".run");
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, server) =
+            finished_isolated_run(&workspace, provider.clone(), Some(&run_dir)).await;
+        let ctx = workflow.context();
+        let run = workflow.subagents()[0].clone();
+        let previous = workflow.agent_result(run.run_id).unwrap();
+        let (lead, orphans) = orphan_of_a_finished_lead(ctx);
+        provider.go_on.notify_one();
+        within(ctx.subagents.stop(ctx, lead, "r1", "", true))
+            .await
+            .unwrap();
+        for orphan in orphans {
+            ctx.subagents.stop_orphan(ctx, orphan);
+        }
+        let state = ctx.subagents.record(run.run_id).unwrap().state;
+        workflow.checkpoint().await.unwrap();
+        drop(workflow);
+
+        let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+        let resumed = builder(
+            &server,
+            &workspace,
+            SubagentsConfig::default().workspace_provider(provider),
+        )
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+        let continued = within(resumed.continue_agent(&previous, "More.")).await;
+        assert!(
+            state == SubagentState::Closed && continued.is_err(),
+            "the run was {state:?} once the orphans were stopped, and after a resume it was continued in its removed workspace: {:?}",
+            continued.as_ref().map(|result| &result.status)
+        );
+        assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+    }
+
+    /// A run a message started after it was chosen goes on, and its lead
+    /// isn't told that it stopped.
+    #[tokio::test]
+    async fn a_run_started_after_it_was_chosen_as_an_orphan_goes_on() {
+        let workspace = Workspace::new();
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, server) = finished_isolated_run(&workspace, provider, None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        let (lead, orphans) = orphan_of_a_finished_lead(&ctx);
+        // The message launches it, and its driver starts at the next await.
+        workflow
+            .message_subagent("r1", "More.", "Your lead sent you a message:", "")
+            .unwrap();
+        for orphan in orphans {
+            ctx.subagents.stop_orphan(&ctx, orphan);
+        }
+        let state = ctx.subagents.record(run.run_id).unwrap().state;
+        let told = ctx
+            .subagents
+            .pending(lead)
+            .iter()
+            .any(|item| item.kind == MailKind::Stopped);
+        assert!(
+            state == SubagentState::Running && !told,
+            "the run a message started is {state:?}, and its lead was told it stopped: {told}"
+        );
+        until(|| bodies_of(&server, "r1").len() == 2).await;
+    }
+
+    /// A removal that fails after its run was chosen leaves the run as it
+    /// was, so the host can continue it in its workspace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_removal_after_its_run_was_chosen_as_an_orphan_opens_it_again() {
+        let workspace = Workspace::new();
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            fails: true,
+            ..HeldFolders::default()
+        });
+        let (workflow, _server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        let previous = workflow.agent_result(run.run_id).unwrap();
+        let (lead, orphans) = orphan_of_a_finished_lead(&ctx);
+        let removal = tokio::spawn({
+            let ctx = ctx.clone();
+            async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+        });
+        within(provider.removing.notified()).await;
+        for orphan in orphans {
+            ctx.subagents.stop_orphan(&ctx, orphan);
+        }
+        provider.go_on.notify_one();
+        let removed = within(removal).await.unwrap();
+        assert!(
+            removed
+                .as_ref()
+                .is_err_and(|error| error.contains("aren't committed")),
+            "{removed:?}"
+        );
+        let state = ctx.subagents.record(run.run_id).unwrap().state;
+        let continued = within(workflow.continue_agent(&previous, "More.")).await;
+        assert!(
+            state == SubagentState::Interrupted && continued.is_ok(),
+            "the removal failed, and the run is {state:?} and its continuation {:?}",
+            continued
+                .as_ref()
+                .map(|result| &result.status)
+                .map_err(ToString::to_string)
+        );
+    }
+}
+
 /// The news of a run a checkpoint saved running.
 #[cfg(test)]
 mod restore_tests {
@@ -3937,5 +4233,108 @@ mod group_tests {
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0].to, runs[0].run_id);
         assert!(told[0].heading.starts_with(&runs[1].handle));
+    }
+}
+
+/// A closed run stays closed whatever the board does with it next.
+#[cfg(test)]
+mod closed_stays_closed_tests {
+    use super::super::tests::{HeldFolders, finished_isolated_run, within};
+    use super::*;
+    use crate::test_support::{ResponsesServer, Workspace};
+
+    /// A workflow whose run r1 finished and had its workspace removed.
+    async fn closed_run(workspace: &Workspace) -> (crate::Workflow, ResponsesServer) {
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, server) = finished_isolated_run(workspace, provider.clone(), None).await;
+        let ctx = workflow.context();
+        let lead = workflow.subagents()[0].caller_run_id;
+        provider.go_on.notify_one();
+        within(ctx.subagents.stop(ctx, lead, "r1", "", true))
+            .await
+            .unwrap();
+        assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+        (workflow, server)
+    }
+
+    /// The board's launch leaves a closed run closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_leaves_a_closed_run_closed() {
+        let workspace = Workspace::new();
+        let (workflow, _server) = closed_run(&workspace).await;
+        let ctx = workflow.context();
+        let run = workflow.subagents()[0].clone();
+        ctx.subagents.launch(
+            ctx,
+            run.run_id,
+            PendingLaunch::Resume {
+                message: String::new(),
+            },
+        );
+        assert_eq!(workflow.subagents()[0], run);
+    }
+
+    /// The end of a run settled on a closed record leaves it as it is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settling_a_run_leaves_a_closed_record_as_it_is() {
+        let workspace = Workspace::new();
+        let (workflow, _server) = closed_run(&workspace).await;
+        let ctx = workflow.context();
+        let run = workflow.subagents()[0].clone();
+        {
+            let mut state = ctx.subagents.state.lock();
+            let record = state
+                .runs
+                .iter_mut()
+                .find(|record| record.run_id == run.run_id)
+                .unwrap();
+            settle_record(
+                record,
+                SubagentState::Finished,
+                Some("Done again.".to_string()),
+                None,
+            );
+        }
+        assert_eq!(workflow.subagents()[0], run);
+    }
+}
+
+#[cfg(test)]
+mod launch_result_tests {
+    use super::super::tests::{HeldFolders, finished_isolated_run, within};
+    use super::*;
+    use crate::test_support::Workspace;
+
+    fn resume() -> PendingLaunch {
+        PendingLaunch::Resume {
+            message: String::new(),
+        }
+    }
+
+    /// A launch says whether it launched or queued the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_says_whether_it_launched() {
+        let workspace = Workspace::new();
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, _server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        assert!(!ctx.subagents.launch(&ctx, Uuid::new_v4(), resume()));
+        provider.go_on.notify_one();
+        within(ctx.subagents.stop(&ctx, run.caller_run_id, "r1", "", true))
+            .await
+            .unwrap();
+        assert!(!ctx.subagents.launch(&ctx, run.run_id, resume()), "closed");
+        let (workflow, _server) = finished_isolated_run(&workspace, provider, None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        assert!(ctx.subagents.launch(&ctx, run.run_id, resume()), "open");
+        assert!(!ctx.subagents.launch(&ctx, run.run_id, resume()), "running");
     }
 }

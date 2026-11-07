@@ -18,7 +18,7 @@
 //! A watch channel publishes the version, so `wait_for_message` wakes when
 //! an agent starts or finishes without polling.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use arko_agents::AgentEvent;
 use arko_agents::task::TaskState;
@@ -191,6 +191,38 @@ struct RegistryState {
     /// [`AgentRegistry::claim_recovery`]), a receiver that closes when its
     /// recovery ends. Closed entries are removed as they are found.
     recoveries: HashMap<Uuid, watch::Receiver<()>>,
+    /// The runs that never run again, since their subagent's isolated
+    /// workspace was removed (see [`AgentRegistry::close`]).
+    closed: HashSet<Uuid>,
+}
+
+/// Why the registry doesn't start again a run it knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartRefused {
+    /// It runs, or writes a report on request.
+    Running,
+    /// Its subagent's isolated workspace was removed, so it never runs again.
+    Closed,
+}
+
+impl StartRefused {
+    /// The error a call that would start run `task_id` returns.
+    pub(crate) fn error(self, task_id: Uuid) -> crate::error::WorkflowError {
+        crate::error::WorkflowError::BuilderInvalid(match self {
+            Self::Running => format!("agent run {task_id} is running already"),
+            Self::Closed => format!(
+                "agent run {task_id} can't run again, since its isolated workspace was removed"
+            ),
+        })
+    }
+}
+
+/// Why [`AgentRegistry::claim_recovery`] claimed nothing.
+pub(crate) enum ClaimRefused {
+    /// A recovery runs it, and the receiver's `changed` fails once that
+    /// recovery has ended.
+    Recovering(watch::Receiver<()>),
+    Refused(StartRefused),
 }
 
 /// A recovery's claim on the interrupted run it recovers (see
@@ -254,6 +286,7 @@ impl AgentRegistry {
             runs: HashMap::new(),
             reports: HashMap::new(),
             recoveries: HashMap::new(),
+            closed: HashSet::new(),
         })
     }
 
@@ -333,10 +366,12 @@ impl AgentRegistry {
     /// [`abandon`](Self::abandon) leave it marked, so that no other run of
     /// its ID starts until the report's outcome is recorded, and
     /// [`end_report`](Self::end_report) unmarks it then, again without a
-    /// change.
+    /// change. A closed run may write one, since its report run's other
+    /// calls are refused until it reports, so it never works in the
+    /// workspace that was removed.
     pub(crate) fn start_report_unless_running(&self, task_id: Uuid, agent: &str) -> bool {
         let mut state = self.state.lock();
-        if state.runs.contains_key(&task_id) || state.reports.contains_key(&task_id) {
+        if refusal(&state, task_id) == Some(StartRefused::Running) {
             return false;
         }
         state.reports.insert(task_id, agent.to_string());
@@ -402,33 +437,52 @@ impl AgentRegistry {
     }
 
     /// Marks run `task_id` of `agent` running, as [`start`](Self::start)
-    /// does, unless it is running already. Returns whether it was marked.
-    pub fn start_unless_running(&self, task_id: Uuid, agent: &str) -> bool {
+    /// does, unless it is running already or closed.
+    pub fn start_unless_running(&self, task_id: Uuid, agent: &str) -> Result<(), StartRefused> {
         let mut guard = self.state.lock();
-        if guard.runs.contains_key(&task_id) || guard.reports.contains_key(&task_id) {
-            return false;
+        if let Some(refused) = refusal(&guard, task_id) {
+            return Err(refused);
         }
         self.start_locked(&mut guard, &[(task_id, agent)]);
-        true
+        Ok(())
+    }
+
+    /// Closes run `task_id` for good, unless it runs, so that no
+    /// continuation, resume or recovery starts it again. Its subagent's
+    /// isolated workspace is being removed.
+    pub(crate) fn close(&self, task_id: Uuid) -> Result<(), StartRefused> {
+        let mut state = self.state.lock();
+        match refusal(&state, task_id) {
+            Some(StartRefused::Running) => Err(StartRefused::Running),
+            _ => {
+                state.closed.insert(task_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Opens run `task_id` again, after a removal of its workspace failed.
+    pub(crate) fn reopen(&self, task_id: Uuid) {
+        self.state.lock().closed.remove(&task_id);
     }
 
     /// Marks interrupted run `task_id` of `agent` running for its recovery,
     /// as [`start_unless_running`](Self::start_unless_running) does, and
     /// returns the claim to hold until the recovery has recorded the run's
     /// outcome. When the run is running already, returns the receiver of
-    /// the recovery running it (see [`recovery`](Self::recovery)), or
-    /// `None` when no recovery does.
+    /// the recovery running it (see [`recovery`](Self::recovery)), if one
+    /// does, and refuses it otherwise, as for a closed run.
     pub fn claim_recovery(
         &self,
         task_id: Uuid,
         agent: &str,
-    ) -> Result<RecoveryClaim, Option<watch::Receiver<()>>> {
+    ) -> Result<RecoveryClaim, ClaimRefused> {
         let mut guard = self.state.lock();
         if let Some(recovering) = Self::recovery_locked(&mut guard, task_id) {
-            return Err(Some(recovering));
+            return Err(ClaimRefused::Recovering(recovering));
         }
-        if guard.runs.contains_key(&task_id) || guard.reports.contains_key(&task_id) {
-            return Err(None);
+        if let Some(refused) = refusal(&guard, task_id) {
+            return Err(ClaimRefused::Refused(refused));
         }
         self.start_locked(&mut guard, &[(task_id, agent)]);
         let (claim, recovering) = watch::channel(());
@@ -725,6 +779,19 @@ fn until_passed(reason: &WaitReason, now: DateTime<Utc>) -> bool {
         | WaitReason::Retrying { until }
         | WaitReason::UsageLimit { until } => until.is_some_and(|until| until <= now),
         _ => false,
+    }
+}
+
+/// Why run `task_id` can't start again now, if it can't. Every
+/// continuation, resume, recovery and report of a known run is admitted by
+/// it.
+fn refusal(state: &RegistryState, task_id: Uuid) -> Option<StartRefused> {
+    if state.runs.contains_key(&task_id) || state.reports.contains_key(&task_id) {
+        Some(StartRefused::Running)
+    } else if state.closed.contains(&task_id) {
+        Some(StartRefused::Closed)
+    } else {
+        None
     }
 }
 
@@ -1173,6 +1240,29 @@ mod tests {
                 .changes_since_seen(Uuid::new_v4(), &recipients)
                 .is_empty()
         );
+    }
+
+    /// A closed run is refused by every start of a run that ran before, a
+    /// continuation's, a resume's and a recovery's, and may still write a
+    /// report. A run that runs can't be closed.
+    #[test]
+    fn a_closed_run_is_never_started_again() {
+        let registry = AgentRegistry::default();
+        let run = Uuid::new_v4();
+        registry.close(run).unwrap();
+        assert_eq!(
+            registry.start_unless_running(run, "worker"),
+            Err(StartRefused::Closed)
+        );
+        assert!(matches!(
+            registry.claim_recovery(run, "worker"),
+            Err(ClaimRefused::Refused(StartRefused::Closed))
+        ));
+        assert!(registry.start_report_unless_running(run, "worker"));
+        registry.end_report(run);
+        registry.reopen(run);
+        assert_eq!(registry.start_unless_running(run, "worker"), Ok(()));
+        assert_eq!(registry.close(run), Err(StartRefused::Running));
     }
 
     #[test]
