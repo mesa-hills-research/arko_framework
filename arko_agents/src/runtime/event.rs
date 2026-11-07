@@ -160,7 +160,11 @@ pub enum AgentEvent {
         original_output: String,
         intercepted_output: String,
     },
-    /// A tool was rejected by the user.
+    /// A call didn't run. The user rejected it, its approval timed out, or
+    /// it was stopped, held or not reached. A Claude Code agent's call also
+    /// ends this way when Claude Code withdraws its request for approval or
+    /// its session ends while it waits. `reason` says why, when there is
+    /// one.
     ToolRejected {
         tool_call_id: Uuid,
         tool_name: String,

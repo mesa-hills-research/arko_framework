@@ -335,8 +335,15 @@ pub(super) async fn run(
             }
         }
     }
-    if let Some(watch) = &monitor {
-        watch.running.ending(&data);
+    // The job is ending from now on, whatever its end turns out to be.
+    if let Some(stop) = stop {
+        data.lock().unwrap().decide(stop);
+    }
+    #[cfg(test)]
+    let barrier = data.lock().unwrap().end_barrier.clone();
+    #[cfg(test)]
+    if let Some(barrier) = barrier {
+        barrier.hold().await;
     }
     requests_task.abort();
     let _ = requests_task.await;
@@ -373,7 +380,7 @@ pub(super) async fn run(
     }
     let final_notice = {
         let mut data = data.lock().unwrap();
-        data.record.state = if failure.is_some() && stop == Some(JobState::Succeeded) {
+        let state = if failure.is_some() && stop == Some(JobState::Succeeded) {
             JobState::Failed
         } else {
             stop.unwrap_or(JobState::Failed)
@@ -384,13 +391,7 @@ pub(super) async fn run(
             failure = Some("stopped by the user".into());
         }
         let ending = monitor.as_ref().map(|_| {
-            monitor::end_reason(
-                data.record.state,
-                done,
-                data.stopped_by,
-                exit_code,
-                failure.as_deref(),
-            )
+            monitor::end_reason(state, done, data.stopped_by, exit_code, failure.as_deref())
         });
         if monitor.is_some() && failure.is_none() {
             failure = match (done, data.stopped_by) {
@@ -402,18 +403,9 @@ pub(super) async fn run(
             };
         }
         data.record.exit_code = exit_code;
-        data.record.error = failure;
-        data.record.input = None;
-        data.record.revision += 1;
-        if let Err(error) = persist(&config, &data.record) {
-            data.record.state = JobState::Failed;
-            data.record.error = Some(format!("could not persist terminal result: {error}"));
-        }
         // Publish terminal state only after the last manifest write. A caller
         // can then forget the job without racing a later write from this actor.
-        let snapshot = data
-            .snapshot(&config, None, config.excerpt_bytes)
-            .expect("valid output window");
+        let snapshot = data.finish(&config, state, failure);
         // A monitor tells its owner how it ended with its news.
         let last_lines = match &ending {
             Some(Some(monitor::EndReason::Exited { .. })) => monitor
@@ -428,13 +420,12 @@ pub(super) async fn run(
         (
             data.record.owner,
             snapshot,
-            data.record.held,
-            by_user,
+            calls::wakes_owner(data.record.held, data.stopped_by),
             ending,
             last_lines,
         )
     };
-    let (owner, snapshot, held, by_user, ending, last_lines) = final_notice;
+    let (owner, snapshot, wakes, ending, last_lines) = final_notice;
     match (ending, &monitor) {
         (Some(ending), Some(watch)) => {
             // Only a command that exited by itself wakes its owner, as
@@ -461,9 +452,8 @@ pub(super) async fn run(
         }
         _ => {
             if let Some(manager) = manager.upgrade() {
-                // The user's stop wakes no one. The job's update goes with
-                // the owner's next turn.
-                if !held && !by_user {
+                // Otherwise the job's update goes with the owner's next turn.
+                if wakes {
                     let _ = manager.finished.send(JobFinished {
                         owner,
                         job_id: snapshot.job_id,

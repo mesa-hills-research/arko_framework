@@ -4,23 +4,6 @@
 
 use super::*;
 
-/// The current wait for a command, timed by the opt-in
-/// `AgentConfig::user_command_timeout_seconds`. Its deadline is set once,
-/// when the wait starts. Context injected during the wait and commands the
-/// wait ignores don't move it, and a decision ends the wait (the next one
-/// gets a deadline of its own).
-#[derive(Debug, Clone, Copy)]
-pub(super) enum CommandWait {
-    /// No wait has started since the last one ended.
-    NotStarted,
-    /// Waiting until this deadline (`None` means no timeout).
-    Until(Option<tokio::time::Instant>),
-    /// The host is deciding this wait itself ([`UserCommand::HostDeciding`],
-    /// or the run's [`HostDecisions`](super::super::HostDecisions) when it
-    /// started), so no deadline.
-    HostDeciding,
-}
-
 impl AgentLoop {
     /// Takes what every place that reads commands takes alike, namely context,
     /// kept for the next turn boundary, and a handover request, noted.
@@ -126,29 +109,12 @@ impl AgentLoop {
     /// timeout, set when the wait starts, none while the host decides the
     /// run's waits), then the command, or the end of the wait without one.
     pub(super) async fn wait_for_command(&mut self) -> Result<Flow, ArkoAgentsError> {
-        let deadline = match self.command_wait {
-            CommandWait::Until(deadline) => deadline,
-            CommandWait::HostDeciding => None,
-            // A wait that starts while the host decides the run's
-            // waits is not timed, even if that changes.
-            CommandWait::NotStarted if self.host_decisions.get() => {
-                self.command_wait = CommandWait::HostDeciding;
-                None
-            }
-            CommandWait::NotStarted => {
-                let deadline = self
-                    .task
-                    .agent_config
-                    .user_command_timeout_seconds
-                    .and_then(|seconds| {
-                        tokio::time::Instant::now().checked_add(Duration::from_secs(seconds))
-                    });
-                self.command_wait = CommandWait::Until(deadline);
-                deadline
-            }
-        };
-        // Not timed while the host decides the run's waits.
-        let deadline = deadline.filter(|_| !self.host_decisions.get());
+        let timeout = self.task.agent_config.user_command_timeout_seconds;
+        let host = &self.host_decisions;
+        let deadline = self
+            .command_wait
+            .get_or_insert_with(|| CommandWait::start(timeout, host))
+            .deadline(host);
         let command_future = self.command_receiver.recv();
         let command_result = match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, command_future).await,
@@ -189,7 +155,7 @@ impl AgentLoop {
             return Ok(Flow::NextPass);
         };
         if let UserCommand::HostDeciding = cmd {
-            self.command_wait = CommandWait::HostDeciding;
+            self.command_wait = Some(CommandWait::HostDeciding);
             return Ok(Flow::NextPass);
         }
         let state_before = self.task.current_state.clone();
@@ -248,7 +214,7 @@ impl AgentLoop {
         } = follow_up;
         // A command the wait didn't ignore (those continue
         // above) ends it, and a later wait gets its own deadline.
-        self.command_wait = CommandWait::NotStarted;
+        self.command_wait = None;
 
         if let UserCommand::CancelTask = cmd {
             log::info!("Task {}: Cancelled by user command.", self.task.id);

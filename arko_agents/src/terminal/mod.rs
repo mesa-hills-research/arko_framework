@@ -346,7 +346,47 @@ struct JobData {
     note: Option<String>,
     /// A running monitor's timing.
     monitor: Option<monitor::Arming>,
+    /// The state the job's actor decided it ends in, while the actor winds
+    /// it down (it kills, waits for and drains the process, or gives a call
+    /// its grace). Set as the decision is made and cleared by
+    /// [`finish`](Self::finish). Not saved, so a job that never finishes is
+    /// running on disk and interrupted at the next open.
+    ending: Option<JobState>,
+    /// Holds the job's runner at its end decision, for a test.
+    #[cfg(test)]
+    end_barrier: Option<Arc<EndBarrier>>,
 }
+
+/// Holds a job's runner at its end decision, once it has marked the job
+/// ending and before it winds it down, so a test can act in between. Each
+/// side waits a bounded time, so a test that fails doesn't hang the job.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct EndBarrier {
+    reached: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl EndBarrier {
+    /// The runner's side, until the test releases it.
+    async fn hold(&self) {
+        self.reached.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.released.notified()).await;
+    }
+
+    /// Waits until the runner is held at its end decision.
+    pub(super) async fn reached(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.reached.notified())
+            .await
+            .expect("the job reached its end decision");
+    }
+
+    pub(super) fn release(&self) {
+        self.released.notify_one();
+    }
+}
+
 impl JobData {
     fn new(record: Record) -> Self {
         Self {
@@ -356,7 +396,45 @@ impl JobData {
             stopped_by: None,
             note: None,
             monitor: None,
+            ending: None,
+            #[cfg(test)]
+            end_barrier: None,
         }
+    }
+
+    /// The job runs, and no one has decided it ends.
+    fn running(&self) -> bool {
+        self.record.state == JobState::Running && self.ending.is_none()
+    }
+
+    /// The job's actor decided it ends in `state`. Observers see it ending
+    /// from now on.
+    fn decide(&mut self, state: JobState) {
+        self.ending.get_or_insert(state);
+    }
+
+    /// Records the job's end in `state` with `error`, saving it before it's
+    /// published. A record that can't be saved ends `Failed`. Returns the
+    /// snapshot to publish. Each job's actor calls it once, under the job's
+    /// lock, as its last change.
+    fn finish(
+        &mut self,
+        config: &TerminalConfig,
+        state: JobState,
+        error: Option<String>,
+    ) -> TerminalSnapshot {
+        debug_assert!(!self.record.state.is_terminal(), "a job ends once");
+        self.ending = None;
+        self.record.state = state;
+        self.record.error = error;
+        self.record.input = None;
+        self.record.revision += 1;
+        if let Err(error) = persist(config, &self.record) {
+            self.record.state = JobState::Failed;
+            self.record.error = Some(format!("could not persist terminal result: {error}"));
+        }
+        self.snapshot(config, None, config.excerpt_bytes)
+            .expect("valid output window")
     }
 
     fn snapshot(
@@ -1003,7 +1081,8 @@ impl TerminalManager {
         let job = self.owned(owner, id)?;
         {
             let mut data = job.data.lock().unwrap();
-            if !data.record.state.is_terminal() {
+            // A job that is already ending wasn't stopped by its owner.
+            if data.running() {
                 data.stopped_by.get_or_insert(calls::StopCause::Owner);
             }
         }
@@ -1181,10 +1260,7 @@ impl Job {
     fn stop_for_close(&self) {
         {
             let mut data = self.data.lock().unwrap();
-            if data.record.state == JobState::Running
-                && !data.record.held
-                && data.stopped_by.is_none()
-            {
+            if data.running() && !data.record.held && data.stopped_by.is_none() {
                 data.record.stopped_by_close = true;
             }
         }
@@ -1198,7 +1274,8 @@ fn background(jobs: &HashMap<Uuid, Arc<Job>>) -> Vec<BackgroundJob> {
         .values()
         .filter_map(|job| {
             let data = job.data.lock().unwrap();
-            (data.record.state == JobState::Running && !data.record.held).then(|| BackgroundJob {
+            // A job that is ending stops without anyone's agreement.
+            (data.running() && !data.record.held).then(|| BackgroundJob {
                 owner: data.record.owner,
                 job_id: data.record.job_id,
                 command: job.command.clone(),

@@ -1803,6 +1803,88 @@ async fn the_jobs_a_shutdown_stopped_are_listed_at_the_next_open() {
     assert!(again.interrupted_at_open().is_empty(), "listed once");
 }
 
+/// Python that exits once the file `go` exists.
+fn exits_once(go: &Path) -> String {
+    format!(
+        "import os, time\nwhile not os.path.exists({:?}):\n    time.sleep(0.01)\n",
+        go.display().to_string()
+    )
+}
+
+/// Holds job `id`'s runner at its end decision.
+fn hold_at_end(manager: &TerminalManager, id: Uuid) -> Arc<EndBarrier> {
+    let barrier = Arc::new(EndBarrier::default());
+    manager.jobs.lock().unwrap()[&id]
+        .data
+        .lock()
+        .unwrap()
+        .end_barrier = Some(barrier.clone());
+    barrier
+}
+
+/// A job whose command exited by itself, still ending when the host shuts
+/// down, isn't listed as stopped by the shutdown.
+#[tokio::test]
+async fn a_job_that_exited_before_a_shutdown_is_not_listed_as_stopped() {
+    let f = Fixture::new(|_| {});
+    let directory = f.root.join("closed");
+    let manager = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    let go = f.root.join("go");
+    let id = manager
+        .start(
+            &f.context(),
+            &f.command(&exits_once(&go)),
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .job_id;
+    let barrier = hold_at_end(&manager, id);
+    std::fs::write(&go, "").unwrap();
+    barrier.reached().await;
+    // The shutdown stops its jobs before its first wait, and the job's end
+    // goes on after that.
+    tokio::join!(manager.shutdown(), async { barrier.release() });
+    drop(manager);
+    let reopened = TerminalManager::new(TerminalConfig::new(&directory)).unwrap();
+    assert!(
+        reopened.interrupted_at_open().is_empty(),
+        "{:?}",
+        reopened.interrupted_at_open()
+    );
+}
+
+/// A stop that comes while a job whose command exited by itself is still
+/// ending is refused, so the job's end isn't put down to it.
+#[tokio::test]
+async fn a_stop_while_an_exited_job_ends_is_refused() {
+    let f = Fixture::new(|_| {});
+    let go = f.root.join("go");
+    let id = f
+        .python(
+            &exits_once(&go),
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .job_id;
+    let barrier = hold_at_end(&f.manager, id);
+    std::fs::write(&go, "").unwrap();
+    barrier.reached().await;
+    assert!(matches!(
+        f.manager.stop_for_user(f.owner, id),
+        Err(TerminalError::Finished)
+    ));
+    barrier.release();
+    let end = f.finished(id).await;
+    assert_eq!(end.state, JobState::Succeeded, "{end:?}");
+}
+
 /// The directory opens again as soon as a shutdown returns, also when a
 /// job's task hadn't run to its end by then (here the clock jumps past the
 /// shutdown's waits before a call that ignores its stop is dropped).

@@ -422,14 +422,14 @@ pub(super) async fn run(
             },
         }
     };
-    running.ending(&data);
+    // The monitor is ending from now on.
+    data.lock().unwrap().decide(stop);
     // Dropping a run stops its processes.
     drop(current);
     let (snapshot, ending) = {
         let mut data = data.lock().unwrap();
         let ending = monitor::end_reason(stop, done, data.stopped_by, None, failure.as_deref());
-        data.record.state = stop;
-        data.record.error = failure.or(match (done, data.stopped_by) {
+        let error = failure.or(match (done, data.stopped_by) {
             (Some(done), _) => done.error(),
             (None, Some(calls::StopCause::User)) => Some("stopped by the user".into()),
             (None, Some(calls::StopCause::OwnerEnded)) => {
@@ -437,14 +437,7 @@ pub(super) async fn run(
             }
             _ => None,
         });
-        data.record.revision += 1;
-        if let Err(error) = persist(&config, &data.record) {
-            data.record.state = JobState::Failed;
-            data.record.error = Some(format!("could not persist terminal result: {error}"));
-        }
-        let snapshot = data
-            .snapshot(&config, None, config.excerpt_bytes)
-            .expect("valid output window");
+        let snapshot = data.finish(&config, stop, error);
         (snapshot, ending)
     };
     if let Some(reason) = ending.filter(|_| !told) {

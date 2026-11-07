@@ -443,9 +443,6 @@ pub(super) struct Arming {
     pub(super) lasts: Duration,
     /// Its warning for this arm went.
     pub(super) warned: bool,
-    /// It is ending (it expired, or it was stopped), so it can't be
-    /// rearmed.
-    pub(super) ending: bool,
     /// Its time passed while its owner's workers ran, which kept it.
     pub(super) held: bool,
 }
@@ -557,12 +554,15 @@ impl Running {
                 return None;
             }
             if now >= arming.expires {
-                arming.ending = true;
-                return Some(if arming.held {
+                let done = if arming.held {
                     Done::WorkersFinished
                 } else {
                     Done::Expired
-                });
+                };
+                // Under the same lock as the decision, so no rearm comes
+                // between them.
+                data.decide(done.state());
+                return Some(done);
             }
             if arming
                 .warning(&self.limits, inputs)
@@ -591,13 +591,6 @@ impl Running {
             },
         );
         None
-    }
-
-    /// Marks the monitor as ending, so it can't be rearmed.
-    pub(super) fn ending(&self, data: &Mutex<JobData>) {
-        if let Some(arming) = data.lock().unwrap().monitor.as_mut() {
-            arming.ending = true;
-        }
     }
 
     /// Queues `news` for the owner.
@@ -943,7 +936,6 @@ impl Watching {
                 expires: Instant::now() + options.expires_in,
                 lasts: options.expires_in,
                 warned: false,
-                ending: false,
                 held: false,
             },
             regex,
