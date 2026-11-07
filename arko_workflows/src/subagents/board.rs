@@ -4301,3 +4301,40 @@ mod closed_stays_closed_tests {
         assert_eq!(workflow.subagents()[0], run);
     }
 }
+
+#[cfg(test)]
+mod launch_result_tests {
+    use super::super::tests::{HeldFolders, finished_isolated_run, within};
+    use super::*;
+    use crate::test_support::Workspace;
+
+    fn resume() -> PendingLaunch {
+        PendingLaunch::Resume {
+            message: String::new(),
+        }
+    }
+
+    /// A launch says whether it launched or queued the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_says_whether_it_launched() {
+        let workspace = Workspace::new();
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, _server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        assert!(!ctx.subagents.launch(&ctx, Uuid::new_v4(), resume()));
+        provider.go_on.notify_one();
+        within(ctx.subagents.stop(&ctx, run.caller_run_id, "r1", "", true))
+            .await
+            .unwrap();
+        assert!(!ctx.subagents.launch(&ctx, run.run_id, resume()), "closed");
+        let (workflow, _server) = finished_isolated_run(&workspace, provider, None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        assert!(ctx.subagents.launch(&ctx, run.run_id, resume()), "open");
+        assert!(!ctx.subagents.launch(&ctx, run.run_id, resume()), "running");
+    }
+}

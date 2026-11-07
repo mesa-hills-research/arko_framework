@@ -2728,3 +2728,30 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
         assert_eq!(result.unwrap(), format!("{said} Still running: r1."));
     }
 }
+
+/// A stop_agent call dropped once the provider was asked leaves the run
+/// closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_dropped_while_the_provider_removes_leaves_the_run_closed() {
+    let workspace = Workspace::new();
+    let provider = Arc::new(HeldFolders {
+        root: workspace.0.join("isolated"),
+        ..HeldFolders::default()
+    });
+    let (workflow, _server) = finished_isolated_run(&workspace, provider.clone(), None).await;
+    let ctx = workflow.context().clone();
+    let run = workflow.subagents()[0].clone();
+    let previous = workflow.agent_result(run.run_id).unwrap();
+    let removal = tokio::spawn({
+        let ctx = ctx.clone();
+        let lead = run.caller_run_id;
+        async move { ctx.subagents.stop(&ctx, lead, "r1", "", true).await }
+    });
+    within(provider.removing.notified()).await;
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    provider.go_on.notify_one();
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
+    let continued = within(workflow.continue_agent(&previous, "More.")).await;
+    assert!(continued.is_err(), "a run being removed was continued");
+}
