@@ -358,23 +358,17 @@ impl Board {
         self.bump();
     }
 
-    /// Saves the change soon, with the live checkpoint while runs are live,
-    /// else with a checkpoint.
+    /// Saves the change soon, as [`save`] does.
     fn save_soon(&self, ctx: &Arc<SharedContext>) {
-        let Some(persistence) = ctx.persistence.clone() else {
+        if ctx.persistence.is_none() {
             return;
-        };
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let ctx = ctx.clone();
         runtime.spawn(async move {
-            let saved = if persistence.has_live_runs() {
-                persistence.write_live_checkpoint(&ctx, false).await
-            } else {
-                persistence.auto_checkpoint(&ctx).await
-            };
-            if let Err(error) = saved {
+            if let Err(error) = save(&ctx, false).await {
                 log::warn!(
                     "Workflow '{}': could not save the subagents' state: {error}",
                     ctx.workflow_name
@@ -2661,7 +2655,9 @@ impl Board {
         // no continuation, resume or recovery the host asks for does. The
         // registry is asked under the board's lock, so a run the host starts
         // in between is seen here, and the board's own launches wait for the
-        // same lock. A removal that fails opens it again.
+        // same lock. It's saved before the workspace goes, so a workflow that
+        // ends meanwhile resumes it closed. A removal that fails opens it
+        // again.
         let before = {
             let mut state = self.state.lock();
             let Some(record) = state
@@ -2688,7 +2684,13 @@ impl Board {
             before
         };
         self.bump();
-        if let Err(error) = provider.remove(&workspace).await {
+        let removed = match save(ctx, true).await {
+            Ok(()) => provider.remove(&workspace).await,
+            Err(error) => Err(format!(
+                "{handle}'s workspace stays, because the workflow couldn't be saved: {error}"
+            )),
+        };
+        if let Err(error) = removed {
             {
                 let mut state = self.state.lock();
                 if let Some(record) = state
@@ -2706,7 +2708,6 @@ impl Board {
         if let Some(record) = self.record(run.run_id) {
             self.emit(&record, SubagentEventKind::WorkspaceRemoved);
         }
-        self.save_soon(ctx);
         let branch = workspace.branch.map_or_else(String::new, |branch| {
             format!(" Its branch `{branch}` stays.")
         });
@@ -2851,6 +2852,20 @@ impl Board {
         self.config
             .as_ref()
             .is_some_and(|config| depth < config.max_depth)
+    }
+}
+
+/// Saves the workflow, its board with it, in the live checkpoint while runs
+/// are live, else in a checkpoint if the workflow saves them by itself. A
+/// `durable` live checkpoint is flushed to disk with its directory.
+async fn save(ctx: &SharedContext, durable: bool) -> Result<(), WorkflowError> {
+    let Some(persistence) = &ctx.persistence else {
+        return Ok(());
+    };
+    if persistence.has_live_runs() {
+        persistence.write_live_checkpoint(ctx, durable).await
+    } else {
+        persistence.auto_checkpoint(ctx).await
     }
 }
 
