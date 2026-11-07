@@ -1016,10 +1016,10 @@ impl Board {
     }
 
     /// Launches run `run_id` (`launch` says how), or queues it while
-    /// [`SubagentsConfig::max_running`] runs are running. A closed run
-    /// stays closed.
-    fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
-        self.launch_if(ctx, run_id, launch, false);
+    /// [`SubagentsConfig::max_running`] runs are running, and returns
+    /// whether it did. A closed run stays closed.
+    fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) -> bool {
+        self.launch_if(ctx, run_id, launch, false)
     }
 
     fn launch_if(
@@ -1028,19 +1028,19 @@ impl Board {
         run_id: Uuid,
         launch: PendingLaunch,
         queued_only: bool,
-    ) {
+    ) -> bool {
         let max = self.config.as_ref().and_then(|config| config.max_running);
         let resumed = matches!(launch, PendingLaunch::Resume { .. });
         let (record, started) = {
             let mut state = self.state.lock();
             let running = self.places_taken(&state);
             let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id) else {
-                return;
+                return false;
             };
             if record.state == SubagentState::Running
                 || (queued_only && record.state != SubagentState::Queued)
             {
-                return;
+                return false;
             }
             let has_place = max.is_none_or(|max| running < max.get());
             let runtime = tokio::runtime::Handle::try_current().ok();
@@ -1052,7 +1052,7 @@ impl Board {
             };
             // A closed run stays closed.
             if !move_to(record, next) {
-                return;
+                return false;
             }
             record.stopped_by_caller = None;
             record.stop_requested = None;
@@ -1070,7 +1070,7 @@ impl Board {
         let Some(runtime) = started else {
             self.emit(&record, SubagentEventKind::Queued);
             self.save_soon(ctx);
-            return;
+            return true;
         };
         self.emit(
             &record,
@@ -1082,6 +1082,7 @@ impl Board {
         );
         let driver = runtime.spawn(drive(ctx.clone(), run_id, launch));
         self.drivers.lock().insert(run_id, driver.abort_handle());
+        true
     }
 
     /// Starts the queued runs that have a place now, oldest first.
@@ -1401,20 +1402,19 @@ impl Board {
                 message: String::new(),
             });
             if run.state == SubagentState::Queued {
-                // Its place comes in turn.
+                // Its place comes in turn, unless it started or stopped since.
                 let mut state = self.state.lock();
-                if let Some(record) = state
-                    .runs
-                    .iter_mut()
-                    .find(|record| record.run_id == run.run_id)
-                {
+                if let Some(record) = state.runs.iter_mut().find(|record| {
+                    record.run_id == run.run_id && record.state == SubagentState::Queued
+                }) {
                     record.pending = Some(launch);
+                    resumed.push(run.handle);
                 }
-                resumed.push(run.handle);
                 continue;
             }
-            self.launch(ctx, run.run_id, launch);
-            resumed.push(run.handle);
+            if self.launch(ctx, run.run_id, launch) {
+                resumed.push(run.handle);
+            }
         }
         self.start_queued(ctx);
         resumed
@@ -1473,10 +1473,18 @@ impl Board {
             else {
                 return;
             };
-            // A run a stop of the workflow ended has its stop news already.
-            if record.state == SubagentState::Stopped || !move_to(record, SubagentState::Stopped) {
+            // Only a run still in the state it was chosen in is stopped. One a
+            // stop of the workflow ended has its stop news already, and one a
+            // removal closed or a message started since stays as it is.
+            if record.state != orphan.state
+                || !matches!(
+                    orphan.state,
+                    SubagentState::Interrupted | SubagentState::Queued
+                )
+            {
                 return;
             }
+            move_to(record, SubagentState::Stopped);
             record.error = Some(reason.clone());
             record.pending = None;
             record.asking = false;
@@ -3753,7 +3761,9 @@ mod record_tests {
 /// orphans and their stop.
 #[cfg(test)]
 mod orphan_stop_tests {
-    use super::super::tests::{HeldFolders, bodies_of, builder, finished_isolated_run, within};
+    use super::super::tests::{
+        HeldFolders, bodies_of, builder, finished_isolated_run, until, within,
+    };
     use super::*;
     use crate::persistence::PersistenceConfig;
     use crate::test_support::Workspace;
@@ -3830,6 +3840,39 @@ mod orphan_stop_tests {
             continued.as_ref().map(|result| &result.status)
         );
         assert_eq!(bodies_of(&server, "r1").len(), 1, "r1 made no request");
+    }
+
+    /// A run a message started after it was chosen goes on, and its lead
+    /// isn't told that it stopped.
+    #[tokio::test]
+    async fn a_run_started_after_it_was_chosen_as_an_orphan_goes_on() {
+        let workspace = Workspace::new();
+        let provider = Arc::new(HeldFolders {
+            root: workspace.0.join("isolated"),
+            ..HeldFolders::default()
+        });
+        let (workflow, server) = finished_isolated_run(&workspace, provider, None).await;
+        let ctx = workflow.context().clone();
+        let run = workflow.subagents()[0].clone();
+        let (lead, orphans) = orphan_of_a_finished_lead(&ctx);
+        // The message launches it, and its driver starts at the next await.
+        workflow
+            .message_subagent("r1", "More.", "Your lead sent you a message:", "")
+            .unwrap();
+        for orphan in orphans {
+            ctx.subagents.stop_orphan(&ctx, orphan);
+        }
+        let state = ctx.subagents.record(run.run_id).unwrap().state;
+        let told = ctx
+            .subagents
+            .pending(lead)
+            .iter()
+            .any(|item| item.kind == MailKind::Stopped);
+        assert!(
+            state == SubagentState::Running && !told,
+            "the run a message started is {state:?}, and its lead was told it stopped: {told}"
+        );
+        until(|| bodies_of(&server, "r1").len() == 2).await;
     }
 
     /// A removal that fails after its run was chosen leaves the run as it
