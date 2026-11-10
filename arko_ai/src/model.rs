@@ -936,6 +936,42 @@ impl Model {
         }
     }
 
+    /// <https://platform.claude.com/docs/en/models/fable-5-2/overview>
+    pub fn anthropic_claude_fable_5_2() -> Self {
+        Self {
+            provider: Provider::Anthropic,
+            id: "claude-fable-5-2".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 8.00,
+                output_cost_per_million: 40.00,
+                cached_input_cost_per_million: Some(0.20),
+                cache_write_cost_per_million: Some(10.00),
+                cache_write_1h_cost_per_million: Some(16.00),
+                service_tiers: vec![TierPricing::fast(2.0)],
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Claude Fable 5.2 for organizations verified through one of Anthropic's
+    /// verification programs. The model, limits and prices are the same
+    /// ([`Model::is_fable_or_mythos_5_2`]). Released 2026-11-09, retirement not
+    /// sooner than 2027-11-09.
+    /// <https://platform.claude.com/docs/en/models/mythos-5-2/overview>
+    pub fn anthropic_claude_mythos_5_2() -> Self {
+        Self {
+            id: "claude-mythos-5-2".to_string(),
+            ..Self::anthropic_claude_fable_5_2()
+        }
+    }
+
     /// <https://platform.claude.com/docs/en/models/fable-5-1/overview>
     pub fn anthropic_claude_fable_5_1() -> Self {
         Self {
@@ -1973,6 +2009,8 @@ impl Model {
 
     pub(crate) fn list_anthropic_models() -> Vec<Self> {
         vec![
+            Self::anthropic_claude_fable_5_2(),
+            Self::anthropic_claude_mythos_5_2(),
             Self::anthropic_claude_fable_5_1(),
             Self::anthropic_claude_mythos_5_1(),
             Self::anthropic_claude_fable_5(),
@@ -2308,6 +2346,16 @@ impl Model {
         self.id.starts_with("gpt-5-pro")
     }
 
+    pub fn is_mythos_5_2(&self) -> bool {
+        self.id == "claude-mythos-5-2"
+    }
+
+    /// Claude Fable 5.2 or Claude Mythos 5.2, the same model under two ids,
+    /// so every Fable 5.2 rule applies to both.
+    pub fn is_fable_or_mythos_5_2(&self) -> bool {
+        self.id == "claude-fable-5-2" || self.is_mythos_5_2()
+    }
+
     pub fn is_fable_5_1(&self) -> bool {
         self.id == "claude-fable-5-1"
     }
@@ -2369,7 +2417,8 @@ impl Model {
     /// Claude models whose 1M context window is standard (no beta header), which
     /// is also the "Claude 4.6 and later" set used by data residency.
     fn is_anthropic_4_6_or_later(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2390,7 +2439,8 @@ impl Model {
     }
 
     pub fn defaults_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2405,14 +2455,16 @@ impl Model {
     /// below, and this client sends it only without an Anthropic reasoning config,
     /// so at the model's default effort.
     pub fn always_uses_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_sonnet_5_5()
     }
 
     pub fn rejects_anthropic_manual_thinking(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2425,7 +2477,8 @@ impl Model {
 
     /// Non-default `temperature`, `top_p` or `top_k` return 400 on these models.
     pub fn omits_anthropic_sampling_parameters(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2440,7 +2493,8 @@ impl Model {
     /// be requested with `thinking.display`. On Opus 4.6, Sonnet 4.6 and earlier
     /// thinking models summarized text is already the default.
     pub fn supports_anthropic_summarized_thinking_display(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2458,7 +2512,8 @@ impl Model {
     }
 
     pub fn supports_anthropic_xhigh_effort(&self) -> bool {
-        self.is_fable_or_mythos_5_1()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2478,15 +2533,27 @@ impl Model {
     /// is enabled.
     /// <https://platform.claude.com/docs/en/build-with-claude/thinking>
     pub fn rejects_anthropic_forced_tool_choice(&self) -> bool {
-        self.is_fable_or_mythos_5_1() || self.is_opus_5_5() || self.is_sonnet_5_5()
+        self.is_fable_or_mythos_5_2()
+            || self.is_fable_or_mythos_5_1()
+            || self.is_opus_5_5()
+            || self.is_sonnet_5_5()
     }
 
-    /// Whether fast mode (`speed: "fast"`, research preview) is supported.
-    /// Available for Opus 5.5, Opus 5 and Opus 4.8 on the Claude API.
-    /// Opus 4.7 rejects it. Opus 4.6 silently runs at standard speed.
+    /// Whether fast mode (`speed: "fast"`) is supported, on Fable 5.2, Mythos
+    /// 5.2, Opus 5.5, Opus 5 and Opus 4.8 on the Claude API. Opus 4.7 rejects
+    /// it. Opus 4.6 silently runs at standard speed.
     /// <https://platform.claude.com/docs/en/build-with-claude/fast-mode>
     pub fn supports_anthropic_fast_mode(&self) -> bool {
-        self.is_opus_5_5() || self.is_opus_5() || self.is_opus_4_8()
+        self.is_fable_or_mythos_5_2()
+            || self.is_opus_5_5()
+            || self.is_opus_5()
+            || self.is_opus_4_8()
+    }
+
+    /// Fast mode on Opus 5 and Opus 4.8 is a research preview that needs the
+    /// `fast-mode-2026-02-01` beta header. The other fast models need none.
+    pub fn needs_anthropic_fast_mode_beta(&self) -> bool {
+        self.is_opus_5() || self.is_opus_4_8()
     }
 
     /// `inference_geo` is accepted on Claude 4.6 and later. Older models return 400.
@@ -2779,7 +2846,7 @@ mod tests {
         assert_eq!(position("gpt-6.1-terra"), position("gpt-6.1-sol") + 1);
     }
 
-    /// Cache reads cost 0.025x input on Fable 5.1 and Mythos 5.1, 0.05x on
+    /// Cache reads cost 0.025x input on Fable and Mythos 5.1 and 5.2, 0.05x on
     /// Opus 5.5 and Sonnet 5.5, and 0.1x on every other Claude model.
     /// https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
     #[test]
@@ -2787,7 +2854,8 @@ mod tests {
         for model in Model::list(Provider::Anthropic) {
             let pricing = &model.pricing;
             let expected = match model.id.as_str() {
-                "claude-fable-5-1" | "claude-mythos-5-1" => 0.025,
+                "claude-fable-5-2" | "claude-mythos-5-2" | "claude-fable-5-1"
+                | "claude-mythos-5-1" => 0.025,
                 "claude-opus-5-5" | "claude-sonnet-5-5" => 0.05,
                 _ => 0.1,
             };
@@ -2863,6 +2931,23 @@ mod tests {
             (fable.max_input_tokens, fable.max_output_tokens)
         );
 
+        // Fable 5.2 keeps every Fable 5.1 rule and adds fast mode, without the
+        // beta. Mythos 5.2 is Fable 5.2 under another id.
+        let fable_5_2 = Model::anthropic_claude_fable_5_2();
+        let mythos_5_2 = Model::anthropic_claude_mythos_5_2();
+        assert!(fable_5_2.is_fable_or_mythos_5_2() && !fable_5_2.is_mythos_5_2());
+        assert!(mythos_5_2.is_fable_or_mythos_5_2() && mythos_5_2.is_mythos_5_2());
+        assert!(!fable_5_2.is_fable_or_mythos_5_1());
+        let mut expected = rules(&fable);
+        expected[10] = true; // supports_anthropic_fast_mode
+        assert_eq!(rules(&fable_5_2), expected);
+        assert_eq!(rules(&mythos_5_2), expected);
+        assert!(!fable_5_2.needs_anthropic_fast_mode_beta());
+        assert_eq!(
+            serde_json::to_value(&mythos_5_2.pricing).unwrap(),
+            serde_json::to_value(&fable_5_2.pricing).unwrap()
+        );
+
         let sonnet = Model::anthropic_claude_sonnet_5_5();
         assert!(sonnet.is_sonnet_5_5());
         assert!(!sonnet.is_sonnet_5());
@@ -2910,6 +2995,7 @@ mod tests {
             ("anthropic/claude-haiku-5.5", "claude-haiku-5-5"),
             ("anthropic/claude-haiku-4.5", "claude-haiku-4-5-20251001"),
             ("anthropic/claude-mythos-5.1", "claude-mythos-5-1"),
+            ("anthropic/claude-fable-5.2", "claude-fable-5-2"),
         ] {
             assert_eq!(
                 Model::openrouter(slug)

@@ -29,7 +29,7 @@ pub struct GenerationConfig {
     /// Sampling temperature. `None` (the default) sends none, so the model's
     /// default applies. OpenAI reasoning models and Google's Interactions API
     /// take no temperature, so a set one is an error for requests to them.
-    /// Claude models that take no sampling parameters (Fable 5.x, Mythos 5.1,
+    /// Claude models that take no sampling parameters (Fable 5.x, Mythos 5.x,
     /// Opus 4.7 and later, Sonnet 5 and later, Haiku 5.5) drop it, with a
     /// warning logged once per model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,7 +91,7 @@ pub struct GenerationConfig {
     /// Requests summarized Anthropic thinking text while thinking is enabled
     /// (adaptive or manual budgets).
     ///
-    /// Claude Fable 5.1, Mythos 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7,
+    /// Claude Fable 5.x, Mythos 5.x, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7,
     /// Sonnet 5.5, Sonnet 5 and Haiku 5.5 default to omitted thinking text, so this
     /// sends `thinking.display: "summarized"`. On Opus 4.6, Sonnet 4.6 and earlier
     /// thinking models summarized text is already the default and nothing extra
@@ -184,10 +184,11 @@ pub struct GenerationConfig {
     /// uncached, and `Some(0)` reports it so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_lifetime_seconds: Option<u64>,
-    /// Anthropic fast mode (`speed: "fast"` with the `fast-mode-2026-02-01` beta
-    /// header, research preview, Claude API only). Supported on Claude Opus 5.5,
-    /// Opus 5 and Opus 4.8 and rejected locally for other models. Priced at the
-    /// model's fast-mode rates. The response's `usage.speed` decides the price.
+    /// Anthropic fast mode (`speed: "fast"`, Claude API only). Supported on Claude
+    /// Fable 5.2, Mythos 5.2, Opus 5.5, Opus 5 and Opus 4.8 and rejected locally
+    /// for other models. Opus 5 and Opus 4.8 also get the `fast-mode-2026-02-01`
+    /// beta header (research preview). Priced at the model's fast-mode rates. The
+    /// response's `usage.speed` decides the price.
     /// `None` and `Some(false)` send nothing.
     /// <https://platform.claude.com/docs/en/build-with-claude/fast-mode>
     #[serde(default, skip_serializing_if = "Option::is_none")]

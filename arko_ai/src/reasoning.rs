@@ -30,7 +30,7 @@ pub enum OpenAIReasoningMode {
 ///
 /// `Low`, `Medium`, and `High` are available on all supported effort models.
 ///
-/// `XHigh` is available on Claude Fable 5.x, Mythos 5.1, Opus 4.7 and later,
+/// `XHigh` is available on Claude Fable 5.x, Mythos 5.x, Opus 4.7 and later,
 /// Sonnet 5 and later, and Haiku 5.5
 /// ([`Model::supports_anthropic_xhigh_effort`](crate::Model::supports_anthropic_xhigh_effort)).
 ///
@@ -270,7 +270,7 @@ pub enum ReasoningConfig {
     /// Supported on Claude 4.6 and later models
     /// ([`Model::supports_anthropic_adaptive_thinking`](crate::Model::supports_anthropic_adaptive_thinking)).
     ///
-    /// Claude Fable 5.x, Mythos 5.1, Opus 5.5 and Sonnet 5.5 always use adaptive
+    /// Claude Fable 5.x, Mythos 5.x, Opus 5.5 and Sonnet 5.5 always use adaptive
     /// thinking. Claude Opus 5, Sonnet 5 and Haiku 5.5 also think adaptively by
     /// default when this configuration is absent.
     AnthropicAdaptive {
