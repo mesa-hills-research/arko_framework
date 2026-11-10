@@ -89,7 +89,7 @@ impl AnthropicClient {
             && !conversation.model.supports_anthropic_fast_mode()
         {
             return Err(Error::InvalidRequest(format!(
-                "Fast mode is not supported for model '{}'. Use Claude Opus 5.5, Opus 5 or Opus 4.8. Opus 4.6 would silently run at standard speed.",
+                "Fast mode is not supported for model '{}'. Use Claude Fable 5.2, Mythos 5.2, Opus 5.5, Opus 5 or Opus 4.8. Opus 4.6 would silently run at standard speed.",
                 conversation.model.id
             )));
         }
@@ -180,7 +180,9 @@ impl AnthropicClient {
     fn compute_betas(conversation: &Conversation, config: &GenerationConfig) -> Vec<&'static str> {
         let mut betas = Vec::new();
 
-        if config.anthropic_fast_mode == Some(true) {
+        if config.anthropic_fast_mode == Some(true)
+            && conversation.model.needs_anthropic_fast_mode_beta()
+        {
             betas.push("fast-mode-2026-02-01");
         }
 
@@ -1794,6 +1796,8 @@ mod tests {
     fn latest_claude_models_build_adaptive_requests_without_beta_headers() {
         let client = AnthropicClient::new("test");
         for id in [
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
             "claude-fable-5-1",
             "claude-mythos-5-1",
             "claude-opus-5",
@@ -1839,9 +1843,11 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_1_rejects_disabled_thinking_and_forced_tool_use() {
-        // Mythos 5.1 is the same model for verified organizations.
+    fn fable_and_mythos_reject_disabled_thinking_and_forced_tool_use() {
+        // Mythos is the same model as Fable for verified organizations.
         for model in [
+            Model::anthropic_claude_fable_5_2(),
+            Model::anthropic_claude_mythos_5_2(),
             Model::anthropic_claude_fable_5_1(),
             Model::anthropic_claude_mythos_5_1(),
         ] {
@@ -2668,16 +2674,26 @@ mod model_rule_tests {
     #[test]
     fn fast_mode_sends_speed_and_beta_only_on_supported_models() {
         let fast = GenerationConfig::default().with_anthropic_fast_mode(true);
-        for model in [
-            Model::anthropic_claude_opus_5_5(),
-            Model::anthropic_claude_opus_5(),
-            Model::anthropic_claude_opus_4_8(),
+        // Only the research preview on Opus 5 and Opus 4.8 needs the beta.
+        for (model, beta) in [
+            (Model::anthropic_claude_fable_5_2(), None),
+            (Model::anthropic_claude_mythos_5_2(), None),
+            (Model::anthropic_claude_opus_5_5(), None),
+            (
+                Model::anthropic_claude_opus_5(),
+                Some("fast-mode-2026-02-01"),
+            ),
+            (
+                Model::anthropic_claude_opus_4_8(),
+                Some("fast-mode-2026-02-01"),
+            ),
         ] {
             let value = request(model.clone(), &fast).unwrap();
             assert_eq!(value["speed"], "fast");
-            assert_eq!(betas(model, &fast).as_deref(), Some("fast-mode-2026-02-01"));
+            assert_eq!(betas(model, &fast).as_deref(), beta);
         }
         for model in [
+            Model::anthropic_claude_fable_5_1(),
             Model::anthropic_claude_opus_4_7(),
             Model::anthropic_claude_opus_4_6(),
         ] {
