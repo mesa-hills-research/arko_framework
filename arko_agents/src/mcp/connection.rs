@@ -12,6 +12,7 @@ use std::time::Duration;
 use arko_ai::process::NoConsoleWindow;
 use arko_ai::process_tree::{ProcessTree, exited};
 use rmcp::ServiceExt;
+use rmcp::model::{ClientConfig, ProtocolVersion};
 use rmcp::service::{Peer, RoleClient, RunningService};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
@@ -268,7 +269,7 @@ fn runnable(path: &Path) -> bool {
 /// A server's process and the MCP session with it.
 pub(crate) struct Connection {
     name: String,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, ClientConfig>,
     /// Sent to stop the server process gracefully. Dropped, it is killed.
     stop: Option<oneshot::Sender<()>>,
     watcher: Option<JoinHandle<Option<ServerExit>>>,
@@ -366,8 +367,12 @@ impl Connection {
             exit.clone(),
         );
 
+        // The `initialize` handshake asks for the newest version that has
+        // one, which rmcp's default (the newest of all) doesn't.
+        let client =
+            ClientConfig::default().with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
         // Should the handshake fail, dropping `stop` kills the server.
-        let service = match ().serve((stdout, stdin)).await {
+        let service = match client.serve((stdout, stdin)).await {
             Ok(service) => service,
             Err(error) => {
                 // A server that exited is reported by its exit.

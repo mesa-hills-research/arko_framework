@@ -146,6 +146,20 @@ fn lead(hub: &Arc<McpHub>) -> (McpBridgeTool, Arc<Changes>) {
     )
 }
 
+/// The handshake asks for a version that has one, which the stub echoes.
+#[tokio::test]
+async fn the_handshake_asks_for_a_version_with_initialize() {
+    let mut connection = connection::Connection::open(&stub("stub", &[]))
+        .await
+        .unwrap();
+    let info = connection.peer().peer_info().unwrap();
+    assert_eq!(
+        info.protocol_version,
+        rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE
+    );
+    connection.stop().await;
+}
+
 #[tokio::test]
 async fn the_hub_starts_stops_adds_and_removes_servers_and_reports_failures() {
     let hub = McpHub::new(vec![stub("issues", &[]), missing("broken")]);
