@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "arko_index"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arko_ai",
  "burn-cuda",
@@ -3188,9 +3188,9 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
 name = "mesquite"
-version = "0.25.10"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e6d8781f488b0ef3eab29dd945c6fbf9b68507f6412f3e60ad13a900ae3cbb"
+checksum = "dc5fa6d732e0dede6ede9f4ab71b4b50106e895fe843f0bcd76c8e585a3a3124"
 dependencies = [
  "mesquite_language",
  "regex",
@@ -3199,285 +3199,285 @@ dependencies = [
 
 [[package]]
 name = "mesquite_astro"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c1f99dbc8d29a2184bf87a825f4aac3865541b350280a31d4df2c6d4eb9812c"
+checksum = "eb673818de212dd96568682b366f45c0bc09e044a8de2ffc7fc7d27e37d6a801"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_bash"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d7aee0c64b33110817533d21380f49746724b39f2eb01f8ea067ea42c165db"
+checksum = "1a2f2368c996a08c2136f8718cbfd60e1b13d441287990e3f3139d401233c0d1"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_c"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cba7a2bcbdc8aeebbcc301aea804c26cc553cd3318826707baed65901b0341e"
+checksum = "e18a2927491f1fd91c8f26e2d96b7e83841d1101cbed6c6a9f125a3ebcd4ee43"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_c_sharp"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5964bfcd9d6b9c913a40c265bee8b795b04b3168c3ce25bfbdad57ba0cd4340"
+checksum = "9b21fb030813c3d961d9cf49f97c57c47cb5f7827a5c6fe2e55b66e47ff78d35"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_cmake"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45ff2e56c9b7618115f7953cbbf63ca6adacae6a1acf7a7998122b10bf3f84a8"
+checksum = "561f4ff2dcff2a696642d3545bd8f07f0b60386af2dcfa1a7c488aa07a55acc1"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_cpp"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b6741bfb4b85e8a35f25a8b73bfbbcfad7f0bd9fc409543f288500b8a1907e8"
+checksum = "7690b0bfd71792caf5562597eb4b328c703f56abb584d840e8b2ab5f4806eb84"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_css"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8f70812fbdd78510b22405ed05239ad5b7dd209f0f1afdfce9607233cc5caf7"
+checksum = "87504c7a70fd88777985b18777bd7ed7fd2cc77cca634cd9adadc59219bcd740"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_cuda"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fca2cf901f2be804c25a97b1632dd747eb003bc384eb394544d4ed7e66d5443"
+checksum = "9058ae88f1a5f33708a96fc387742487c062914480307bb3c2b8b2cc59f28bd0"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_dart"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aadc43bae0511177ca881378422fee63dd6d360bf7eea25b502fe3b07f604ec2"
+checksum = "e9c38051d2345809d17aaa1e89f8da199a2974799da7eccee1d4811775d85105"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_diff"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7663d24aaef5e06bed6cf0776c67dd767e1b886b13af325d79c4b2fb7a1cd24d"
+checksum = "f779b113d82dbef6b2c23298b002324214e757b88ec5d3d3dcaace534da1ae9f"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_dtd"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b75a190466bc57b6f9b9efae0081d1a6dd35504253cc9d9ae70f033069f84648"
+checksum = "6c69ec61eaf971ce3295f509625d578345cf9daf776aab0b41c04de82b9cd163"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_elixir"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae64b3d64c85ef34c3976cb142e25de86307a51269d3309744c94992b02930d1"
+checksum = "88aa7f95a96eb972d591dad3a88a27d381f0b71840a4aa734b53d9d03c5a2445"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_elm"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77fb9b07da6c198fb6ace70dab0f0329827bfe2ca097559669c03deabaf2ad26"
+checksum = "d31e388340c5c9a1de745f38c873291d354d8acdf0fc257d0883fda67593a141"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_embedded_template"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7225203f89f769dcd4ca847b85d80a5ce3a62ad3ecacf914cda20b4a50f776d3"
+checksum = "6a3a84e6157a78c4136212e62b4470dd8fa2bd526d3999c64b0a50906d268050"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_erlang"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "756315fa92b1b0c484229fbb30297739705e6055741c66ee8d8e87a71198cc2d"
+checksum = "a028359766330935a07dccdd1dd6e1c7ac6b08bfcb91c83f7005181bff0b5125"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_fortran"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee547cace2337d936f5376dc72b330f1a22c8e04580fcc7cff6d5745b9277b54"
+checksum = "01a5f6b3bfb07579dada4be5d5b3be7dfdb5d8a8828094ac775ad60b7291f8ff"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_fsharp"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc003bbdaf147a6125130a0f365357314635c3b403560ac07c1e6779bd9b0ef2"
+checksum = "28eda49fac540907afa4219cb15b73b6da64525c10c21a1180fb01b908f51862"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_glsl"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a063071e1aabfd7c021bad4bc10807aefcc466779ed463543ee46aeb7d5c9e89"
+checksum = "9962895a2e054c0813353cfd929e46d87fcce54d9909cefd98a98110922e1475"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_go"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56f6da54a6ce85292f19bb8007a96bae8986597258b4dcb7ee3dd13ba581f3ee"
+checksum = "1c0b164c066d392f3821929815c412e9101fa7e7ff424e3c15b4b2a2dfe3cc3a"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_graphql"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de898087b668664792f5cbcfc542536525a14b5ef84a1bcaea9bf050ad1c80f3"
+checksum = "d12da36f6f3f7ef8cceb620ea890f148064ea0e26c1bfbdfa7fda96530cdef20"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_haskell"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0bfc46c50fef27b1d54c756bead8060a3af76756dca01e488859eb0b5a5e7d7"
+checksum = "66b51b9040caf79c9b94b259ed3a8a78db43650460e69e4f07f407d99b5f6a89"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_hcl"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db5962537baceebf7ce48d9640d169786b6ccc9d47f518b028336fa1b0bb7372"
+checksum = "a2ef34679e7c6358f6106f60d485190780fff6af6cc2842f17c5045808573635"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_html"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1164199c33166eb9e4da4d377963e733f2aed68c3b69c9f9f8ab371ee11fed53"
+checksum = "bc92923ac92770688e82f071cb5fb21c8d3cf2cfc0844b4550df7e22efd1c6e3"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_java"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8d254a044912fa631490029ed8eaaa622a8c342faf8c52d265f7d836ad760b3"
+checksum = "724c326b93b8337e5cc9f2d15271fa5035ee0c3f84e8aba1db58594a6f7787ee"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_javascript"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd4a69b464956f5db1e6c1271cdc0c6b87e08e0eb661397e89b5832e9cee29ed"
+checksum = "0ae96ae8f3a0f9031f37532b3198547cf37ff4b96cd9d1445fdf9b10786bdafa"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_json"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f0fbceceb9f1ef17f8f62e0b308d0c86ea108b68fa69d024c2f70d836588a82"
+checksum = "b644817699bd5d5ee58eb3e82cf3a923e1944ff3b2bd90a329b746477f4b730f"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_julia"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "614de1aacffe6c001c1f820ca0014aa8adcb23ea54c7e56cd8c99437f1187321"
+checksum = "23161c7afd641dc88225c959599e4cac74ae39cb0aabe9d35e60e1fde85e7799"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_kotlin"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59c85791570ee8b3f117f08be294040ce3c62abc4e8ec4dfb73173d7e1906407"
+checksum = "078373dd03ac7de846fc7f68821b3034c4f5b1f49861016b5184c691bf0937b2"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_language"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44fe057271f7722874dac9a4141d1d953daff176a55b210c3cc56d0a3d1745d4"
+checksum = "52d5c14fe01febcea1cc80ef4a30aa1545597c87b0258fb871a5a21977df795d"
 
 [[package]]
 name = "mesquite_lua"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6897ed86ed970fc2177151e549e1d1c25b0762e7a6245d42b97f3dbd2ebcd5dd"
+checksum = "24d5f0c22c2091693b8aaa0dc931f70a3ec924db115da97c82eaed835bb1e9cf"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_make"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89cb4ae548f72d504afcbe5f25adc9937853ab47c47620a55f4dc8567f1123e"
+checksum = "04fe7705dc15c30d084c1e5760c12bf36f25c94004488f7d0d16216ca9fdb58c"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_markdown"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5019037386db39f86d5799ec88d82bbc84e227d1844d40a59aef15f85738e674"
+checksum = "96b7eef75141a42bf9661fb7c45a429ae405025d7343d763a47e33352dbd9ba6"
 dependencies = [
  "mesquite_language",
  "mesquite_markdown_inline",
@@ -3485,27 +3485,27 @@ dependencies = [
 
 [[package]]
 name = "mesquite_markdown_inline"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5ea909e06c461b4d686b7273a32c240e0670ead0de09a9d90b5dbf79795c2f3"
+checksum = "43c4919cd2a2da47905c35152e165a06971d2aeaef5b14c86ce313fc5d25f3a7"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_objc"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6784065505db67a205f159e976e90d4218782e0472393cf14cf4769483b1e204"
+checksum = "3973cb3b574d0c902a09f11662185d5c0be42d7f51fc3c0ab7eafd38fe5896d1"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_ocaml"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe3c4dccbf8dab8342891343057e365057ffd73557ba4cb49b9df0aad8eadf02"
+checksum = "f70415908d91161843f991344fab7ed751c09c1b3c640c960a7577784eae30e1"
 dependencies = [
  "mesquite_language",
  "mesquite_ocaml_interface",
@@ -3513,36 +3513,36 @@ dependencies = [
 
 [[package]]
 name = "mesquite_ocaml_interface"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "250d3540d70faf7823e239c688b66cb427a528f446a2baf7b8a7eaea68302cb5"
+checksum = "a973ccb6e299e1c38cde86158f6627ff30bedcc735b3d770923325a1fe0a337b"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_odin"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5b51e8d210f1116d4fe79dfa7a233dbfcf7cc73efc9e80fc27cc4c5bf95c7a"
+checksum = "f4084e994eb4ed1ddb0d801a403e5791038bdade544699029c13cdb54ce6ee1d"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_perl"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca6df95adf9750e0f4e422df1adf18afde71bdd33d4ca93cb72b9e171c08de20"
+checksum = "2bfe1b8143296ef7c8a2d2666cc08c1a76d2760cad1b9fc629c071575a59a8a2"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_php"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "312548b3c3469ef5eaeaee68cb487383d4e25466cbd30faad22f1b12ccfd3ce0"
+checksum = "2b1463cf203a0a98f5538fc44d69f8f7bbf09d1728c05a7400da0e855456cbfe"
 dependencies = [
  "mesquite_language",
  "mesquite_php_only",
@@ -3550,135 +3550,135 @@ dependencies = [
 
 [[package]]
 name = "mesquite_php_only"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "611cabe2c41c3391db8db5c4e1560e23eb08fbcfbfba23abf6cfe10d7a6296bf"
+checksum = "4ad419d382976277f2eb33f96724851029827d60ed6776de3eb9c53f53a6abac"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_powershell"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c96e1e0af1c0403927705cdb2ded5c332d921be0eddf8147f2b77aeb44f316"
+checksum = "bc481cbdc7f21c33b38ba2a4ddd94d19539dfcacaa20d6d00a9ff4a5ca356c4a"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_proto"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a94e09c131f7e67ac3fdb9b378826aea22fffd47cdd4048ee61345eafaf50a01"
+checksum = "f99a1c80ff257442d2bcddb3742dbbcb1d2cafd4774744a3d2d644e38d164ee5"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_python"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56f759f7cf0c069db021f97abf2807890207cc596e27d67b79fdb9bec7cc28f7"
+checksum = "f1e3adad33c98c5a6ce2d5a6d2adbafb370ba4454c67fcc4edf8583d62786c32"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_r"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e34643f9f92e6fa8550aec12972fa41d078c9c590d5123995f70b5e901536cf"
+checksum = "f6f76344b49741702bd3c9f89132216f80a3f5e06d04ce29f0bb00e924118aab"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_ruby"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79d30af43efb495353d8bfa107305aaab03ac3c11a66e3d0ac8a9cd844ce5c28"
+checksum = "9c9aa87a0941e778b6c1e0c85ed88c6b1fc0c1d1b87e5c0ade61e83d17b395a1"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_rust"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad5a7d72b30240e5c629e3ac8e4d654ae2065380b9039bee7f97865190b7d107"
+checksum = "4ec95b1ccf1f5df3a03ff8eb212287e8ddcd0afdad6acca9c53b6e10dead5064"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_scala"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe862bd5641c7228cd50728c2e7df9caa4359f12342ac99f119792145fc31d30"
+checksum = "2a511e146491756363780bf2c5daae9878d8695969f3a4e423a8dbeea92bd464"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_solidity"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbdab973965ea6071ea9d2f5c913e93737283985df2822663d16b5b034f8fe89"
+checksum = "9a7d9bf04fd4ea8e52ca4cfc7325afbd95b169930594c950625badc169f924ca"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_sql"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25aa8d9e16fba8611e12ee4e52084d3a7b1b7bf0c45fa6403cb010543b7f50c5"
+checksum = "7c1a871bd198e7a88c338dda481c5862acbed8b1115f8b9598730cd902745b79"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_svelte"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ba3bb530b24d9d33534e2c37aa51c494f3a34662d20e058ad5e2309eb37a5a"
+checksum = "e63a98268bcab8c5a796ad88c6c54aaed87bd8613c4be0292d902a0882946585"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_swift"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82301a3bc53e54688c1eebe054a2ed92ce48196cbd8218e7574971948255c2ea"
+checksum = "1557bf4f31c3625802924f10c73719fcf6d4b4c1cef75fc495dae98ddf959a64"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_toml"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01d03c014daabdf350b2a3071c048801e2c8d18c6b1b7bb8a0b88dda2e112feb"
+checksum = "ff77964510c585bfa838002a30da59a1d864b650768bb4200a4c8109883f44e8"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_tsx"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cb12618a408567da1aa0583ae22c58a9cd5cff15b773ab41a9f635d7e9af0cc"
+checksum = "7e4334125e83cf56f97e1316d93231cf2a3a3dce8b5dabe6bef7dcba4f891111"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_typescript"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fca4539f3244b8116d4e398e2bdbbb6824c40106a4166bb26e805b3eb3e3c249"
+checksum = "c92795ab1d2a059f700e41f395811e5de4d54ce2ce61a570e31279ce6290a7b7"
 dependencies = [
  "mesquite_language",
  "mesquite_tsx",
@@ -3686,18 +3686,18 @@ dependencies = [
 
 [[package]]
 name = "mesquite_verilog"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e9a2ee96aab92a0a623bd60389511ee20ebf1251c096be6211f1b8859b1425f"
+checksum = "bdd7fbd185d56e6bcb976792152e2864f8056eb47e14cbe6e26662730edbb03a"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_xml"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb18e77d0d4a9388c0855c267f1df32b6a0aa070709de61cb0699949346ae9d0"
+checksum = "0a268909be04bd71399ae62682a48fe50ee86144aac914c9da65db12bb1ad260"
 dependencies = [
  "mesquite_dtd",
  "mesquite_language",
@@ -3705,18 +3705,18 @@ dependencies = [
 
 [[package]]
 name = "mesquite_yaml"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8baed8fcee9f40ced36b04e88d6db635e63d6b5d8c5e815d8d12b72b901b8677"
+checksum = "c7712aa45300924ae3c955b0a68c3812168b78fd8ef43719fda815baded7eec8"
 dependencies = [
  "mesquite_language",
 ]
 
 [[package]]
 name = "mesquite_zig"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "310c888746cdd099a59655cb7953ad3be8359bd818baade83e345812abdb0040"
+checksum = "04018575be4c2c2b26b2a9417536eb3a2114a4a81f02233eb32df11aa30453c6"
 dependencies = [
  "mesquite_language",
 ]
