@@ -1,6 +1,6 @@
 [package]
 name = "arko_index"
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Splits source repositories into chunks along their syntax, searches them lexically, densely or both, and keeps them current with file watchers"
