@@ -30,8 +30,8 @@ parking_lot = "0.12"
 sha2.workspace = true
 base64 = "0.22"
 
-pyo3 = { version = "0.27.2", features = ["extension-module"], optional = true }
-pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"], optional = true }
+pyo3 = { version = "0.29.3", features = ["extension-module"], optional = true }
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"], optional = true }
 
 [lib]
 name = "arko_workflows"

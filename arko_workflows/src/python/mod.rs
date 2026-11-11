@@ -733,7 +733,7 @@ impl PyWorkflow {
 }
 
 #[cfg(feature = "python")]
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyAgentResult {
     #[pyo3(get)]
