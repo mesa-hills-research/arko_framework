@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CancelledNotification, CancelledNotificationParam,
-    ClientRequest, ErrorCode, RawContent, RequestId, ResourceContents, ServerResult,
+    ClientRequest, ContentBlock, ErrorCode, RequestId, ResourceContents, ServerResult,
 };
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient, ServiceError};
 
@@ -87,9 +87,9 @@ pub(crate) async fn call_tool(
     };
     let mut images = Vec::new();
     for content in &result.content {
-        match &content.raw {
-            RawContent::Text(text) => push(&text.text),
-            RawContent::Image(image) => match image_type(&image.mime_type) {
+        match content {
+            ContentBlock::Text(text) => push(&text.text),
+            ContentBlock::Image(image) => match image_type(&image.mime_type) {
                 Some(mime_type) => images.push(ToolImage::base64(
                     format!("image {} ({mime_type})", images.len() + 1),
                     image.data.clone(),
@@ -100,7 +100,7 @@ pub(crate) async fn call_tool(
                     image.mime_type
                 )),
             },
-            RawContent::Resource(resource) => match &resource.resource {
+            ContentBlock::Resource(resource) => match &resource.resource {
                 ResourceContents::TextResourceContents { uri, text, .. } => {
                     push(&format!("Resource {uri}:\n{text}"))
                 }
@@ -118,14 +118,16 @@ pub(crate) async fn call_tool(
                         mime_type.as_deref().unwrap_or("of an unknown type")
                     )),
                 },
+                _ => push("[A resource of a kind that can't be shown.]"),
             },
-            RawContent::Audio(audio) => push(&format!(
+            ContentBlock::Audio(audio) => push(&format!(
                 "[Audio ({}) that the model can't be given.]",
                 audio.mime_type
             )),
-            RawContent::ResourceLink(link) => {
+            ContentBlock::ResourceLink(link) => {
                 push(&format!("Resource link: {} ({})", link.uri, link.name))
             }
+            _ => push("[Content of a kind that can't be shown.]"),
         }
     }
     output.images = images;
@@ -144,7 +146,7 @@ pub(crate) async fn call_tool(
     let has_text = result
         .content
         .iter()
-        .any(|content| matches!(&content.raw, RawContent::Text(text) if !text.text.is_empty()));
+        .any(|content| matches!(content, ContentBlock::Text(text) if !text.text.is_empty()));
     if !has_text && let Some(ref structured) = result.structured_content {
         if !output.text.is_empty() {
             output.text.push_str("\n\n");
@@ -176,10 +178,10 @@ impl Drop for CancelOnDrop {
         };
         let peer = self.peer.clone();
         runtime.spawn(async move {
-            let notification = CancelledNotification::new(CancelledNotificationParam {
-                request_id,
-                reason: Some("The call was stopped.".into()),
-            });
+            let notification = CancelledNotification::new(CancelledNotificationParam::new(
+                Some(request_id),
+                Some("The call was stopped.".into()),
+            ));
             let _ = peer.send_notification(notification.into()).await;
         });
     }
