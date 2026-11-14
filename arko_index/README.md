@@ -42,7 +42,7 @@ describes the questions and the method.
 
 ```toml
 [dependencies]
-arko_index = "0.3.0"
+arko_index = "0.3.2"
 ```
 
 The library needs no C compiler, because it parses with

@@ -599,7 +599,7 @@ CLI's `search2` prints it under the results, as in
 A search maps the store's ids through its own generation's vector keys, and an id names
 a path and an embedded text, so a vector is only ever returned for the text it embeds:
 an edited chunk is found densely again once its new text is embedded. `index2::status`
-gives the current generation, its coverage, the latest run's `EmbedProgress` (texts
+gives the current generation with its coverage, the latest run's `EmbedProgress` (texts
 embedded and to embed, tokens billed, requests) and whether a run is working now.
 
 ## Vector store measurements

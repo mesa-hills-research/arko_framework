@@ -18,8 +18,8 @@ and your code decides which agents run and in what order.
 
 ```toml
 [dependencies]
-arko_workflows = "0.3"
-arko_agents = "0.2"
+arko_workflows = "0.9"
+arko_agents = "0.8"
 arko_ai = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```

@@ -43,7 +43,7 @@ Code paths are relative to the repository root. Items are listed by their shorte
 | `arko_ai::providers::openai` | OpenAI Responses API client, API key and ChatGPT OAuth. | `arko_ai/src/providers/openai.rs` | [OpenAI Responses](arko_ai-guide.md#openai-responses-replay-prompt-caching-and-chatgpt-oauth) |
 | `arko_ai::providers::anthropic` | Anthropic Messages API client. | `arko_ai/src/providers/anthropic.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `arko_ai::providers::google` | Gemini client on the Interactions API. | `arko_ai/src/providers/google.rs` | [Generation settings and tool calls](arko_ai-guide.md#generation-settings-and-tool-calls) |
-| `arko_ai::providers::openrouter` | OpenRouter Chat Completions client, its options and model catalog. | `arko_ai/src/providers/openrouter.rs` | [OpenRouter](arko_ai-guide.md#openrouter) |
+| `arko_ai::providers::openrouter` | OpenRouter Chat Completions client, with its options and model catalog. | `arko_ai/src/providers/openrouter.rs` | [OpenRouter](arko_ai-guide.md#openrouter) |
 | `arko_ai::providers::voyage` | Voyage embeddings client. | `arko_ai/src/providers/voyage.rs` | [Voyage embeddings](arko_ai-guide.md#voyage-embeddings) |
 | `arko_ai::reasoning` | `ReasoningConfig`, the effort and level enums, and `ReasoningArtifact`. | `arko_ai/src/reasoning.rs` | [Reasoning (arko_ai)](#reasoning-arko_ai) |
 | `arko_ai::retry` | `BackoffPolicy` and `MAX_SERVER_DELAY_HINT`. | `arko_ai/src/retry.rs` | [Errors and retries](arko_ai-guide.md#errors-and-retries) |
@@ -809,7 +809,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 
 | Item | What it is | Code | Docs |
 |---|---|---|---|
-| `Task` | One run. The configuration it runs with, its conversation, state and usage. Serializable. | `arko_agents/src/task/mod.rs` | [Running tasks](arko_agents-guide.md#running-tasks) |
+| `Task` | One run, with its configuration, conversation, state and usage. Serializable. | `arko_agents/src/task/mod.rs` | [Running tasks](arko_agents-guide.md#running-tasks) |
 | `Task::new(agent_config, initial_task_prompt, initial_cwd, developer_env_details)` | A `Pending` task with an empty conversation for the configured model. | `arko_agents/src/task/mod.rs` | [Quick start](arko_agents-guide.md#events-and-commands) |
 | `Task::load_from_path`, `Task::save_to_path` | Load JSON. Save pretty JSON through a temporary file and a rename. | `arko_agents/src/task/mod.rs` | [Persisted data (arko_agents)](#persisted-data-arko_agents) |
 | `Task::{id, agent_config_id, agent_config, initial_task_prompt, initial_task_images, conversation, current_state, start_time, end_time, developer_env_details, current_working_directory}` | The task's identity, the configuration and prompt it runs with (and the prompt's images, which the runtime moves to follow its text in the first message, `Task::initial_images` giving them either way), its `arko_ai::Conversation`, state, times, developer details and working directory. | `arko_agents/src/task/mod.rs` | [Running tasks](arko_agents-guide.md#running-tasks) |

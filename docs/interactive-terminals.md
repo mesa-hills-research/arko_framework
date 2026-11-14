@@ -306,7 +306,7 @@ then on.
 | Lines and bytes of a monitor's news per note (`lines_per_note`, `bytes_per_note`) | 20 and 2,000 |
 | Bytes kept of a line, and the quiet before a partial line counts (`line_bytes`, `partial_line_after`) | 500 bytes and 2 seconds |
 | A line monitor's wait for a command that exits at once (`start_wait`) | 1 second |
-| A check's interval, its runs, its output compared, its first result (`shortest_check`, `longest_check`, `check_run_limit`, `check_output_bytes`, `first_check_wait`) | 10 to 600 seconds, 60 seconds, 4,096 bytes, 10 seconds |
+| A check's interval, run limit, output size and first wait (`shortest_check`, `longest_check`, `check_run_limit`, `check_output_bytes`, `first_check_wait`) | 10 to 600 seconds, 60 seconds, 4,096 bytes, 10 seconds |
 | A pattern's length (`pattern_chars`) | 1,000 characters |
 | Matching lines that make a pattern noisy (`noisy_lines`, `noisy_window`) | 200 in 5 minutes |
 
