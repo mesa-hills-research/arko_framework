@@ -9,25 +9,10 @@ use std::{
     time::Duration,
 };
 
-const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# a cache directory\n";
+mod support;
+use support::cli;
 
-/// The `arko_index_cli` example. `cargo test` builds the package's examples before
-/// it runs the tests, and integration tests live in `<target>/<profile>/deps`, examples in
-/// `<target>/<profile>/examples`.
-fn cli() -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
-    let cli = profile_dir
-        .join("examples")
-        .join(format!("arko_index_cli{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        cli.is_file(),
-        "{} is missing: run the whole suite (`cargo test -p arko_index`) or build it first \
-         (`cargo build -p arko_index --example arko_index_cli`)",
-        cli.display()
-    );
-    cli
-}
+const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# a cache directory\n";
 
 fn write(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);

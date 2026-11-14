@@ -25,6 +25,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+mod support;
+#[cfg(unix)]
+use support::cli;
+
 const DIMS: usize = 32;
 
 /// The hash embedder behind a gate, where each document request waits until the test lets
@@ -761,20 +766,6 @@ fn watcher_driven_rebuilds_while_a_run_is_embedding() {
     );
     assert_eq!(r.hits[0].chunk, chunk);
     assert!((r.hits[0].score - 1.0).abs() < 1e-5);
-}
-
-/// The `arko_index_cli` example, which `cargo test` builds before the tests.
-#[cfg(unix)]
-fn cli() -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
-    let cli = profile_dir.join("examples").join("arko_index_cli");
-    assert!(
-        cli.is_file(),
-        "{} is missing: run the whole suite (`cargo test -p arko_index`) or build it first",
-        cli.display()
-    );
-    cli
 }
 
 /// The CLI's `index2` returns once lexical search is ready, a background process

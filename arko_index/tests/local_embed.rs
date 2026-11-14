@@ -14,6 +14,7 @@
 #[allow(dead_code)]
 #[path = "../examples/support/local.rs"]
 mod local;
+mod support;
 
 use arko_index::dense::{
     Embedder, InputKind,
@@ -21,13 +22,13 @@ use arko_index::dense::{
 };
 use serde::Deserialize;
 use std::{
-    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
+use support::cli;
 
 /// The lazy embedder answers for its model and limits without loading it, loads on
 /// the first token count, once, and keeps a failure.
@@ -66,22 +67,6 @@ fn the_lazy_embedder_loads_on_first_use() {
         .unwrap()
         .to_string();
     assert!(err.contains("runs on a GPU"), "{err}");
-}
-
-/// The `arko_index_cli` example, which `cargo test` builds before the tests.
-fn cli() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
-    let cli = profile_dir
-        .join("examples")
-        .join(format!("arko_index_cli{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        cli.is_file(),
-        "{} is missing: run the whole suite or build it first \
-         (`cargo build -p arko_index --features local-embed --example arko_index_cli`)",
-        cli.display()
-    );
-    cli
 }
 
 /// `index2 --embed local` returns once lexical search is ready without loading the
