@@ -1,7 +1,14 @@
-# Arko Framework
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mesa-hills-research/arko_framework/main/assets/readme-header-dark.svg">
+    <img src="https://raw.githubusercontent.com/mesa-hills-research/arko_framework/main/assets/readme-header-light.svg" alt="Arko Framework" width="680">
+  </picture>
+</h1>
 
 Rust crates for calling language models, running tool-using agents, orchestrating
 multi-agent workflows, and searching source code.
+
+<img src="https://raw.githubusercontent.com/mesa-hills-research/arko_framework/main/docs/images/arko-framework-demo.png" alt="Rust code that runs three Arko agents in parallel, and the terminal output below it with their answers to three questions about the code, each citing file and line, after 8.9 seconds." width="830">
 
 | Crate | What it does |
 | --- | --- |
