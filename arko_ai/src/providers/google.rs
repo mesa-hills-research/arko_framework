@@ -586,6 +586,7 @@ impl GoogleClient {
             GeminiThinkingLevel::Low => "low",
             GeminiThinkingLevel::Medium => "medium",
             GeminiThinkingLevel::High => "high",
+            GeminiThinkingLevel::XHigh => "xhigh",
         }
     }
 
@@ -717,9 +718,10 @@ impl GoogleClient {
     /// The `thinking_level` and `thinking_summaries` to send. Both are
     /// optional in the Interactions API, so without a reasoning configuration
     /// neither is sent and the model's own defaults apply, with thinking at its
-    /// documented default level (medium on Gemini 3.5 to 3.8 Flash, minimal
-    /// on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic
-    /// on 2.5) and no thought summaries.
+    /// documented default level (medium on Gemini 4 Carbon and Argon and on
+    /// 3.5 to 3.8 Flash, high on Gemini 4 Hydrogen, minimal on 3.1 and 3.5
+    /// Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5) and no
+    /// thought summaries.
     /// https://ai.google.dev/gemini-api/docs/thinking
     /// https://ai.google.dev/static/api/interactions-v1.openapi.json
     fn resolve_thinking(
@@ -789,7 +791,10 @@ impl GoogleClient {
                     thinking_level,
                     include_summaries,
                 }) if conversation.model.is_gemini_2_5() => {
-                    if matches!(thinking_level, GeminiThinkingLevel::Minimal) {
+                    if matches!(
+                        thinking_level,
+                        GeminiThinkingLevel::Minimal | GeminiThinkingLevel::XHigh
+                    ) {
                         return Err(Error::InvalidRequest(format!(
                             "Gemini 2.5 models only support LOW, MEDIUM, and HIGH thinking levels, got {}.",
                             thinking_level.as_str()
@@ -856,13 +861,27 @@ impl GoogleClient {
             )));
         }
 
-        // Gemini 3.7 and 3.8 Flash return an error for MINIMAL.
+        // Only Gemini 4 Hydrogen takes XHIGH.
         // https://ai.google.dev/gemini-api/docs/thinking
-        if (model.is_gemini_3_7_flash() || model.is_gemini_3_8_flash())
+        if matches!(level, GeminiThinkingLevel::XHigh) && !model.supports_gemini_xhigh_thinking() {
+            return Err(Error::InvalidRequest(format!(
+                "Model '{}' doesn't take the XHIGH thinking level. Gemini 4 Hydrogen does.",
+                model.id
+            )));
+        }
+
+        // Gemini 3.7 and 3.8 Flash and the Gemini 4 models return an error for
+        // MINIMAL. https://ai.google.dev/gemini-api/docs/thinking
+        if (model.is_gemini_3_7_flash() || model.is_gemini_3_8_flash() || model.is_gemini_4())
             && matches!(level, GeminiThinkingLevel::Minimal)
         {
+            let levels = if model.supports_gemini_xhigh_thinking() {
+                "LOW, MEDIUM, HIGH, and XHIGH"
+            } else {
+                "LOW, MEDIUM, and HIGH"
+            };
             return Err(Error::InvalidRequest(format!(
-                "Model '{}' only supports LOW, MEDIUM, and HIGH thinking levels, got {}.",
+                "Model '{}' only supports {levels} thinking levels, got {}.",
                 model.id,
                 level.as_str()
             )));
@@ -2114,6 +2133,71 @@ mod model_rule_tests {
             level(Model::google_gemini_3_6_flash(), &minimal).as_deref(),
             Some("minimal")
         );
+    }
+
+    /// The Gemini 4 models take low, medium and high, Hydrogen also xhigh,
+    /// and every one rejects minimal, also from a zero budget.
+    /// https://ai.google.dev/gemini-api/docs/thinking
+    #[test]
+    fn gemini_4_takes_its_documented_levels() {
+        let with = |level| {
+            GenerationConfig::default().with_reasoning(ReasoningConfig::gemini(level, false))
+        };
+        let zero_budget =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
+        for model in [
+            Model::google_gemini_4_carbon(),
+            Model::google_gemini_4_argon(),
+            Model::google_gemini_4_hydrogen(),
+        ] {
+            for (wanted, sent) in [
+                (GeminiThinkingLevel::Low, "low"),
+                (GeminiThinkingLevel::Medium, "medium"),
+                (GeminiThinkingLevel::High, "high"),
+            ] {
+                assert_eq!(
+                    level(model.clone(), &with(wanted)).as_deref(),
+                    Some(sent),
+                    "{}",
+                    model.id
+                );
+            }
+            for config in [with(GeminiThinkingLevel::Minimal), zero_budget.clone()] {
+                assert!(
+                    matches!(
+                        thinking(model.clone(), &config),
+                        Err(Error::InvalidRequest(_))
+                    ),
+                    "{}",
+                    model.id
+                );
+            }
+            let xhigh = thinking(model.clone(), &with(GeminiThinkingLevel::XHigh));
+            if model.supports_gemini_xhigh_thinking() {
+                assert_eq!(xhigh.unwrap().0.as_deref(), Some("xhigh"));
+            } else {
+                assert!(
+                    matches!(xhigh, Err(Error::InvalidRequest(_))),
+                    "{}",
+                    model.id
+                );
+            }
+        }
+        // The older models take no xhigh.
+        for model in [
+            Model::google_gemini_3_8_flash(),
+            Model::google_gemini_3_1_pro(),
+            Model::google_gemini_2_5_pro(),
+        ] {
+            assert!(
+                matches!(
+                    thinking(model.clone(), &with(GeminiThinkingLevel::XHigh)),
+                    Err(Error::InvalidRequest(_))
+                ),
+                "{}",
+                model.id
+            );
+        }
     }
 
     #[test]

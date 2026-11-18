@@ -7,15 +7,16 @@ use super::*;
 /// Codex replays history unchanged when it switches between models of one
 /// compaction family and compacts it otherwise (codex-rs
 /// `maybe_run_previous_model_inline_compact`, its bundled catalog,
-/// models-manager/models.json, gives every GPT-5.6 and GPT-6 model the same
-/// `comp_hash`). arko can't compact, so for other pairs the reasoning items
-/// are dropped and the reply's messages and calls replayed without them.
+/// models-manager/models.json, gives every GPT-5.6, GPT-6 and GPT-6.2 model
+/// the same `comp_hash`). arko can't compact, so for other pairs the reasoning
+/// items are dropped and the reply's messages and calls replayed without them.
 pub(super) fn openai_reasoning_replays(from: &ai::Model, to: &ai::Model) -> bool {
     let family = |model: &ai::Model| {
         model.provider == ai::Provider::OpenAI
             && (model.is_openai_gpt_5_6()
                 || model.is_openai_gpt_6_astra()
-                || model.is_openai_gpt_6_sol_or_luna())
+                || model.is_openai_gpt_6_sol_or_luna()
+                || model.is_openai_gpt_6_2())
     };
     from.id == to.id || (family(from) && family(to))
 }

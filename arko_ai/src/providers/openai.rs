@@ -85,9 +85,11 @@ const ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 /// sends `service_tier: "priority"` for over ChatGPT sign-in
 /// (`ModelInfo::service_tier_for_request` in
 /// `codex-rs/protocol/src/openai_models.rs`). From
-/// `codex-rs/models-manager/models.json` at openai/codex ac9b5b8, less
+/// `codex-rs/models-manager/models.json` at openai/codex 6c0cee50, less
 /// Codex's hidden approval-review model (`codex-auto-review`).
 const CHATGPT_FAST_MODE_MODELS: &[&str] = &[
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "gpt-6-astra",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
@@ -2282,7 +2284,8 @@ impl OpenAIClient {
         let is_gpt5_6 = conversation.model.is_openai_gpt_5_6();
         let is_gpt6_astra = conversation.model.is_openai_gpt_6_astra();
         let is_gpt6_sol_luna = conversation.model.is_openai_gpt_6_sol_or_luna();
-        let is_gpt6 = is_gpt6_astra || is_gpt6_sol_luna;
+        let is_gpt6_2 = conversation.model.is_openai_gpt_6_2();
+        let is_gpt6 = is_gpt6_astra || is_gpt6_sol_luna || is_gpt6_2;
 
         let is_legacy_reasoning =
             conversation.model.id.starts_with("o3-") || conversation.model.id.starts_with("o4-");
@@ -2327,7 +2330,10 @@ impl OpenAIClient {
             include_summaries,
         }) = &config.reasoning
         {
-            let (allowed, supported_label): (&[OpenAIEffort], &str) = if is_gpt6_astra {
+            // GPT-6.2 rejects `none`, as GPT-6 Astra does.
+            // https://developers.openai.com/api/docs/guides/reasoning
+            let (allowed, supported_label): (&[OpenAIEffort], &str) = if is_gpt6_astra || is_gpt6_2
+            {
                 (
                     &[
                         OpenAIEffort::Low,
@@ -2484,6 +2490,28 @@ impl OpenAIClient {
             }
 
             request.parallel_tool_calls = tool_config.parallel_tool_calls;
+        }
+
+        // GPT-6.2 reads top-level `instructions` after `input` and bills them
+        // uncached on every request, so the system prompt goes first in
+        // `input` as a developer message, where it is part of the cached
+        // prefix. Codex sends its base instructions this way on every model
+        // (`codex-rs/core/src/client.rs`).
+        // https://developers.openai.com/api/docs/guides/prompt-caching
+        if is_gpt6_2
+            && let Some(system) = request
+                .instructions
+                .take()
+                .filter(|system| !system.is_empty())
+        {
+            request
+                .input
+                .push(OpenAIInputEntry::Message(OpenAIInputMessage {
+                    role: "developer".to_string(),
+                    type_: "message".to_string(),
+                    content: Some(OpenAIContent::Text(system)),
+                    id: None,
+                }));
         }
 
         for message in &conversation.messages {
@@ -3577,6 +3605,92 @@ mod tests {
         }
     }
 
+    /// GPT-6.2 takes GPT-6 Astra's efforts and GPT-6's request options, and
+    /// its system prompt goes first in `input` as a developer message, on
+    /// either auth path, because the model reads top-level `instructions`
+    /// after `input`, uncached.
+    #[test]
+    fn gpt_6_2_builds_reasoning_and_cache_requests_with_the_system_prompt_first() {
+        let client = OpenAIClient::new("test");
+        for id in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let mut conversation = Conversation::new(Model::get(Provider::OpenAI, id).unwrap())
+                .with_system_message("Be brief.");
+            conversation.add_user_message("Hello");
+            for effort in [
+                OpenAIEffort::Low,
+                OpenAIEffort::Medium,
+                OpenAIEffort::High,
+                OpenAIEffort::XHigh,
+                OpenAIEffort::Max,
+            ] {
+                let config = GenerationConfig::default()
+                    .with_verbosity(Verbosity::Low)
+                    .with_openai_reasoning_mode(OpenAIReasoningMode::Pro)
+                    .with_reasoning(ReasoningConfig::openai(effort, true));
+                for oauth in [false, true] {
+                    let request = client.build_request(&conversation, &config, oauth).unwrap();
+                    let value = serde_json::to_value(request).unwrap();
+                    assert_eq!(value["model"], id);
+                    assert!(value.get("instructions").is_none(), "{value}");
+                    assert_eq!(
+                        value["input"][0],
+                        serde_json::json!({"role": "developer", "type": "message", "content": "Be brief."})
+                    );
+                    assert_eq!(value["input"][1]["role"], "user");
+                    assert_eq!(
+                        value["reasoning"]["effort"],
+                        serde_json::to_value(effort).unwrap()
+                    );
+                    assert_eq!(
+                        value["reasoning"]["mode"],
+                        if oauth {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!("pro")
+                        }
+                    );
+                    if oauth {
+                        assert_eq!(value["reasoning"]["context"], "all_turns");
+                        assert!(value.get("prompt_cache_options").is_none());
+                    } else {
+                        assert!(value["reasoning"].get("context").is_none());
+                        assert_eq!(value["prompt_cache_options"]["mode"], "implicit");
+                    }
+                    assert_eq!(value["text"]["verbosity"], "low");
+                }
+            }
+            for effort in [OpenAIEffort::None, OpenAIEffort::Minimal] {
+                let config = GenerationConfig::default()
+                    .with_reasoning(ReasoningConfig::openai(effort, false));
+                assert!(matches!(
+                    client.build_request(&conversation, &config, false),
+                    Err(Error::InvalidRequest(_))
+                ));
+            }
+            // Fast mode over the ChatGPT login, as Codex's catalog offers it,
+            // and no Flex with an API key.
+            let fast = GenerationConfig::default()
+                .with_openai_service_tier(crate::config::OpenAIServiceTier::Fast);
+            let value =
+                serde_json::to_value(client.build_request(&conversation, &fast, true).unwrap())
+                    .unwrap();
+            assert_eq!(value["service_tier"], "priority");
+            let flex = GenerationConfig::default()
+                .with_openai_service_tier(crate::config::OpenAIServiceTier::Flex);
+            assert!(client.build_request(&conversation, &flex, false).is_err());
+        }
+        // Earlier models keep the system prompt in `instructions`.
+        let conversation =
+            Conversation::new(Model::openai_gpt_6_1_sol()).with_system_message("Be brief.");
+        let value = serde_json::to_value(
+            client
+                .build_request(&conversation, &GenerationConfig::default(), false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["instructions"], "Be brief.");
+    }
+
     #[test]
     fn gpt_6_sol_terra_and_luna_build_reasoning_verbosity_and_cache_requests() {
         let client = OpenAIClient::new("test");
@@ -4063,6 +4177,8 @@ mod tests {
         // ChatGPT OAuth, with Fast mode as Codex sends it, on every model its
         // catalog offers it for (GPT-5.5 by its undated ID)...
         for model in [
+            Model::openai_gpt_6_2_sol(),
+            Model::openai_gpt_6_2_astra(),
             Model::openai_gpt_6_astra(),
             Model::openai_gpt_6_sol(),
             Model::openai_gpt_6_1_sol(),
@@ -4116,7 +4232,8 @@ mod tests {
         // The tier follows the model, ahead of the input, as Codex orders it.
         let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
         conversation.add_user_message("hello");
-        let config = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Fast);
+        let config = GenerationConfig::default()
+            .with_openai_service_tier(crate::config::OpenAIServiceTier::Fast);
         let body =
             serde_json::to_string(&client.build_request(&conversation, &config, true).unwrap())
                 .unwrap();
@@ -4170,7 +4287,8 @@ mod tests {
     fn reported_service_tier_and_reasoning_tokens_price_the_call() {
         use crate::config::OpenAIServiceTier;
         let standard = GenerationConfig::default();
-        let flex = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Flex);
+        let flex = GenerationConfig::default()
+            .with_openai_service_tier(crate::config::OpenAIServiceTier::Flex);
         // GPT-6 Astra short context, 0.1M input at $10 + 1M output at $50.
         let usage = priced(None, &standard, false);
         assert_eq!(usage.reasoning_tokens, Some(400_000));

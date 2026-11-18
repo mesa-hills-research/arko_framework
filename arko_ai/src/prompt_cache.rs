@@ -252,6 +252,8 @@ mod tests {
             Model::openai_gpt_5_6(),
             Model::openai_gpt_6_astra(),
             Model::openai_gpt_6_1_terra(),
+            Model::openai_gpt_6_2_sol(),
+            Model::openai_gpt_6_2_astra(),
             Model::get(Provider::OpenAI, "gpt-6-sol").unwrap(),
         ] {
             assert!(model.supports_openai_prompt_cache_options(), "{}", model.id);

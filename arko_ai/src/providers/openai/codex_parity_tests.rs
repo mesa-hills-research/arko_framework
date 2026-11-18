@@ -1003,6 +1003,8 @@ fn all_turns_reasoning_context_goes_where_documented_or_verified() {
             Model::openai_gpt_6_sol(),
             Model::openai_gpt_6_1_terra(),
             Model::openai_gpt_6_luna(),
+            Model::openai_gpt_6_2_sol(),
+            Model::openai_gpt_6_2_astra(),
         ] {
             assert_eq!(
                 context(model.clone(), true, &config).as_deref(),

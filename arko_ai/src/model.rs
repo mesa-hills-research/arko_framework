@@ -123,6 +123,74 @@ pub struct Model {
 /// - Gemini Flex/Priority require the v1beta endpoint, which this client does
 ///   not use, so no Gemini tiers are listed.
 impl Model {
+    /// Standard API pricing and limits. Cache reads are 0.05x input, and above
+    /// 272K input tokens input and cache rates double and output is 1.5x.
+    /// GPT-6.2 offers Fast mode (2x) and no Flex tier. Ultrafast (3x through
+    /// 2027-02-28, then 6x) is left out, as on the other models.
+    /// <https://developers.openai.com/api/docs/models/gpt-6.2-astra>
+    /// <https://developers.openai.com/api/docs/pricing>
+    pub fn openai_gpt_6_2_astra() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6.2-astra".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 8.00,
+                output_cost_per_million: 40.00,
+                cached_input_cost_per_million: Some(0.40),
+                cache_write_cost_per_million: Some(10.00),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(16.00),
+                large_output_cost_per_million: Some(60.00),
+                large_cached_input_cost_per_million: Some(0.80),
+                large_cache_write_cost_per_million: Some(20.00),
+                cache_write_1h_cost_per_million: Some(20.00),
+                large_cache_write_1h_cost_per_million: Some(40.00),
+                reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Standard API pricing and limits, GPT-6.1 Sol's rates. GPT-6.2 offers
+    /// Fast mode (2x) and no Flex tier.
+    /// <https://developers.openai.com/api/docs/models/gpt-6.2-sol>
+    /// <https://developers.openai.com/api/docs/pricing>
+    pub fn openai_gpt_6_2_sol() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6.2-sol".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 2.00,
+                output_cost_per_million: 10.00,
+                cached_input_cost_per_million: Some(0.10),
+                cache_write_cost_per_million: Some(2.50),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(4.00),
+                large_output_cost_per_million: Some(15.00),
+                large_cached_input_cost_per_million: Some(0.20),
+                large_cache_write_cost_per_million: Some(5.00),
+                cache_write_1h_cost_per_million: Some(5.00),
+                large_cache_write_1h_cost_per_million: Some(10.00),
+                reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
     /// Standard API pricing.
     /// <https://developers.openai.com/api/docs/pricing>
     pub fn openai_gpt_6_astra() -> Self {
@@ -1908,6 +1976,84 @@ impl Model {
         }
     }
 
+    /// Shared limits of the Gemini 4 models. Input, thinking and output share
+    /// one 1,048,576-token window, and a synchronous response stops at 65,536
+    /// tokens (longer ones need background execution, which this client does
+    /// not use). Image input, implicit caching only, one price across the
+    /// window. Thinking levels low, medium and high (Hydrogen adds xhigh), and
+    /// `minimal` returns an error.
+    /// <https://ai.google.dev/gemini-api/docs/thinking>
+    fn google_gemini_4(id: &str, pricing: ModelPricing) -> Self {
+        Self {
+            provider: Provider::Google,
+            id: id.to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_048_576,
+            max_output_tokens: 65_536,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing,
+        }
+    }
+
+    /// Introductory $2/$10 (cached $0.10) through 2026-11-30, then $4/$20
+    /// (cached $0.20) from 2026-12-01, for Gemini 4 Carbon and Argon.
+    /// <https://ai.google.dev/gemini-api/docs/pricing>
+    fn google_gemini_4_carbon_and_argon_pricing() -> ModelPricing {
+        ModelPricing {
+            input_cost_per_million: 2.00,
+            output_cost_per_million: 10.00,
+            cached_input_cost_per_million: Some(0.10),
+            schedule: vec![ScheduledPricing::new(
+                "2026-12-01",
+                ModelPricing {
+                    input_cost_per_million: 4.00,
+                    output_cost_per_million: 20.00,
+                    cached_input_cost_per_million: Some(0.20),
+                    ..ModelPricing::default()
+                },
+            )],
+            ..ModelPricing::default()
+        }
+    }
+
+    /// Google's most capable Gemini 4 model, which spends more thinking per
+    /// turn than Argon. Thinking levels low, medium (default) and high.
+    /// <https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon>
+    pub fn google_gemini_4_carbon() -> Self {
+        Self::google_gemini_4(
+            "gemini-4-carbon",
+            Self::google_gemini_4_carbon_and_argon_pricing(),
+        )
+    }
+
+    /// Gemini 4 at Carbon's prices with faster replies and less thinking per
+    /// turn. Thinking levels low, medium (default) and high.
+    /// <https://ai.google.dev/gemini-api/docs/models/gemini-4-argon>
+    pub fn google_gemini_4_argon() -> Self {
+        Self::google_gemini_4(
+            "gemini-4-argon",
+            Self::google_gemini_4_carbon_and_argon_pricing(),
+        )
+    }
+
+    /// The efficient Gemini 4 model, Google's recommended upgrade from Gemini
+    /// 3.8 Flash. Thinking levels low, medium, high (default) and xhigh.
+    /// <https://ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen>
+    /// <https://ai.google.dev/gemini-api/docs/pricing>
+    pub fn google_gemini_4_hydrogen() -> Self {
+        Self::google_gemini_4(
+            "gemini-4-hydrogen",
+            ModelPricing {
+                input_cost_per_million: 1.50,
+                output_cost_per_million: 7.50,
+                cached_input_cost_per_million: Some(0.075),
+                ..ModelPricing::default()
+            },
+        )
+    }
+
     /// GA 2026-09-02. Thinking levels low, medium (default) and high. `minimal`
     /// returns an error.
     /// <https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash>
@@ -1975,6 +2121,8 @@ impl Model {
 
     pub(crate) fn list_openai_models() -> Vec<Self> {
         vec![
+            Self::openai_gpt_6_2_astra(),
+            Self::openai_gpt_6_2_sol(),
             Self::openai_gpt_6_astra(),
             Self::openai_gpt_6_1_sol(),
             Self::openai_gpt_6_1_terra(),
@@ -2037,6 +2185,9 @@ impl Model {
 
     pub(crate) fn list_google_models() -> Vec<Self> {
         vec![
+            Self::google_gemini_4_carbon(),
+            Self::google_gemini_4_argon(),
+            Self::google_gemini_4_hydrogen(),
             Self::google_gemini_3_8_flash(),
             Self::google_gemini_3_7_flash(),
             Self::google_gemini_3_6_flash(),
@@ -2253,6 +2404,15 @@ impl Model {
         self.id == "gpt-6-astra"
     }
 
+    /// GPT-6.2 Sol and GPT-6.2 Astra. They take GPT-6 Astra's efforts (the API
+    /// rejects `none`) and the GPT-6 request options, and read top-level
+    /// `instructions` after `input`, so the system prompt goes first in
+    /// `input` instead.
+    /// <https://developers.openai.com/api/docs/guides/latest-model>
+    pub fn is_openai_gpt_6_2(&self) -> bool {
+        matches!(self.id.as_str(), "gpt-6.2-sol" | "gpt-6.2-astra")
+    }
+
     /// GPT-6 Sol, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna share GPT-5.6's
     /// reasoning controls. Unlike Astra, they accept `none`.
     pub fn is_openai_gpt_6_sol_or_luna(&self) -> bool {
@@ -2331,7 +2491,8 @@ impl Model {
         self.provider == Provider::OpenAI
             && (self.is_openai_gpt_5_6()
                 || self.is_openai_gpt_6_astra()
-                || self.is_openai_gpt_6_sol_or_luna())
+                || self.is_openai_gpt_6_sol_or_luna()
+                || self.is_openai_gpt_6_2())
     }
 
     pub fn is_openai_gpt_5_5_pro(&self) -> bool {
@@ -2652,8 +2813,23 @@ impl Model {
         self.is_gemini_2_5_pro() || self.is_gemini_2_5_flash() || self.is_gemini_2_5_flash_lite()
     }
 
+    /// Gemini 4 Carbon, Argon and Hydrogen.
+    pub fn is_gemini_4(&self) -> bool {
+        matches!(
+            self.id.as_str(),
+            "gemini-4-carbon" | "gemini-4-argon" | "gemini-4-hydrogen"
+        )
+    }
+
+    /// Whether the model takes the `xhigh` thinking level, which only Gemini 4
+    /// Hydrogen does. <https://ai.google.dev/gemini-api/docs/thinking>
+    pub fn supports_gemini_xhigh_thinking(&self) -> bool {
+        self.id == "gemini-4-hydrogen"
+    }
+
     pub fn uses_gemini_thinking_levels(&self) -> bool {
-        self.is_gemini_3_pro()
+        self.is_gemini_4()
+            || self.is_gemini_3_pro()
             || self.is_gemini_3_flash()
             || self.is_gemini_3_1_pro()
             || self.is_gemini_3_1_flash_lite()
@@ -2691,8 +2867,13 @@ mod tests {
             assert!(model.accepts_tool_result_images(), "{}", model.id);
         }
         for model in Model::list(Provider::Google) {
-            let gemini_3 = model.id.starts_with("gemini-3");
-            assert_eq!(model.accepts_tool_result_images(), gemini_3, "{}", model.id);
+            let gemini_3_or_later = !model.id.starts_with("gemini-2");
+            assert_eq!(
+                model.accepts_tool_result_images(),
+                gemini_3_or_later,
+                "{}",
+                model.id
+            );
         }
         let with_id = |id: &str| {
             let mut model = Model::google_gemini_3_5_flash();
@@ -2844,6 +3025,104 @@ mod tests {
             .collect();
         let position = |id: &str| ids.iter().position(|listed| listed == id).unwrap();
         assert_eq!(position("gpt-6.1-terra"), position("gpt-6.1-sol") + 1);
+    }
+
+    /// GPT-6.2 Astra is $8/$40 (cache reads $0.40, writes $10, 12-hour writes
+    /// $20), Sol $2/$10 (reads $0.10, writes $2.50, 12-hour writes $5). Above
+    /// 272K input tokens input and cache rates double and output is 1.5x.
+    /// Both offer Fast mode and no Flex.
+    /// https://developers.openai.com/api/docs/pricing
+    #[test]
+    fn gpt_6_2_is_registered_with_its_documented_prices_and_limits() {
+        for (id, rates) in [
+            ("gpt-6.2-astra", [8.00, 40.00, 0.40, 10.00, 20.00]),
+            ("gpt-6.2-sol", [2.00, 10.00, 0.10, 2.50, 5.00]),
+        ] {
+            let model = Model::get(Provider::OpenAI, id).unwrap();
+            assert_eq!(model.model_type, ModelType::Reasoning);
+            assert_eq!(
+                (model.max_input_tokens, model.max_output_tokens),
+                (922_000, 128_000)
+            );
+            assert!(model.supports_image_input && model.supports_cache);
+            let [input, output, read, write, write_12h] = rates;
+            let pricing = &model.pricing;
+            assert_eq!(pricing.input_cost_per_million, input, "{id}");
+            assert_eq!(pricing.output_cost_per_million, output, "{id}");
+            assert_eq!(pricing.cached_input_cost_per_million, Some(read), "{id}");
+            assert_eq!(pricing.cache_write_cost_per_million, Some(write), "{id}");
+            assert_eq!(pricing.cache_write_1h_cost_per_million, Some(write_12h));
+            assert_eq!(pricing.large_input_threshold, Some(272_000));
+            assert_eq!(pricing.large_input_cost_per_million, Some(2.0 * input));
+            assert_eq!(pricing.large_output_cost_per_million, Some(1.5 * output));
+            assert_eq!(
+                pricing.large_cached_input_cost_per_million,
+                Some(2.0 * read)
+            );
+            assert_eq!(
+                pricing.large_cache_write_cost_per_million,
+                Some(2.0 * write)
+            );
+            assert_eq!(
+                pricing.large_cache_write_1h_cost_per_million,
+                Some(2.0 * write_12h)
+            );
+            assert!(pricing.offers_tier(&ServiceTier::Fast), "{id}");
+            assert!(!pricing.offers_tier(&ServiceTier::Flex), "{id}");
+            assert!(model.is_openai_gpt_6_2(), "{id}");
+            assert!(!model.is_openai_gpt_6_astra() && !model.is_openai_gpt_6_sol_or_luna());
+            assert!(model.supports_openai_prompt_cache_options(), "{id}");
+        }
+        assert!(!Model::openai_gpt_6_1_sol().is_openai_gpt_6_2());
+        assert!(!Model::openai_gpt_6_astra().is_openai_gpt_6_2());
+    }
+
+    /// Gemini 4 Carbon and Argon cost $2/$10 (cached $0.10) through
+    /// 2026-11-30 and $4/$20 (cached $0.20) from 2026-12-01. Hydrogen costs
+    /// $1.50/$7.50 (cached $0.075). One price across the 1,048,576-token
+    /// window, and 65,536 output tokens per synchronous response.
+    /// https://ai.google.dev/gemini-api/docs/pricing
+    #[test]
+    fn gemini_4_is_registered_with_its_documented_prices_and_limits() {
+        let date = |day: &str| {
+            let seconds = crate::pricing::ScheduledPricing::new(day, ModelPricing::default())
+                .effective_from_unix()
+                .unwrap();
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64)
+        };
+        for id in ["gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] {
+            let model = Model::get(Provider::Google, id).unwrap();
+            assert_eq!(model.model_type, ModelType::Reasoning);
+            assert_eq!(
+                (model.max_input_tokens, model.max_output_tokens),
+                (1_048_576, 65_536),
+                "{id}"
+            );
+            assert!(model.supports_image_input && model.supports_cache, "{id}");
+            assert!(model.is_gemini_4() && model.uses_gemini_thinking_levels());
+            assert!(model.accepts_tool_result_images(), "{id}");
+            let pricing = &model.pricing;
+            assert_eq!(pricing.large_input_threshold, None, "{id}");
+            assert_eq!(pricing.cache_write_cost_per_million, None, "{id}");
+            let prices = |pricing: &ModelPricing| {
+                (
+                    pricing.input_cost_per_million,
+                    pricing.output_cost_per_million,
+                    pricing.cached_input_cost_per_million,
+                )
+            };
+            let (now, later) = if id == "gemini-4-hydrogen" {
+                ((1.50, 7.50, Some(0.075)), (1.50, 7.50, Some(0.075)))
+            } else {
+                ((2.00, 10.00, Some(0.10)), (4.00, 20.00, Some(0.20)))
+            };
+            assert_eq!(prices(pricing.at(date("2026-11-30"))), now, "{id}");
+            assert_eq!(prices(pricing.at(date("2026-12-01"))), later, "{id}");
+        }
+        assert!(Model::google_gemini_4_hydrogen().supports_gemini_xhigh_thinking());
+        assert!(!Model::google_gemini_4_carbon().supports_gemini_xhigh_thinking());
+        assert!(!Model::google_gemini_4_argon().supports_gemini_xhigh_thinking());
+        assert!(!Model::google_gemini_3_8_flash().is_gemini_4());
     }
 
     /// Cache reads cost 0.025x input on Fable and Mythos 5.1 and 5.2, 0.05x on

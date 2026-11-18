@@ -46,10 +46,11 @@ pub enum AnthropicReasoningEffort {
     Max,
 }
 
-/// Defines the thinking level for Gemini 3.x reasoning models.
+/// Defines the thinking level for Gemini 3.x and Gemini 4 reasoning models.
 ///
 /// Gemini 3.5 Flash supports `Minimal`, `Low`, `Medium`, and `High`, with
-/// `Medium` as its provider default.
+/// `Medium` as its provider default. Gemini 4 models reject `Minimal`, and
+/// only Gemini 4 Hydrogen takes `XHigh`.
 ///
 /// Supported values are validated against the selected model when a request
 /// is built.
@@ -63,6 +64,8 @@ pub enum GeminiThinkingLevel {
     Medium,
     #[serde(rename = "HIGH")]
     High,
+    #[serde(rename = "XHIGH")]
+    XHigh,
 }
 
 impl GeminiThinkingLevel {
@@ -72,6 +75,7 @@ impl GeminiThinkingLevel {
             GeminiThinkingLevel::Low => "LOW",
             GeminiThinkingLevel::Medium => "MEDIUM",
             GeminiThinkingLevel::High => "HIGH",
+            GeminiThinkingLevel::XHigh => "XHIGH",
         }
     }
 }
@@ -145,6 +149,7 @@ impl From<GeminiThinkingLevel> for ReasoningEffort {
             GeminiThinkingLevel::Low => Self::Low,
             GeminiThinkingLevel::Medium => Self::Medium,
             GeminiThinkingLevel::High => Self::High,
+            GeminiThinkingLevel::XHigh => Self::XHigh,
         }
     }
 }
@@ -280,7 +285,7 @@ pub enum ReasoningConfig {
         thinking_budget: isize,
         include_summaries: bool,
     },
-    /// Gemini 3.x thinking-level-based reasoning configuration.
+    /// Gemini 3.x and Gemini 4 thinking-level-based reasoning configuration.
     ///
     /// Supported levels are validated against the selected model when the
     /// request is built.
@@ -413,7 +418,7 @@ impl ReasoningConfig {
         }
     }
 
-    /// Creates a Gemini 3.x thinking-level configuration.
+    /// Creates a Gemini 3.x or Gemini 4 thinking-level configuration.
     pub fn gemini(thinking_level: GeminiThinkingLevel, include_summaries: bool) -> Self {
         ReasoningConfig::Gemini {
             thinking_level,
@@ -622,6 +627,11 @@ mod tests {
         assert_eq!(ReasoningEffort::from(OpenAIEffort::XHigh), XHigh);
         assert_eq!(ReasoningEffort::from(AnthropicReasoningEffort::Max), Max);
         assert_eq!(ReasoningEffort::from(GeminiThinkingLevel::Minimal), Minimal);
+        assert_eq!(ReasoningEffort::from(GeminiThinkingLevel::XHigh), XHigh);
+        assert_eq!(
+            serde_json::to_value(GeminiThinkingLevel::XHigh).unwrap(),
+            GeminiThinkingLevel::XHigh.as_str()
+        );
     }
 
     #[test]
