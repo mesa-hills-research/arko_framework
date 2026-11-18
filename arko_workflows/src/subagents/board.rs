@@ -1905,7 +1905,9 @@ impl Board {
         let mut version = self.version.subscribe();
         let mut notes = ctx.notes.watch();
         // The wait ends `timeout` after the call started, whatever the checks
-        // and the locks above took. A wait too long to count has no end.
+        // and the locks above took. The limit is at most a day, so a time
+        // that can't be counted doesn't happen, and it would end the wait at
+        // once.
         let deadline = started.checked_add(timeout).unwrap_or(started);
         let mut collected: Vec<MailItem> = Vec::new();
         // What the items collected take of the result's room.
