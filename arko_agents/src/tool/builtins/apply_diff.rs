@@ -9,10 +9,10 @@
 //! doesn't matter. A call applies every block or none. It reads the file,
 //! checks every block and writes the file once, and an error names each block
 //! that failed and why. Everything outside the matched lines is kept byte for
-//! byte, a byte-order mark and the last line break included. The write keeps
-//! who can read and write the file. A new file renamed over it replaces it in
-//! one step where the new file can have its owner, group, permissions and
-//! lack of ACLs and links (on Linux), and elsewhere it is written in place.
+//! byte, a byte-order mark and the last line break included. A new file
+//! takes the file's place in one step, with its owner, group, permissions,
+//! ACL and extended attributes, and a file whose identity a new file can't
+//! have, such as one with a second hard link, is refused and left as it was.
 //!
 //! A line of the file that is itself a marker is written in a block with a
 //! backslash before it (`\=======`), as the error that meets one says. Blocks
@@ -28,6 +28,7 @@ use super::edit_file::{
     BOM, CONTEXT_LINES, LISTED_LINES, SHOWN_LINES, line_at, line_range, lines_at, lines_named,
     replace_all_param, starts_with_line_number, text_param,
 };
+use super::rewrite::RewriteError;
 use crate::tool::receipt::{Replacement, edit_receipt};
 use crate::tool::{
     TaskContext, Tool, ToolDefinition, ToolError, ToolOutput, ToolParameterDefinition,
@@ -663,10 +664,15 @@ impl Tool for ApplyDiffTool {
         contents.extend_from_slice(bom);
         contents.extend_from_slice(edited.as_bytes());
         let target = absolute_path.clone();
-        tokio::task::spawn_blocking(move || crate::utils::rewrite_file(&target, &contents))
+        tokio::task::spawn_blocking(move || super::rewrite::rewrite_file(&target, &contents))
             .await
             .map_err(|error| ToolError::ExecutionFailed(format!("The write stopped: {error}")))?
-            .map_err(io)?;
+            .map_err(|error| match error {
+                RewriteError::Kept(why) => ToolError::ExecutionFailed(format!(
+                    "{path} is unchanged. {why} To change it, use write_file or the shell, which write it in place."
+                )),
+                RewriteError::Io(error) => io(error),
+            })?;
         let receipt = ToolReceipt::Edit(edit_receipt(text, &edited, &replaced));
 
         let starts: Vec<usize> = replaced
@@ -1241,7 +1247,7 @@ mod tests {
 
     /// The file is replaced whole, keeping its permissions, and a symbolic
     /// link stays a link to the file it names.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     #[tokio::test]
     async fn the_write_keeps_permissions_and_links() {
         use std::os::unix::fs::PermissionsExt;
@@ -1277,9 +1283,10 @@ mod tests {
     }
 
     /// Who can read and write the file stays as it was. A file of another
-    /// group keeps its group and permissions, a hard link sees the edit, and
-    /// an ACL is kept.
-    #[cfg(unix)]
+    /// group keeps its group and permissions, and an ACL is kept. A file
+    /// with a second hard link, which a new file in its place would leave
+    /// behind, is refused.
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     #[tokio::test]
     async fn the_write_keeps_who_can_read_the_file() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1306,8 +1313,8 @@ mod tests {
 
         ws.write("a.txt", b"one\n");
         std::fs::hard_link(ws.root.join("a.txt"), ws.root.join("b.txt")).unwrap();
-        ws.apply("a.txt", &block("one", "two")).await;
-        assert_eq!(ws.text("b.txt"), "two\n");
+        ws.refused_diff("a.txt", &block("one", "two")).await;
+        assert_eq!(ws.text("b.txt"), "one\n");
         assert_eq!(std::fs::metadata(ws.root.join("a.txt")).unwrap().nlink(), 2);
 
         ws.write("acl.txt", b"one\n");

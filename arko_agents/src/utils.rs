@@ -231,7 +231,7 @@ pub fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// The directory of `path`, and a new temporary file's path in it.
-fn temporary_beside(path: &Path) -> std::io::Result<(&Path, PathBuf)> {
+pub(crate) fn temporary_beside(path: &Path) -> std::io::Result<(&Path, PathBuf)> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -246,113 +246,6 @@ fn temporary_beside(path: &Path) -> std::io::Result<(&Path, PathBuf)> {
     temporary_name.push(name);
     temporary_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     Ok((directory, directory.join(temporary_name)))
-}
-
-/// Writes `bytes` over the existing file at `path`, for a file a person or a
-/// tool edits, without changing who can read or write it. A symbolic link is
-/// followed, so the file it points to is written and the link stays, and a
-/// file the process can't write is refused, as a write in place would be.
-///
-/// Where a new file can have all of the file's identity (on Linux, a file
-/// the process owns, with one link, a group the new file can be given, and
-/// no ACLs or other extended attributes on either), the bytes go to a new
-/// file beside it that is renamed over it, as [`write_file_atomically`]
-/// does, so a crash leaves the previous file whole. Otherwise the file is
-/// written in place, keeping its owner, group, ACLs and links, and only a
-/// crash during the write can leave it partly written.
-pub(crate) fn rewrite_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let target = std::fs::canonicalize(path)?;
-    let mut file = std::fs::OpenOptions::new().write(true).open(&target)?;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if replace_keeping_identity(&file, &target, bytes)? {
-        return Ok(());
-    }
-    file.write_all(bytes)?;
-    file.set_len(bytes.len() as u64)?;
-    file.sync_all()
-}
-
-/// Replaces `target`, open as `file`, with a new file holding `bytes`,
-/// renamed over it, when the new file can have its whole identity (see
-/// [`rewrite_file`]). False, with nothing changed, when it can't.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn replace_keeping_identity(
-    file: &std::fs::File,
-    target: &Path,
-    bytes: &[u8],
-) -> std::io::Result<bool> {
-    use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata()?;
-    if metadata.nlink() != 1 || has_extended_attributes(file) {
-        return Ok(false);
-    }
-    let (_, temporary) = temporary_beside(target)?;
-    // (A directory the process can't write in leaves the write in place.)
-    let Ok(Some(mut new)) = new_file_like(&metadata, &temporary) else {
-        return Ok(false);
-    };
-    let written = new.write_all(bytes).and_then(|()| new.sync_all());
-    drop(new);
-    let written = written.and_then(|()| std::fs::rename(&temporary, target));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written.map(|()| true)
-}
-
-/// A new, empty file at `temporary` with the identity of the file `like`
-/// describes, its owner, group and permissions, and no extended attributes
-/// (the process owns it, so it is the owner's file only when the process
-/// owns that too). It is
-/// created readable by its owner alone and has the permissions before a
-/// byte is written, so no one else sees what it will hold. `None`, with
-/// nothing left behind, when it can't have them.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn new_file_like(
-    like: &std::fs::Metadata,
-    temporary: &Path,
-) -> std::io::Result<Option<std::fs::File>> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(temporary)?;
-    let fits = (|| {
-        let made = file.metadata()?;
-        if made.uid() != like.uid() {
-            return Ok(false);
-        }
-        if made.gid() != like.gid() {
-            std::os::unix::fs::fchown(&file, None, Some(like.gid()))?;
-        }
-        // (A directory's default ACL gives a new file one.)
-        if has_extended_attributes(&file) {
-            return Ok(false);
-        }
-        file.set_permissions(like.permissions())?;
-        Ok::<_, std::io::Error>(true)
-    })();
-    if matches!(fits, Ok(true)) {
-        return Ok(Some(file));
-    }
-    drop(file);
-    let _ = std::fs::remove_file(temporary);
-    Ok(None)
-}
-
-/// Whether `file` has extended attributes, ACLs among them. An error, other
-/// than the file system having none, counts as having some.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn has_extended_attributes(file: &std::fs::File) -> bool {
-    use std::os::fd::AsRawFd;
-    // SAFETY: with no list and a size of 0, flistxattr writes nothing and
-    // returns the size the names need.
-    let size = unsafe { nix::libc::flistxattr(file.as_raw_fd(), std::ptr::null_mut(), 0) };
-    size != 0
-        && !(size < 0 && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ENOTSUP))
 }
 
 #[cfg(test)]
@@ -389,81 +282,6 @@ mod tests {
         assert!(
             names.iter().all(|name| !name.ends_with(".tmp")),
             "{names:?}"
-        );
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    /// The file that replaces an edited one has the edited file's group and
-    /// permissions before any of its bytes are written, so a private file's
-    /// content is never readable by others, even for a moment.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    #[test]
-    fn a_rewrite_s_new_file_has_its_identity_before_its_content() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let directory = std::env::temp_dir().join(format!("arko-rewrite-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let original = directory.join("original");
-        std::fs::write(&original, b"old").unwrap();
-        // The groups the process can give a file, its own first.
-        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
-        let groups: Vec<u32> = String::from_utf8(groups.stdout)
-            .unwrap()
-            .split_whitespace()
-            .map(|group| group.parse().unwrap())
-            .collect();
-        for (mode, group) in [0o600, 0o640, 0o755]
-            .into_iter()
-            .flat_map(|mode| groups.iter().take(2).map(move |group| (mode, *group)))
-        {
-            std::os::unix::fs::chown(&original, None, Some(group)).unwrap();
-            std::fs::set_permissions(&original, std::fs::Permissions::from_mode(mode)).unwrap();
-            let like = std::fs::metadata(&original).unwrap();
-            let path = directory.join(format!("new-{mode:o}-{group}"));
-            let file = new_file_like(&like, &path).unwrap().unwrap();
-            let made = file.metadata().unwrap();
-            assert_eq!(
-                (made.mode() & 0o7777, made.gid(), made.uid(), made.len()),
-                (mode, group, like.uid(), 0)
-            );
-        }
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    /// A file of the process's own, with one link and no ACL, is replaced in
-    /// one step, so a reader that opened it before keeps the old content
-    /// whole. A file with a second link is written in place, so both of its
-    /// names show the new content.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    #[test]
-    fn a_rewrite_replaces_the_file_whole_where_that_keeps_its_identity() {
-        use std::io::Read;
-        let directory = std::env::temp_dir().join(format!("arko-rewrite-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("file.txt");
-        std::fs::write(&path, b"old").unwrap();
-        let mut reader = std::fs::File::open(&path).unwrap();
-        rewrite_file(&path, b"new").unwrap();
-        let mut read = String::new();
-        reader.read_to_string(&mut read).unwrap();
-        assert_eq!(
-            (read.as_str(), std::fs::read(&path).unwrap()),
-            ("old", b"new".to_vec())
-        );
-
-        let link = directory.join("link.txt");
-        std::fs::hard_link(&path, &link).unwrap();
-        rewrite_file(&path, b"newer, and longer").unwrap();
-        assert_eq!(std::fs::read(&link).unwrap(), b"newer, and longer");
-        rewrite_file(&link, b"short").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"short");
-        let mut names: Vec<_> = std::fs::read_dir(&directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            ["file.txt", "link.txt"].map(std::ffi::OsString::from)
         );
         std::fs::remove_dir_all(&directory).unwrap();
     }

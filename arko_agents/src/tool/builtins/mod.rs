@@ -8,6 +8,7 @@ pub mod edit_file;
 pub mod list_files;
 pub mod message_user;
 pub mod read_file;
+mod rewrite;
 pub mod write_file;
 
 pub use complete_task::COMPLETE_TASK_TOOL_NAME;

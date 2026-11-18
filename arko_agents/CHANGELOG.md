@@ -13,10 +13,10 @@
   re-indenting of replacement lines are gone. Blocks need no `:start_line:` and `-------` lines,
   and blocks that still have them parse.
 - `replace_all` replaces every occurrence of each block's search lines.
-- The file is written once, through a symbolic link, keeping its owner, group, permissions, ACLs
-  and hard links. On Linux, a file whose identity a new file can have is replaced in one step,
-  and any other is written in place. A byte-order mark, CRLF line breaks and a missing last line
-  break are kept.
+- A new file takes the file's place in one step, through a symbolic link, with its owner, group,
+  permissions, ACL and extended attributes, so an error or a crash leaves the old file whole. A
+  file whose identity a new file can't have, such as one with a second hard link, is refused
+  unchanged. A byte-order mark, CRLF line breaks and a missing last line break are kept.
 - Its result shows each block's new lines, as `edit_file`'s does, and carries a
   `ToolReceipt::Edit` covering every block.
 - Its description is a few sentences and one example.

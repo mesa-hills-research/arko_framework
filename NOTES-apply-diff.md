@@ -16,12 +16,13 @@ Deleted in the branch's last commit.
   (copied line numbers, a match apart from indentation) and names the first line that differs.
 - Bytes outside the matched lines are kept: a byte-order mark, line breaks, a missing last line
   break. In a CRLF file the search lines match CRLF lines and the replacement lines get CRLF.
-- A save never widens who can read a file. It keeps the owner, group, permissions, ACLs and hard
-  links, writes through a symbolic link so the link stays a link, and refuses a file the process
-  can't write, as an in-place write would. A temporary file renamed over the file is used only
-  where it keeps all of that (on Linux, an own file with one link, a settable group and no
-  extended attributes on either file), and the file is written in place otherwise. The temporary
-  file is private until it has the file's permissions, before any byte is written.
+- A save never widens who can read a file, and never leaves it partly written. A temporary file
+  takes its place (rename, or ReplaceFileW on Windows) on every platform, and nothing is written
+  in place. On Unix the temporary file is 0600 until it has the file's owner, group, extended
+  attributes and permissions, before any byte. A file whose identity it can't have is refused
+  unchanged with the reason (more than one hard link, another owner, a group or attribute that
+  can't be given, an ACL on macOS, no room for the temporary file, other Unix systems). Writes go
+  through a symbolic link, and a file the process can't write is refused.
 - Anything but a regular file is refused before it is read.
 - The output carries an `EditReceipt` covering every block, as edit_file's does.
 - The description is a few plain sentences and one short example. Rare cases (a file line that
