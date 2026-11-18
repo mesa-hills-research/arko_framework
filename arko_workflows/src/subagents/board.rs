@@ -1845,7 +1845,8 @@ impl Board {
     }
 
     /// Waits for mail for run `me`, as `wait_for_agents` does, returning the
-    /// tool's result. The call's `signals` end it early when it is stopped,
+    /// tool's result. It ends `timeout` after `started`, the time the call
+    /// began, and the call's `signals` end it early when it is stopped,
     /// moved to the background, or context arrives for it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn wait(
@@ -1855,6 +1856,7 @@ impl Board {
         agent_name: &str,
         runs: Option<Vec<String>>,
         all: bool,
+        started: tokio::time::Instant,
         timeout: Duration,
         signals: &WaitSignals<'_>,
     ) -> Result<String, String> {
@@ -1902,7 +1904,9 @@ impl Board {
         let _waiting = Waiting(self, me);
         let mut version = self.version.subscribe();
         let mut notes = ctx.notes.watch();
-        let deadline = tokio::time::Instant::now() + timeout;
+        // The wait ends `timeout` after the call started, whatever the checks
+        // and the locks above took. A wait too long to count has no end.
+        let deadline = started.checked_add(timeout).unwrap_or(started);
         let mut collected: Vec<MailItem> = Vec::new();
         // What the items collected take of the result's room.
         let mut bytes = 0;

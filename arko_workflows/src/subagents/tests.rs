@@ -2791,6 +2791,83 @@ async fn a_wait_for_agents_stays_inside_the_cache() {
     }
 }
 
+/// The board's wait ends `timeout` after the call began, not after the
+/// board looked at it. Time that went before, such as the checks and locks of
+/// the call, comes out of the wait, and a call whose time is up waits no time.
+#[tokio::test]
+async fn the_board_s_wait_ends_at_the_deadline_of_the_calls_start() {
+    // r1 works until the server is dropped.
+    let server = ResponsesServer::start(|_, _| None).await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Search slowly.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let (stop, moved, arrived) = (
+        arko_agents::stop::StopSignal::never(),
+        arko_agents::MoveSignal::never(),
+        arko_agents::ContextSignal::never(),
+    );
+    let signals = board::WaitSignals {
+        stop: &stop,
+        moved: &moved,
+        context_arrived: &arrived,
+        claude_code: false,
+    };
+    // (how long ago the call began, the wait it asked for, how long this
+    // takes in seconds at most, and at least)
+    for (began, wait, at_least, below) in [
+        (Duration::ZERO, 1, 0.9, 5.0),
+        (Duration::from_millis(1500), 2, 0.4, 1.4),
+        (Duration::from_secs(2), 2, 0.0, 0.5),
+        (Duration::from_secs(30), 2, 0.0, 0.5),
+    ] {
+        let started = tokio::time::Instant::now().checked_sub(began).unwrap();
+        let entered = std::time::Instant::now();
+        let result = ctx
+            .subagents
+            .wait(
+                ctx,
+                lead,
+                "lead",
+                Some(vec!["r1".to_string()]),
+                false,
+                started,
+                Duration::from_secs(wait),
+                &signals,
+            )
+            .await
+            .unwrap();
+        let waited = entered.elapsed().as_secs_f64();
+        assert!(
+            result.starts_with(&format!("Nothing new in {wait} s.")),
+            "{result}"
+        );
+        assert!(
+            (at_least..below).contains(&waited),
+            "began {began:?} ago, asked {wait} s, waited {waited}"
+        );
+    }
+}
+
 /// A stop_agent call dropped once the provider was asked leaves the run
 /// closed.
 #[tokio::test(flavor = "multi_thread")]

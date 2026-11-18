@@ -406,6 +406,7 @@ impl Tool for WaitForAgentsTool {
         context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
+        let started = tokio::time::Instant::now();
         let requested = match params.get("timeout_seconds") {
             None | Some(Value::Null) => None,
             Some(value) => {
@@ -432,9 +433,7 @@ impl Tool for WaitForAgentsTool {
                 }
             }
         };
-        let limit = self
-            .limits
-            .wait_limit(&context.prompt_cache, tokio::time::Instant::now());
+        let limit = self.limits.wait_limit(&context.prompt_cache, started);
         // The model may only shorten the wait.
         let wait = match requested {
             Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),
@@ -448,6 +447,7 @@ impl Tool for WaitForAgentsTool {
                 &self.agent_name,
                 ids(&params, "runs"),
                 flag(&params, "all")?,
+                started,
                 wait,
                 &super::board::WaitSignals {
                     stop: &context.stop,

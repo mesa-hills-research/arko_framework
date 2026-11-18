@@ -121,13 +121,17 @@ impl TerminalTool {
         id: Uuid,
         params: &HashMap<String, Value>,
     ) -> std::result::Result<Value, ToolError> {
+        let started = tokio::time::Instant::now();
         let revision = revision(params)?;
         let asked = number(params, "wait_ms")?.map_or(DEFAULT_WAIT, Duration::from_millis);
-        let wait = context.prompt_cache.cap(tokio::time::Instant::now(), asked);
+        // One deadline from the start, down to the manager's timer, so the
+        // time the job's lookup and lock take comes out of the wait.
+        let wait = context.prompt_cache.cap(started, asked);
+        let deadline = started.checked_add(wait);
         let owner = context.task_id;
         let (snapshot, ran_out) = tokio::select! {
             biased;
-            waited = self.manager.wait_for_change(owner, id, revision, wait) => waited,
+            waited = self.manager.wait_for_change(owner, id, revision, deadline) => waited,
             () = context.context_arrived.arrived() => {
                 self.manager.status(owner, id, None).map(|snapshot| (snapshot, false))
             }

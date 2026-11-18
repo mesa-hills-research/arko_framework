@@ -39,10 +39,6 @@ pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(270);
 /// The longest time limit the builder accepts, 24 hours.
 pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The least an automatic limit leaves for a wait, however long ago the last
-/// model request was, as long as the cache lasts that much longer.
-const MIN_AUTO_WAIT: Duration = Duration::from_secs(1);
-
 /// How long a wait that found a message still waits for the run's delivery
 /// worker to put it in the command channel, so that it arrives at the next
 /// turn boundary. It takes microseconds unless the channel is full.
@@ -104,18 +100,19 @@ impl From<Duration> for WaitForMessageTimeout {
 impl WaitForMessageTimeout {
     /// The time limit for an agent whose prompt cache has `lifetime`, from a
     /// cache just used. A `Fixed` limit is cut to the longest wait inside a
-    /// known lifetime ([`PromptCacheLifetime::longest_wait`]).
+    /// known lifetime ([`PromptCacheLifetime::longest_wait`]). There is no
+    /// minimum, so a lifetime within its margin gives none. The tools take
+    /// the time left of the call's own cache instead
+    /// ([`TaskContext::prompt_cache`]).
     pub fn resolve(self, lifetime: PromptCacheLifetime) -> Duration {
         match (self, lifetime) {
             (Self::Fixed(timeout), PromptCacheLifetime::Known(_)) => {
                 timeout.min(lifetime.longest_wait())
             }
             (Self::Fixed(timeout), _) => timeout,
-            (Self::Auto, PromptCacheLifetime::Known(known)) => lifetime.longest_wait().clamp(
-                // A second, where the cache lasts that long.
-                MIN_AUTO_WAIT.min(known),
-                MAX_WAIT_FOR_MESSAGE_TIMEOUT,
-            ),
+            (Self::Auto, PromptCacheLifetime::Known(_)) => {
+                lifetime.longest_wait().min(MAX_WAIT_FOR_MESSAGE_TIMEOUT)
+            }
             (Self::Auto, PromptCacheLifetime::Unknown | PromptCacheLifetime::Disabled) => {
                 DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT
             }
@@ -447,14 +444,10 @@ mod tests {
         assert_eq!(known(5 * MINUTE), Duration::from_secs(270));
         assert_eq!(known(30 * MINUTE), 27 * MINUTE);
         assert_eq!(known(60 * MINUTE), 54 * MINUTE);
-        // The margin is at least 30 seconds, and the limit at least 1 second
-        // where the cache lasts that long.
+        // The margin is at least 30 seconds, and there is no minimum limit.
         assert_eq!(known(2 * MINUTE), Duration::from_secs(90));
-        assert_eq!(known(Duration::from_secs(10)), Duration::from_secs(1));
-        assert_eq!(
-            known(Duration::from_millis(400)),
-            Duration::from_millis(400)
-        );
+        assert_eq!(known(Duration::from_secs(10)), Duration::ZERO);
+        assert_eq!(known(Duration::from_millis(400)), Duration::ZERO);
         assert_eq!(known(48 * 60 * MINUTE), MAX_WAIT_FOR_MESSAGE_TIMEOUT);
         for lifetime in [PromptCacheLifetime::Unknown, PromptCacheLifetime::Disabled] {
             assert_eq!(auto.resolve(lifetime), DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT);

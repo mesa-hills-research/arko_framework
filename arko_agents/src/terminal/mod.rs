@@ -1161,7 +1161,7 @@ impl TerminalManager {
 
     /// Waits for a revision change, input request, or completion, for at
     /// most `duration`. The wait deadline does not terminate the process.
-    /// `terminal_control wait` bounds `duration` by the agent's prompt cache.
+    /// `terminal_control wait` bounds its deadline by the agent's prompt cache.
     pub async fn wait(
         &self,
         owner: Uuid,
@@ -1169,24 +1169,27 @@ impl TerminalManager {
         revision: u64,
         duration: Duration,
     ) -> Result<TerminalSnapshot> {
-        Ok(self.wait_for_change(owner, id, revision, duration).await?.0)
+        // A duration too long for the clock has no end. The time counts from
+        // here, before the job is looked up and its record locked.
+        let deadline = tokio::time::Instant::now().checked_add(duration);
+        Ok(self.wait_for_change(owner, id, revision, deadline).await?.0)
     }
 
-    /// [`wait`](Self::wait), and whether `duration` ran out with the job
-    /// unchanged. Updates that leave the revision and state alone (part of
-    /// an input declaration, say) don't end the wait or restart its time.
+    /// [`wait`](Self::wait) until `deadline` (none is no end), and whether it
+    /// passed with the job unchanged. The deadline is a moment the caller
+    /// fixed, so the time the lookup and the record's lock take comes out of
+    /// the wait. Updates that leave the revision and state alone (part of an
+    /// input declaration, say) don't end the wait or restart its time.
     pub(crate) async fn wait_for_change(
         &self,
         owner: Uuid,
         id: Uuid,
         revision: u64,
-        duration: Duration,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(TerminalSnapshot, bool)> {
         let job = self.owned(owner, id)?;
         let mut changes = job.changes.clone();
         changes.borrow_and_update();
-        // A duration too long for the clock has no end.
-        let deadline = tokio::time::Instant::now().checked_add(duration);
         let mut timed_out = false;
         loop {
             let unchanged = {

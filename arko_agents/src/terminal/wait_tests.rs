@@ -293,7 +293,12 @@ async fn the_manager_says_whether_the_time_ran_out() {
     let started = Instant::now();
     let (snapshot, timed_out) = f
         .manager
-        .wait_for_change(f.owner, job.job_id, job.revision, Duration::from_secs(90))
+        .wait_for_change(
+            f.owner,
+            job.job_id,
+            job.revision,
+            Some(started + Duration::from_secs(90)),
+        )
         .await
         .unwrap();
     assert!(timed_out);
@@ -306,12 +311,78 @@ async fn the_manager_says_whether_the_time_ran_out() {
             f.owner,
             job.job_id,
             job.revision + 1,
-            Duration::from_secs(90),
+            Some(started + Duration::from_secs(900)),
         )
         .await
         .unwrap();
     assert!(!timed_out);
     assert_lasted(started.elapsed(), 90);
+}
+
+/// The wait ends at the deadline the caller fixed, so time that passes
+/// between fixing it and the wait's own start comes out of the wait. That is
+/// what looking up the job and locking its record take. A deadline that has
+/// passed ends the wait at once, and none has no end.
+#[tokio::test(start_paused = true)]
+async fn the_manager_waits_until_a_deadline_fixed_earlier() {
+    let f = Fixture::new(|_| {});
+    let job = silent(&f);
+    let wait = |deadline| {
+        f.manager
+            .wait_for_change(f.owner, job.job_id, job.revision, deadline)
+    };
+    let fixed = Instant::now();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    let (_, timed_out) = wait(Some(fixed + Duration::from_secs(10))).await.unwrap();
+    assert!(timed_out);
+    assert_lasted(fixed.elapsed(), 10);
+    // Passed already.
+    let before = Instant::now();
+    let (_, timed_out) = wait(Some(fixed)).await.unwrap();
+    assert!(timed_out);
+    assert_eq!(before.elapsed(), Duration::ZERO);
+    // No deadline ends with a change.
+    let waiting = tokio::spawn({
+        let manager = f.manager.clone();
+        let (owner, id, revision) = (f.owner, job.job_id, job.revision);
+        async move { manager.wait_for_change(owner, id, revision, None).await }
+    });
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert!(!waiting.is_finished());
+    waiting.abort();
+}
+
+/// The tool ends its wait at its deadline when the job's record is locked
+/// meanwhile, as it is while the runner writes. The lock isn't part of the
+/// wait's time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_record_doesnt_extend_a_wait() {
+    let f = Fixture::new(|_| {});
+    let job = silent(&f);
+    let held = f.manager.owned(f.owner, job.job_id).unwrap();
+    let (locked, is_locked) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _data = held.data.lock().unwrap();
+        locked.send(()).unwrap();
+        // Long enough to see, and under the wait.
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    is_locked.recv().unwrap();
+    let cache = PromptCacheWindow::new(
+        Known(5 * MINUTE),
+        Instant::now().checked_sub(Duration::from_millis(269_400)),
+    );
+    // A wait cut to 600 ms of the cache, started with the record locked.
+    let started = std::time::Instant::now();
+    let (result, _) = wait(&f, &job, Some(60_000), cache).await;
+    let waited = started.elapsed();
+    holder.join().unwrap();
+    assert!(waited >= Duration::from_millis(550), "{waited:?}");
+    assert!(waited < Duration::from_millis(900), "{waited:?}");
+    assert!(
+        note(&result).starts_with("The wait ended after"),
+        "{result}"
+    );
 }
 
 /// Context that arrives for the agent, before or during the wait, and a
