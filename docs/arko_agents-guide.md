@@ -108,7 +108,11 @@ first snapshot followed by changes at model-call boundaries. See
 `replace_all`) and changes nothing when the text isn't there exactly once. Its `ToolResult`
 event carries a receipt of what it changed (`ToolReceipt::Edit`), diff hunks of whole lines
 made from the text it read and wrote, which a host can show without reading the file.
-`apply_diff` applies SEARCH/REPLACE blocks. An agent is
+`apply_diff` makes several changes to a file in one call, as SEARCH/REPLACE blocks. Each
+block's search lines must match whole lines of the file exactly and be found once (or with
+`replace_all`, at least once), and blocks must not overlap. It applies every block or none,
+writes the file atomically with its permissions kept, and its error names each block that
+failed and why. Its result carries the same receipt, covering every block. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
@@ -386,9 +390,10 @@ tool_config.tool_specific_configs.insert(
 
 When an agent is offered both `read_file` and the terminal tools, `read_file`'s
 description gains one sentence (`read_file::TERMINAL_HINT`) pointing to the terminal for
-large or generated files. Likewise, when it is offered both `write_file` and `edit_file`,
-`write_file`'s description gains one sentence (`write_file::EDIT_FILE_HINT`) pointing to
-`edit_file` for changes to part of a file. Each is part of the tool's description, not of the agent's
+large or generated files. Likewise, when it is offered both `write_file` and `apply_diff`,
+`write_file`'s description gains one sentence (`write_file::APPLY_DIFF_HINT`) pointing to
+`apply_diff` for changes to part of a file, and when it is offered `edit_file` instead, one
+pointing to `edit_file` (`write_file::EDIT_FILE_HINT`). Each is part of the tool's description, not of the agent's
 instructions, so the same configuration always shows the same definitions, and a
 workflow's resume check, which compares configurations, not tool definitions, isn't
 affected. (In output-based mode the definitions are in the system prompt written when a

@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### apply_diff
+
+- `apply_diff` applies every block of a call or none. A block not found, found more than once
+  or overlapping another, and a diff that doesn't parse, leave the file byte for byte as it was.
+  The error names each failing block and why, with `edit_file`'s hints and the first line that
+  differs. Before, it wrote the blocks that matched and left the file half changed.
+- A block's search lines match whole lines exactly, anywhere in the file, as it was before the
+  call. The fuzzy search near `:start_line:`, the stripping of copied line numbers and the
+  re-indenting of replacement lines are gone. Blocks need no `:start_line:` and `-------` lines,
+  and blocks that still have them parse.
+- `replace_all` replaces every occurrence of each block's search lines.
+- The file is written once, atomically, keeping its permissions and writing through a symbolic
+  link. A byte-order mark, CRLF line breaks and a missing last line break are kept.
+- Its result shows each block's new lines, as `edit_file`'s does, and carries a
+  `ToolReceipt::Edit` covering every block.
+- Its description is a few sentences and one example.
+- `write_file`'s description points to `apply_diff` when the agent is offered it
+  (`write_file::APPLY_DIFF_HINT`).
+
+### Breaking changes
+
+- An `apply_diff` call with a block that fails is an error and writes nothing.
+- A line of the file that is itself a marker is written with a backslash before it
+  (`\=======`). The `AD_ESC::` prefix is gone.
+
 ## 0.9.1 (2026-11-18)
 
 ### Waits inside the prompt cache
