@@ -32,7 +32,7 @@
 //! | macOS | File flags compressed and tracked | Ignored. One is how the file is stored, and the other tracks a document's identity and grants no access. |
 //! | macOS | Any other file flag | Refused. |
 //! | Windows | Owner, group and DACL | Kept. The new file is created with them, its rules made its own and protected from the directory's, and `ReplaceFileW` gives it the old file's whole security descriptor. An owner the process can't give is refused. |
-//! | Windows | Mandatory labels, central access policies and resource attributes | Refused, as is a failure to read them. |
+//! | Windows | Mandatory labels, central access policies, resource attributes, access filters and process trust labels | Refused, as is a failure to read them or a system that can't. |
 //! | Windows | Audit rules | Ignored, and an edit may drop them. Reading them needs a privilege the process doesn't have, and they grant no access, so a save can't widen who reads the file. |
 //! | Windows | Attributes hidden, system, not content indexed, archive and normal | Kept by `ReplaceFileW`. |
 //! | Windows | Any other attribute | Refused, among them encrypted, compressed, sparse, a reparse point, offline, temporary, integrity stream, no scrub data, extended attributes, and a cloud file's pinned, unpinned and recall attributes. |
@@ -530,6 +530,11 @@ mod system {
     use std::path::Path;
     use windows_sys::Win32::Storage::FileSystem as fs;
 
+    /// The security information of a file's access filters and process
+    /// trust labels, which windows-sys keeps among the system services.
+    const ACCESS_FILTER_SECURITY_INFORMATION: u32 = 0x100;
+    const PROCESS_TRUST_LABEL_SECURITY_INFORMATION: u32 = 0x80;
+
     /// The attributes `ReplaceFileW` keeps, or that every file has.
     const KEPT: u32 = fs::FILE_ATTRIBUTE_HIDDEN
         | fs::FILE_ATTRIBUTE_SYSTEM
@@ -575,13 +580,16 @@ mod system {
                 attributes & !KEPT
             )));
         }
-        // Labels, central access policies and resource attributes, each
-        // read through its own flag. (Audit rules need a privilege.)
+        // Labels, central access policies, resource attributes, access
+        // filters and trust labels, each read through its own flag. (Audit
+        // rules need a privilege.)
         let mut descriptor = security_of(
             target,
             LABEL_SECURITY_INFORMATION
                 | SCOPE_SECURITY_INFORMATION
-                | ATTRIBUTE_SECURITY_INFORMATION,
+                | ATTRIBUTE_SECURITY_INFORMATION
+                | ACCESS_FILTER_SECURITY_INFORMATION
+                | PROCESS_TRUST_LABEL_SECURITY_INFORMATION,
         )
         .map_err(|error| {
             kept(format!(
@@ -590,7 +598,7 @@ mod system {
         })?;
         if rules(&mut descriptor, false)? > 0 {
             return Err(kept(
-                "It has a mandatory label, an access policy or resource attributes, which a new file in its place can't keep.",
+                "It has a mandatory label, an access policy, resource attributes, an access filter or a trust label, which a new file in its place can't keep.",
             ));
         }
         if has_named_streams(target)? {
