@@ -1,6 +1,6 @@
 [package]
 name = "arko_workflows"
-version = "0.10.0"
+version = "0.10.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Coordinates many agents in plain Rust."

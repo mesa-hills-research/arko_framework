@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.1 (2026-11-18)
+
+### Waits inside the prompt cache
+
+- `terminal_control wait` lasts `wait_ms` (1 second without it), up to the longest wait that ends
+  before the agent's prompt cache lapses, counted from the request that made the call. It used to
+  end after 30 seconds whatever `wait_ms` said. A longer request is cut to that, and a wait that
+  then runs out has a `note` that says so, with the time the cache lapses when its lifetime is
+  known. New output, the job's end or an input request, context that reaches the agent and a stop
+  end a wait sooner.
+- `TaskContext::prompt_cache` is the call's `PromptCacheWindow`, the task's cache lifetime and the
+  anchor of the request that made the call, a moment no later than its use of the cache, on the
+  monotonic clock. `PromptCacheWindow::deadline` is the same for every wait of a request, and
+  `cap` shortens a wait to it. A known lifetime with no anchor, as for a task loaded from a save,
+  leaves no wait. An unknown lifetime, or caching off, gives 4 min 30 s from the start of the
+  wait.
+- The window uses the conversation's switch for caching, so a conversation with caching off gets
+  the fixed ceiling and not an hour. A call that follows a request to the refusal fallback's model
+  gets that model's lifetime.
+- In Claude Code the lifetime is the one the run asked the CLI for (`promptCacheTtl`), else the
+  one the cache writes show, else 5 minutes. The anchor is the latest hand-off to the CLI that must
+  come before its next main request, which is the turn's input or the hook, permission request or
+  result of a call the main conversation announced. A slow or unstreamed reply no longer makes a
+  request look newer than it is.
+- `LatestRequest::sent_at` is that anchor, and the new `LatestRequest::sent_instant` is the same
+  moment on the monotonic clock, set with `with_sent_instant`. It isn't saved.
+- `TerminalManager::wait` no longer cuts its duration to 30 seconds, so the caller sets the bound.
+  It returns when the job's revision or state changes or the duration ends, and an update that
+  changes neither, such as part of an input declaration, doesn't end it.
+
+### Dependencies
+
+- Takes arko_ai 0.3.1.
+
 ## 0.9.0 (2026-11-18)
 
 ### Nested calls

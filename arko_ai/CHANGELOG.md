@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 (2026-11-18)
+
+### Prompt caching
+
+- `PromptCacheLifetime::longest_wait` gives the longest an agent may wait before its next request
+  and still find its prompt cached. It is the lifetime less a margin of a tenth of it, at least
+  `prompt_cache::MIN_CACHE_MARGIN` (30 seconds). That is 4 min 30 s for a 5-minute cache, 27 min
+  for 30 minutes and 54 min for an hour. An unknown lifetime, or caching off, gives the 5-minute
+  cache's.
+
 ## 0.3.0 (2026-11-18)
 
 ### Models
