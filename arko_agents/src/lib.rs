@@ -77,7 +77,7 @@ pub use task::{
 };
 pub use tool::{
     ContextSignal, ContextSource, ImageRoom, InterceptedResult, InterceptionFailurePolicy,
-    InterceptorConfig, MoveSignal, MoveSource, NestedCalls, NestedOutcome, TaskContext, Tool,
+    InterceptorConfig, MoveSignal, MoveSource, NestedCalls, NestedOutcome, NestedRecord, NestedState, TaskContext, Tool,
     ToolBackground, ToolCallContext,
     ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
     ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput,

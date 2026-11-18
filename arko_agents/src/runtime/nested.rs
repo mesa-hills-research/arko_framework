@@ -15,7 +15,7 @@ use crate::tool::builtins::{
 use crate::tool::{ToolBackground, ToolOutput, ToolRegistry};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -105,6 +105,34 @@ pub struct NestedCalls {
     order: Arc<tokio::sync::Mutex<()>>,
     /// The first stop or pause a call met, for the outer call.
     halt: Arc<OnceLock<Halt>>,
+    /// The calls that got past the checks, in order.
+    records: Arc<Mutex<Vec<NestedRecord>>>,
+}
+
+/// A call that got past the gate's checks, so its tool may have run, as
+/// [`NestedCalls::records`] keeps it. It is there before the tool starts,
+/// so a call dropped before its end (the outer call was stopped) is too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedRecord {
+    pub tool_call_id: Uuid,
+    pub tool_name: String,
+    pub state: NestedState,
+}
+
+/// How far a recorded call got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestedState {
+    /// It runs, or it was dropped before its end, so it may have done
+    /// anything its tool does.
+    Running,
+    /// The tool returned, or with `failed` failed.
+    Ran { failed: bool },
+    /// The middleware or a check inside the tool refused it, and it did
+    /// nothing.
+    Refused,
+    /// The middleware stopped or paused the task at it, before the tool
+    /// ran, or with `ran` after.
+    Halted { ran: bool },
 }
 
 impl std::fmt::Debug for NestedCalls {
@@ -134,6 +162,35 @@ impl NestedCalls {
             stop,
             order: Arc::default(),
             halt: Arc::default(),
+            records: Arc::default(),
+        }
+    }
+
+    /// The calls that got past the checks so far, in the order made, each
+    /// as far as it got. A caller whose own run ends early (stopped, timed
+    /// out) reads what its calls may have done here.
+    pub fn records(&self) -> Vec<NestedRecord> {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record(&self, tool_call_id: Uuid, tool_name: &str, state: NestedState) {
+        let mut records = self
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match records
+            .iter_mut()
+            .find(|record| record.tool_call_id == tool_call_id)
+        {
+            Some(record) => record.state = state,
+            None => records.push(NestedRecord {
+                tool_call_id,
+                tool_name: tool_name.to_string(),
+                state,
+            }),
         }
     }
 
@@ -158,36 +215,43 @@ impl NestedCalls {
     pub async fn call(&self, tool_name: &str, params: HashMap<String, Value>) -> NestedOutcome {
         let _turn = self.order.lock().await;
         let tool_call_id = Uuid::new_v4();
-        self.emit(AgentEvent::NestedToolCallStarted {
+        let started = AgentEvent::NestedToolCallStarted {
             outer_tool_call_id: self.outer_tool_call_id,
             tool_call_id,
             tool_name: tool_name.to_string(),
             parameters: params.clone(),
-        })
-        .await;
-        // A call stopped before its end still ends in the events.
-        let mut unfinished = Unfinished {
-            events: Some(self.gate.events.clone()),
-            outer_tool_call_id: self.outer_tool_call_id,
-            tool_call_id,
-            tool_name,
         };
+        // Once the start is queued, an end is owed, a stop's until the
+        // call's own is known.
+        let mut end = Owed::start(
+            &self.gate.events,
+            started,
+            finished(
+                self.outer_tool_call_id,
+                tool_call_id,
+                tool_name,
+                NestedCallOutcome::Stopped,
+                "The call was stopped before it ended.",
+            ),
+        )
+        .await;
         let outcome = self.run(tool_call_id, tool_name, params).await;
-        unfinished.events = None;
         let (kind, text) = match &outcome {
             NestedOutcome::Finished(output) => (NestedCallOutcome::Finished, output.text.as_str()),
             NestedOutcome::Failed(text) => (NestedCallOutcome::Failed, text.as_str()),
             NestedOutcome::Refused(text) => (NestedCallOutcome::Refused, text.as_str()),
             NestedOutcome::Halted(text) => (NestedCallOutcome::Halted, text.as_str()),
         };
-        self.emit(finished(
-            self.outer_tool_call_id,
-            tool_call_id,
-            tool_name,
-            kind,
-            text,
-        ))
-        .await;
+        if let Some(end) = &mut end {
+            end.owe(finished(
+                self.outer_tool_call_id,
+                tool_call_id,
+                tool_name,
+                kind,
+                text,
+            ));
+            end.deliver().await;
+        }
         outcome
     }
 
@@ -260,45 +324,72 @@ impl NestedCalls {
             message_to_agent: None,
             recovering: false,
         };
+        self.record(tool_call_id, tool_name, NestedState::Running);
         let outcome = tool_run::run_nested(self.environment.clone(), run, self.stop.clone()).await;
-        let (halt, text) = match outcome {
-            RunOutcome::Finished { output, .. } => return NestedOutcome::Finished(output),
+        let (state, ended) = match outcome {
+            RunOutcome::Finished { output, .. } => (
+                NestedState::Ran { failed: false },
+                Ok(NestedOutcome::Finished(output)),
+            ),
             // (A nested call never moves to the background.)
-            RunOutcome::Moved { text } => return NestedOutcome::Finished(ToolOutput::text(text)),
+            RunOutcome::Moved { text } => (
+                NestedState::Ran { failed: false },
+                Ok(NestedOutcome::Finished(ToolOutput::text(text))),
+            ),
             RunOutcome::Failed(crate::tool::ToolError::Refused(message)) => {
-                return NestedOutcome::Refused(message);
+                (NestedState::Refused, Ok(NestedOutcome::Refused(message)))
             }
-            RunOutcome::Failed(error) => return NestedOutcome::Failed(error.to_string()),
-            RunOutcome::Rejected(message) => return NestedOutcome::Refused(message),
+            RunOutcome::Failed(error) => (
+                NestedState::Ran { failed: true },
+                Ok(NestedOutcome::Failed(error.to_string())),
+            ),
+            RunOutcome::Rejected(message) => {
+                (NestedState::Refused, Ok(NestedOutcome::Refused(message)))
+            }
             RunOutcome::Stop { reason, cancel } => (
-                Halt::Stop {
-                    reason: reason.clone(),
-                    cancel,
-                },
-                reason,
+                NestedState::Halted { ran: false },
+                Err((
+                    Halt::Stop {
+                        reason: reason.clone(),
+                        cancel,
+                    },
+                    reason,
+                )),
             ),
-            RunOutcome::Pause { message, reason } => (Halt::Pause { reason }, message),
+            RunOutcome::Pause { message, reason } => (
+                NestedState::Halted { ran: false },
+                Err((Halt::Pause { reason }, message)),
+            ),
             RunOutcome::MiddlewareErrorBefore { reason } => (
-                Halt::Pause {
-                    reason: reason.clone(),
-                },
-                reason,
+                NestedState::Halted { ran: false },
+                Err((
+                    Halt::Pause {
+                        reason: reason.clone(),
+                    },
+                    reason,
+                )),
             ),
+            // The tool ran, and the hook after it failed.
             RunOutcome::MiddlewareErrorAfter { reason, .. } => (
-                Halt::Pause {
-                    reason: reason.clone(),
-                },
-                reason,
+                NestedState::Halted { ran: true },
+                Err((
+                    Halt::Pause {
+                        reason: reason.clone(),
+                    },
+                    reason,
+                )),
             ),
         };
-        let _ = self.halt.set(halt);
-        NestedOutcome::Halted(text)
+        self.record(tool_call_id, tool_name, state);
+        match ended {
+            Ok(outcome) => outcome,
+            Err((halt, text)) => {
+                let _ = self.halt.set(halt);
+                NestedOutcome::Halted(text)
+            }
+        }
     }
 
-    async fn emit(&self, event: AgentEvent) {
-        // The task's consumer is gone only once the task ended.
-        let _ = self.gate.events.send(event).await;
-    }
 }
 
 impl Halt {
@@ -332,25 +423,60 @@ fn finished(
     }
 }
 
-/// Sends a stopped call's end event when the call is dropped before it
-/// ends, without waiting for room in the channel.
-struct Unfinished<'a> {
-    events: Option<mpsc::Sender<AgentEvent>>,
-    outer_tool_call_id: Uuid,
-    tool_call_id: Uuid,
-    tool_name: &'a str,
+/// The end event a started call owes. Delivered, it waits for room in the
+/// channel. Dropped first (the outer call was stopped), it goes on a task of
+/// its own, which waits for room, so every start has its end.
+struct Owed {
+    events: mpsc::Sender<AgentEvent>,
+    end: Option<AgentEvent>,
 }
 
-impl Drop for Unfinished<'_> {
+impl Owed {
+    /// Sends `started`, and owes `end` from then on. `None` when the
+    /// task's events have no reader, as once it has ended.
+    async fn start(
+        events: &mpsc::Sender<AgentEvent>,
+        started: AgentEvent,
+        end: AgentEvent,
+    ) -> Option<Self> {
+        let permit = events.reserve().await.ok()?;
+        permit.send(started);
+        Some(Self {
+            events: events.clone(),
+            end: Some(end),
+        })
+    }
+
+    /// Owes `end` in place of the end owed until now.
+    fn owe(&mut self, end: AgentEvent) {
+        self.end = Some(end);
+    }
+
+    /// Sends the end owed, once the channel has room.
+    async fn deliver(&mut self) {
+        if let Ok(permit) = self.events.reserve().await
+            && let Some(end) = self.end.take()
+        {
+            permit.send(end);
+        }
+    }
+}
+
+impl Drop for Owed {
     fn drop(&mut self) {
-        if let Some(events) = self.events.take() {
-            let _ = events.try_send(finished(
-                self.outer_tool_call_id,
-                self.tool_call_id,
-                self.tool_name,
-                NestedCallOutcome::Stopped,
-                "The call was stopped before it ended.",
-            ));
+        let Some(end) = self.end.take() else {
+            return;
+        };
+        match self.events.try_send(end) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(end)) => {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let events = self.events.clone();
+                    runtime.spawn(async move {
+                        let _ = events.send(end).await;
+                    });
+                }
+            }
         }
     }
 }

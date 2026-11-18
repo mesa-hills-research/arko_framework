@@ -29,7 +29,9 @@ pub use receipt::{
     EDIT_RECEIPT_BYTES, EDIT_RECEIPT_CONTEXT, EDIT_RECEIPT_LINE_BYTES, EDIT_RECEIPT_LINES,
     EditHunk, EditLine, EditReceipt, LineChange, ToolReceipt,
 };
-pub use crate::runtime::nested::{NEVER_NESTED, NestedCalls, NestedOutcome};
+pub use crate::runtime::nested::{
+    NEVER_NESTED, NestedCalls, NestedOutcome, NestedRecord, NestedState,
+};
 pub use registry::ToolRegistry;
 pub use types::ToolTypeDetails;
 

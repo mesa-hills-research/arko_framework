@@ -7,8 +7,8 @@ use super::*;
 use crate::agent_config::PerToolConfigOverride;
 use crate::runtime::event::{NESTED_OUTPUT_BYTES, NestedCallOutcome};
 use crate::tool::{
-    NestedCalls, NestedOutcome, Tool, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    ContextSource, NestedCalls, NestedOutcome, NestedState, Tool, ToolError,
+    ToolParameterDefinition, ToolParameterType, ToolTypeDetails,
 };
 use async_trait::async_trait;
 use std::sync::Mutex;
@@ -149,6 +149,11 @@ impl Tool for Caller {
         let described: Vec<String> = outcomes.iter().map(describe).collect();
         for line in &described {
             self.log.push(line.clone());
+        }
+        if params.get("records") == Some(&Value::Bool(true)) {
+            for record in nested.records() {
+                self.log.push(format!("record {} {:?}", record.tool_name, record.state));
+            }
         }
         Ok(described.join("\n"))
     }
@@ -717,4 +722,194 @@ fn a_context_made_by_hand_has_no_nested_calls() {
     let context = TaskContext::new(Uuid::new_v4(), "agent", "", std::path::Path::new("/"));
     let nested: Option<&NestedCalls> = context.nested.as_ref();
     assert!(nested.is_none());
+}
+
+/// A middleware that fails after each call of `target`.
+struct FailsAfter {
+    target: &'static str,
+}
+
+#[async_trait]
+impl ToolExecutionMiddleware for FailsAfter {
+    async fn before(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        _: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        Ok(ToolExecutionDecision::Continue)
+    }
+
+    async fn after(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+        _: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError> {
+        if call.tool_name == self.target {
+            return Err(ToolError::ExecutionFailed("the check broke".into()));
+        }
+        Ok(())
+    }
+}
+
+/// A call that ran before the hook after it failed is recorded as having
+/// run, and one refused or halted before as not, so a caller can say what
+/// its calls may have changed.
+#[tokio::test]
+async fn the_records_say_which_calls_ran() {
+    let log = Arc::new(Log::default());
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &tools());
+    config.tool_config.tool_specific_configs.insert(
+        "b".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    let (mut agent, mut events, commands) = agent(
+        config,
+        registry(&log, &[("a", returns("a ran")), ("b", returns("b ran"))]),
+        &workspace,
+    );
+    agent.execution_middleware = Some(Arc::new(FailsAfter { target: "a" }));
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "outer",
+            "caller",
+            serde_json::json!({"calls": [["b", {}], ["a", {}], ["a", {}]], "records": true}),
+        )]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    wait_for(&mut events, &mut seen, |event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+        .then_some(())
+    })
+    .await;
+    commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let records: Vec<String> = log
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.starts_with("record"))
+        .collect();
+    // b needed approval, so it never got past the checks, and the second a
+    // came after the halt.
+    assert_eq!(records, ["record a Halted { ran: true }"]);
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Calls made outside a loop, whose events go to `events`.
+fn nested_calls(registry: ToolRegistry, events: mpsc::Sender<AgentEvent>) -> NestedCalls {
+    let config = config(ToolCallingMode::Native, &tools());
+    let gate = Arc::new(super::super::nested::Gate {
+        registry: Arc::new(registry),
+        tool_config: config.tool_config.clone(),
+        events,
+    });
+    let environment = Arc::new(RunEnvironment {
+        task_id: Uuid::new_v4(),
+        agent_name: "agent".into(),
+        initial_task_prompt: String::new(),
+        working_directory: std::env::temp_dir(),
+        middleware: None,
+        stop: crate::stop::StopSignal::never(),
+        model: config.llm_config.model.clone(),
+        image_sink: None,
+        image_room: None,
+        context: ContextSource::new(),
+        #[cfg(any(unix, windows))]
+        jobs: None,
+        terminal_tools: false,
+        gate: Some(gate.clone()),
+    });
+    NestedCalls::new(
+        environment,
+        gate,
+        Uuid::new_v4(),
+        "caller",
+        crate::stop::StopSignal::never(),
+    )
+}
+
+/// A call stopped while it runs, or as it delivers its end, with no room
+/// in the event channel, still ends there once there is room, and its
+/// record says how far it got.
+#[tokio::test]
+async fn a_stopped_call_owes_its_end_when_the_events_are_full() {
+    let log = Arc::new(Log::default());
+    let (events, mut received) = mpsc::channel(1);
+    let calls = nested_calls(
+        registry(
+            &log,
+            &[
+                ("a", Ends::Waits(Duration::from_secs(3600))),
+                ("b", returns("b ran")),
+            ],
+        ),
+        events,
+    );
+    let ended = |event: Option<AgentEvent>| match event {
+        Some(AgentEvent::NestedToolCallFinished {
+            tool_name, outcome, ..
+        }) => (tool_name, outcome),
+        other => panic!("{other:?}"),
+    };
+    // Stopped while it runs, its start filling the channel.
+    let running = tokio::spawn({
+        let calls = calls.clone();
+        async move { calls.call("a", HashMap::new()).await }
+    });
+    while !log.entries().contains(&"start a".to_string()) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    running.abort();
+    let _ = running.await;
+    assert!(matches!(
+        received.recv().await,
+        Some(AgentEvent::NestedToolCallStarted { .. })
+    ));
+    let end = timeout(Duration::from_secs(5), received.recv()).await.unwrap();
+    assert_eq!(ended(end), ("a".into(), NestedCallOutcome::Stopped));
+    // Stopped as it waits to deliver its end.
+    let delivering = tokio::spawn({
+        let calls = calls.clone();
+        async move { calls.call("b", HashMap::new()).await }
+    });
+    while !log.entries().contains(&"end b".to_string()) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    delivering.abort();
+    let _ = delivering.await;
+    assert!(matches!(
+        received.recv().await,
+        Some(AgentEvent::NestedToolCallStarted { .. })
+    ));
+    let end = timeout(Duration::from_secs(5), received.recv()).await.unwrap();
+    assert_eq!(ended(end), ("b".into(), NestedCallOutcome::Finished));
+    let states: Vec<(String, NestedState)> = calls
+        .records()
+        .into_iter()
+        .map(|record| (record.tool_name, record.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("a".into(), NestedState::Running),
+            ("b".into(), NestedState::Ran { failed: false }),
+        ]
+    );
 }
