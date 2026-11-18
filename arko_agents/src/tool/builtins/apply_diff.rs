@@ -13,9 +13,10 @@
 //!
 //! A line of the file that is itself a marker is written in a block with a
 //! backslash before it (`\=======`), as the error that meets one says. Blocks
-//! in the form earlier versions took, with a `:start_line:` line and a
-//! `-------` line after `<<<<<<< SEARCH`, still parse, and the line number
-//! isn't used.
+//! in the form earlier versions took, opening with a `:start_line:` line and
+//! a `-------` line, still parse, and the line number isn't used. Only both
+//! lines together are that header, and a `:start_line:` line of the file is
+//! written with a backslash too.
 //!
 //! Its output carries a receipt of what it changed
 //! ([`EditReceipt`](crate::tool::EditReceipt)), as `edit_file`'s does.
@@ -105,11 +106,12 @@ fn marker(line: &str) -> Option<Marker> {
     }
 }
 
-/// A line of a block's text. A marker with backslashes before it stands for
-/// itself with one backslash fewer, and any other line for itself.
+/// A line of a block's text. A marker, or a `:start_line:` line, with
+/// backslashes before it stands for itself with one backslash fewer, and
+/// any other line for itself.
 fn text_line(line: &str) -> String {
     let unescaped = line.trim_start_matches('\\');
-    if unescaped.len() < line.len() && marker(unescaped).is_some() {
+    if unescaped.len() < line.len() && (marker(unescaped).is_some() || is_start_line(unescaped)) {
         line[1..].to_string()
     } else {
         line.to_string()
@@ -134,16 +136,16 @@ fn parse(diff: &str) -> Result<Vec<Block>, String> {
     let mut blocks = Vec::new();
     let mut part = Part::Outside;
     let (mut search, mut replace) = (Vec::new(), Vec::new());
-    // The lines of the block's search part so far, the old form's included,
-    // and whether it opened with `:start_line:`.
-    let (mut opening, mut old_form) = (0, false);
+    // The lines of the block's search part so far, and its first line while
+    // it may open the old form's header, `:start_line:` and `-------`.
+    let (mut opening, mut start_line) = (0, None);
     for (index, line) in diff.split('\n').enumerate() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         let (at, number) = (index + 1, blocks.len() + 1);
         match (&part, marker(line)) {
             (Part::Outside, Some(Marker::Search)) => {
                 part = Part::Search;
-                (opening, old_form) = (0, false);
+                (opening, start_line) = (0, None);
             }
             (Part::Outside, Some(_)) => {
                 return Err(format!(
@@ -152,7 +154,10 @@ fn parse(diff: &str) -> Result<Vec<Block>, String> {
                 ));
             }
             (Part::Outside, None) => {}
-            (Part::Search, Some(Marker::Divider)) => part = Part::Replace,
+            (Part::Search, Some(Marker::Divider)) => {
+                search.extend(start_line.take().map(text_line));
+                part = Part::Replace;
+            }
             (Part::Search, Some(Marker::Search)) => {
                 return Err(format!(
                     "Block {number} has a second <<<<<<< SEARCH line, line {at} of the diff, before its =======. {ESCAPE}"
@@ -166,8 +171,12 @@ fn parse(diff: &str) -> Result<Vec<Block>, String> {
             (Part::Search, None) => {
                 opening += 1;
                 if opening == 1 && is_start_line(line) {
-                    old_form = true;
-                } else if !(opening == 2 && old_form && line.trim_end() == OLD_DIVIDER) {
+                    start_line = Some(line);
+                } else if opening == 2 && start_line.is_some() && line.trim_end() == OLD_DIVIDER {
+                    // (The whole header, which is left out.)
+                    start_line = None;
+                } else {
+                    search.extend(start_line.take().map(text_line));
                     search.push(text_line(line));
                 }
             }
@@ -515,6 +524,12 @@ impl Tool for ApplyDiffTool {
         if metadata.is_dir() {
             return Err(ToolError::ExecutionFailed(format!(
                 "{path} is a directory, not a file."
+            )));
+        }
+        // (A pipe or a device could keep the read waiting.)
+        if !metadata.is_file() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{path} isn't a regular file, so it can't be edited."
             )));
         }
         let bytes = tokio::fs::read(&absolute_path).await.map_err(io)?;
@@ -1100,6 +1115,19 @@ mod tests {
         ws.write("b.md", b"Title\n-------\n");
         ws.apply("b.md", &block("-------", "=====")).await;
         assert_eq!(ws.text("b.md"), "Title\n=====\n");
+        // Nor is a `:start_line:` line without `-------` after it.
+        ws.write("c.txt", b":start_line:42\na\nb\n");
+        ws.apply("c.txt", &block(":start_line:42\na", "x")).await;
+        assert_eq!(ws.text("c.txt"), "x\nb\n");
+        ws.write("d.txt", b"a\n:start_line:42\n");
+        ws.apply("d.txt", &block(":start_line:42", "x")).await;
+        assert_eq!(ws.text("d.txt"), "a\nx\n");
+        // Both header lines, as lines of the file, are written with a
+        // backslash.
+        ws.write("e.txt", b":start_line:1\n-------\nx\n");
+        ws.apply("e.txt", &block("\\:start_line:1\n-------\nx", "y"))
+            .await;
+        assert_eq!(ws.text("e.txt"), "y\n");
     }
 
     #[tokio::test]
@@ -1191,6 +1219,23 @@ mod tests {
             json!({"path": "a.txt", "diff": diff, "replace_all": "maybe"}),
         )
         .await;
+    }
+
+    /// A pipe is refused without being read, which would wait for a writer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pipe_is_refused_without_waiting_for_it() {
+        let ws = Workspace::new();
+        let made = std::process::Command::new("mkfifo")
+            .arg(ws.root.join("pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let call = ws.call(json!({"path": "pipe", "diff": block("a", "b")}));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .expect("the call waited");
+        assert!(result.is_err());
     }
 
     /// The file is replaced whole, keeping its permissions, and a symbolic
