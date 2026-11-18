@@ -6,8 +6,9 @@
 //! An error or a crash leaves the old file as it was. On Unix the new file is
 //! created readable by its owner alone, and before any content is written it
 //! is checked to be the old file's owner's and given its group, extended
-//! attributes and permissions. On Windows `ReplaceFileW` gives it the old
-//! file's security descriptor and attributes as it takes its place.
+//! attributes and permissions. On Windows it is created with the old file's
+//! owner, group and DACL, and `ReplaceFileW` gives it the old file's whole
+//! security descriptor and attributes as it takes its place.
 //!
 //! A file whose identity a new file can't have is refused and left as it was
 //! ([`RewriteError::Kept`]): one with more than one hard link, one owned by
@@ -58,7 +59,7 @@ fn rewrite_with(
         )));
     }
     let (_, temporary) = crate::utils::temporary_beside(&target)?;
-    let mut new = system::create(&temporary).map_err(|error| {
+    let mut new = system::create(&temporary, &target).map_err(|error| {
         RewriteError::Kept(format!("A new file can't be made beside it ({error})."))
     })?;
     let written = system::give_identity(&original, &new).and_then(|()| {
@@ -87,8 +88,9 @@ mod system {
         Ok(file.metadata()?.nlink())
     }
 
-    /// A new, empty file at `path`, readable by its owner alone.
-    pub(super) fn create(path: &Path) -> std::io::Result<File> {
+    /// A new, empty file at `path`, readable by its owner alone until
+    /// [`give_identity`] gives it the identity of the file at `_like`.
+    pub(super) fn create(path: &Path, _like: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .write(true)
@@ -357,27 +359,120 @@ mod system {
         Ok(information.nNumberOfLinks.into())
     }
 
-    pub(super) fn create(path: &Path) -> std::io::Result<File> {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
+    /// `path` as a NUL-terminated wide string.
+    fn wide(path: &Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().chain([0]).collect()
     }
 
-    /// `ReplaceFileW` gives the new file the old one's security descriptor
-    /// and attributes as it takes its place.
+    /// The owner, group and DACL of the file at `path`, as a self-relative
+    /// security descriptor in a buffer aligned for it.
+    pub(super) fn security_of(path: &Path) -> std::io::Result<Vec<u64>> {
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetFileSecurityW,
+            OWNER_SECURITY_INFORMATION,
+        };
+        let name = wide(path);
+        let wanted =
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut needed = 0u32;
+        // SAFETY: with no buffer and a length of 0, the call only says the
+        // length it needs.
+        unsafe { GetFileSecurityW(name.as_ptr(), wanted, std::ptr::null_mut(), 0, &mut needed) };
+        if needed == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut descriptor = vec![0u64; (needed as usize).div_ceil(8)];
+        // SAFETY: the buffer holds `needed` bytes.
+        let read = unsafe {
+            GetFileSecurityW(
+                name.as_ptr(),
+                wanted,
+                descriptor.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        if read == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(descriptor)
+    }
+
+    /// A new, empty file at `path` with the owner, group and DACL of the file
+    /// at `like` from the start, so it is never open to more than `like` is.
+    /// The DACL's rules are made the file's own and protected from the
+    /// directory's, which would otherwise be added to them.
+    pub(super) fn create(path: &Path, like: &Path) -> std::io::Result<File> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Security::{
+            ACE_HEADER, ACL, GetAce, GetSecurityDescriptorDacl, INHERITED_ACE, SE_DACL_PROTECTED,
+            SECURITY_ATTRIBUTES, SetSecurityDescriptorControl,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let mut descriptor = security_of(like)?;
+        let pointer = descriptor.as_mut_ptr().cast();
+        let (mut present, mut dacl, mut defaulted) = (0, std::ptr::null_mut::<ACL>(), 0);
+        // SAFETY: the descriptor is the one GetFileSecurityW wrote, and the
+        // DACL and its rules are inside it.
+        unsafe {
+            if GetSecurityDescriptorDacl(pointer, &mut present, &mut dacl, &mut defaulted) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if present != 0 && !dacl.is_null() {
+                for index in 0..u32::from((*dacl).AceCount) {
+                    let mut ace = std::ptr::null_mut();
+                    if GetAce(dacl, index, &mut ace) == 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    (*ace.cast::<ACE_HEADER>()).AceFlags &= !(INHERITED_ACE as u8);
+                }
+            }
+            if SetSecurityDescriptorControl(pointer, SE_DACL_PROTECTED, SE_DACL_PROTECTED) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: pointer,
+            bInheritHandle: 0,
+        };
+        let name = wide(path);
+        // SAFETY: the name is NUL-terminated, and the attributes and the
+        // descriptor they point to outlive the call.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the handle is new, and the file owns it from here.
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    /// The new file has the old one's owner, group and DACL from
+    /// [`create`], and `ReplaceFileW` gives it the old one's whole security
+    /// descriptor and attributes as it takes its place.
     pub(super) fn give_identity(_original: &File, _new: &File) -> Result<(), RewriteError> {
         Ok(())
     }
 
     /// Puts `temporary` in `target`'s place with `ReplaceFileW`, which keeps
-    /// `target` under a backup name until the swap is done, and puts it back
-    /// when the swap fails part way.
+    /// `target` under a backup name until the swap is done.
     pub(super) fn take_place(temporary: &Path, target: &Path) -> std::io::Result<()> {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-        let wide =
-            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
         let (_, backup) = crate::utils::temporary_beside(target)?;
         let (replaced, replacement, kept) = (wide(target), wide(temporary), wide(&backup));
         // SAFETY: the three names are NUL-terminated, and the last two
@@ -396,11 +491,31 @@ mod system {
             let _ = std::fs::remove_file(&backup);
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
-        if !target.exists() && backup.exists() {
-            let _ = std::fs::rename(&backup, target);
-        }
-        Err(error)
+        Err(super::put_back(
+            target,
+            &backup,
+            std::io::Error::last_os_error(),
+        ))
+    }
+}
+
+/// The error of a swap that failed with `error`. A failed `ReplaceFileW` can
+/// leave the replaced file under its backup's name, so it is moved back, and
+/// when that fails too the error says where the file is.
+#[cfg(any(windows, test))]
+fn put_back(target: &Path, backup: &Path, error: std::io::Error) -> std::io::Error {
+    if target.exists() || !backup.exists() {
+        return error;
+    }
+    match std::fs::rename(backup, target) {
+        Ok(()) => error,
+        Err(moving) => std::io::Error::new(
+            error.kind(),
+            format!(
+                "{error}. The file is now {}, since moving it back failed ({moving}).",
+                backup.display()
+            ),
+        ),
     }
 }
 
@@ -492,7 +607,7 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
                 // The new file, as it is before its content is written.
                 let original = File::open(&path).unwrap();
-                let new = system::create(&folder.0.join("new")).unwrap();
+                let new = system::create(&folder.0.join("new"), &path).unwrap();
                 system::give_identity(&original, &new).unwrap();
                 let made = new.metadata().unwrap();
                 assert_eq!(
@@ -649,10 +764,71 @@ mod tests {
                 .any(|rule| rule.contains("S-1-5-32-546") || rule.contains("Guests")),
             "{before:?}"
         );
+        // The new file has the file's rules before any content is written.
+        let new_path = folder.0.join("new");
+        let new = system::create(&new_path, &path).unwrap();
+        assert_eq!(std::fs::metadata(&new_path).unwrap().len(), 0);
+        assert_eq!(access_rules(&new_path), access_rules(&path));
+        drop(new);
+        std::fs::remove_file(&new_path).unwrap();
         rewrite_file(&path, b"new").unwrap();
         assert_eq!(rules(), before);
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert_eq!(folder.names(), ["file.txt"]);
+    }
+
+    /// The rules of a file's DACL, each as its bytes, whether inherited or
+    /// its own.
+    #[cfg(windows)]
+    fn access_rules(path: &Path) -> Vec<Vec<u8>> {
+        use windows_sys::Win32::Security::{
+            ACE_HEADER, ACL, GetAce, GetSecurityDescriptorDacl, INHERITED_ACE,
+        };
+        let mut descriptor = system::security_of(path).unwrap();
+        let (mut present, mut dacl, mut defaulted) = (0, std::ptr::null_mut::<ACL>(), 0);
+        let mut rules = Vec::new();
+        // SAFETY: the DACL and its rules are inside the descriptor.
+        unsafe {
+            assert_ne!(
+                GetSecurityDescriptorDacl(
+                    descriptor.as_mut_ptr().cast(),
+                    &mut present,
+                    &mut dacl,
+                    &mut defaulted
+                ),
+                0
+            );
+            assert!(present != 0 && !dacl.is_null());
+            for index in 0..u32::from((*dacl).AceCount) {
+                let mut ace = std::ptr::null_mut();
+                assert_ne!(GetAce(dacl, index, &mut ace), 0);
+                let size = (*ace.cast::<ACE_HEADER>()).AceSize;
+                let mut rule = std::slice::from_raw_parts(ace.cast::<u8>(), size.into()).to_vec();
+                rule[1] &= !(INHERITED_ACE as u8);
+                rules.push(rule);
+            }
+        }
+        rules
+    }
+
+    /// A swap that failed with the file moved to its backup puts it back,
+    /// and when it can't, the error says where the file is.
+    #[test]
+    fn a_failed_swap_puts_the_file_back_or_says_where_it_is() {
+        let folder = Folder::new();
+        let (target, backup) = (folder.0.join("file.txt"), folder.0.join("backup"));
+        std::fs::write(&backup, b"old").unwrap();
+        let failed = || std::io::Error::other("the swap failed");
+        let error = put_back(&target, &backup, failed());
+        assert_eq!(error.to_string(), "the swap failed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert_eq!(folder.names(), ["file.txt"]);
+        // The backup can't be moved back, since the file's folder is gone.
+        let target = folder.0.join("gone").join("file.txt");
+        std::fs::rename(folder.0.join("file.txt"), &backup).unwrap();
+        let error = put_back(&target, &backup, failed()).to_string();
+        assert!(error.contains(&backup.display().to_string()), "{error}");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
     }
 
     /// A directory the new file can't be made in is refused, and the file
