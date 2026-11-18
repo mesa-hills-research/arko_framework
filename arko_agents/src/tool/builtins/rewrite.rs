@@ -622,27 +622,30 @@ mod system {
                     _ => Err(error),
                 };
             }
-            let mut named = false;
-            loop {
+            let found = loop {
                 let length = stream
                     .cStreamName
                     .iter()
                     .position(|unit| *unit == 0)
                     .unwrap_or(stream.cStreamName.len());
                 if String::from_utf16_lossy(&stream.cStreamName[..length]) != "::$DATA" {
-                    named = true;
-                    break;
+                    break Ok(true);
                 }
                 if fs::FindNextStreamW(
                     search,
                     (&mut stream as *mut fs::WIN32_FIND_STREAM_DATA).cast(),
                 ) == 0
                 {
-                    break;
+                    // (Only the end of the list ends the search well.)
+                    let error = std::io::Error::last_os_error();
+                    break match error.raw_os_error() {
+                        Some(code) if code as u32 == ERROR_HANDLE_EOF => Ok(false),
+                        _ => Err(error),
+                    };
                 }
-            }
+            };
             fs::FindClose(search);
-            Ok(named)
+            found
         }
     }
 
