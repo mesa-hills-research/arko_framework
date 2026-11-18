@@ -66,18 +66,20 @@ pub const EDIT_RECEIPT_BYTES: usize = 64 * 1024;
 /// character boundary.
 pub const EDIT_RECEIPT_LINE_BYTES: usize = 2_000;
 
-/// The receipt of an edit that turned `before` into `after`, replacing the
-/// `old_len` bytes at each of `found` (in order, not overlapping) with the
-/// `new_len` bytes that start at the same place of `starts` in `after`. The
-/// work is linear in the two texts and the receipt.
-pub(crate) fn edit_receipt(
-    before: &str,
-    after: &str,
-    found: &[usize],
-    starts: &[usize],
-    old_len: usize,
-    new_len: usize,
-) -> EditReceipt {
+/// One replacement of an edit. The `old_len` bytes at `at` in the text before
+/// became the `new_len` bytes at `start` in the text after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Replacement {
+    pub at: usize,
+    pub old_len: usize,
+    pub start: usize,
+    pub new_len: usize,
+}
+
+/// The receipt of an edit that turned `before` into `after` through
+/// `replaced`, in order and not overlapping, each replacing at least one
+/// byte. The work is linear in the two texts and the receipt.
+pub(crate) fn edit_receipt(before: &str, after: &str, replaced: &[Replacement]) -> EditReceipt {
     let mut built = Builder {
         before,
         after,
@@ -93,9 +95,9 @@ pub(crate) fn edit_receipt(
     // How many more lines `after` has than `before` up to the last change.
     let mut shift: isize = 0;
     let mut at = 0;
-    while at < found.len() && !built.full() {
+    while at < replaced.len() && !built.full() {
         let first = at;
-        let a = found[at];
+        let a = replaced[at].at;
         for (offset, byte) in before.as_bytes()[scanned..a].iter().enumerate() {
             if *byte == b'\n' {
                 line += 1;
@@ -109,8 +111,8 @@ pub(crate) fn edit_receipt(
         let start = line_start;
         let mut end;
         loop {
-            let match_end = found[at] + old_len;
-            let next = found.get(at + 1).copied();
+            let match_end = replaced[at].at + replaced[at].old_len;
+            let next = replaced.get(at + 1).map(|next| next.at);
             end = if before.as_bytes()[match_end - 1] == b'\n' {
                 Some(match_end)
             } else {
@@ -120,7 +122,7 @@ pub(crate) fn edit_receipt(
             // the line after it is part of the change too.
             if end == Some(match_end)
                 && match_end < before.len()
-                && !at_line_break(after, starts[at] + new_len)
+                && !at_line_break(after, replaced[at].start + replaced[at].new_len)
             {
                 end = line_end(before, match_end, next);
             }
@@ -133,8 +135,9 @@ pub(crate) fn edit_receipt(
         let last = at;
         at += 1;
         // The same lines after the edit.
-        let after_start = starts[first] - (found[first] - start);
-        let after_end = end - (found[last] + old_len) + (starts[last] + new_len);
+        let (first, last) = (replaced[first], replaced[last]);
+        let after_start = first.start - (first.at - start);
+        let after_end = end - (last.at + last.old_len) + (last.start + last.new_len);
         let old_line = line;
         let new_line = (line as isize + shift) as usize;
         shift += lines_of(&after[after_start..after_end]).count() as isize
@@ -156,7 +159,7 @@ pub(crate) fn edit_receipt(
         }
         scanned = end;
     }
-    if at < found.len() {
+    if at < replaced.len() {
         built.receipt.truncated = true;
     }
     built.finish()
@@ -390,15 +393,20 @@ mod tests {
     /// `edit_file` does.
     fn receipt(before: &str, old: &str, new: &str) -> EditReceipt {
         let found: Vec<usize> = before.match_indices(old).map(|(at, _)| at).collect();
-        let (mut after, mut starts, mut rest) = (String::new(), Vec::new(), 0);
-        for at in &found {
-            after.push_str(&before[rest..*at]);
-            starts.push(after.len());
+        let (mut after, mut replaced, mut rest) = (String::new(), Vec::new(), 0);
+        for at in found {
+            after.push_str(&before[rest..at]);
+            replaced.push(Replacement {
+                at,
+                old_len: old.len(),
+                start: after.len(),
+                new_len: new.len(),
+            });
             after.push_str(new);
             rest = at + old.len();
         }
         after.push_str(&before[rest..]);
-        edit_receipt(before, &after, &found, &starts, old.len(), new.len())
+        edit_receipt(before, &after, &replaced)
     }
 
     /// A receipt as a diff reads, each hunk's line numbers before and after,
@@ -540,11 +548,17 @@ mod tests {
         let receipt = receipt(before, old, new);
         let after = before.replace(old, new);
         let context = format!("{before:?} {old:?} {new:?} {receipt:?}");
+        shows_the_lines(before, &after, &receipt, &context);
+    }
+
+    /// [`shows_the_written_lines`] for any receipt of `before` becoming
+    /// `after`.
+    fn shows_the_lines(before: &str, after: &str, receipt: &EditReceipt, context: &str) {
         if receipt.truncated {
             return;
         }
         let (was, is): (Vec<&str>, Vec<&str>) =
-            (lines_of(before).collect(), lines_of(&after).collect());
+            (lines_of(before).collect(), lines_of(after).collect());
         let (mut old_at, mut new_at) = (0, 0);
         for hunk in &receipt.hunks {
             let (from_old, from_new) = (hunk.old_start - 1, hunk.new_start - 1);
@@ -614,6 +628,52 @@ mod tests {
             if old != new {
                 shows_the_written_lines(&before, old, &new);
             }
+        }
+    }
+
+    /// Replacements of different lengths in one edit, as `apply_diff`
+    /// makes, show the lines written too.
+    #[test]
+    fn varied_edits_of_several_lengths_show_the_lines_written() {
+        let mut seed: u64 = 91;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let alphabet = ["a", "b", "\n", "\r\n", "界", "c"];
+        for _ in 0..10_000 {
+            let before: String = (0..next() % 200 + 1)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
+            let edges: Vec<usize> = before
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain([before.len()])
+                .collect();
+            let (mut after, mut replaced, mut edge) = (String::new(), Vec::new(), 0);
+            while edge + 1 < edges.len() {
+                let from = edge + next() % 8;
+                let to = from + next() % 6 + 1;
+                if to >= edges.len() {
+                    break;
+                }
+                let new: String = (0..next() % 6)
+                    .map(|_| alphabet[next() % alphabet.len()])
+                    .collect();
+                after.push_str(&before[edges[edge]..edges[from]]);
+                replaced.push(Replacement {
+                    at: edges[from],
+                    old_len: edges[to] - edges[from],
+                    start: after.len(),
+                    new_len: new.len(),
+                });
+                after.push_str(&new);
+                edge = to;
+            }
+            after.push_str(&before[edges[edge]..]);
+            let receipt = edit_receipt(&before, &after, &replaced);
+            let context = format!("{before:?} {after:?} {replaced:?} {receipt:?}");
+            shows_the_lines(&before, &after, &receipt, &context);
         }
     }
 

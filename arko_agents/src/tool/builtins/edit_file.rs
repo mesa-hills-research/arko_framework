@@ -14,7 +14,7 @@
 //! ([`EditReceipt`](crate::tool::EditReceipt)), made
 //! from the text it read and wrote, for the host to show as a diff.
 
-use crate::tool::receipt::edit_receipt;
+use crate::tool::receipt::{Replacement, edit_receipt};
 use crate::tool::{
     TaskContext, Tool, ToolDefinition, ToolError, ToolOutput, ToolParameterDefinition,
     ToolParameterType, ToolReceipt, ToolTypeDetails,
@@ -29,13 +29,13 @@ const OLD_STRING_PARAM_NAME: &str = "old_string";
 const NEW_STRING_PARAM_NAME: &str = "new_string";
 const REPLACE_ALL_PARAM_NAME: &str = "replace_all";
 
-const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+pub(super) const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 /// The lines around a change that its result shows, on each side.
-const CONTEXT_LINES: usize = 2;
+pub(super) const CONTEXT_LINES: usize = 2;
 /// The most lines a result shows of the file.
-const SHOWN_LINES: usize = 20;
+pub(super) const SHOWN_LINES: usize = 20;
 /// The most line numbers a result or an error lists.
-const LISTED_LINES: usize = 20;
+pub(super) const LISTED_LINES: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct EditFileTool;
@@ -53,7 +53,10 @@ impl Default for EditFileTool {
 }
 
 /// A required text parameter.
-fn text_param<'a>(params: &'a HashMap<String, Value>, name: &str) -> Result<&'a str, ToolError> {
+pub(super) fn text_param<'a>(
+    params: &'a HashMap<String, Value>,
+    name: &str,
+) -> Result<&'a str, ToolError> {
     params
         .get(name)
         .ok_or_else(|| ToolError::MissingParameter {
@@ -68,7 +71,7 @@ fn text_param<'a>(params: &'a HashMap<String, Value>, name: &str) -> Result<&'a 
 
 /// `replace_all` is a boolean, or the text `true` or `false`. Absent or null
 /// is `false`.
-fn replace_all_param(params: &HashMap<String, Value>) -> Result<bool, ToolError> {
+pub(super) fn replace_all_param(params: &HashMap<String, Value>) -> Result<bool, ToolError> {
     match params.get(REPLACE_ALL_PARAM_NAME) {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
@@ -96,7 +99,7 @@ fn with_crlf(text: &str) -> String {
 
 /// The line, numbered from 1 as `read_file` numbers them, that byte
 /// `offset` of `text` is on.
-fn line_at(text: &str, offset: usize) -> usize {
+pub(super) fn line_at(text: &str, offset: usize) -> usize {
     1 + text.as_bytes()[..offset]
         .iter()
         .filter(|byte| **byte == b'\n')
@@ -105,7 +108,7 @@ fn line_at(text: &str, offset: usize) -> usize {
 
 /// The lines [`line_at`] gives for each of `offsets` (sorted), in one pass
 /// over `text`.
-fn lines_at(text: &str, offsets: &[usize]) -> Vec<usize> {
+pub(super) fn lines_at(text: &str, offsets: &[usize]) -> Vec<usize> {
     let mut lines = Vec::with_capacity(offsets.len());
     let (mut scanned, mut line) = (0, 1);
     for offset in offsets {
@@ -142,7 +145,7 @@ fn line_list(lines: &[usize]) -> String {
 }
 
 /// `line 3` or `lines 3 and 17` (see [`line_list`]).
-fn lines_named(lines: &[usize]) -> String {
+pub(super) fn lines_named(lines: &[usize]) -> String {
     let mut distinct = lines.to_vec();
     distinct.dedup();
     let word = if distinct.len() == 1 { "line" } else { "lines" };
@@ -150,7 +153,7 @@ fn lines_named(lines: &[usize]) -> String {
 }
 
 /// `line 3` or `lines 3-5`.
-fn line_range(first: usize, last: usize) -> String {
+pub(super) fn line_range(first: usize, last: usize) -> String {
     if first == last {
         format!("line {first}")
     } else {
@@ -160,7 +163,7 @@ fn line_range(first: usize, last: usize) -> String {
 
 /// Whether `text` starts with a line number as `read_file` shows it
 /// (`12 | `), copied from its output.
-fn starts_with_line_number(text: &str) -> bool {
+pub(super) fn starts_with_line_number(text: &str) -> bool {
     let first = text
         .trim_start_matches(['\r', '\n'])
         .lines()
@@ -406,14 +409,17 @@ impl Tool for EditFileTool {
         tokio::fs::write(&absolute_path, contents)
             .await
             .map_err(io)?;
-        let receipt = ToolReceipt::Edit(edit_receipt(
-            text,
-            &edited,
-            &found,
-            &starts,
-            old.len(),
-            new.len(),
-        ));
+        let replaced: Vec<Replacement> = found
+            .iter()
+            .zip(&starts)
+            .map(|(at, start)| Replacement {
+                at: *at,
+                old_len: old.len(),
+                start: *start,
+                new_len: new.len(),
+            })
+            .collect();
+        let receipt = ToolReceipt::Edit(edit_receipt(text, &edited, &replaced));
 
         if replace_all {
             let lines = lines_at(&edited, &starts);
