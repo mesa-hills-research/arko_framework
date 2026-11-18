@@ -74,27 +74,46 @@ impl AgentLoop {
             #[cfg(any(unix, windows))]
             jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
-            prompt_cache,
+            prompt_cache: std::sync::Mutex::new(prompt_cache),
         })
     }
 
-    /// The task's prompt cache for the calls of a response. The cache was
-    /// last used by the request that made them, the latest one on record.
+    /// The task's prompt cache for the calls of a response. It is the cache
+    /// the request that made them used, with the lifetime for that request's
+    /// model and settings (the conversation's switch for caching included)
+    /// and the time it was sent. A request to the refusal fallback's model
+    /// used that model's cache, which the task's latest request doesn't
+    /// record.
     async fn prompt_cache_window(&self) -> crate::tool::PromptCacheWindow {
+        let task = &self.task;
+        let fallback = task
+            .agent_config
+            .refusal_fallback
+            .as_ref()
+            .filter(|_| self.current_request_is_fallback);
+        let (model, settings) = match fallback {
+            Some(fallback) => (&fallback.model, &fallback.generation_config),
+            None => (
+                &task.conversation.model,
+                &task.agent_config.llm_config.generation_config,
+            ),
+        };
+        let mut settings = settings.clone();
+        settings
+            .prompt_caching
+            .get_or_insert(task.conversation.enable_cache);
         let lifetime = self
             .llm_client
-            .prompt_cache_lifetime(
-                &self.task.conversation.model,
-                &self.task.agent_config.llm_config.generation_config,
-            )
+            .prompt_cache_lifetime(model, &settings)
             .await;
-        crate::tool::PromptCacheWindow::new(
-            lifetime,
-            self.task
+        let last_used = match fallback {
+            Some(_) => None,
+            None => task
                 .latest_request
                 .latest()
-                .map(|request| request.sent_at.into()),
-        )
+                .and_then(|request| request.sent_instant),
+        };
+        crate::tool::PromptCacheWindow::new(lifetime, last_used)
     }
 
     /// How a tool's results are intercepted, by the configured interceptor,

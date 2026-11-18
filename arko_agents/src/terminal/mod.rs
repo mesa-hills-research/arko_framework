@@ -1169,17 +1169,48 @@ impl TerminalManager {
         revision: u64,
         duration: Duration,
     ) -> Result<TerminalSnapshot> {
+        Ok(self.wait_for_change(owner, id, revision, duration).await?.0)
+    }
+
+    /// [`wait`](Self::wait), and whether `duration` ran out with the job
+    /// unchanged. Updates that leave the revision and state alone (part of
+    /// an input declaration, say) don't end the wait or restart its time.
+    pub(crate) async fn wait_for_change(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+        revision: u64,
+        duration: Duration,
+    ) -> Result<(TerminalSnapshot, bool)> {
         let job = self.owned(owner, id)?;
         let mut changes = job.changes.clone();
         changes.borrow_and_update();
-        let should_wait = {
-            let data = job.data.lock().unwrap();
-            data.record.revision == revision && !data.record.state.is_terminal()
-        };
-        if should_wait {
-            let _ = tokio::time::timeout(duration, changes.changed()).await;
+        // A duration too long for the clock has no end.
+        let deadline = tokio::time::Instant::now().checked_add(duration);
+        let mut timed_out = false;
+        loop {
+            let unchanged = {
+                let data = job.data.lock().unwrap();
+                data.record.revision == revision && !data.record.state.is_terminal()
+            };
+            if !unchanged {
+                break;
+            }
+            let woke = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, changes.changed()).await,
+                None => Ok(changes.changed().await),
+            };
+            match woke {
+                Ok(Ok(())) => {}
+                // The job's notifier is gone, so nothing will change.
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+            }
         }
-        self.status(owner, id, None)
+        Ok((self.status(owner, id, None)?, timed_out))
     }
 
     pub fn forget(&self, owner: Uuid, id: Uuid) -> Result<()> {

@@ -125,15 +125,17 @@ impl TerminalTool {
         let asked = number(params, "wait_ms")?.map_or(DEFAULT_WAIT, Duration::from_millis);
         let wait = asked.min(context.prompt_cache.longest_wait());
         let owner = context.task_id;
-        let (snapshot, interrupted) = tokio::select! {
+        let (snapshot, ran_out) = tokio::select! {
             biased;
-            snapshot = self.manager.wait(owner, id, revision, wait) => (snapshot, false),
-            () = context.context_arrived.arrived() => (self.manager.status(owner, id, None), true),
-            () = context.stop.stopping() => (self.manager.status(owner, id, None), true),
-        };
-        let snapshot = snapshot.map_err(tool_error)?;
-        let ran_out =
-            !interrupted && snapshot.revision == revision && !snapshot.state.is_terminal();
+            waited = self.manager.wait_for_change(owner, id, revision, wait) => waited,
+            () = context.context_arrived.arrived() => {
+                self.manager.status(owner, id, None).map(|snapshot| (snapshot, false))
+            }
+            () = context.stop.stopping() => {
+                self.manager.status(owner, id, None).map(|snapshot| (snapshot, false))
+            }
+        }
+        .map_err(tool_error)?;
         let mut result = serde_json::to_value(&snapshot).map_err(tool_error)?;
         if ran_out && wait < asked {
             result["note"] = cut_note(asked, wait, &context.prompt_cache).into();
@@ -150,12 +152,15 @@ fn cut_note(asked: Duration, waited: Duration, cache: &PromptCacheWindow) -> Str
         describe(waited),
         describe(asked)
     );
-    match cache.lapses_at() {
-        Some(at) => format!(
+    match (cache.lifetime, cache.lapses_at()) {
+        (_, Some(at)) => format!(
             "{start}, because your prompt cache lapses at {}. Call terminal_control wait again to keep waiting.",
             super::monitor::clock_seconds(at)
         ),
-        None => format!(
+        (arko_ai::PromptCacheLifetime::Known(_), None) => format!(
+            "{start}, because it can't tell when your prompt cache lapses. Call terminal_control wait again to keep waiting."
+        ),
+        _ => format!(
             "{start}, the longest a wait lasts here. Call terminal_control wait again to keep waiting."
         ),
     }
@@ -236,7 +241,7 @@ impl Tool for TerminalTool {
             ),
             Operation::Control => (
                 Self::NAMES[3],
-                "Lists your jobs (action `list`), waits until a job changes (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A wait ends when the job prints something new, finishes or asks for input, and when a note or an update reaches you. Without `wait_ms` it lasts 1 second at most. Ask for longer when you expect the job to take longer, up to your prompt cache's lifetime less a margin (4 min 30 s for a 5-minute cache). A longer request is cut to that, and the result says so and when your cache lapses. A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
+                "Lists your jobs (action `list`), waits until a job changes (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A wait ends when the job prints something new, finishes or asks for input, and when a note or an update reaches you. Without `wait_ms` it lasts 1 second at most. Ask for longer when you expect the job to take longer, up to your prompt cache's lifetime less a margin, counted from your latest request (4 min 30 s for a 5-minute cache, and when the lifetime is unknown). A longer request is cut to that, and the result says so, and when your cache lapses if its lifetime is known. A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
                 vec![
                     parameter("action", "list, wait, cancel or forget.", true),
                     parameter("job_id", "The job's ID (not for list).", false),

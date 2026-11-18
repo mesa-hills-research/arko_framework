@@ -7563,6 +7563,81 @@ async fn an_arko_call_of_a_claude_code_agent_sees_that_it_runs_in_claude_code() 
     assert_eq!(fake.logged("post")[0]["output"], "true");
 }
 
+/// A tool that says what its call sees of the task's prompt cache, as the
+/// lifetime, whether the latest request's time is known, and the seconds a
+/// wait may last.
+#[derive(Debug)]
+struct SaysCache;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for SaysCache {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "says_cache".into(),
+            description: "Says what the prompt cache is".into(),
+            ..WaitsForContext::default().definition()
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        let cache = context.prompt_cache;
+        Ok(format!(
+            "{:?} {} {}",
+            cache.lifetime,
+            cache.last_used.is_some(),
+            cache.longest_wait().as_secs()
+        ))
+    }
+}
+
+/// The arko tools of a Claude Code agent see its cache as Arko times it,
+/// from the lifetime the run asked Claude Code for, or the one its writes
+/// show, or Anthropic's shorter one, and the time its latest request came.
+#[tokio::test]
+async fn an_arko_call_of_a_claude_code_agent_sees_its_prompt_cache() {
+    for (long, lifetime, wait) in [
+        // The hour asked for, less its tenth.
+        (Some(true), "Known(3600s)", 3240),
+        // The shorter one asked for, and none asked for with no writes to
+        // show another, less its margin.
+        (Some(false), "Known(300s)", 270),
+        (None, "Known(300s)", 270),
+    ] {
+        let fake = Fake::new(json!([[
+            {"tool": "mcp__arko__says_cache", "input": {}},
+            complete("Done"),
+        ]]));
+        let mut config = config(&fake, &["says_cache"]);
+        config.llm_config.generation_config.long_prompt_cache = long;
+        let task = Task::new(config, "Say the cache.".into(), fake.workspace(), None);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SaysCache));
+        let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+            .run_task(task, Arc::new(registry), None, false, None, None, None);
+        let run = Run {
+            events,
+            commands,
+            handle,
+        };
+        let (task, _) = run.finish().await;
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        let said = fake.logged("post")[0]["output"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let said: Vec<&str> = said.split(' ').collect();
+        assert_eq!(said[0], lifetime, "{long:?}");
+        assert_eq!(said[1], "true", "the request's time is known, {long:?}");
+        let seconds: u64 = said[2].parse().unwrap();
+        // A little of it went before the call.
+        assert!((wait - 20..=wait).contains(&seconds), "{long:?}: {seconds}");
+    }
+}
+
 /// An arko tool that runs until the test releases it.
 #[derive(Debug, Default)]
 struct Slow {

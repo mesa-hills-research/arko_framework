@@ -693,6 +693,8 @@ struct PendingUsage {
     /// When the runtime first saw the request, at its first streamed token, or
     /// at its response for one that wasn't streamed.
     seen_at: chrono::DateTime<chrono::Utc>,
+    /// The same moment on the monotonic clock.
+    seen_instant: tokio::time::Instant,
     /// The response finished when its final `message_delta` came, or when it came
     /// whole without streaming. Only a finished response is the task's latest
     /// request. One that failed or was abandoned while it streamed is
@@ -2290,8 +2292,13 @@ impl ClaudeCodeRun {
                 #[cfg(any(unix, windows))]
                 jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
-                // Claude Code chooses its cache's lifetime.
-                prompt_cache: Default::default(),
+                prompt_cache: std::sync::Mutex::new(crate::tool::PromptCacheWindow::new(
+                    self.cache_lifetime(),
+                    self.task
+                        .latest_request
+                        .latest()
+                        .and_then(|request| request.sent_instant),
+                )),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),
@@ -4401,6 +4408,7 @@ impl ClaudeCodeRun {
         parent: Option<String>,
         (seen_at, complete): (chrono::DateTime<chrono::Utc>, bool),
     ) -> Result<(), ArkoAgentsError> {
+        let seen_instant = tokio::time::Instant::now();
         if parent.is_none() {
             // Anthropic's input counts are exclusive, so the uncached input,
             // cache reads and cache writes add up to the whole input.
@@ -4421,11 +4429,17 @@ impl ClaudeCodeRun {
                 pending.complete |= complete;
             }
             None => {
+                // The request used the main conversation's cache as it was
+                // first seen, so the calls it makes count from now.
+                if parent.is_none() {
+                    self.publish_prompt_cache(Some(seen_instant));
+                }
                 self.pending_usage.insert(
                     parent,
                     PendingUsage {
                         key,
                         seen_at,
+                        seen_instant,
                         complete,
                         usage,
                         model,
@@ -4641,8 +4655,11 @@ impl ClaudeCodeRun {
             };
             self.task.latest_request = crate::task::RequestRecord::Latest(
                 crate::task::LatestRequest::new(pending.seen_at, &info)
-                    .with_cache_lifetime(lifetime),
+                    .with_cache_lifetime(lifetime)
+                    .with_sent_instant(pending.seen_instant),
             );
+            // Its writes may show another lifetime.
+            self.publish_prompt_cache(Some(pending.seen_instant));
         }
         self.task.record_usage(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
@@ -4821,40 +4838,61 @@ impl ClaudeCodeRun {
             }
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
                 if self.slow_down.is_none() {
-                    // The configured TTL, else the one Claude Code's writes
-                    // show, else Anthropic's shorter one. Claude Code's
-                    // subagents cache for 5 minutes whatever the main TTL.
-                    let config = &self.task.agent_config;
-                    let subagents = config
-                        .tool_config
-                        .available_tool_names
-                        .iter()
-                        .any(|tool| tool == "Agent" || tool == "Task");
-                    let lifetime = if subagents {
-                        ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME
-                    } else {
-                        config
-                            .llm_config
-                            .generation_config
-                            .claude_cache_ttl()
-                            .map(ai::AnthropicCacheTtl::duration)
-                            .or(self
-                                .task
-                                .latest_request
-                                .latest()
-                                .and_then(crate::task::LatestRequest::cache_lifetime))
-                            .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
-                    };
                     super::monitor::warn_if_slow_down_outlasts_cache(
                         self.task.id,
                         delay_ms,
-                        ai::PromptCacheLifetime::Known(lifetime),
+                        self.cache_lifetime(),
                     );
                 }
                 self.slow_down = Some(Duration::from_millis(delay_ms));
             }
         }
         Ok(())
+    }
+
+    /// How long the main conversation's cache lasts. Caching off, or a
+    /// lifetime the host gave, is as `arko_ai::prompt_cache` reports it.
+    /// Otherwise it is the configured TTL, else the one Claude Code's writes
+    /// show, else Anthropic's shorter one. Claude Code's subagents cache for
+    /// 5 minutes whatever the main TTL.
+    fn cache_lifetime(&self) -> ai::PromptCacheLifetime {
+        let config = &self.task.agent_config;
+        let settings = &config.llm_config.generation_config;
+        let reported =
+            ai::prompt_cache::prompt_cache_lifetime(&config.llm_config.model, settings, false);
+        if reported == ai::PromptCacheLifetime::Disabled
+            || settings.prompt_cache_lifetime_seconds.is_some()
+        {
+            return reported;
+        }
+        let subagents = config
+            .tool_config
+            .available_tool_names
+            .iter()
+            .any(|tool| tool == "Agent" || tool == "Task");
+        ai::PromptCacheLifetime::Known(if subagents {
+            ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME
+        } else {
+            settings
+                .claude_cache_ttl()
+                .map(ai::AnthropicCacheTtl::duration)
+                .or(self
+                    .task
+                    .latest_request
+                    .latest()
+                    .and_then(crate::task::LatestRequest::cache_lifetime))
+                .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
+        })
+    }
+
+    /// Tells the calls of the agent's arko tools about the main
+    /// conversation's cache, which the latest request used at `last_used`
+    /// ([`TaskContext::prompt_cache`](crate::tool::TaskContext::prompt_cache)).
+    fn publish_prompt_cache(&self, last_used: Option<tokio::time::Instant>) {
+        if let Some(host) = &self.host {
+            *host.environment.prompt_cache.lock().unwrap() =
+                crate::tool::PromptCacheWindow::new(self.cache_lifetime(), last_used);
+        }
     }
 
     /// The opt-in cache monitor, after a request of the main conversation,

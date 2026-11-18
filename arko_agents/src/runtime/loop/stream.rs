@@ -394,9 +394,10 @@ impl AgentLoop {
             self.prepare_fallback_response(&mut generation_response);
         }
         self.task.record_usage(generation_response.usage.clone());
-        if let Some(sent_at) = self.request_sent_at.take() {
+        if let Some((sent_at, sent_instant)) = self.request_sent_at.take() {
             self.task.latest_request = crate::task::RequestRecord::Latest(
-                crate::task::LatestRequest::new(sent_at, &generation_response.usage),
+                crate::task::LatestRequest::new(sent_at, &generation_response.usage)
+                    .with_sent_instant(sent_instant),
             );
         }
         // The request was answered. Its usage calibrates the estimate of

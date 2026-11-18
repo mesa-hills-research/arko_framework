@@ -55,13 +55,18 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 
 A wait may be as long as the agent asks, up to the longest wait that ends before its
 prompt cache lapses (`PromptCacheLifetime::longest_wait`, the lifetime less a margin of a
-tenth of it, at least 30 seconds). That is 4 min 30 s for a 5-minute cache and 27 min for a 30-minute cache,
-counted from the agent's latest model request, so the time the model took to call the tool
-is included. `TaskContext::prompt_cache` carries the lifetime and the request's time. With
-an unknown lifetime, or caching off, the ceiling is 4 min 30 s from the start of the wait,
-and Claude Code agents get it too, since Claude Code chooses its own lifetime. A longer
-request is cut to the ceiling. If the wait then runs out, the result has a `note` that says
-so and when the cache lapses.
+tenth of it, at least 30 seconds). That is 4 min 30 s for a 5-minute cache and 27 min for a
+30-minute cache, counted from the agent's latest model request, so the time the model took
+to call the tool is included. `TaskContext::prompt_cache` carries the lifetime and the
+request's time on the monotonic clock, the one the wait's timer runs on, so a change of
+the wall clock can't lengthen a wait. A request whose time isn't known leaves no wait on a
+known cache. For a Claude Code agent the lifetime is the one the run asked Claude Code for
+(`promptCacheTtl`), else the one its cache writes show, else 5 minutes, and a request counts
+from its first streamed token. With an unknown lifetime, or caching off, the ceiling is
+4 min 30 s from the start of the wait. A longer request is cut to the ceiling. If the wait
+then runs out, the result has a `note` that says so, and when the cache lapses if the
+lifetime is known. An update that leaves the job as it was doesn't end the wait or count as
+its running out.
 
 ```text
 "note": "The wait ended after 4 min 30 s, not the 25 min you asked for, because your prompt cache lapses at 14:35:12 UTC. Call terminal_control wait again to keep waiting."
