@@ -7564,8 +7564,8 @@ async fn an_arko_call_of_a_claude_code_agent_sees_that_it_runs_in_claude_code() 
 }
 
 /// A tool that says what its call sees of the task's prompt cache, as the
-/// lifetime, whether the latest request's time is known, and the seconds a
-/// wait may last.
+/// lifetime, whether the request's anchor is known, the seconds a wait of 4
+/// hours is cut to, and the milliseconds since the anchor.
 #[derive(Debug)]
 struct SaysCache;
 
@@ -7585,11 +7585,15 @@ impl crate::tool::Tool for SaysCache {
         _: std::collections::HashMap<String, Value>,
     ) -> Result<String, crate::tool::ToolError> {
         let cache = context.prompt_cache;
+        let now = tokio::time::Instant::now();
         Ok(format!(
-            "{:?} {} {}",
+            "{:?} {} {} {}",
             cache.lifetime,
             cache.last_used.is_some(),
-            cache.longest_wait().as_secs()
+            cache.cap(now, Duration::from_secs(4 * 3600)).as_secs(),
+            cache.last_used.map_or(0, |anchor| now
+                .saturating_duration_since(anchor)
+                .as_millis())
         ))
     }
 }
@@ -7631,11 +7635,132 @@ async fn an_arko_call_of_a_claude_code_agent_sees_its_prompt_cache() {
             .to_string();
         let said: Vec<&str> = said.split(' ').collect();
         assert_eq!(said[0], lifetime, "{long:?}");
-        assert_eq!(said[1], "true", "the request's time is known, {long:?}");
+        assert_eq!(said[1], "true", "the request's anchor is known, {long:?}");
         let seconds: u64 = said[2].parse().unwrap();
         // A little of it went before the call.
         assert!((wait - 20..=wait).contains(&seconds), "{long:?}: {seconds}");
     }
+}
+
+/// Runs a Claude Code agent whose first step is a call of `says_cache`,
+/// `unstreamed` or not, after the CLI took `delay` seconds to answer, and
+/// gives what the call said.
+async fn cache_said_after(delay: f64, unstreamed: bool) -> Vec<String> {
+    let fake = Fake::new(json!([[
+        {
+            "tool": "mcp__arko__says_cache",
+            "input": {},
+            "sleep_before": delay,
+            "unstreamed": unstreamed,
+        },
+        complete("Done"),
+    ]]));
+    let mut config = config(&fake, &["says_cache"]);
+    config.llm_config.generation_config.long_prompt_cache = Some(true);
+    let task = Task::new(config, "Say the cache.".into(), fake.workspace(), None);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SaysCache));
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    // The request that made the call is the latest the task has on record
+    // when the CLI's next one is answered, and its anchor is early too.
+    let latest = task.latest_request.latest().unwrap();
+    assert!(latest.sent_instant.is_some());
+    fake.logged("post")[0]["output"]
+        .as_str()
+        .unwrap()
+        .split(' ')
+        .map(str::to_string)
+        .collect()
+}
+
+/// A response that takes 1.5 seconds to come, streamed or whole, is a
+/// request as old as the time since the input that started it was handed
+/// over, so the wait loses what the response took. The anchor isn't when
+/// the response was first seen.
+#[tokio::test]
+async fn a_slow_reply_ages_the_cache_from_the_input_that_started_it() {
+    for unstreamed in [false, true] {
+        let said = cache_said_after(1.5, unstreamed).await;
+        let age: u64 = said[3].parse().unwrap();
+        assert!(age >= 1400, "unstreamed {unstreamed}: {said:?}");
+        // The hour's 3,240 seconds, less what the response took.
+        let seconds: u64 = said[2].parse().unwrap();
+        assert!(seconds < 3240, "unstreamed {unstreamed}: {said:?}");
+        assert!(seconds >= 3240 - 20, "unstreamed {unstreamed}: {said:?}");
+    }
+}
+
+/// The hand-offs that bound a response's request. Only input that starts a
+/// turn, and the hook or result of a call the main conversation announced,
+/// advance the anchor. It freezes when a response is first seen.
+#[test]
+fn hand_offs_advance_the_anchor_only_when_they_must_precede_the_request() {
+    use super::{HandOffs, Stamp};
+    let origin = Stamp::now();
+    let at = |seconds: u64| Stamp {
+        at: origin.at + chrono::Duration::seconds(seconds as i64),
+        instant: origin.instant + Duration::from_secs(seconds),
+    };
+    let seen = |hand_offs: &HandOffs| hand_offs.freeze().map(|stamp| stamp.instant);
+    let hand_offs = HandOffs::default();
+    // No hand-off, no anchor.
+    assert_eq!(seen(&hand_offs), None);
+    // The turn's input is the first anchor, and nothing before the input
+    // can replace a later one.
+    hand_offs.input(at(10));
+    hand_offs.input(at(5));
+    // The first response is slow. A subagent's hooks and results go by
+    // meanwhile, with ids the main conversation never announced, and move
+    // nothing. (A note the user typed goes at a hook with `send_human`,
+    // which doesn't count.)
+    hand_offs.call(Some("sub-early"), at(20));
+    hand_offs.call(Some("sub-early"), at(25));
+    assert_eq!(seen(&hand_offs), Some(at(10).instant));
+    // A response announced two calls. A subagent's hook, and a call nobody
+    // announced, change nothing. The main calls' hooks and result do.
+    hand_offs.announce(["main-a".to_string(), "main-b".to_string()]);
+    hand_offs.call(Some("sub-x"), at(30));
+    hand_offs.call(None, at(31));
+    hand_offs.call(Some("main-a"), at(40));
+    hand_offs.call(Some("main-b"), at(50));
+    hand_offs.call(Some("main-a"), at(45));
+    assert_eq!(seen(&hand_offs), Some(at(50).instant));
+    // The next response's calls are forgotten at its freeze. Late hooks of
+    // the old ones can't move the anchor of the response after it.
+    hand_offs.call(Some("main-a"), at(60));
+    hand_offs.call(Some("main-b"), at(61));
+    assert_eq!(seen(&hand_offs), Some(at(50).instant));
+}
+
+/// A hook that comes before its call's announcement, as the two channels
+/// don't keep their order, is ignored. The anchor stays the older one rather
+/// than becoming a fresh one.
+#[test]
+fn a_hook_before_its_calls_announcement_leaves_the_older_anchor() {
+    use super::{HandOffs, Stamp};
+    let origin = Stamp::now();
+    let at = |seconds: u64| Stamp {
+        at: origin.at,
+        instant: origin.instant + Duration::from_secs(seconds),
+    };
+    let hand_offs = HandOffs::default();
+    hand_offs.input(at(1));
+    assert_eq!(hand_offs.freeze().unwrap().instant, at(1).instant);
+    hand_offs.call(Some("late"), at(100));
+    hand_offs.announce(["late".to_string()]);
+    assert_eq!(hand_offs.freeze().unwrap().instant, at(1).instant);
+    // Counted once it is announced, and not before.
+    hand_offs.announce(["late".to_string()]);
+    hand_offs.call(Some("late"), at(120));
+    assert_eq!(hand_offs.freeze().unwrap().instant, at(120).instant);
 }
 
 /// An arko tool that runs until the test releases it.

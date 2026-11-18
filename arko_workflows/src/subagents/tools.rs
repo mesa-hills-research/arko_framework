@@ -401,10 +401,6 @@ impl Tool for WaitForAgentsTool {
         arko_agents::ToolBackground::Own
     }
 
-    fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message) {
-        self.limits.observe_context(task_id, message);
-    }
-
     async fn execute(
         &self,
         context: &TaskContext<'_>,
@@ -436,7 +432,9 @@ impl Tool for WaitForAgentsTool {
                 }
             }
         };
-        let limit = self.limits.wait_limit(context.task_id).await;
+        let limit = self
+            .limits
+            .wait_limit(&context.prompt_cache, tokio::time::Instant::now());
         // The model may only shorten the wait.
         let wait = match requested {
             Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),

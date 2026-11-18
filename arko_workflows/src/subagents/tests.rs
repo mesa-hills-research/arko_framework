@@ -2729,6 +2729,68 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
     }
 }
 
+/// `wait_for_agents` takes its time from the call's prompt cache, as
+/// `wait_for_message` does. It waits as long as the cache's deadline
+/// leaves, however the request that made the call was timed, and not at all
+/// once none is left or the request's anchor isn't known.
+#[tokio::test]
+async fn a_wait_for_agents_stays_inside_the_cache() {
+    // r1 works until the server is dropped.
+    let server = ResponsesServer::start(|_, _| None).await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Search slowly.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
+    let five_minutes = arko_ai::PromptCacheLifetime::Known(Duration::from_secs(300));
+    let anchored = |ago: u64| {
+        arko_agents::PromptCacheWindow::new(
+            five_minutes,
+            tokio::time::Instant::now().checked_sub(Duration::from_secs(ago)),
+        )
+    };
+    let missing = arko_agents::PromptCacheWindow::new(five_minutes, None);
+    // 270 seconds less 268 leaves 2. Less 290 or no anchor leaves nothing.
+    for (window, said, at_least, below) in [
+        (anchored(268), "Nothing new in 2 s.", 1.8, 10.0),
+        (anchored(290), "Nothing new in 0 s.", 0.0, 0.5),
+        (missing, "Nothing new in 0 s.", 0.0, 0.5),
+    ] {
+        let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+        task_context.prompt_cache = window;
+        let started = std::time::Instant::now();
+        let result = tool
+            .execute(
+                &task_context,
+                HashMap::from([("runs".to_string(), json!("r1"))]),
+            )
+            .await
+            .unwrap();
+        let waited = started.elapsed().as_secs_f64();
+        assert!(result.starts_with(said), "{result}");
+        assert!((at_least..below).contains(&waited), "{said}: {waited}");
+    }
+}
+
 /// A stop_agent call dropped once the provider was asked leaves the run
 /// closed.
 #[tokio::test(flavor = "multi_thread")]

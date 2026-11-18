@@ -18,8 +18,8 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use arko_agents::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    PromptCacheWindow, TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition,
+    ToolParameterType, ToolTypeDetails,
 };
 use arko_ai::{LLMClient, PromptCacheLifetime};
 
@@ -72,10 +72,12 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// bounded wait still lets the agent look around now and then.
 ///
 /// With a known lifetime, no limit lets a wait run past the cache. The
-/// wait counts from the agent's last model request, when the cache was last
-/// used, so the time the model took to call the tool is included. An
-/// automatic limit leaves a second at least, while the cache still lasts that
-/// long. A `Fixed` limit can only shorten what is left of
+/// wait counts from the request that made the call, when the cache was last
+/// used, so the time the model took to call the tool is included. The runtime
+/// gives each call that cache in [`TaskContext::prompt_cache`], and a call
+/// made with [`TaskContext::new`] has an unknown lifetime. No limit has a
+/// minimum, so a spent cache leaves no wait. A `Fixed` limit can only
+/// shorten what is left of
 /// [`PromptCacheLifetime::longest_wait`], and a longer one is cut to it. With
 /// an unknown lifetime, or caching off, a `Fixed` limit counts from the
 /// start of the wait and may be as long as the builder accepts.
@@ -154,10 +156,6 @@ impl WaitTimeouts {
 pub struct WaitForMessageTool {
     context: Arc<SharedContext>,
     agent_name: String,
-    llm_client: Arc<LLMClient>,
-    /// Per run, when its conversation last got new messages, just before a
-    /// model request, which is when its prompt cache was last used.
-    last_request: parking_lot::Mutex<HashMap<uuid::Uuid, Instant>>,
 }
 
 impl std::fmt::Debug for WaitForMessageTool {
@@ -170,82 +168,36 @@ impl std::fmt::Debug for WaitForMessageTool {
 }
 
 impl WaitForMessageTool {
+    /// The tool for `agent_name`. It takes its prompt cache from the call's
+    /// [`TaskContext::prompt_cache`], which the runtime fills, so the client
+    /// isn't read. The argument is kept so the constructor doesn't change.
     pub fn new(
         context: Arc<SharedContext>,
         agent_name: String,
-        llm_client: Arc<LLMClient>,
+        _llm_client: Arc<LLMClient>,
     ) -> Self {
         Self {
             context,
             agent_name,
-            llm_client,
-            last_request: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
-    /// How long run `task_id` may wait, which is the agent's limit. With a
-    /// known cache lifetime it counts from the run's last model request,
-    /// when the cache was last used, so the time the model took to answer is
-    /// included, and no limit lets the wait run past the cache. An
-    /// automatic limit leaves a second at least while the cache lasts that
-    /// long, and a fixed limit only shortens what is left.
-    pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
+    /// How long a wait that starts at `started` may last, which is the
+    /// agent's limit inside the call's prompt cache. The cache's deadline is
+    /// the one of the request that made the call ([`PromptCacheWindow`]), so
+    /// no limit lets the wait run past it, and the time the model took to
+    /// answer is already gone from it. A fixed limit can only shorten what
+    /// the cache leaves, and with an unknown lifetime or caching off it is
+    /// as given.
+    pub(crate) fn wait_limit(&self, cache: &PromptCacheWindow, started: Instant) -> Duration {
         let timeout = self.context.wait_timeouts.for_agent(&self.agent_name);
-        let lifetime = self.lifetime_of(Some(task_id)).await;
-        let limit = timeout.resolve(lifetime);
-        let since = self
-            .last_request
-            .lock()
-            .get(&task_id)
-            .map_or(Duration::ZERO, |at| at.elapsed());
-        match (timeout, lifetime) {
-            // No cache to lapse, so a fixed limit counts from the start.
-            (WaitForMessageTimeout::Fixed(_), PromptCacheLifetime::Unknown)
-            | (WaitForMessageTimeout::Fixed(_), PromptCacheLifetime::Disabled) => limit,
-            (WaitForMessageTimeout::Auto, PromptCacheLifetime::Unknown)
-            | (WaitForMessageTimeout::Auto, PromptCacheLifetime::Disabled) => {
-                limit.saturating_sub(since).max(MIN_AUTO_WAIT)
-            }
+        match (timeout, cache.lifetime) {
             (WaitForMessageTimeout::Fixed(timeout), PromptCacheLifetime::Known(_)) => {
-                timeout.min(lifetime.longest_wait().saturating_sub(since))
+                cache.cap(started, timeout)
             }
-            (WaitForMessageTimeout::Auto, PromptCacheLifetime::Known(known)) => {
-                let left = limit.saturating_sub(since);
-                if since + MIN_AUTO_WAIT <= known {
-                    left.max(MIN_AUTO_WAIT)
-                } else {
-                    left
-                }
-            }
-        }
-    }
-
-    /// The agent's time limit, for a run of its registered configuration.
-    #[cfg(test)]
-    pub(crate) async fn limit(&self) -> Duration {
-        let timeout = self.context.wait_timeouts.for_agent(&self.agent_name);
-        timeout.resolve(self.lifetime_of(None).await)
-    }
-
-    /// The prompt-cache lifetime of the model run `task_id` works with,
-    /// which may not be its agent's (or of the agent's registered
-    /// configuration without one).
-    async fn lifetime_of(&self, task_id: Option<uuid::Uuid>) -> PromptCacheLifetime {
-        let config = match task_id {
-            Some(task_id) => self.context.run_llm_config(&self.agent_name, task_id),
-            None => self
-                .context
-                .agent_configs
-                .get(&self.agent_name)
-                .map(|config| config.llm_config.clone()),
-        };
-        match config {
-            Some(config) => {
-                self.llm_client
-                    .prompt_cache_lifetime(&config.model, &config.generation_config)
-                    .await
-            }
-            None => PromptCacheLifetime::Unknown,
+            (WaitForMessageTimeout::Fixed(timeout), _) => timeout,
+            // The cache decides, up to the longest limit there is.
+            (WaitForMessageTimeout::Auto, _) => cache.cap(started, MAX_WAIT_FOR_MESSAGE_TIMEOUT),
         }
     }
 }
@@ -351,24 +303,25 @@ impl Tool for WaitForMessageTool {
         arko_agents::ToolBackground::Own
     }
 
-    fn observe_context(&self, task_id: uuid::Uuid, _message: &arko_ai::Message) {
-        // (The messages it holds count as seen as the runtime reports them,
-        // `MessageBus::seen`.) The runtime reports new messages just before
-        // each model request.
-        self.last_request.lock().insert(task_id, Instant::now());
-    }
-
     async fn execute(
         &self,
         task_context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
         let requested = requested_timeout(&params)?;
-        let limit = self.wait_limit(task_context.task_id).await;
+        let started = Instant::now();
+        let cache = &task_context.prompt_cache;
+        let limit = self.wait_limit(cache, started);
         // The model may only shorten the wait.
         let wait = match requested {
             Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),
             _ => limit,
+        };
+        // The cache's deadline, which nothing after the start moves, a wait
+        // for a message to be forwarded included. A known lifetime only.
+        let cache_deadline = match cache.lifetime {
+            PromptCacheLifetime::Known(_) => cache.deadline(started),
+            _ => None,
         };
         let context = &self.context;
         let task_id = task_context.task_id;
@@ -384,7 +337,9 @@ impl Tool for WaitForMessageTool {
         let peers = context.status_peers(&self.agent_name);
         let baseline = context.registry.activity(&peers);
 
-        let deadline = Instant::now() + wait;
+        // Counting can't fail for a wait of up to a day, and a wait that
+        // couldn't be counted would end at once.
+        let deadline = started.checked_add(wait).unwrap_or(started);
         let mut forward_deadline = None;
         let (mut arrivals_open, mut versions_open, mut stopping_open) = (true, true, true);
         loop {
@@ -420,10 +375,17 @@ impl Tool for WaitForMessageTool {
                     return Ok(format!("No messages after {}.", describe_duration(wait)));
                 }
             } else {
-                if unseen.forwarded || forward_deadline.is_some_and(|until| now >= until) {
+                // The cache's deadline ends the wait for the forward too, and
+                // the message then reaches the agent at a later boundary.
+                if unseen.forwarded
+                    || forward_deadline.is_some_and(|until| now >= until)
+                    || cache_deadline.is_some_and(|until| now >= until)
+                {
                     return Ok(message_result(&unseen.senders, &changes));
                 }
-                forward_deadline.get_or_insert(now + FORWARD_WAIT);
+                let until = now.checked_add(FORWARD_WAIT).unwrap_or(now);
+                forward_deadline
+                    .get_or_insert(cache_deadline.map_or(until, |cache| until.min(cache)));
             }
             let until = forward_deadline.unwrap_or(deadline);
             tokio::select! {

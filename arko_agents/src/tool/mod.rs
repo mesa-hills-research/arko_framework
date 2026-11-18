@@ -363,9 +363,13 @@ pub struct TaskContext<'a> {
     /// shows the model only a short preview of a very long tool result. A
     /// tool with long results can keep them short for it.
     pub runs_in_claude_code: bool,
-    /// How long the task's prompt cache lasts and when its latest model
-    /// request used it. A tool that waits keeps the wait inside it. Unknown
-    /// in Claude Code, which chooses its own lifetime.
+    /// How long the task's prompt cache lasts and the anchor of the request
+    /// that made the call, which is no later than the request's use of it. A
+    /// tool that waits keeps the wait inside the window's
+    /// [deadline](PromptCacheWindow::deadline). In Claude Code the lifetime is
+    /// the one the run asked for, else the one the cache writes show, else 5
+    /// minutes, and the anchor is the last hand-off to the CLI before the
+    /// response. [`TaskContext::new`] gives an unknown lifetime.
     pub prompt_cache: PromptCacheWindow,
 }
 

@@ -1174,21 +1174,41 @@ async fn cache_seen_by_a_call(
     config: AgentConfig,
     prepare: impl FnOnce(&mut AgentLoop),
 ) -> (crate::tool::PromptCacheWindow, Task) {
+    slow_cache_seen_by_a_call(config, Duration::ZERO, prepare).await
+}
+
+/// As [`cache_seen_by_a_call`], when the response that makes the call takes
+/// `delay` to come.
+async fn slow_cache_seen_by_a_call(
+    config: AgentConfig,
+    delay: Duration,
+    prepare: impl FnOnce(&mut AgentLoop),
+) -> (crate::tool::PromptCacheWindow, Task) {
+    use futures::StreamExt;
     let workspace = workspace();
     let seen = Arc::new(SeesCache::default());
     let mut registry = ToolRegistry::new();
     registry.register(seen.clone());
     let (mut agent, _events, _commands) = agent(config, registry, &workspace);
     prepare(&mut agent);
-    agent.scripted_responses.get_mut().unwrap().extend([
-        turn(vec![native_call(
-            "look",
-            "sees_cache",
-            serde_json::json!({}),
-        )]),
-        complete(),
-    ]);
-    let task = timeout(Duration::from_secs(30), agent.run())
+    let call = turn(vec![native_call(
+        "look",
+        "sees_cache",
+        serde_json::json!({}),
+    )]);
+    // The response comes whole after the delay.
+    let call = call.map(|stream| {
+        futures::stream::once(tokio::time::sleep(delay))
+            .filter_map(|()| async { None })
+            .chain(stream)
+            .boxed()
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .extend([call, complete()]);
+    let task = timeout(delay + Duration::from_secs(30), agent.run())
         .await
         .unwrap()
         .unwrap();
@@ -1216,6 +1236,30 @@ async fn a_call_sees_its_tasks_prompt_cache() {
     assert!(
         started <= used && used <= latest,
         "{started:?} {used:?} {latest:?}"
+    );
+}
+
+/// A response that takes 10 minutes to come leaves an hour's cache 44 minutes
+/// of wait, not the 54 a cache just used leaves. The time before the
+/// response is first seen counts, however the response comes.
+#[tokio::test(start_paused = true)]
+async fn a_slow_response_uses_up_the_caches_time() {
+    let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(3600));
+    let sent = tokio::time::Instant::now();
+    let (window, _) = slow_cache_seen_by_a_call(config, Duration::from_secs(600), |_| {}).await;
+    // The anchor is when the request went out, not when its response came.
+    let anchor = window.last_used.expect("an anchor");
+    assert!(
+        anchor - sent < Duration::from_secs(1),
+        "{:?}",
+        anchor - sent
+    );
+    let left = window.cap(tokio::time::Instant::now(), Duration::from_secs(4 * 3600));
+    assert!(
+        (Duration::from_secs(44 * 60 - 1)..=Duration::from_secs(44 * 60)).contains(&left),
+        "{left:?}"
     );
 }
 

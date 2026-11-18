@@ -745,10 +745,11 @@ async fn a_run_on_its_own_configuration_needs_a_registered_agent() {
     assert_eq!(server.requests(), 0);
 }
 
-/// A handover that changes the run's prompt cache lifetime changes its
-/// automatic `wait_for_message` limit too.
+/// A handover that changes the run's prompt cache lifetime changes the one
+/// its calls' cache windows follow, which the runtime takes from the task's
+/// configuration.
 #[tokio::test]
-async fn a_handover_s_configuration_sets_the_run_s_wait_limit() {
+async fn a_handover_s_configuration_sets_the_run_s_cache_lifetime() {
     let workspace = Workspace::new();
     let server = ResponsesServer::start(|index, body| {
         Some(if body.contains("# Handover report") {
@@ -783,8 +784,7 @@ async fn a_handover_s_configuration_sets_the_run_s_wait_limit() {
     workflow.checkpoint().await.unwrap();
     drop(workflow);
 
-    // GPT-5.6 Luna's 30-minute cache gives a 27-minute limit, and a
-    // 10-minute lifetime 9.
+    // GPT-5.6 Luna's own 30-minute cache, and then a 10-minute lifetime.
     let mut current = saved;
     current.llm_config.generation_config = current
         .llm_config
@@ -795,27 +795,20 @@ async fn a_handover_s_configuration_sets_the_run_s_wait_limit() {
         .keep_saved_configs(["main"])
         .build()
         .unwrap();
-    let limit = || {
-        crate::messaging::wait::WaitForMessageTool::new(
-            resumed.context().clone(),
-            "main".to_string(),
-            Arc::new(server.client()),
-        )
+    let lifetime = |task: &arko_agents::Task| {
+        task.agent_config
+            .llm_config
+            .generation_config
+            .prompt_cache_lifetime_seconds
     };
     let restored = resumed.agent_result(first.agent_run_id).unwrap();
-    assert_eq!(
-        limit().wait_limit(first.agent_run_id).await,
-        std::time::Duration::from_secs(27 * 60)
-    );
+    assert_eq!(lifetime(restored.task().unwrap()), None);
     let result = resumed
         .continue_agent(&restored, "Keep going.")
         .await
         .unwrap();
     assert_eq!(result.task().unwrap().handovers.len(), 1);
-    assert_eq!(
-        limit().wait_limit(first.agent_run_id).await,
-        std::time::Duration::from_secs(9 * 60)
-    );
+    assert_eq!(lifetime(result.task().unwrap()), Some(600));
 }
 
 /// The skills configuration of one embedded skill, `name`.
@@ -939,8 +932,8 @@ async fn a_handover_sees_a_change_of_load_skill_s_entry() {
 }
 
 /// A configuration the runtime leaves out at a handover (its skills don't
-/// load) changes none of the run's settings. Its automatic
-/// `wait_for_message` limit stays by the configuration it keeps.
+/// load) changes none of the run's settings. Its cache lifetime stays the
+/// configuration's it keeps.
 #[tokio::test]
 async fn a_handover_configuration_left_out_leaves_the_run_s_settings() {
     let workspace = Workspace::new();
@@ -1006,13 +999,13 @@ async fn a_handover_configuration_left_out_leaves_the_run_s_settings() {
     let task = result.task().unwrap();
     assert_eq!(task.handovers.len(), 1);
     assert!(task.agent_config.skills_config.is_none());
-    let limit = crate::messaging::wait::WaitForMessageTool::new(
-        resumed.context().clone(),
-        "main".to_string(),
-        Arc::new(server.client()),
-    );
+    // The handover that failed to take the new configuration keeps the
+    // saved one, whose cache lifetime is the model's own.
     assert_eq!(
-        limit.wait_limit(first.agent_run_id).await,
-        std::time::Duration::from_secs(27 * 60)
+        task.agent_config
+            .llm_config
+            .generation_config
+            .prompt_cache_lifetime_seconds,
+        None
     );
 }

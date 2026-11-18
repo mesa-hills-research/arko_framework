@@ -123,7 +123,7 @@ impl TerminalTool {
     ) -> std::result::Result<Value, ToolError> {
         let revision = revision(params)?;
         let asked = number(params, "wait_ms")?.map_or(DEFAULT_WAIT, Duration::from_millis);
-        let wait = asked.min(context.prompt_cache.longest_wait());
+        let wait = context.prompt_cache.cap(tokio::time::Instant::now(), asked);
         let owner = context.task_id;
         let (snapshot, ran_out) = tokio::select! {
             biased;
