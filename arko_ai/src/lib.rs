@@ -49,7 +49,10 @@ pub use config::{
 };
 pub use conversation::{Conversation, OpenAITurnState};
 pub use error::{Error, ErrorKind, RetryClass};
-pub use input_limit::{CHATGPT_OAUTH_MAX_INPUT_TOKENS, effective_max_input_tokens};
+pub use input_limit::{
+    CHATGPT_OAUTH_LONG_MAX_INPUT_TOKENS, CHATGPT_OAUTH_MAX_INPUT_TOKENS,
+    chatgpt_oauth_max_input_tokens, effective_max_input_tokens,
+};
 pub use message::{ConfigurationUpdate, Content, Image, Message, Role};
 pub use model::{Model, ModelPricing, Provider};
 pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};

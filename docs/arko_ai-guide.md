@@ -81,9 +81,12 @@ and the OpenRouter catalog supplies limits and prices on request. See
 
 `Model::max_input_tokens` is the provider's published input limit. The ChatGPT OAuth
 backend accepts less, so `LLMClient::max_input_tokens(&model)` returns the limit for the
-client's auth path, capping OpenAI models at `CHATGPT_OAUTH_MAX_INPUT_TOKENS` (272,000)
-over ChatGPT OAuth, and `effective_max_input_tokens(&model, chatgpt_oauth)` computes the
-same without a client. Both return `None` when the limit is unknown.
+client's auth path, capping OpenAI models over ChatGPT OAuth at
+`chatgpt_oauth_max_input_tokens(id)`, the `context_window` of the model's Codex catalog
+entry. That is `CHATGPT_OAUTH_LONG_MAX_INPUT_TOKENS` (500,000) for GPT-6.2 Sol, GPT-6.1
+Sol and GPT-6.1 Terra, and `CHATGPT_OAUTH_MAX_INPUT_TOKENS` (272,000) for the others.
+`effective_max_input_tokens(&model, chatgpt_oauth)` computes the same without a client.
+Both return `None` when the limit is unknown.
 
 ## Generation settings and tool calls
 
@@ -105,9 +108,12 @@ Each provider takes its own `ReasoningConfig` variant, built with
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and
 `openrouter_effort(effort)`. Without a reasoning configuration, Gemini requests send no
 `thinking_level` or `thinking_summaries`, so each model thinks at its documented default
-(medium on Gemini 3.5 to 3.8 Flash, minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro,
-3 Flash and 3.1 Pro, dynamic on 2.5) and returns no thought summaries. An explicit level
-is validated against the model.
+(medium on Gemini 4 Carbon and Argon and on 3.5 to 3.8 Flash, high on Gemini 4 Hydrogen,
+minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5) and
+returns no thought summaries. An explicit level is validated against the model. Only
+Gemini 4 Hydrogen takes `GeminiThinkingLevel::XHigh`, and the Gemini 4 models reject
+`Minimal`. `GeminiThinkingLevel` is non-exhaustive since 0.3.0, so a `match` on it outside
+arko_ai needs a `_` arm.
 
 ### Reasoning summaries
 
@@ -370,8 +376,10 @@ and at the ChatGPT backend's `chatgpt.com/backend-api/codex/responses` with Chat
 ### Prompt caching and reasoning context
 
 Every OpenAI request sends the conversation's
-`prompt_cache_key`, for every model. `prompt_cache_options` is sent only to GPT-5.6 and
-GPT-6 with API keys. Reasoning GPT-5.6 requests also send `reasoning.context:
+`prompt_cache_key`, for every model. `prompt_cache_options` is sent only to GPT-5.6,
+GPT-6 and GPT-6.2 with API keys. GPT-6.2 reads top-level `instructions` after `input` and
+bills them uncached, so its requests send the system prompt as a `developer` message
+first in `input` instead, on both auth paths, as Codex does. Reasoning GPT-5.6 requests also send `reasoning.context:
 "all_turns"`, so reasoning from earlier turns is rendered back to the model. Over ChatGPT
 OAuth, GPT-6 requests send it too, as Codex does. With API keys it is left out for GPT-6,
 since the API documents the value only for GPT-5.6. Without a configured effort, API-key
@@ -420,8 +428,9 @@ and warns once when configured.
 
 `GenerationConfig::with_openai_service_tier(Fast)`
 works on a subscription as Codex's Fast mode does. It sends `service_tier: "priority"` in
-the body of every request it is set for, on the models Codex's catalog offers it for (GPT-6
-Astra, Sol, Luna, 6.1 Sol and 6.1 Terra, GPT-5.6 Sol, Terra and Luna, and GPT-5.5), and fails with
+the body of every request it is set for, on the models Codex's catalog offers it for (GPT-6.2
+Sol and Astra, GPT-6 Astra, Sol, Luna, 6.1 Sol and 6.1 Terra, GPT-5.6 Sol, Terra and Luna, and
+GPT-5.5), and fails with
 `Error::InvalidRequest` on other models. Every OAuth request also carries Codex's `x-codex-routing-hint` header,
 `model=<model>`, with `;tier=priority` in Fast mode. Codex's catalog describes Fast mode
 as "2x speed, increased usage", so it uses more of the plan's limits. `Default` sends no

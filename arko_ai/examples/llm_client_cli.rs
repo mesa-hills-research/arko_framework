@@ -641,9 +641,10 @@ fn reasoning_config(
                         "low" => GeminiThinkingLevel::Low,
                         "medium" => GeminiThinkingLevel::Medium,
                         "high" => GeminiThinkingLevel::High,
+                        "xhigh" => GeminiThinkingLevel::XHigh,
                         other => {
                             return Err(invalid(format!(
-                                "Gemini thinking takes a level (minimal, low, medium, high) or a token budget, not '{other}'."
+                                "Gemini thinking takes a level (minimal, low, medium, high, xhigh) or a token budget, not '{other}'."
                             )));
                         }
                     };
