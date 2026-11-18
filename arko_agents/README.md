@@ -24,7 +24,7 @@ updates, cancellation and suspension.
 
 ```toml
 [dependencies]
-arko_agents = "0.9"
+arko_agents = "0.10"
 arko_ai = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```

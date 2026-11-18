@@ -1,12 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (2026-11-18)
+
+### Waits end for notes and mail
+
+- A note posted for a running agent, and mail that wakes it (a worker's report, a message from
+  its lead), end the agent's running waits (`terminal_control wait`, `wait_for_message`), in the
+  native loop and in Claude Code. Before, they waited for the next turn boundary, up to 270 s.
+- `wait_for_agents` with `runs` still ignores mail from other runs.
 
 ### Tools reached only from inside a call
 
 - An agent tool listed in the agent's `nested_only_tool_names` isn't offered to its runs. A saved
   run needs its nested-only tools registered to resume, as it does its offered ones, and the
   freshness configuration and distillers may name them.
+
+### Breaking changes
+
+- arko_workflows takes arko_agents 0.10, whose types its public API holds. Its agents get
+  arko_agents 0.10's `apply_diff`, which applies every block of a call or none.
+
+### Dependencies
+
+- Takes arko_ai 0.3.2.
 
 ## 0.10.1 (2026-11-18)
 

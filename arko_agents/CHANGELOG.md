@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (2026-11-18)
 
 ### apply_diff
 
@@ -13,11 +13,10 @@
   re-indenting of replacement lines are gone. Blocks need no `:start_line:` and `-------` lines,
   and blocks that still have them parse.
 - `replace_all` replaces every occurrence of each block's search lines.
-- A new file takes the file's place in one step, through a symbolic link, with its owner, group,
-  permissions, ACL and other properties, so an error or a crash leaves the old file whole. A file
-  with a property the new file can't keep, such as a second hard link, is refused unchanged, and
-  so is any property not known to be kept. A byte-order mark, CRLF line breaks and a missing
-  last line break are kept.
+- The edited text goes to a new file that takes the old one's place in one step, so an error or a
+  crash leaves the old file whole. The new file has the old one's owner, group, permissions, ACL
+  and other properties before any content is written. A symbolic link is followed and stays a
+  link. A byte-order mark, CRLF line breaks and a missing last line break are kept.
 - Its result shows each block's new lines, as `edit_file`'s does, and carries a
   `ToolReceipt::Edit` covering every block.
 - Its description is a few sentences and one example.
@@ -41,9 +40,32 @@
 - `write_file`'s hint names `apply_diff` or `edit_file` also when the agent reaches that tool
   only from inside a call.
 
+### Waits end for notes
+
+- A call's `context_arrived` also fires while the task's turn context source holds context for
+  its next update that should end a wait, such as a workflow's note. Before,
+  `terminal_control wait` ran its whole time while such a note waited.
+- `TurnContextSource` gains `has_waking_update` and `update_changed`, both defaulted, and
+  `ContextSignal` gains `with_updates` and `without_updates`.
+- The signal holds the source weakly, so a call moved to the background doesn't keep the
+  terminal manager alive through it.
+
+### ask_user
+
+- Its description says to repeat an unanswered question in the same words. It said to ask the
+  question again, which read as a new `ask_user` call while the question was still open.
+
 ### Breaking changes
 
 - An `apply_diff` call with a block that fails is an error and writes nothing.
+- `apply_diff` refuses a file, and leaves it as it was, when the new file can't keep one of its
+  properties or the file has one not known to be kept. Among them are a second hard link, the
+  setuid or setgid bit, an owner other than the process's user, an ACL on macOS, and encryption,
+  compression or named streams on Windows. On Unix systems other than Linux and macOS it refuses
+  every file. The error says why and points to `write_file` or the shell. `edit_file` still
+  writes these files in place.
+- `apply_diff` refuses an empty file (`write_file` gives it content) and a file with a NUL byte.
+  It refuses a pipe or a device without reading it.
 - A line of the file that is itself a marker is written with a backslash before it
   (`\=======`). The `AD_ESC::` prefix is gone.
 - `AgentToolConfig` has a new public field, `nested_only_tool_names`.
@@ -51,6 +73,10 @@
   already says the tool failed, so a failed call read "Tool 'read_file' execution failed:
   Execution failed: …" to the model, in the events and in saved conversations. It now reads
   "Tool 'read_file' execution failed: …".
+
+### Dependencies
+
+- Takes arko_ai 0.3.2.
 
 ## 0.9.1 (2026-11-18)
 
