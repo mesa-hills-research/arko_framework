@@ -288,6 +288,10 @@ mod tests {
             PromptCacheLifetime::Known(Duration::from_secs(u64::MAX)),
             Some(start),
         );
+        // On Unix an instant counts its seconds in an i64, so this deadline
+        // is too far to count. Windows counts them in a u64 and gives the
+        // far deadline the loop above accepts.
+        #[cfg(unix)]
         assert_eq!(window.deadline(start), None);
         assert_eq!(window.lapses_at(), None);
         // One that fits is counted, and an hour of it is the cache's.
