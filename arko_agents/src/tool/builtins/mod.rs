@@ -101,7 +101,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(std::fs::read_to_string(&target).unwrap(), "one", "{path}");
-            let diff = "<<<<<<< SEARCH\n:start_line:1\n-------\none\n=======\ntwo\n>>>>>>> REPLACE";
+            let diff = "<<<<<<< SEARCH\none\n=======\ntwo\n>>>>>>> REPLACE";
             ApplyDiffTool
                 .execute(&context, params(json!({"path": path, "diff": diff})))
                 .await

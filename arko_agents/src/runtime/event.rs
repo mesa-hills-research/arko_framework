@@ -167,7 +167,8 @@ pub enum AgentEvent {
         output: String,
         /// What the call did, when its tool says
         /// ([`ToolOutput::receipt`](crate::tool::ToolOutput::receipt)), for
-        /// the host to show. `edit_file`'s says what it changed.
+        /// the host to show. `edit_file`'s and `apply_diff`'s say what they
+        /// changed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receipt: Option<crate::tool::ToolReceipt>,
     },

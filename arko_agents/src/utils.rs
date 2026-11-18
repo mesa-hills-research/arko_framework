@@ -211,6 +211,30 @@ pub fn get_file_tree(
 /// writing, which is why the flush uses the handle that wrote.) On failure
 /// the temporary file is removed.
 pub fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    replace_file(path, bytes, None)
+}
+
+/// Writes `bytes` over the existing file at `path` in one step, as
+/// [`write_file_atomically`] does, for a file a person or a tool edits. The
+/// file keeps its permissions, a symbolic link is followed so that the file
+/// it points to is replaced and the link stays, and a file the process can't
+/// write is refused, as an in-place write would be.
+pub(crate) fn rewrite_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path)?;
+    // (Opening it to write, without truncating it, checks the access an
+    // in-place write needs.)
+    let file = std::fs::OpenOptions::new().write(true).open(&target)?;
+    let permissions = file.metadata()?.permissions();
+    drop(file);
+    replace_file(&target, bytes, Some(permissions))
+}
+
+/// [`write_file_atomically`], giving the new file `permissions` when set.
+fn replace_file(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> std::io::Result<()> {
     use std::io::Write;
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -233,6 +257,9 @@ pub fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .create_new(true)
             .open(&temporary)?;
         file.write_all(bytes)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)

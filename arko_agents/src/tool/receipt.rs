@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ToolReceipt {
-    /// What `edit_file` changed.
+    /// What `edit_file` or `apply_diff` changed.
     Edit(EditReceipt),
 }
 
