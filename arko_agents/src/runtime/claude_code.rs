@@ -2290,6 +2290,11 @@ impl ClaudeCodeRun {
                 #[cfg(any(unix, windows))]
                 jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
+                gate: Some(Arc::new(super::nested::Gate {
+                    registry: self.registry.clone(),
+                    tool_config: self.task.agent_config.tool_config.clone(),
+                    events: self.events.clone(),
+                })),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),

@@ -12,6 +12,7 @@ use crate::tool::{
     ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome, ToolImageSink,
     ToolOutput, ToolResultInterceptor,
 };
+use super::nested::{Gate, Halt, NestedCalls};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -50,6 +51,9 @@ pub(super) struct RunEnvironment {
     /// The agent is offered `terminal_status` and `terminal_control`, which
     /// a moved call's result names.
     pub terminal_tools: bool,
+    /// What a call's [`NestedCalls`] check their calls against, or `None`
+    /// for calls that can't call tools.
+    pub gate: Option<Arc<Gate>>,
 }
 
 /// What a call sees of a stop, a move and context arriving.
@@ -75,6 +79,7 @@ impl RunEnvironment {
             moved: signals.moved.clone(),
             context_arrived: signals.context_arrived.clone(),
             runs_in_claude_code: self.model.provider == arko_ai::Provider::ClaudeCode,
+            nested: None,
         }
     }
 
@@ -211,7 +216,27 @@ pub(super) async fn run_tool(
     {
         return Ok(movable::run(environment, run, signals, jobs).await);
     }
-    Ok(execute(environment, run, signals, None).await)
+    Ok(execute(environment, run, signals, None, false).await)
+}
+
+/// Runs a call made from inside a call ([`NestedCalls`]) with `stop`, the
+/// outer call's stop signal. The middleware's `before` and `after` see it,
+/// and it runs under its time limit, in the foreground, with no images
+/// kept, no interception and no [`NestedCalls`] of its own.
+pub(super) async fn run_nested(
+    environment: Arc<RunEnvironment>,
+    run: ToolRun,
+    stop: StopSignal,
+) -> RunOutcome {
+    if let Some(outcome) = before(&environment, &run).await {
+        return outcome;
+    }
+    let signals = CallSignals {
+        stop,
+        moved: MoveSignal::never(),
+        context_arrived: ContextSignal::never(),
+    };
+    execute(environment, run, signals, None, true).await
 }
 
 /// A call answered with the host's output instead of running. The
@@ -302,13 +327,91 @@ async fn before(environment: &RunEnvironment, run: &ToolRun) -> Option<RunOutcom
 /// It owns what it uses, so a call that moves to the background goes on as
 /// a job. Once `adopted` is set (the call moved), its images are kept as
 /// the tool returned them, since the turn's image room no longer applies.
+/// A call that isn't `nested` gets [`NestedCalls`] when the environment has
+/// a gate, and a stop or pause one of them met is the call's own once it
+/// returns. A `nested` call gets none, and keeps no images.
 fn execute(
     environment: Arc<RunEnvironment>,
     run: ToolRun,
     signals: CallSignals,
     adopted: Option<Arc<AtomicBool>>,
+    nested: bool,
 ) -> BoxFuture<'static, RunOutcome> {
     Box::pin(async move {
+        let calls = match environment.gate.clone() {
+            Some(gate) if !nested => Some(NestedCalls::new(
+                environment.clone(),
+                gate,
+                run.tool_call_id,
+                &run.tool_name,
+                signals.stop.clone(),
+            )),
+            _ => None,
+        };
+        let outcome = execute_tool(
+            &environment,
+            &run,
+            &signals,
+            adopted,
+            nested,
+            calls.clone(),
+        )
+        .await;
+        match calls.and_then(|calls| calls.halt().get().cloned()) {
+            Some(halt) => halted(outcome, halt),
+            None => outcome,
+        }
+    })
+}
+
+/// A call's outcome when a call it made met a stop or pause. A stop stops
+/// the task at it. A pause keeps its result and pauses the task, as a
+/// middleware's failure after a call does.
+fn halted(outcome: RunOutcome, halt: Halt) -> RunOutcome {
+    match (halt, outcome) {
+        (Halt::Stop { reason, cancel }, _) => RunOutcome::Stop { reason, cancel },
+        (
+            Halt::Pause { reason },
+            RunOutcome::Finished {
+                output,
+                effective,
+                intercepted,
+            },
+        ) => RunOutcome::MiddlewareErrorAfter {
+            output,
+            effective,
+            intercepted,
+            reason,
+            is_error: false,
+        },
+        (Halt::Pause { reason }, RunOutcome::Failed(error)) => {
+            let text = error.to_string();
+            RunOutcome::MiddlewareErrorAfter {
+                output: ToolOutput::text(text.clone()),
+                effective: text,
+                intercepted: false,
+                reason,
+                is_error: true,
+            }
+        }
+        // A middleware's failure after the call pauses it already.
+        (Halt::Pause { .. }, outcome) => outcome,
+    }
+}
+
+/// The tool under the host's time limit, the image sink (not for a
+/// `nested` call), the middleware's `after` and interception. `calls` are
+/// the call's [`NestedCalls`].
+async fn execute_tool(
+    environment: &Arc<RunEnvironment>,
+    run: &ToolRun,
+    signals: &CallSignals,
+    adopted: Option<Arc<AtomicBool>>,
+    nested: bool,
+    calls: Option<NestedCalls>,
+) -> RunOutcome {
+    {
+        let environment = environment.as_ref();
         let call = ToolCallContext {
             tool_call_id: run.tool_call_id,
             tool_name: &run.tool_name,
@@ -316,7 +419,8 @@ fn execute(
         };
         let execution = environment.execution_context();
         let middleware = environment.middleware.as_ref();
-        let context = environment.task_context(&run, &signals);
+        let mut context = environment.task_context(run, signals);
+        context.nested = calls;
         let execution_future = run.tool.execute_with_output(&context, run.params.clone());
         // Dropping the call at the limit stops it, and a command it started
         // is killed with it.
@@ -352,7 +456,10 @@ fn execute(
                 return RunOutcome::Failed(error);
             }
         };
-        if let Some(sink) = &environment.image_sink
+        if nested {
+            // A nested call's caller gets its text.
+            output.images.clear();
+        } else if let Some(sink) = &environment.image_sink
             && !output.images.is_empty()
         {
             sink.tool_images_with_call_id(
@@ -379,8 +486,7 @@ fn execute(
                 .await
         {
             let reason = middleware_error_reason("after", &run.tool_name, &error);
-            let (effective, intercepted) =
-                intercepted_output(&environment, &run, &output.text).await;
+            let (effective, intercepted) = intercepted_output(environment, run, &output.text).await;
             return RunOutcome::MiddlewareErrorAfter {
                 output,
                 effective,
@@ -389,13 +495,13 @@ fn execute(
                 is_error: false,
             };
         }
-        let (effective, intercepted) = intercepted_output(&environment, &run, &output.text).await;
+        let (effective, intercepted) = intercepted_output(environment, run, &output.text).await;
         RunOutcome::Finished {
             output,
             effective,
             intercepted,
         }
-    })
+    }
 }
 
 /// Calls that can move to the background.
@@ -422,7 +528,7 @@ mod movable {
         );
         if run.background != ToolBackground::Detach {
             signals.moved = held.signal();
-            let outcome = execute(environment, run, signals, None).await;
+            let outcome = execute(environment, run, signals, None, false).await;
             drop(held);
             return outcome;
         }
@@ -456,7 +562,13 @@ mod movable {
             }
         });
         let adopted = Arc::new(AtomicBool::new(false));
-        let mut call = execute(environment.clone(), run, signals, Some(adopted.clone()));
+        let mut call = execute(
+            environment.clone(),
+            run,
+            signals,
+            Some(adopted.clone()),
+            false,
+        );
         // Moves by itself after this long. A time too far off to count means
         // never.
         let auto_after = jobs.background_after();

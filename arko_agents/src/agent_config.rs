@@ -747,6 +747,34 @@ impl AgentToolConfig {
         seconds.map(std::time::Duration::from_secs)
     }
 
+    /// Whether calls to `tool_name` run without approval, as its
+    /// [`PerToolConfigOverride::auto_approve_tool_use`] says, or else
+    /// [`default_auto_approve_tool_use`](Self::default_auto_approve_tool_use).
+    /// `ask_user` and `close_questions` run without it unless their
+    /// overrides say otherwise, since a question already waits for an
+    /// answer.
+    pub fn auto_approves(&self, tool_name: &str) -> bool {
+        self.tool_specific_configs
+            .get(tool_name)
+            .and_then(|override_cfg| override_cfg.auto_approve_tool_use)
+            .unwrap_or(
+                self.default_auto_approve_tool_use
+                    || tool_name == crate::tool::builtins::ASK_USER_TOOL_NAME
+                    || tool_name == crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
+            )
+    }
+
+    /// How a call to `tool_name` with a path outside the workspace is
+    /// judged, as its [`PerToolConfigOverride::out_of_workspace_path_policy`]
+    /// says, or else
+    /// [`default_out_of_workspace_path_policy`](Self::default_out_of_workspace_path_policy).
+    pub fn path_safety_policy(&self, tool_name: &str) -> PathSafetyPolicy {
+        self.tool_specific_configs
+            .get(tool_name)
+            .and_then(|override_cfg| override_cfg.out_of_workspace_path_policy.clone())
+            .unwrap_or_else(|| self.default_out_of_workspace_path_policy.clone())
+    }
+
     /// Whether the agent is offered arko's terminal tools
     /// ([`TerminalTool`](crate::terminal::TerminalTool), named by
     /// `terminal_start`).
@@ -1500,30 +1528,15 @@ impl AgentConfig {
     /// `tool_specific_configs` override, or else
     /// `default_auto_approve_tool_use`. `ask_user` and `close_questions` are
     /// auto-approved unless their overrides say otherwise, since a question
-    /// already waits for an answer.
+    /// already waits for an answer. See [`AgentToolConfig::auto_approves`].
     pub fn should_auto_approve_tool(&self, tool_name: &str) -> bool {
-        self.tool_config
-            .tool_specific_configs
-            .get(tool_name)
-            .and_then(|override_cfg| override_cfg.auto_approve_tool_use)
-            .unwrap_or(
-                self.tool_config.default_auto_approve_tool_use
-                    || tool_name == crate::tool::builtins::ASK_USER_TOOL_NAME
-                    || tool_name == crate::tool::builtins::CLOSE_QUESTIONS_TOOL_NAME,
-            )
+        self.tool_config.auto_approves(tool_name)
     }
 
-    /// Gets the path safety policy for a given tool.
+    /// Gets the path safety policy for a given tool. See
+    /// [`AgentToolConfig::path_safety_policy`].
     pub fn get_path_safety_policy(&self, tool_name: &str) -> PathSafetyPolicy {
-        self.tool_config
-            .tool_specific_configs
-            .get(tool_name)
-            .and_then(|override_cfg| override_cfg.out_of_workspace_path_policy.clone())
-            .unwrap_or_else(|| {
-                self.tool_config
-                    .default_out_of_workspace_path_policy
-                    .clone()
-            })
+        self.tool_config.path_safety_policy(tool_name)
     }
 
     /// Whether calls to a tool may run at the same time as other

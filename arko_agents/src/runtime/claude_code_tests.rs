@@ -7916,3 +7916,115 @@ async fn a_claude_code_agent_reaches_mcp_servers_through_the_bridge() {
     assert!(first_report("toolu_note"));
     hub.shutdown().await;
 }
+
+/// An arko tool that calls tools from inside its call, and returns what
+/// each call got.
+#[derive(Debug)]
+struct CallsFromInside;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for CallsFromInside {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "calls_from_inside".into(),
+            description: "Calls tools".into(),
+            ..WaitsForContext::default().definition()
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        let nested = context.nested.clone().expect("Claude Code's calls have a gate");
+        let mut lines = Vec::new();
+        for name in ["says_runtime", "needs_approval", "complete_task"] {
+            lines.push(match nested.call(name, Default::default()).await {
+                crate::tool::NestedOutcome::Finished(output) => format!("finished: {}", output.text),
+                crate::tool::NestedOutcome::Refused(why) => format!("refused: {why}"),
+                other => format!("{other:?}"),
+            });
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+/// A Claude Code agent's arko calls have the same gate as the native
+/// loop's: a tool that needs approval is refused without waiting, the
+/// turn's own tools are refused, and each nested call has its events.
+#[tokio::test]
+async fn a_claude_code_agents_calls_reach_tools_through_the_gate() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__calls_from_inside", "input": {}},
+        complete("Done"),
+    ]]));
+    let mut config = config(
+        &fake,
+        &["calls_from_inside", "says_runtime", "needs_approval"],
+    );
+    config.tool_config.tool_specific_configs.insert(
+        "needs_approval".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let task = Task::new(config, "Call them.".into(), fake.workspace(), None);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(CallsFromInside));
+    registry.register(Arc::new(SaysRuntime));
+    registry.register(Arc::new(NeedsApproval));
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, events) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let output = fake.logged("post")[0]["output"].as_str().unwrap().to_string();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines[0], "finished: true");
+    assert!(
+        lines[1].starts_with("refused: This call of needs_approval needs the user's approval"),
+        "{output}"
+    );
+    assert_eq!(
+        lines[2],
+        "refused: complete_task can't be called from inside a call of calls_from_inside."
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallAwaitingApproval { .. }
+    )));
+    let ends = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::NestedToolCallFinished { .. }))
+        .count();
+    assert_eq!(ends, 3);
+}
+
+/// An arko tool the tests configure to need approval.
+#[derive(Debug)]
+struct NeedsApproval;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for NeedsApproval {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "needs_approval".into(),
+            description: "Needs approval".into(),
+            ..WaitsForContext::default().definition()
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        panic!("a call that needs approval never runs from inside a call")
+    }
+}

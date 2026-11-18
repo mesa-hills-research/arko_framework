@@ -4,7 +4,7 @@ use super::event::{AgentEvent, ShortenReason};
 use super::result_budget;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{
-    LLMErrorPolicy, PathSafetyPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy,
+    LLMErrorPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy,
     UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
@@ -22,7 +22,7 @@ use crate::task::{
 };
 // Names the test modules (`use super::*`) rely on.
 #[cfg(test)]
-use crate::agent_config::AgentConfig;
+use crate::agent_config::{AgentConfig, PathSafetyPolicy};
 #[cfg(test)]
 use crate::tool::{
     InterceptedResult, TaskContext, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
@@ -550,6 +550,10 @@ mod context_tests;
 #[cfg(test)]
 #[path = "tool_call_tests.rs"]
 mod tool_call_tests;
+
+#[cfg(test)]
+#[path = "nested_tests.rs"]
+mod nested_tests;
 
 #[cfg(test)]
 #[path = "injection_tests.rs"]

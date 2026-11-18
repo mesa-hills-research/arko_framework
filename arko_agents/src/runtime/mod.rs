@@ -17,6 +17,7 @@ use crate::task::Task;
 use crate::tool::{InterceptorConfig, ToolExecutionMiddleware, ToolRegistry};
 use arko_ai::LLMClient;
 
+mod admission;
 mod claude_code;
 pub mod command;
 mod command_wait;
@@ -24,6 +25,7 @@ pub mod event;
 mod hook_budget;
 mod r#loop;
 mod monitor;
+pub(crate) mod nested;
 mod result_budget;
 mod retry;
 mod tool_run;
