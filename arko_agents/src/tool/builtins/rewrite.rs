@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     /// The rules of a file's DACL, each as its bytes, whether inherited or
-    /// its own.
+    /// its own, as a set.
     #[cfg(windows)]
     fn access_rules(path: &Path) -> Vec<Vec<u8>> {
         use windows_sys::Win32::Security::{
@@ -1110,6 +1110,9 @@ mod tests {
                 rules.push(rule);
             }
         }
+        // (A rule both inherited and the file's own grants once.)
+        rules.sort();
+        rules.dedup();
         rules
     }
 
