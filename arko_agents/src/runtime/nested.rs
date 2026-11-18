@@ -224,11 +224,13 @@ impl NestedCalls {
     pub async fn call(&self, tool_name: &str, params: HashMap<String, Value>) -> NestedOutcome {
         let _turn = self.order.lock().await;
         let tool_call_id = Uuid::new_v4();
+        let (parameters, parameters_bytes) = bounded(&params);
         let started = AgentEvent::NestedToolCallStarted {
             outer_tool_call_id: self.outer_tool_call_id,
             tool_call_id,
             tool_name: tool_name.to_string(),
-            parameters: params.clone(),
+            parameters,
+            parameters_bytes,
         };
         // Once the start is queued, an end is owed, a stop's until the
         // call's own is known.
@@ -412,6 +414,60 @@ impl Halt {
     }
 }
 
+/// `text` cut at [`NESTED_OUTPUT_BYTES`] on a character boundary.
+fn cut(text: &str) -> &str {
+    let mut end = text.len().min(NESTED_OUTPUT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A call's arguments as its start event holds them, and their whole size
+/// as JSON. Each is cut at [`NESTED_OUTPUT_BYTES`] (an argument longer
+/// than that, or one that isn't text whose JSON is, becomes text that ends
+/// saying how many bytes were left out), in the order of their names, and
+/// once they hold four times that, the rest are left out, with an argument
+/// `(left out)` saying how many.
+fn bounded(params: &HashMap<String, Value>) -> (HashMap<String, Value>, usize) {
+    let mut names: Vec<&String> = params.keys().collect();
+    names.sort();
+    let mut total = 0;
+    let mut held = 0;
+    let mut left_out = 0;
+    let mut kept = HashMap::new();
+    for name in names {
+        let value = &params[name];
+        let text = match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        total += name.len() + text.len();
+        if held >= 4 * NESTED_OUTPUT_BYTES {
+            left_out += 1;
+            continue;
+        }
+        let value = if text.len() <= NESTED_OUTPUT_BYTES {
+            value.clone()
+        } else {
+            let part = cut(&text);
+            Value::String(format!(
+                "{part}[{} more bytes left out]",
+                text.len() - part.len()
+            ))
+        };
+        held += name.len() + value.to_string().len();
+        kept.insert(name.clone(), value);
+    }
+    if left_out > 0 {
+        kept.insert(
+            "(left out)".into(),
+            Value::String(format!("{left_out} more arguments")),
+        );
+    }
+    (kept, total)
+}
+
 /// The end event of a nested call, with at most [`NESTED_OUTPUT_BYTES`] of
 /// its result.
 fn finished(
@@ -421,16 +477,12 @@ fn finished(
     outcome: NestedCallOutcome,
     text: &str,
 ) -> AgentEvent {
-    let mut cut = text.len().min(NESTED_OUTPUT_BYTES);
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
     AgentEvent::NestedToolCallFinished {
         outer_tool_call_id,
         tool_call_id,
         tool_name: tool_name.to_string(),
         outcome,
-        output: text[..cut].to_string(),
+        output: cut(text).to_string(),
         output_bytes: text.len(),
     }
 }

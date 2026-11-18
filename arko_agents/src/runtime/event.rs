@@ -188,11 +188,15 @@ pub enum AgentEvent {
     /// such as code that calls the agent's tools. It is not a call of the
     /// model's, so it has no `ToolCallFormatted` or `ToolResult`. A
     /// `NestedToolCallFinished` of the same `tool_call_id` follows.
+    /// `parameters` holds each argument cut at [`NESTED_OUTPUT_BYTES`] (a
+    /// longer one becomes text that ends saying how much was left out), and
+    /// `parameters_bytes` the size of them all as JSON.
     NestedToolCallStarted {
         outer_tool_call_id: Uuid,
         tool_call_id: Uuid,
         tool_name: String,
         parameters: HashMap<String, Value>,
+        parameters_bytes: usize,
     },
     /// A call started from inside another call ended, how `outcome` says.
     /// `output` is its result (a failure's or refusal's message), cut at

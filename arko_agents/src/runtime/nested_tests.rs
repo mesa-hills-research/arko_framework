@@ -1001,3 +1001,52 @@ async fn a_call_stopped_before_its_tool_starts_has_no_record() {
     assert!(calls.records().is_empty());
     assert!(log.entries().is_empty());
 }
+
+/// A flood of calls with large arguments leaves each start event small, so
+/// a subscriber that falls behind holds little of them.
+#[tokio::test]
+async fn a_start_event_holds_its_arguments_cut() {
+    let log = Arc::new(Log::default());
+    let (events, mut received) = mpsc::channel(1000);
+    let calls = nested_calls(registry(&log, &[("a", returns("a ran"))]), events);
+    let big = "é".repeat(512 * 1024);
+    for _ in 0..100 {
+        let mut params = HashMap::from([
+            ("content".to_string(), Value::String(big.clone())),
+            ("list".to_string(), serde_json::json!([big.clone()])),
+            ("n".to_string(), serde_json::json!(1)),
+        ]);
+        // Arguments the tool doesn't take, many of them.
+        for extra in 0..50 {
+            params.insert(format!("x{extra:02}"), Value::String(big.clone()));
+        }
+        calls.call("a", params).await;
+    }
+    drop(calls);
+    let mut most = 0;
+    while let Ok(event) = received.try_recv() {
+        if let AgentEvent::NestedToolCallStarted {
+            parameters,
+            parameters_bytes,
+            ..
+        } = &event
+        {
+            let content = parameters["content"].as_str().unwrap();
+            assert!(
+                content.ends_with(" more bytes left out]"),
+                "{}",
+                &content[content.len() - 40..]
+            );
+            assert_eq!(parameters["n"], serde_json::json!(1));
+            assert!(
+                parameters["(left out)"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(" more arguments")
+            );
+            assert!(*parameters_bytes > 50 * 1024 * 1024);
+        }
+        most = most.max(serde_json::to_string(&event).unwrap().len());
+    }
+    assert!(most < 6 * NESTED_OUTPUT_BYTES, "an event of {most} bytes");
+}
