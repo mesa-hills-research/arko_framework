@@ -11,6 +11,29 @@ fn waits() -> bool {
     true
 }
 
+/// How much of a nested call's result its `NestedToolCallFinished` event
+/// holds, in bytes.
+pub const NESTED_OUTPUT_BYTES: usize = 4 * 1024;
+
+/// How a call made from inside another call ended
+/// ([`AgentEvent::NestedToolCallFinished`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NestedCallOutcome {
+    /// The tool ran and returned.
+    Finished,
+    /// The tool ran and failed.
+    Failed,
+    /// A check refused the call (the agent's tools, the path or approval
+    /// policy, the middleware, a check inside the tool), and it didn't run.
+    Refused,
+    /// The middleware stopped or paused the task at the call, which the
+    /// outer call then does.
+    Halted,
+    /// The call was dropped before it ended, as the outer call was stopped.
+    Stopped,
+}
+
 /// Events emitted by the agent runtime during task execution.
 // Events are built once and sent through channels, so the size of the largest
 // variant costs little, and boxing it would change the public variants.
@@ -159,6 +182,35 @@ pub enum AgentEvent {
         tool_name: String,
         original_output: String,
         intercepted_output: String,
+    },
+    /// A tool started a call of another tool from inside its own call
+    /// `outer_tool_call_id` ([`NestedCalls`](crate::tool::NestedCalls)),
+    /// such as code that calls the agent's tools. It is not a call of the
+    /// model's, so it has no `ToolCallFormatted` or `ToolResult`. A
+    /// `NestedToolCallFinished` of the same `tool_call_id` follows.
+    /// `parameters` holds each argument cut at [`NESTED_OUTPUT_BYTES`] and
+    /// its name at 256 bytes (a longer one becomes text that ends saying
+    /// how much was left out), and at most four times
+    /// [`NESTED_OUTPUT_BYTES`] of them, and `parameters_bytes` the size of
+    /// them all as JSON.
+    NestedToolCallStarted {
+        outer_tool_call_id: Uuid,
+        tool_call_id: Uuid,
+        tool_name: String,
+        parameters: HashMap<String, Value>,
+        parameters_bytes: usize,
+    },
+    /// A call started from inside another call ended, how `outcome` says.
+    /// `output` is its result (a failure's or refusal's message), cut at
+    /// [`NESTED_OUTPUT_BYTES`] on a character boundary, and `output_bytes`
+    /// its whole length.
+    NestedToolCallFinished {
+        outer_tool_call_id: Uuid,
+        tool_call_id: Uuid,
+        tool_name: String,
+        outcome: NestedCallOutcome,
+        output: String,
+        output_bytes: usize,
     },
     /// A call didn't run. The user rejected it, its approval timed out, or
     /// it was stopped, held or not reached. A Claude Code agent's call also

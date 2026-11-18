@@ -12,6 +12,14 @@ pub enum ToolError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// A check inside the tool refused the call before it did anything,
+    /// such as the command guard refusing a command. It reads as
+    /// [`ExecutionFailed`](Self::ExecutionFailed) does, and a call made from
+    /// inside another call
+    /// ([`NestedCalls`](crate::tool::NestedCalls)) counts it as refused.
+    #[error("Execution failed: {0}")]
+    Refused(String),
+
     #[error("Configuration error for tool '{tool_name}': {message}")]
     Configuration { tool_name: String, message: String },
 

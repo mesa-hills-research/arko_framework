@@ -21,29 +21,7 @@ pub(super) struct GroupRun {
     pub(super) stop: Option<ToolsStopped>,
 }
 
-/// The workspace check of a call's `is_path` parameters.
-pub(super) enum PathCheck {
-    Inside,
-    /// This parameter's path is outside the workspace.
-    Outside(String),
-    /// A path couldn't be judged. The call is rejected with this reason.
-    Invalid(String),
-}
-
-/// A call's paths under the path-safety policy. See
-/// [`AgentLoop::path_verdict`].
-pub(super) enum PathVerdict {
-    /// The paths don't stop the call.
-    Allowed,
-    /// This parameter's path is outside the workspace, and the policy asks
-    /// for approval.
-    NeedsApproval(String),
-    /// This parameter's path is outside the workspace, and the policy
-    /// rejects the call.
-    Outside(String),
-    /// A path couldn't be judged. The call is rejected with this reason.
-    Invalid(String),
-}
+pub(super) use super::super::admission::PathVerdict;
 
 /// Tool names excluded from result interception because their results
 /// carry semantic meaning used directly by the runtime (task state
@@ -74,6 +52,11 @@ impl AgentLoop {
             #[cfg(any(unix, windows))]
             jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
+            gate: Some(Arc::new(super::super::nested::Gate {
+                registry: self.tool_registry.clone(),
+                tool_config: self.task.agent_config.tool_config.clone(),
+                events: self.event_sender.clone(),
+            })),
         })
     }
 
@@ -414,62 +397,23 @@ impl AgentLoop {
         .await
     }
 
-    /// Checks a call's `is_path` parameters against the workspace, as
-    /// [`crate::utils::is_path_in_workspace`] resolves them. A missing,
-    /// null or empty value is not checked. Any other non-string value is
-    /// invalid, since a tool could read it as a path the check never saw.
-    pub(super) fn check_path_parameters(
-        &self,
-        definition: &ToolDefinition,
-        params: &HashMap<String, Value>,
-    ) -> PathCheck {
-        for param_def in definition.parameters.iter().filter(|param| param.is_path) {
-            let path = match params.get(&param_def.name) {
-                None | Some(Value::Null) => continue,
-                Some(Value::String(path)) if path.is_empty() => continue,
-                Some(Value::String(path)) => path,
-                Some(other) => {
-                    return PathCheck::Invalid(format!(
-                        "Path validation failed for parameter '{}'. A path must be a string, not {other}.",
-                        param_def.name
-                    ));
-                }
-            };
-            match crate::utils::is_path_in_workspace(path, &self.task.current_working_directory) {
-                Ok(true) => {}
-                Ok(false) => return PathCheck::Outside(param_def.name.clone()),
-                Err(error) => {
-                    return PathCheck::Invalid(format!(
-                        "Path validation failed for parameter '{}': {error}",
-                        param_def.name
-                    ));
-                }
-            }
-        }
-        PathCheck::Inside
-    }
-
-    /// A call's `is_path` parameters checked against the workspace (see
-    /// [`check_path_parameters`](Self::check_path_parameters)), and a path
-    /// outside it judged under the tool's path-safety policy. Each tool
-    /// calling mode answers a rejection its own way.
+    /// A call's `is_path` parameters checked against the workspace, and a
+    /// path outside it judged under the tool's path-safety policy (see
+    /// [`admission::path_verdict`](super::super::admission::path_verdict)).
+    /// Each tool calling mode answers a rejection its own way.
     pub(super) fn path_verdict(
         &self,
         tool_name: &str,
         definition: &ToolDefinition,
         params: &HashMap<String, Value>,
     ) -> PathVerdict {
-        match self.check_path_parameters(definition, params) {
-            PathCheck::Inside => PathVerdict::Allowed,
-            PathCheck::Invalid(reason) => PathVerdict::Invalid(reason),
-            PathCheck::Outside(param_name) => {
-                match self.task.agent_config.get_path_safety_policy(tool_name) {
-                    PathSafetyPolicy::AutoReject => PathVerdict::Outside(param_name),
-                    PathSafetyPolicy::RequireApproval => PathVerdict::NeedsApproval(param_name),
-                    PathSafetyPolicy::AutoApprove => PathVerdict::Allowed,
-                }
-            }
-        }
+        super::super::admission::path_verdict(
+            &self.task.agent_config.tool_config,
+            tool_name,
+            definition,
+            params,
+            &self.task.current_working_directory,
+        )
     }
 
     /// Emits `ToolResult` with the original output and the tool's

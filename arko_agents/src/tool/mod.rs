@@ -15,6 +15,9 @@ pub mod receipt;
 pub mod registry;
 pub mod types;
 
+pub use crate::runtime::nested::{
+    NEVER_NESTED, NestedCalls, NestedOutcome, NestedRecord, NestedState,
+};
 pub use background::{ContextSignal, ContextSource, MoveSignal, MoveSource, ToolBackground};
 pub use definition::{ToolDefinition, ToolParameterDefinition, ToolParameterType};
 pub use error::ToolError;
@@ -361,6 +364,11 @@ pub struct TaskContext<'a> {
     /// shows the model only a short preview of a very long tool result. A
     /// tool with long results can keep them short for it.
     pub runs_in_claude_code: bool,
+    /// Calls the agent's tools from inside this call, through the checks a
+    /// call of the model's gets (see [`NestedCalls`]). A runtime gives it to
+    /// each call of the model's, and a call made through it has none, nor
+    /// does a context made with [`new`](Self::new).
+    pub nested: Option<NestedCalls>,
 }
 
 impl<'a> TaskContext<'a> {
@@ -385,6 +393,7 @@ impl<'a> TaskContext<'a> {
             moved: MoveSignal::never(),
             context_arrived: ContextSignal::never(),
             runs_in_claude_code: false,
+            nested: None,
         }
     }
 
