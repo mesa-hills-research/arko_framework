@@ -19,9 +19,9 @@ Deleted in the branch's last commit.
 - A save never widens who can read a file, and never leaves it partly written. A temporary file
   takes its place (rename, or ReplaceFileW on Windows) on every platform, and nothing is written
   in place. On Unix the temporary file is 0600 until it has the file's owner, group, extended
-  attributes and permissions, before any byte. A file whose identity it can't have is refused
-  unchanged with the reason (more than one hard link, another owner, a group or attribute that
-  can't be given, an ACL on macOS, no room for the temporary file, other Unix systems). Writes go
+  attributes and permissions, before any byte. An allowlist decides: a file is replaced only
+  when every property observed of it is kept or knowingly ignored (the table in rewrite.rs),
+  and anything else, unknown or unreadable included, is refused unchanged with the reason. Writes go
   through a symbolic link, and a file the process can't write is refused.
 - Anything but a regular file is refused before it is read.
 - The output carries an `EditReceipt` covering every block, as edit_file's does.

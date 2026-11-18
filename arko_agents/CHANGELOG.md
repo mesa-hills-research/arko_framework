@@ -14,9 +14,10 @@
   and blocks that still have them parse.
 - `replace_all` replaces every occurrence of each block's search lines.
 - A new file takes the file's place in one step, through a symbolic link, with its owner, group,
-  permissions, ACL and extended attributes, so an error or a crash leaves the old file whole. A
-  file whose identity a new file can't have, such as one with a second hard link, is refused
-  unchanged. A byte-order mark, CRLF line breaks and a missing last line break are kept.
+  permissions, ACL and other properties, so an error or a crash leaves the old file whole. A file
+  with a property the new file can't keep, such as a second hard link, is refused unchanged, and
+  so is any property not known to be kept. A byte-order mark, CRLF line breaks and a missing
+  last line break are kept.
 - Its result shows each block's new lines, as `edit_file`'s does, and carries a
   `ToolReceipt::Edit` covering every block.
 - Its description is a few sentences and one example.

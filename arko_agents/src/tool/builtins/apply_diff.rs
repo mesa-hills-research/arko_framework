@@ -11,8 +11,9 @@
 //! that failed and why. Everything outside the matched lines is kept byte for
 //! byte, a byte-order mark and the last line break included. A new file
 //! takes the file's place in one step, with its owner, group, permissions,
-//! ACL and extended attributes, and a file whose identity a new file can't
-//! have, such as one with a second hard link, is refused and left as it was.
+//! ACL and other properties, and a file with a property a new file can't
+//! keep, such as a second hard link, is refused and left as it was (see
+//! `rewrite`).
 //!
 //! A line of the file that is itself a marker is written in a block with a
 //! backslash before it (`\=======`), as the error that meets one says. Blocks

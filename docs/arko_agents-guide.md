@@ -113,8 +113,8 @@ block's search lines must match whole lines of the file exactly and be found onc
 `replace_all`, at least once), and blocks must not overlap. It applies every block or none,
 and its error names each block that failed and why. A new file takes the file's place in one
 step (a rename, or `ReplaceFileW` on Windows) with its owner, group, permissions, ACL and
-extended attributes, so an error or a crash leaves the old file whole. A file whose identity a
-new file can't have is refused unchanged. Its result carries the same receipt, covering every
+other properties, so an error or a crash leaves the old file whole. A file with a property the
+new file can't keep, or one not known to be kept, is refused unchanged. Its result carries the same receipt, covering every
 block. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
