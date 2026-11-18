@@ -252,14 +252,8 @@ fn replace_file(
     temporary_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     let temporary = directory.join(temporary_name);
     let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut file = create_temporary(&temporary, permissions)?;
         file.write_all(bytes)?;
-        if let Some(permissions) = permissions {
-            file.set_permissions(permissions)?;
-        }
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)
@@ -268,6 +262,27 @@ fn replace_file(
         let _ = std::fs::remove_file(&temporary);
     }
     written
+}
+
+/// A new, empty file at `path`, with `permissions` when set. They are the
+/// file's before a byte is written, and on Unix it is created readable by
+/// its owner alone until then, so no one else sees what it will hold.
+fn create_temporary(
+    path: &Path,
+    permissions: Option<std::fs::Permissions>,
+) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if permissions.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)?;
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -305,6 +320,35 @@ mod tests {
             names.iter().all(|name| !name.ends_with(".tmp")),
             "{names:?}"
         );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The file that replaces an edited one has the edited file's
+    /// permissions before any of its bytes are written, so a private file's
+    /// content is never readable by others, even for a moment.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_s_new_file_has_its_permissions_before_its_content() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("arko-rewrite-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for mode in [0o600, 0o640, 0o755] {
+            let path = directory.join(format!("new-{mode:o}"));
+            let file =
+                create_temporary(&path, Some(std::fs::Permissions::from_mode(mode))).unwrap();
+            let metadata = file.metadata().unwrap();
+            assert_eq!(
+                (metadata.permissions().mode() & 0o7777, metadata.len()),
+                (mode, 0)
+            );
+        }
+        let private = directory.join("private.txt");
+        std::fs::write(&private, b"old").unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rewrite_file_atomically(&private, b"new").unwrap();
+        let metadata = std::fs::metadata(&private).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(std::fs::read(&private).unwrap(), b"new");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
