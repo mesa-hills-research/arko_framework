@@ -5,6 +5,7 @@
 //! the rest is an owned future, so a call that moves to the background goes
 //! on as a job of the host's terminal manager.
 
+use super::nested::{Gate, Halt, NestedCalls};
 use crate::stop::{StopSignal, StopSource};
 use crate::tool::{
     ContextSignal, ContextSource, InterceptedResult, InterceptionFailurePolicy, MoveSignal,
@@ -12,7 +13,6 @@ use crate::tool::{
     ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome, ToolImageSink,
     ToolOutput, ToolResultInterceptor,
 };
-use super::nested::{Gate, Halt, NestedCalls};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -222,15 +222,18 @@ pub(super) async fn run_tool(
 /// Runs a call made from inside a call ([`NestedCalls`]) with `stop`, the
 /// outer call's stop signal. The middleware's `before` and `after` see it,
 /// and it runs under its time limit, in the foreground, with no images
-/// kept, no interception and no [`NestedCalls`] of its own.
+/// kept, no interception and no [`NestedCalls`] of its own. `starting` is
+/// called once `before` lets it run, as the tool starts.
 pub(super) async fn run_nested(
     environment: Arc<RunEnvironment>,
     run: ToolRun,
     stop: StopSignal,
+    starting: impl FnOnce(),
 ) -> RunOutcome {
     if let Some(outcome) = before(&environment, &run).await {
         return outcome;
     }
+    starting();
     let signals = CallSignals {
         stop,
         moved: MoveSignal::never(),
@@ -348,15 +351,8 @@ fn execute(
             )),
             _ => None,
         };
-        let outcome = execute_tool(
-            &environment,
-            &run,
-            &signals,
-            adopted,
-            nested,
-            calls.clone(),
-        )
-        .await;
+        let outcome =
+            execute_tool(&environment, &run, &signals, adopted, nested, calls.clone()).await;
         match calls.and_then(|calls| calls.halt().get().cloned()) {
             Some(halt) => halted(outcome, halt),
             None => outcome,

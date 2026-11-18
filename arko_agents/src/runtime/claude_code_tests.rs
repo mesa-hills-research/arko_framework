@@ -7937,11 +7937,16 @@ impl crate::tool::Tool for CallsFromInside {
         context: &crate::tool::TaskContext<'_>,
         _: std::collections::HashMap<String, Value>,
     ) -> Result<String, crate::tool::ToolError> {
-        let nested = context.nested.clone().expect("Claude Code's calls have a gate");
+        let nested = context
+            .nested
+            .clone()
+            .expect("Claude Code's calls have a gate");
         let mut lines = Vec::new();
         for name in ["says_runtime", "needs_approval", "complete_task"] {
             lines.push(match nested.call(name, Default::default()).await {
-                crate::tool::NestedOutcome::Finished(output) => format!("finished: {}", output.text),
+                crate::tool::NestedOutcome::Finished(output) => {
+                    format!("finished: {}", output.text)
+                }
                 crate::tool::NestedOutcome::Refused(why) => format!("refused: {why}"),
                 other => format!("{other:?}"),
             });
@@ -7984,7 +7989,10 @@ async fn a_claude_code_agents_calls_reach_tools_through_the_gate() {
     };
     let (task, events) = run.finish().await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    let output = fake.logged("post")[0]["output"].as_str().unwrap().to_string();
+    let output = fake.logged("post")[0]["output"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let lines: Vec<&str> = output.lines().collect();
     assert_eq!(lines[0], "finished: true");
     assert!(
@@ -7995,10 +8003,11 @@ async fn a_claude_code_agents_calls_reach_tools_through_the_gate() {
         lines[2],
         "refused: complete_task can't be called from inside a call of calls_from_inside."
     );
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolCallAwaitingApproval { .. }
-    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+    );
     let ends = events
         .iter()
         .filter(|event| matches!(event, AgentEvent::NestedToolCallFinished { .. }))

@@ -2,7 +2,9 @@
 //! fails if a nested call skips the gate: the call would run, or wait, or
 //! leave no events.
 
-use super::tool_call_tests::{agent, complete, config, drain, native_call, turn, wait_for, workspace};
+use super::tool_call_tests::{
+    agent, complete, config, drain, native_call, turn, wait_for, workspace,
+};
 use super::*;
 use crate::agent_config::PerToolConfigOverride;
 use crate::runtime::event::{NESTED_OUTPUT_BYTES, NestedCallOutcome};
@@ -129,7 +131,10 @@ impl Tool for Caller {
         context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
-        let nested = context.nested.clone().expect("a call of the model's has a gate");
+        let nested = context
+            .nested
+            .clone()
+            .expect("a call of the model's has a gate");
         assert_eq!(Some(nested.outer_tool_call_id()), context.tool_call_id);
         let calls: Vec<(String, HashMap<String, Value>)> =
             serde_json::from_value(params["calls"].clone()).unwrap();
@@ -152,7 +157,8 @@ impl Tool for Caller {
         }
         if params.get("records") == Some(&Value::Bool(true)) {
             for record in nested.records() {
-                self.log.push(format!("record {} {:?}", record.tool_name, record.state));
+                self.log
+                    .push(format!("record {} {:?}", record.tool_name, record.state));
             }
         }
         Ok(described.join("\n"))
@@ -271,7 +277,10 @@ async fn nested_calls_pass_the_middleware_and_emit_their_own_events() {
     };
     let (task, events) = run_caller(
         config(ToolCallingMode::Native, &tools()),
-        registry(&log, &[("a", returns("a's text")), ("b", returns("b's text"))]),
+        registry(
+            &log,
+            &[("a", returns("a's text")), ("b", returns("b's text"))],
+        ),
         Some(Arc::new(middleware)),
         serde_json::json!([["a", {}], ["b", {}]]),
     )
@@ -335,7 +344,11 @@ async fn nested_calls_pass_the_middleware_and_emit_their_own_events() {
                 tool_name,
                 outcome,
                 ..
-            } => Some((*outer_tool_call_id, format!("end {tool_name}"), Some(*outcome))),
+            } => Some((
+                *outer_tool_call_id,
+                format!("end {tool_name}"),
+                Some(*outcome),
+            )),
             _ => None,
         })
         .collect();
@@ -418,8 +431,16 @@ async fn a_nested_calls_paths_follow_the_path_policy() {
         let result = outer_result(&task);
         assert!(result.starts_with(expected), "{policy:?}: {result}");
         assert!(result.ends_with("finished: a ran"), "{policy:?}: {result}");
-        let runs = log.entries().iter().filter(|entry| *entry == "start a").count();
-        let expected_runs = if policy == PathSafetyPolicy::AutoApprove { 2 } else { 1 };
+        let runs = log
+            .entries()
+            .iter()
+            .filter(|entry| *entry == "start a")
+            .count();
+        let expected_runs = if policy == PathSafetyPolicy::AutoApprove {
+            2
+        } else {
+            1
+        };
         assert_eq!(runs, expected_runs, "{policy:?}");
     }
 }
@@ -600,7 +621,10 @@ async fn nested_calls_run_one_at_a_time_in_the_order_made() {
         .into_iter()
         .filter(|entry| entry.starts_with("start") || entry.starts_with("end"))
         .collect();
-    assert_eq!(runs, ["start a", "end a", "start b", "end b", "start a", "end a"]);
+    assert_eq!(
+        runs,
+        ["start a", "end a", "start b", "end b", "start a", "end a"]
+    );
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -624,7 +648,9 @@ async fn a_nested_call_keeps_its_tools_time_limit() {
     .await;
     let result = outer_result(&task);
     assert!(
-        result.starts_with("failed: The tool did not finish within the host's time limit of 1 minute"),
+        result.starts_with(
+            "failed: The tool did not finish within the host's time limit of 1 minute"
+        ),
         "{result}"
     );
     assert_eq!(log.entries()[..2], ["start a", "dropped a"]);
@@ -805,14 +831,23 @@ async fn the_records_say_which_calls_ran() {
         .into_iter()
         .filter(|entry| entry.starts_with("record"))
         .collect();
-    // b needed approval, so it never got past the checks, and the second a
-    // came after the halt.
-    assert_eq!(records, ["record a Halted { ran: true }"]);
+    // b needed approval, so its tool never started, and the second a came
+    // after the halt.
+    assert_eq!(records, ["record a Halted"]);
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
 /// Calls made outside a loop, whose events go to `events`.
 fn nested_calls(registry: ToolRegistry, events: mpsc::Sender<AgentEvent>) -> NestedCalls {
+    nested_calls_with(registry, events, None)
+}
+
+/// [`nested_calls`] with `middleware`.
+fn nested_calls_with(
+    registry: ToolRegistry,
+    events: mpsc::Sender<AgentEvent>,
+    middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
+) -> NestedCalls {
     let config = config(ToolCallingMode::Native, &tools());
     let gate = Arc::new(super::super::nested::Gate {
         registry: Arc::new(registry),
@@ -824,7 +859,7 @@ fn nested_calls(registry: ToolRegistry, events: mpsc::Sender<AgentEvent>) -> Nes
         agent_name: "agent".into(),
         initial_task_prompt: String::new(),
         working_directory: std::env::temp_dir(),
-        middleware: None,
+        middleware,
         stop: crate::stop::StopSignal::never(),
         model: config.llm_config.model.clone(),
         image_sink: None,
@@ -881,7 +916,9 @@ async fn a_stopped_call_owes_its_end_when_the_events_are_full() {
         received.recv().await,
         Some(AgentEvent::NestedToolCallStarted { .. })
     ));
-    let end = timeout(Duration::from_secs(5), received.recv()).await.unwrap();
+    let end = timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap();
     assert_eq!(ended(end), ("a".into(), NestedCallOutcome::Stopped));
     // Stopped as it waits to deliver its end.
     let delivering = tokio::spawn({
@@ -898,7 +935,9 @@ async fn a_stopped_call_owes_its_end_when_the_events_are_full() {
         received.recv().await,
         Some(AgentEvent::NestedToolCallStarted { .. })
     ));
-    let end = timeout(Duration::from_secs(5), received.recv()).await.unwrap();
+    let end = timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap();
     assert_eq!(ended(end), ("b".into(), NestedCallOutcome::Finished));
     let states: Vec<(String, NestedState)> = calls
         .records()
@@ -912,4 +951,53 @@ async fn a_stopped_call_owes_its_end_when_the_events_are_full() {
             ("b".into(), NestedState::Ran { failed: false }),
         ]
     );
+}
+
+/// A middleware whose `before` waits until its call is dropped.
+struct Waits;
+
+#[async_trait]
+impl ToolExecutionMiddleware for Waits {
+    async fn before(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        _: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        std::future::pending().await
+    }
+
+    async fn after(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        _: &ToolCallContext<'_>,
+        _: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
+/// A call stopped while the middleware's `before` judges it never started
+/// its tool, so it has no record.
+#[tokio::test]
+async fn a_call_stopped_before_its_tool_starts_has_no_record() {
+    let log = Arc::new(Log::default());
+    let (events, mut received) = mpsc::channel(10);
+    let calls = nested_calls_with(
+        registry(&log, &[("a", returns("a ran"))]),
+        events,
+        Some(Arc::new(Waits)),
+    );
+    let judged = tokio::spawn({
+        let calls = calls.clone();
+        async move { calls.call("a", HashMap::new()).await }
+    });
+    assert!(matches!(
+        received.recv().await,
+        Some(AgentEvent::NestedToolCallStarted { .. })
+    ));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    judged.abort();
+    let _ = judged.await;
+    assert!(calls.records().is_empty());
+    assert!(log.entries().is_empty());
 }

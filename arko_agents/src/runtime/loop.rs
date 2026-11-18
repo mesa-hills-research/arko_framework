@@ -4,8 +4,7 @@ use super::event::{AgentEvent, ShortenReason};
 use super::result_budget;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{
-    LLMErrorPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy,
-    UsageLimitPolicy,
+    LLMErrorPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy, UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
 use crate::handover::{

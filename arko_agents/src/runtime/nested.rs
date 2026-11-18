@@ -105,13 +105,13 @@ pub struct NestedCalls {
     order: Arc<tokio::sync::Mutex<()>>,
     /// The first stop or pause a call met, for the outer call.
     halt: Arc<OnceLock<Halt>>,
-    /// The calls that got past the checks, in order.
+    /// The calls whose tools started, in order.
     records: Arc<Mutex<Vec<NestedRecord>>>,
 }
 
-/// A call that got past the gate's checks, so its tool may have run, as
-/// [`NestedCalls::records`] keeps it. It is there before the tool starts,
-/// so a call dropped before its end (the outer call was stopped) is too.
+/// A call whose tool started, as [`NestedCalls::records`] keeps it. It is
+/// there from the moment the middleware's `before` lets the tool run, so a
+/// call dropped before its end (the outer call was stopped) is there too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedRecord {
     pub tool_call_id: Uuid,
@@ -119,7 +119,7 @@ pub struct NestedRecord {
     pub state: NestedState,
 }
 
-/// How far a recorded call got.
+/// How far a call whose tool started got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NestedState {
     /// It runs, or it was dropped before its end, so it may have done
@@ -127,12 +127,13 @@ pub enum NestedState {
     Running,
     /// The tool returned, or with `failed` failed.
     Ran { failed: bool },
-    /// The middleware or a check inside the tool refused it, and it did
+    /// A check inside the tool refused it
+    /// ([`ToolError::Refused`](crate::tool::ToolError::Refused)), and it did
     /// nothing.
     Refused,
-    /// The middleware stopped or paused the task at it, before the tool
-    /// ran, or with `ran` after.
-    Halted { ran: bool },
+    /// The tool returned, and the middleware's `after` failed, which pauses
+    /// the task.
+    Halted,
 }
 
 impl std::fmt::Debug for NestedCalls {
@@ -166,9 +167,9 @@ impl NestedCalls {
         }
     }
 
-    /// The calls that got past the checks so far, in the order made, each
-    /// as far as it got. A caller whose own run ends early (stopped, timed
-    /// out) reads what its calls may have done here.
+    /// The calls whose tools started so far, in the order made, each as far
+    /// as it got. A caller whose own run ends early (stopped, timed out)
+    /// reads what its calls may have done here.
     pub fn records(&self) -> Vec<NestedRecord> {
         self.records
             .lock()
@@ -176,21 +177,29 @@ impl NestedCalls {
             .clone()
     }
 
-    fn record(&self, tool_call_id: Uuid, tool_name: &str, state: NestedState) {
-        let mut records = self
-            .records
+    fn records_mut(&self) -> std::sync::MutexGuard<'_, Vec<NestedRecord>> {
+        self.records
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match records
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Call `tool_call_id`'s tool starts.
+    fn started(&self, tool_call_id: Uuid, tool_name: &str) {
+        self.records_mut().push(NestedRecord {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            state: NestedState::Running,
+        });
+    }
+
+    /// Call `tool_call_id`, whose tool started, got as far as `state`.
+    fn got_to(&self, tool_call_id: Uuid, state: NestedState) {
+        if let Some(record) = self
+            .records_mut()
             .iter_mut()
             .find(|record| record.tool_call_id == tool_call_id)
         {
-            Some(record) => record.state = state,
-            None => records.push(NestedRecord {
-                tool_call_id,
-                tool_name: tool_name.to_string(),
-                state,
-            }),
+            record.state = state;
         }
     }
 
@@ -324,8 +333,11 @@ impl NestedCalls {
             message_to_agent: None,
             recovering: false,
         };
-        self.record(tool_call_id, tool_name, NestedState::Running);
-        let outcome = tool_run::run_nested(self.environment.clone(), run, self.stop.clone()).await;
+        let outcome =
+            tool_run::run_nested(self.environment.clone(), run, self.stop.clone(), || {
+                self.started(tool_call_id, tool_name)
+            })
+            .await;
         let (state, ended) = match outcome {
             RunOutcome::Finished { output, .. } => (
                 NestedState::Ran { failed: false },
@@ -343,11 +355,13 @@ impl NestedCalls {
                 NestedState::Ran { failed: true },
                 Ok(NestedOutcome::Failed(error.to_string())),
             ),
+            // The middleware's `before` refused, stopped or paused it, so
+            // its tool didn't start and it has no record.
             RunOutcome::Rejected(message) => {
                 (NestedState::Refused, Ok(NestedOutcome::Refused(message)))
             }
             RunOutcome::Stop { reason, cancel } => (
-                NestedState::Halted { ran: false },
+                NestedState::Halted,
                 Err((
                     Halt::Stop {
                         reason: reason.clone(),
@@ -356,12 +370,11 @@ impl NestedCalls {
                     reason,
                 )),
             ),
-            RunOutcome::Pause { message, reason } => (
-                NestedState::Halted { ran: false },
-                Err((Halt::Pause { reason }, message)),
-            ),
+            RunOutcome::Pause { message, reason } => {
+                (NestedState::Halted, Err((Halt::Pause { reason }, message)))
+            }
             RunOutcome::MiddlewareErrorBefore { reason } => (
-                NestedState::Halted { ran: false },
+                NestedState::Halted,
                 Err((
                     Halt::Pause {
                         reason: reason.clone(),
@@ -371,7 +384,7 @@ impl NestedCalls {
             ),
             // The tool ran, and the hook after it failed.
             RunOutcome::MiddlewareErrorAfter { reason, .. } => (
-                NestedState::Halted { ran: true },
+                NestedState::Halted,
                 Err((
                     Halt::Pause {
                         reason: reason.clone(),
@@ -380,7 +393,7 @@ impl NestedCalls {
                 )),
             ),
         };
-        self.record(tool_call_id, tool_name, state);
+        self.got_to(tool_call_id, state);
         match ended {
             Ok(outcome) => outcome,
             Err((halt, text)) => {
@@ -389,7 +402,6 @@ impl NestedCalls {
             }
         }
     }
-
 }
 
 impl Halt {
