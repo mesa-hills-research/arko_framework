@@ -4287,8 +4287,7 @@ mod tests {
     fn reported_service_tier_and_reasoning_tokens_price_the_call() {
         use crate::config::OpenAIServiceTier;
         let standard = GenerationConfig::default();
-        let flex = GenerationConfig::default()
-            .with_openai_service_tier(crate::config::OpenAIServiceTier::Flex);
+        let flex = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Flex);
         // GPT-6 Astra short context, 0.1M input at $10 + 1M output at $50.
         let usage = priced(None, &standard, false);
         assert_eq!(usage.reasoning_tokens, Some(400_000));
