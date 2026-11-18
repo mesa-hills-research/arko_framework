@@ -26,7 +26,7 @@ Add the crates you need:
 ```toml
 [dependencies]
 arko_ai = "0.3"
-arko_agents = "0.9"
+arko_agents = "0.10"
 ```
 
 Building needs Rust 1.89 or later and a C compiler. As a dependency, arko_index needs no C compiler.

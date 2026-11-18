@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (2026-11-18)
+
+### Workspace paths
+
+- The workspace check resolves symbolic links before it decides. Before, it compared the path's
+  text only, so a link could take a read or write outside the workspace. The working directory
+  and the path are compared in canonical form, so a link to the working directory, its canonical
+  form and the spelling it was given in all get the same answer. For a path that doesn't exist
+  yet, its deepest existing parent is resolved.
+- A path that enters the workspace and leaves it through a link, such as `link/x` or `link/../x`
+  where `link` points outside, is refused under every path policy, however it's spelled. So is a
+  path through a link whose target doesn't exist, also when it ends in a separator (`link/`).
+- The check judges each way a tool may read the path, trimmed or not, with `..` resolved by name
+  from the working directory as given or from its canonical form, or by the operating system. A
+  path that some readings find inside and others outside is refused. A path from `~` still counts
+  as outside, and is refused when a link named `~` in the workspace leads outside.
+- On Windows junctions are followed as links are. A `\\?\` path holding `/` and a name with `:`
+  (a stream of a file) are refused, since tools read them differently.
+- The check judges a path when the call is admitted, so a link created or changed before the tool
+  opens the path isn't seen. It covers `is_path` parameters and the path inputs of Claude Code's
+  file and search tools. Parameters not marked `is_path`, paths inside other arguments, a shell's
+  working directory and what a program does with its paths are outside it.
 
 ### apply_diff
 
@@ -13,11 +34,10 @@
   re-indenting of replacement lines are gone. Blocks need no `:start_line:` and `-------` lines,
   and blocks that still have them parse.
 - `replace_all` replaces every occurrence of each block's search lines.
-- A new file takes the file's place in one step, through a symbolic link, with its owner, group,
-  permissions, ACL and other properties, so an error or a crash leaves the old file whole. A file
-  with a property the new file can't keep, such as a second hard link, is refused unchanged, and
-  so is any property not known to be kept. A byte-order mark, CRLF line breaks and a missing
-  last line break are kept.
+- The edited text goes to a new file that takes the old one's place in one step, so an error or a
+  crash leaves the old file whole. The new file has the old one's owner, group, permissions, ACL
+  and other properties before any content is written. A symbolic link is followed and stays a
+  link. A byte-order mark, CRLF line breaks and a missing last line break are kept.
 - Its result shows each block's new lines, as `edit_file`'s does, and carries a
   `ToolReceipt::Edit` covering every block.
 - Its description is a few sentences and one example.
@@ -41,9 +61,32 @@
 - `write_file`'s hint names `apply_diff` or `edit_file` also when the agent reaches that tool
   only from inside a call.
 
+### Waits end for notes
+
+- A call's `context_arrived` also fires while the task's turn context source holds context for
+  its next update that should end a wait, such as a workflow's note. Before,
+  `terminal_control wait` ran its whole time while such a note waited.
+- `TurnContextSource` gains `has_waking_update` and `update_changed`, both defaulted, and
+  `ContextSignal` gains `with_updates` and `without_updates`.
+- The signal holds the source weakly, so a call moved to the background doesn't keep the
+  terminal manager alive through it.
+
+### ask_user
+
+- Its description says to repeat an unanswered question in the same words. It said to ask the
+  question again, which read as a new `ask_user` call while the question was still open.
+
 ### Breaking changes
 
 - An `apply_diff` call with a block that fails is an error and writes nothing.
+- `apply_diff` refuses a file, and leaves it as it was, when the new file can't keep one of its
+  properties or the file has one not known to be kept. Among them are a second hard link, the
+  setuid or setgid bit, an owner other than the process's user, an ACL on macOS, and encryption,
+  compression or named streams on Windows. On Unix systems other than Linux and macOS it refuses
+  every file. The error says why and points to `write_file` or the shell. `edit_file` still
+  writes these files in place.
+- `apply_diff` refuses an empty file (`write_file` gives it content) and a file with a NUL byte.
+  It refuses a pipe or a device without reading it.
 - A line of the file that is itself a marker is written with a backslash before it
   (`\=======`). The `AD_ESC::` prefix is gone.
 - `AgentToolConfig` has a new public field, `nested_only_tool_names`.
@@ -51,6 +94,10 @@
   already says the tool failed, so a failed call read "Tool 'read_file' execution failed:
   Execution failed: …" to the model, in the events and in saved conversations. It now reads
   "Tool 'read_file' execution failed: …".
+
+### Dependencies
+
+- Takes arko_ai 0.3.2.
 
 ## 0.9.1 (2026-11-18)
 
