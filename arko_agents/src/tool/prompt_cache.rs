@@ -1,3 +1,69 @@
+//! The deadline a wait keeps to so the next request still finds the prompt
+//! cached.
+//!
+//! # One deadline for a request
+//!
+//! A request has one cache deadline, `anchor + longest_wait`
+//! ([`PromptCacheLifetime::longest_wait`], the lifetime less its margin). The
+//! runtime works it out once, when it records the request, and puts it in
+//! the [`PromptCacheWindow`] of every call the request's response makes.
+//! `terminal_control wait`, `wait_for_message` and `wait_for_agents` all take
+//! it from there (`PromptCacheWindow::deadline`). No wait works out a request's
+//! age on its own, so no wait can give a request more time than another.
+//!
+//! # The anchor is early
+//!
+//! The anchor is a moment no later than the one the provider could first have
+//! used the cache at. If the anchor is wrong, the request looks older than it
+//! is and never younger, so a wait ends before the cache lapses. The anchor is
+//! not when the reply came. That can be minutes after the request, and for a
+//! reply that isn't streamed it is the end of the reply.
+//!
+//! | Runtime | Anchor | Why it is no later than the cache's use |
+//! |---|---|---|
+//! | Arko's own | Just before the provider call that got the response | The provider can't read the request before it is sent. A retry after a failed attempt uses its own attempt's time. |
+//! | Claude Code | The latest time Arko handed the CLI something before the response's first token or whole reply came. That is the user's message sent, a tool result returned to it (from `ToolHost`), or a hook request received (the CLI sends its next request only after Arko's answer to one). | The CLI sends the request after it gets what Arko handed it, so the hand-over is earlier. Anything Arko sees later, such as the first streamed token, isn't a bound. |
+//!
+//! A request with no anchor can't say how old its cache is. That is a task loaded
+//! from a save, a request to the refusal fallback's model (whose cache the
+//! task's latest request doesn't record) and a Claude Code session that
+//! handed over nothing yet. With a known lifetime such a window leaves no
+//! wait, and the next request gives it an anchor. With an unknown lifetime or
+//! caching off, the wait is the 5-minute cache's from the start of the wait,
+//! since nothing lapses.
+//!
+//! Claude Code's anchor could be later than the request only if Arko handed
+//! the CLI something while the main request was in flight, which a subagent's
+//! hooks can cause. So a hook counts only for a tool call the main
+//! conversation made, and a tool result only for such a call.
+//!
+//! # Waits only shorten
+//!
+//! A wait lasts the shorter of what it was asked for and what is left until
+//! the cache deadline (`PromptCacheWindow::cap`). There is no minimum
+//! wait, and nothing after the start of the wait moves the deadline. That
+//! includes the wait for a message to reach the run's command channel, which
+//! may take a second after a message arrives. It ends at the cache deadline
+//! and leaves the message to the next turn boundary. A configured limit
+//! (`WaitForMessageTimeout::Fixed`, the model's `timeout_seconds`, `wait_ms`)
+//! can shorten the wait and never lengthen it.
+//!
+//! Keep-warm requests, which refresh the cache, don't move the deadline. The
+//! next request does.
+//!
+//! `LatestRequest::sent_at` stays the wall-clock time a host shows, and it is
+//! the first streamed token in Claude Code. `LatestRequest::sent_instant` is
+//! the anchor in both runtimes.
+//!
+//! # Checked arithmetic
+//!
+//! A deadline is `Instant::checked_add`, and `None` means a deadline too far
+//! to count, which is no bound. An age is `saturating_duration_since`, on the
+//! monotonic clock only. The wall clock is read for the text that says when the
+//! cache lapses and for nothing else (`SystemTime::checked_add`, `None` when
+//! it doesn't fit). A lifetime a host sets to any `u64` number of seconds
+//! must give a value, never a panic.
+
 use std::time::{Duration, SystemTime};
 
 use arko_ai::PromptCacheLifetime;
