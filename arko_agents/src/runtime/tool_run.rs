@@ -54,6 +54,10 @@ pub(super) struct RunEnvironment {
     /// What a call's [`NestedCalls`] check their calls against, or `None`
     /// for calls that can't call tools.
     pub gate: Option<Arc<Gate>>,
+    /// The task's prompt cache. See [`TaskContext::prompt_cache`]. A
+    /// runtime whose requests go on while calls run (Claude Code's) sets it
+    /// as each request starts.
+    pub prompt_cache: std::sync::Mutex<crate::tool::PromptCacheWindow>,
 }
 
 /// What a call sees of a stop, a move and context arriving.
@@ -80,6 +84,7 @@ impl RunEnvironment {
             context_arrived: signals.context_arrived.clone(),
             runs_in_claude_code: self.model.provider == arko_ai::Provider::ClaudeCode,
             nested: None,
+            prompt_cache: *self.prompt_cache.lock().unwrap(),
         }
     }
 

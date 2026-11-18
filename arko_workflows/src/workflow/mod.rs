@@ -2284,8 +2284,9 @@ impl WorkflowBuilder {
     /// prompt cached, at 4 minutes 30 seconds, 27 minutes over ChatGPT OAuth, or
     /// 54 minutes with Anthropic's 1-hour TTL. An agent waits longer by
     /// calling the tool again. A
-    /// `Duration` sets a fixed limit, more than zero and at most 24 hours. One
-    /// past the cache lifetime can cost a cache miss on the next turn.
+    /// `Duration` sets a fixed limit, more than zero and at most 24 hours. A
+    /// wait never runs past a known cache lifetime, so a fixed limit longer
+    /// than what is left of it is cut to that.
     pub fn wait_for_message_timeout(mut self, timeout: impl Into<WaitForMessageTimeout>) -> Self {
         self.wait_timeouts.workflow = timeout.into();
         self

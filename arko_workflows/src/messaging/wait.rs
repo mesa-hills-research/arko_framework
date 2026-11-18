@@ -18,8 +18,8 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use arko_agents::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    PromptCacheWindow, TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition,
+    ToolParameterType, ToolTypeDetails,
 };
 use arko_ai::{LLMClient, PromptCacheLifetime};
 
@@ -39,14 +39,6 @@ pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(270);
 /// The longest time limit the builder accepts, 24 hours.
 pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The least time an automatic limit leaves between the end of a wait and
-/// the end of the cache lifetime, for the model request that follows.
-const MIN_CACHE_MARGIN: Duration = Duration::from_secs(30);
-
-/// The least an automatic limit leaves for a wait, however long ago the last
-/// model request was.
-const MIN_AUTO_WAIT: Duration = Duration::from_secs(1);
-
 /// How long a wait that found a message still waits for the run's delivery
 /// worker to put it in the command channel, so that it arrives at the next
 /// turn boundary. It takes microseconds unless the channel is full.
@@ -63,24 +55,28 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// and a long wait is several of them. The agent calls `wait_for_message`
 /// again, keeping the cache warm. `Auto` keeps each wait inside the agent's
 /// lifetime, from [`LLMClient::prompt_cache_lifetime`] for its model and
-/// settings, calculated as the lifetime minus a margin of a tenth of it, at least 30
-/// seconds. That is 4 minutes 30 seconds for a 5-minute cache (Anthropic's
-/// default, and OpenAI's with an API key before GPT-5.6, reported
-/// conservatively), 27 minutes for a 30-minute cache (OpenAI GPT-5.6 and
-/// later, and ChatGPT OAuth), and 54 minutes with Anthropic's 1-hour TTL, an
-/// explicit opt-in. A host's
+/// settings, calculated as the lifetime minus a margin of a tenth of it, at
+/// least 30 seconds ([`PromptCacheLifetime::longest_wait`]). That is 4
+/// minutes 30 seconds for a 5-minute cache (Anthropic's default, and
+/// OpenAI's with an API key before GPT-5.6, reported conservatively), 27
+/// minutes for a 30-minute cache (OpenAI GPT-5.6 and later, and ChatGPT
+/// OAuth), and 54 minutes with Anthropic's 1-hour TTL, an explicit opt-in. A
+/// host's
 /// `GenerationConfig::prompt_cache_lifetime_seconds` replaces the lifetime.
 /// With an unknown lifetime, or caching off, it is
 /// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]. With nothing to keep warm, a
 /// bounded wait still lets the agent look around now and then.
 ///
-/// An automatic limit counts from the agent's last model request, when the
-/// cache was last used, so the time the model took to call the tool is
-/// included (a second is always left). A `Fixed` limit counts from the start
-/// of the wait.
-///
-/// A `Fixed` limit may be longer than the cache lifetime, at the price of a
-/// possible cache miss on the next turn after a wait that runs to it.
+/// With a known lifetime, no limit lets a wait run past the cache. The
+/// wait counts from the request that made the call, when the cache was last
+/// used, so the time the model took to call the tool is included. The runtime
+/// gives each call that cache in [`TaskContext::prompt_cache`], and a call
+/// made with [`TaskContext::new`] has an unknown lifetime. No limit has a
+/// minimum, so a spent cache leaves no wait. A `Fixed` limit can only
+/// shorten what is left of
+/// [`PromptCacheLifetime::longest_wait`], and a longer one is cut to it. With
+/// an unknown lifetime, or caching off, a `Fixed` limit counts from the
+/// start of the wait and may be as long as the builder accepts.
 ///
 /// [`WorkflowBuilder::wait_for_message_timeout`]: crate::WorkflowBuilder::wait_for_message_timeout
 /// [`WorkflowBuilder::agent_wait_for_message_timeout`]: crate::WorkflowBuilder::agent_wait_for_message_timeout
@@ -90,7 +86,8 @@ pub enum WaitForMessageTimeout {
     #[default]
     Auto,
     /// This long, more than zero and at most
-    /// [`MAX_WAIT_FOR_MESSAGE_TIMEOUT`].
+    /// [`MAX_WAIT_FOR_MESSAGE_TIMEOUT`], and no longer than the agent's
+    /// cache lasts when its lifetime is known.
     Fixed(Duration),
 }
 
@@ -101,13 +98,21 @@ impl From<Duration> for WaitForMessageTimeout {
 }
 
 impl WaitForMessageTimeout {
-    /// The time limit for an agent whose prompt cache has `lifetime`.
+    /// The time limit for an agent whose prompt cache has `lifetime`, from a
+    /// cache just used. A `Fixed` limit is cut to the longest wait inside a
+    /// known lifetime ([`PromptCacheLifetime::longest_wait`]). There is no
+    /// minimum, so a lifetime within its margin gives none. The tools take
+    /// the time left of the call's own cache instead
+    /// ([`TaskContext::prompt_cache`]).
     pub fn resolve(self, lifetime: PromptCacheLifetime) -> Duration {
         match (self, lifetime) {
+            (Self::Fixed(timeout), PromptCacheLifetime::Known(_)) => {
+                timeout.min(lifetime.longest_wait())
+            }
             (Self::Fixed(timeout), _) => timeout,
-            (Self::Auto, PromptCacheLifetime::Known(lifetime)) => lifetime
-                .saturating_sub((lifetime / 10).max(MIN_CACHE_MARGIN))
-                .clamp(Duration::from_secs(1), MAX_WAIT_FOR_MESSAGE_TIMEOUT),
+            (Self::Auto, PromptCacheLifetime::Known(_)) => {
+                lifetime.longest_wait().min(MAX_WAIT_FOR_MESSAGE_TIMEOUT)
+            }
             (Self::Auto, PromptCacheLifetime::Unknown | PromptCacheLifetime::Disabled) => {
                 DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT
             }
@@ -148,10 +153,6 @@ impl WaitTimeouts {
 pub struct WaitForMessageTool {
     context: Arc<SharedContext>,
     agent_name: String,
-    llm_client: Arc<LLMClient>,
-    /// Per run, when its conversation last got new messages, just before a
-    /// model request, which is when its prompt cache was last used.
-    last_request: parking_lot::Mutex<HashMap<uuid::Uuid, Instant>>,
 }
 
 impl std::fmt::Debug for WaitForMessageTool {
@@ -164,64 +165,37 @@ impl std::fmt::Debug for WaitForMessageTool {
 }
 
 impl WaitForMessageTool {
+    /// The tool for `agent_name`. It takes its prompt cache from the call's
+    /// [`TaskContext::prompt_cache`], which the runtime fills, so the client
+    /// isn't read. The argument is kept so the constructor doesn't change.
     pub fn new(
         context: Arc<SharedContext>,
         agent_name: String,
-        llm_client: Arc<LLMClient>,
+        _llm_client: Arc<LLMClient>,
     ) -> Self {
         Self {
             context,
             agent_name,
-            llm_client,
-            last_request: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
-    /// How long run `task_id` may wait, which is the agent's limit. An automatic
-    /// limit counts from the run's last model request, when the cache was
-    /// last used, so the time the model took to answer is included. At least
-    /// a second is left.
-    pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
-        let limit = self.limit_of(Some(task_id)).await;
-        if self.context.wait_timeouts.for_agent(&self.agent_name) != WaitForMessageTimeout::Auto {
-            return limit;
-        }
-        let since = self
-            .last_request
-            .lock()
-            .get(&task_id)
-            .map_or(Duration::ZERO, |at| at.elapsed());
-        limit.saturating_sub(since).max(MIN_AUTO_WAIT)
-    }
-
-    /// The agent's time limit, for a run of its registered configuration.
-    #[cfg(test)]
-    pub(crate) async fn limit(&self) -> Duration {
-        self.limit_of(None).await
-    }
-
-    /// The time limit of run `task_id`, by the prompt cache of the model it
-    /// works with, which may not be its agent's (or of the agent's
-    /// registered configuration without one).
-    async fn limit_of(&self, task_id: Option<uuid::Uuid>) -> Duration {
+    /// How long a wait that starts at `started` may last, which is the
+    /// agent's limit inside the call's prompt cache. The cache's deadline is
+    /// the one of the request that made the call ([`PromptCacheWindow`]), so
+    /// no limit lets the wait run past it, and the time the model took to
+    /// answer is already gone from it. A fixed limit can only shorten what
+    /// the cache leaves, and with an unknown lifetime or caching off it is
+    /// as given.
+    pub(crate) fn wait_limit(&self, cache: &PromptCacheWindow, started: Instant) -> Duration {
         let timeout = self.context.wait_timeouts.for_agent(&self.agent_name);
-        let config = match task_id {
-            Some(task_id) => self.context.run_llm_config(&self.agent_name, task_id),
-            None => self
-                .context
-                .agent_configs
-                .get(&self.agent_name)
-                .map(|config| config.llm_config.clone()),
-        };
-        let lifetime = match (timeout, config) {
-            (WaitForMessageTimeout::Auto, Some(config)) => {
-                self.llm_client
-                    .prompt_cache_lifetime(&config.model, &config.generation_config)
-                    .await
+        match (timeout, cache.lifetime) {
+            (WaitForMessageTimeout::Fixed(timeout), PromptCacheLifetime::Known(_)) => {
+                cache.cap(started, timeout)
             }
-            _ => PromptCacheLifetime::Unknown,
-        };
-        timeout.resolve(lifetime)
+            (WaitForMessageTimeout::Fixed(timeout), _) => timeout,
+            // The cache decides, up to the longest limit there is.
+            (WaitForMessageTimeout::Auto, _) => cache.cap(started, MAX_WAIT_FOR_MESSAGE_TIMEOUT),
+        }
     }
 }
 
@@ -326,24 +300,25 @@ impl Tool for WaitForMessageTool {
         arko_agents::ToolBackground::Own
     }
 
-    fn observe_context(&self, task_id: uuid::Uuid, _message: &arko_ai::Message) {
-        // (The messages it holds count as seen as the runtime reports them,
-        // `MessageBus::seen`.) The runtime reports new messages just before
-        // each model request.
-        self.last_request.lock().insert(task_id, Instant::now());
-    }
-
     async fn execute(
         &self,
         task_context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
         let requested = requested_timeout(&params)?;
-        let limit = self.wait_limit(task_context.task_id).await;
+        let started = Instant::now();
+        let cache = &task_context.prompt_cache;
+        let limit = self.wait_limit(cache, started);
         // The model may only shorten the wait.
         let wait = match requested {
             Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),
             _ => limit,
+        };
+        // The cache's deadline, which nothing after the start moves, a wait
+        // for a message to be forwarded included. A known lifetime only.
+        let cache_deadline = match cache.lifetime {
+            PromptCacheLifetime::Known(_) => cache.deadline(started),
+            _ => None,
         };
         let context = &self.context;
         let task_id = task_context.task_id;
@@ -359,7 +334,9 @@ impl Tool for WaitForMessageTool {
         let peers = context.status_peers(&self.agent_name);
         let baseline = context.registry.activity(&peers);
 
-        let deadline = Instant::now() + wait;
+        // Counting can't fail for a wait of up to a day, and a wait that
+        // couldn't be counted would end at once.
+        let deadline = started.checked_add(wait).unwrap_or(started);
         let mut forward_deadline = None;
         let (mut arrivals_open, mut versions_open, mut stopping_open) = (true, true, true);
         loop {
@@ -395,10 +372,17 @@ impl Tool for WaitForMessageTool {
                     return Ok(format!("No messages after {}.", describe_duration(wait)));
                 }
             } else {
-                if unseen.forwarded || forward_deadline.is_some_and(|until| now >= until) {
+                // The cache's deadline ends the wait for the forward too, and
+                // the message then reaches the agent at a later boundary.
+                if unseen.forwarded
+                    || forward_deadline.is_some_and(|until| now >= until)
+                    || cache_deadline.is_some_and(|until| now >= until)
+                {
                     return Ok(message_result(&unseen.senders, &changes));
                 }
-                forward_deadline.get_or_insert(now + FORWARD_WAIT);
+                let until = now.checked_add(FORWARD_WAIT).unwrap_or(now);
+                forward_deadline
+                    .get_or_insert(cache_deadline.map_or(until, |cache| until.min(cache)));
             }
             let until = forward_deadline.unwrap_or(deadline);
             tokio::select! {
@@ -460,18 +444,33 @@ mod tests {
         assert_eq!(known(5 * MINUTE), Duration::from_secs(270));
         assert_eq!(known(30 * MINUTE), 27 * MINUTE);
         assert_eq!(known(60 * MINUTE), 54 * MINUTE);
-        // The margin is at least 30 seconds, and the limit at least 1 second.
+        // The margin is at least 30 seconds, and there is no minimum limit.
         assert_eq!(known(2 * MINUTE), Duration::from_secs(90));
-        assert_eq!(known(Duration::from_secs(10)), Duration::from_secs(1));
+        assert_eq!(known(Duration::from_secs(10)), Duration::ZERO);
+        assert_eq!(known(Duration::from_millis(400)), Duration::ZERO);
         assert_eq!(known(48 * 60 * MINUTE), MAX_WAIT_FOR_MESSAGE_TIMEOUT);
         for lifetime in [PromptCacheLifetime::Unknown, PromptCacheLifetime::Disabled] {
             assert_eq!(auto.resolve(lifetime), DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT);
+            assert_eq!(lifetime.longest_wait(), DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT);
         }
+        // A fixed limit shortens the automatic one and never lengthens it
+        // past a known lifetime. Without one, it is as given.
         let fixed = WaitForMessageTimeout::from(Duration::from_secs(600));
         assert_eq!(
             fixed.resolve(PromptCacheLifetime::Known(5 * MINUTE)),
+            Duration::from_secs(270)
+        );
+        assert_eq!(
+            fixed.resolve(PromptCacheLifetime::Known(30 * MINUTE)),
             Duration::from_secs(600)
         );
+        assert_eq!(
+            fixed.resolve(PromptCacheLifetime::Known(Duration::from_secs(20))),
+            Duration::ZERO
+        );
+        for lifetime in [PromptCacheLifetime::Unknown, PromptCacheLifetime::Disabled] {
+            assert_eq!(fixed.resolve(lifetime), Duration::from_secs(600));
+        }
     }
 
     #[test]

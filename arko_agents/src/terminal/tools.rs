@@ -1,6 +1,7 @@
 use super::*;
 use crate::tool::{
-    Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType, ToolTypeDetails,
+    PromptCacheWindow, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
+    ToolTypeDetails,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -105,6 +106,88 @@ pub(super) fn tool_error(error: impl std::fmt::Display) -> ToolError {
     ToolError::ExecutionFailed(error.to_string())
 }
 
+/// How long `terminal_control wait` lasts without `wait_ms`.
+const DEFAULT_WAIT: Duration = Duration::from_secs(1);
+
+impl TerminalTool {
+    /// `terminal_control wait`. It lasts as long as the agent asks, up to
+    /// the longest wait that ends before its prompt cache lapses, which a
+    /// longer request is cut to, and the result says so. New output, the
+    /// job's end, context that arrives for the agent and a stop end it
+    /// sooner.
+    async fn wait(
+        &self,
+        context: &TaskContext<'_>,
+        id: Uuid,
+        params: &HashMap<String, Value>,
+    ) -> std::result::Result<Value, ToolError> {
+        let started = tokio::time::Instant::now();
+        let revision = revision(params)?;
+        let asked = number(params, "wait_ms")?.map_or(DEFAULT_WAIT, Duration::from_millis);
+        // One deadline from the start, down to the manager's timer, so the
+        // time the job's lookup and lock take comes out of the wait.
+        let wait = context.prompt_cache.cap(started, asked);
+        let deadline = started.checked_add(wait);
+        let owner = context.task_id;
+        let (snapshot, ran_out) = tokio::select! {
+            biased;
+            waited = self.manager.wait_for_change(owner, id, revision, deadline) => waited,
+            () = context.context_arrived.arrived() => {
+                self.manager.status(owner, id, None).map(|snapshot| (snapshot, false))
+            }
+            () = context.stop.stopping() => {
+                self.manager.status(owner, id, None).map(|snapshot| (snapshot, false))
+            }
+        }
+        .map_err(tool_error)?;
+        let mut result = serde_json::to_value(&snapshot).map_err(tool_error)?;
+        if ran_out && wait < asked {
+            result["note"] = cut_note(asked, wait, &context.prompt_cache).into();
+        }
+        Ok(result)
+    }
+}
+
+/// What a wait that ran to the longest wait tells the agent, which asked for
+/// `asked`.
+fn cut_note(asked: Duration, waited: Duration, cache: &PromptCacheWindow) -> String {
+    let start = format!(
+        "The wait ended after {}, not the {} you asked for",
+        describe(waited),
+        describe(asked)
+    );
+    match (cache.lifetime, cache.lapses_at()) {
+        (_, Some(at)) => format!(
+            "{start}, because your prompt cache lapses at {}. Call terminal_control wait again to keep waiting.",
+            super::monitor::clock_seconds(at)
+        ),
+        (arko_ai::PromptCacheLifetime::Known(_), None) => format!(
+            "{start}, because it can't tell when your prompt cache lapses. Call terminal_control wait again to keep waiting."
+        ),
+        _ => format!(
+            "{start}, the longest a wait lasts here. Call terminal_control wait again to keep waiting."
+        ),
+    }
+}
+
+/// `45 s`, `4 min 30 s`, `27 min`, `10 h 48 min`.
+pub(super) fn describe(duration: Duration) -> String {
+    let total = duration.as_secs_f64().round() as u64;
+    let (hours, minutes, seconds) = (total / 3600, total % 3600 / 60, total % 60);
+    // An hour or more leaves out the seconds.
+    let seconds = if hours > 0 { 0 } else { seconds };
+    let parts: Vec<String> = [(hours, "h"), (minutes, "min"), (seconds, "s")]
+        .into_iter()
+        .filter(|(number, _)| *number > 0)
+        .map(|(number, unit)| format!("{number} {unit}"))
+        .collect();
+    if parts.is_empty() {
+        "less than a second".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 #[async_trait]
 impl Tool for TerminalTool {
     fn definition(&self) -> ToolDefinition {
@@ -162,7 +245,7 @@ impl Tool for TerminalTool {
             ),
             Operation::Control => (
                 Self::NAMES[3],
-                "Lists your jobs (action `list`), waits until a job changes, for at most 30 seconds (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
+                "Lists your jobs (action `list`), waits until a job changes (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A wait ends when the job prints something new, finishes or asks for input, and when a note or an update reaches you. Without `wait_ms` it lasts 1 second at most. Ask for longer when you expect the job to take longer, up to your prompt cache's lifetime less a margin, counted from your latest request (4 min 30 s for a 5-minute cache, and when the lifetime is unknown). A longer request is cut to that, and the result says so, and when your cache lapses if its lifetime is known. A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
                 vec![
                     parameter("action", "list, wait, cancel or forget.", true),
                     parameter("job_id", "The job's ID (not for list).", false),
@@ -173,7 +256,7 @@ impl Tool for TerminalTool {
                     ),
                     parameter(
                         "wait_ms",
-                        "wait: the most milliseconds to wait (default 1000, at most 30000).",
+                        "wait: the most milliseconds to wait (default 1000). Give about how long you expect the job to take.",
                         false,
                     ),
                 ],
@@ -205,7 +288,7 @@ impl Tool for TerminalTool {
         false
     }
     /// Jobs run in the background with their own deadlines, and waits end
-    /// after at most 30 seconds.
+    /// before the agent's prompt cache lapses.
     fn uses_host_timeout(&self) -> bool {
         false
     }
@@ -266,20 +349,7 @@ impl Tool for TerminalTool {
                 } else {
                     let id = Uuid::parse_str(string(&params, "job_id")?).map_err(tool_error)?;
                     match action {
-                        "wait" => serde_json::to_value(
-                            self.manager
-                                .wait(
-                                    context.task_id,
-                                    id,
-                                    revision(&params)?,
-                                    Duration::from_millis(
-                                        number(&params, "wait_ms")?.unwrap_or(1000),
-                                    ),
-                                )
-                                .await
-                                .map_err(tool_error)?,
-                        )
-                        .map_err(tool_error)?,
+                        "wait" => self.wait(context, id, &params).await?,
                         "cancel" => {
                             self.manager
                                 .cancel(context.task_id, id)

@@ -213,9 +213,10 @@ pub struct AgentLoop {
     bytes_per_token: f64,
     /// The request in flight, or last sent.
     sent_request: Option<RequestMark>,
-    /// When the request in flight was sent, unless it went to the refusal
-    /// fallback's model. Its answer records it as the task's latest request.
-    request_sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the request in flight was sent, on the wall clock and the
+    /// monotonic one, unless it went to the refusal fallback's model. Its
+    /// answer records it as the task's latest request.
+    request_sent_at: Option<(chrono::DateTime<chrono::Utc>, tokio::time::Instant)>,
     /// The latest request that was answered. The task's latest reported
     /// usage is its.
     answered_request: Option<RequestMark>,

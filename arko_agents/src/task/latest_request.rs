@@ -12,12 +12,18 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatestRequest {
-    /// When it was sent. The provider uses the prompt cache as it reads a
-    /// request, so the cache lasts from about then. In arko's own runtime
-    /// this is just before the provider call, a little early. Claude Code
-    /// sends a Claude Code model's requests itself, so there it is the
-    /// response's first streamed token, a few seconds late (or the response
-    /// itself, for one that wasn't streamed).
+    /// When it was sent, or a moment before. The provider uses the prompt
+    /// cache as it reads a request, so the cache lasts from about then, and
+    /// never from earlier. In arko's own runtime this is just before the
+    /// provider call. Claude Code sends a Claude Code model's requests
+    /// itself, so there it is the latest time Arko handed the CLI what the
+    /// request needed (the turn's input, or the result or gate of the main
+    /// conversation's last call), before the response was first seen. It is
+    /// early by the CLI's own time, and not by the response's. It is the
+    /// moment [`sent_instant`](Self::sent_instant) gives on the other clock.
+    /// A request with no such moment, such as a Claude Code session that
+    /// handed over nothing yet, has the time its response was first seen,
+    /// and no `sent_instant`.
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub sent_at: DateTime<Utc>,
     /// Its whole input in tokens, cache reads and writes included. Continuing
@@ -35,6 +41,13 @@ pub struct LatestRequest {
     /// configuration sets the lifetime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_lifetime_secs: Option<u64>,
+    /// [`sent_at`](Self::sent_at) on the monotonic clock, read with it, which
+    /// measures how long ago the cache was used without a change of the wall
+    /// clock altering the answer. Only the process that sent the request
+    /// knows it. A task loaded from a save has `None`, and its request's age
+    /// can't be measured safely.
+    #[serde(skip)]
+    pub sent_instant: Option<tokio::time::Instant>,
 }
 
 impl LatestRequest {
@@ -46,7 +59,15 @@ impl LatestRequest {
             cached_tokens: usage.cached_tokens.unwrap_or(0),
             cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
             cache_lifetime_secs: None,
+            sent_instant: None,
         }
+    }
+
+    /// The request with the monotonic time it was sent at
+    /// ([`sent_instant`](Self::sent_instant)).
+    pub fn with_sent_instant(mut self, sent: tokio::time::Instant) -> Self {
+        self.sent_instant = Some(sent);
+        self
     }
 
     /// The request with the cache lifetime its writes showed.
@@ -173,6 +194,20 @@ mod tests {
             (52_000, 50_000, 2_000)
         );
         assert_eq!(request.cache_lifetime(), Some(Duration::from_secs(3_600)));
+    }
+
+    /// The monotonic time a request was sent at is the sending process's
+    /// own. A saved request loads without it, so its age isn't taken from
+    /// the wall clock as the age of a cache this process used.
+    #[test]
+    fn the_monotonic_time_is_not_saved() {
+        let sent = tokio::time::Instant::now();
+        let request = request().with_sent_instant(sent);
+        assert_eq!(request.sent_instant, Some(sent));
+        let loaded: LatestRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(loaded.sent_instant, None);
+        assert_eq!(loaded.sent_at, request.sent_at);
     }
 
     /// A new task knows it has no request yet. A task saved before the

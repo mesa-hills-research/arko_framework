@@ -11,6 +11,7 @@ pub mod definition;
 pub mod error;
 pub mod interceptor;
 pub mod middleware;
+pub mod prompt_cache;
 pub mod receipt;
 pub mod registry;
 pub mod types;
@@ -28,6 +29,7 @@ pub use middleware::{
     ToolCallContext, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
     ToolExecutionOutcome,
 };
+pub use prompt_cache::PromptCacheWindow;
 pub use receipt::{
     EDIT_RECEIPT_BYTES, EDIT_RECEIPT_CONTEXT, EDIT_RECEIPT_LINE_BYTES, EDIT_RECEIPT_LINES,
     EditHunk, EditLine, EditReceipt, LineChange, ToolReceipt,
@@ -369,6 +371,14 @@ pub struct TaskContext<'a> {
     /// each call of the model's, and a call made through it has none, nor
     /// does a context made with [`new`](Self::new).
     pub nested: Option<NestedCalls>,
+    /// How long the task's prompt cache lasts and the anchor of the request
+    /// that made the call, which is no later than the request's use of it. A
+    /// tool that waits keeps the wait inside the window's
+    /// [deadline](PromptCacheWindow::deadline). In Claude Code the lifetime is
+    /// the one the run asked for, else the one the cache writes show, else 5
+    /// minutes, and the anchor is the last hand-off to the CLI before the
+    /// response. [`TaskContext::new`] gives an unknown lifetime.
+    pub prompt_cache: PromptCacheWindow,
 }
 
 impl<'a> TaskContext<'a> {
@@ -394,6 +404,7 @@ impl<'a> TaskContext<'a> {
             context_arrived: ContextSignal::never(),
             runs_in_claude_code: false,
             nested: None,
+            prompt_cache: PromptCacheWindow::default(),
         }
     }
 

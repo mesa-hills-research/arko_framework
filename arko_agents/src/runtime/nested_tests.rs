@@ -869,6 +869,7 @@ fn nested_calls_with(
         jobs: None,
         terminal_tools: false,
         gate: Some(gate.clone()),
+        prompt_cache: Default::default(),
     });
     NestedCalls::new(
         environment,

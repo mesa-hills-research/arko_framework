@@ -164,6 +164,80 @@ fn params_of(input: &Value) -> HashMap<String, Value> {
         .unwrap_or_default()
 }
 
+/// A moment on both clocks, read together.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    at: chrono::DateTime<chrono::Utc>,
+    instant: tokio::time::Instant,
+}
+
+impl Stamp {
+    fn now() -> Self {
+        Self {
+            at: chrono::Utc::now(),
+            instant: tokio::time::Instant::now(),
+        }
+    }
+}
+
+/// The hand-offs to Claude Code that bound when its next main request was
+/// sent. The anchor of a response is the latest one counted before the
+/// response is first seen. `crate::tool::prompt_cache` says which count and why.
+#[derive(Default)]
+struct HandOffs(std::sync::Mutex<HandOffState>);
+
+#[derive(Default)]
+struct HandOffState {
+    /// The latest hand-off counted.
+    latest: Option<Stamp>,
+    /// The tool calls the main conversation's latest response announced.
+    announced: HashSet<String>,
+}
+
+impl HandOffs {
+    /// Input that starts or resumes a turn, which `stamp` was read before
+    /// sending. Only input sent between turns counts. A note the user typed,
+    /// which goes at a hook and may be queued, and a compaction don't.
+    fn input(&self, stamp: Stamp) {
+        self.count(&mut self.0.lock().unwrap(), stamp);
+    }
+
+    /// The main conversation's response announced these calls.
+    fn announce(&self, ids: impl IntoIterator<Item = String>) {
+        self.0.lock().unwrap().announced.extend(ids);
+    }
+
+    /// A hook or permission request arrived for call `tool_use_id`, or its
+    /// result is about to go back, at `stamp`. It counts only for a call the
+    /// main conversation announced. An unknown call (a subagent's, an old one,
+    /// or one whose hook came before its announcement) leaves the anchor as
+    /// it was.
+    fn call(&self, tool_use_id: Option<&str>, stamp: Stamp) {
+        let mut state = self.0.lock().unwrap();
+        if tool_use_id.is_some_and(|id| state.announced.contains(id)) {
+            self.count(&mut state, stamp);
+        }
+    }
+
+    fn count(&self, state: &mut HandOffState, stamp: Stamp) {
+        if state
+            .latest
+            .is_none_or(|latest| stamp.instant > latest.instant)
+        {
+            state.latest = Some(stamp);
+        }
+    }
+
+    /// The main conversation's response is first seen. Its anchor is the
+    /// latest hand-off counted so far, and the calls it follows are
+    /// forgotten, so a late hook of theirs can't move the next anchor.
+    fn freeze(&self) -> Option<Stamp> {
+        let mut state = self.0.lock().unwrap();
+        state.announced.clear();
+        state.latest
+    }
+}
+
 /// What Claude Code's hooks and permission requests ask the runtime.
 enum HostRequest {
     PreToolUse {
@@ -187,17 +261,21 @@ enum HostRequest {
 struct HookForwarder {
     event: cc::HookEvent,
     requests: mpsc::UnboundedSender<HostRequest>,
+    hand_offs: Arc<HandOffs>,
 }
 
 #[async_trait]
 impl cc::HookCallback for HookForwarder {
     async fn call(&self, input: Value, tool_use_id: Option<String>) -> Value {
+        // The request is received before anything answers it.
+        let received = Stamp::now();
         let tool_use_id = tool_use_id.or_else(|| {
             input
                 .get("tool_use_id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
         });
+        self.hand_offs.call(tool_use_id.as_deref(), received);
         let tool_name = input["tool_name"].as_str().unwrap_or_default().to_string();
         let (reply, answer) = oneshot::channel();
         let request = match self.event {
@@ -390,11 +468,17 @@ fn input_blocks<'a>(contents: impl Iterator<Item = &'a ai::Content>) -> Value {
 
 struct PermissionForwarder {
     requests: mpsc::UnboundedSender<HostRequest>,
+    hand_offs: Arc<HandOffs>,
 }
 
 #[async_trait]
 impl cc::PermissionHandler for PermissionForwarder {
     async fn decide(&self, request: cc::PermissionRequest) -> cc::PermissionDecision {
+        // A subagent's request isn't the main conversation's.
+        if request.agent_id.is_none() {
+            self.hand_offs
+                .call(request.tool_use_id.as_deref(), Stamp::now());
+        }
         let (reply, answer) = oneshot::channel();
         if self
             .requests
@@ -459,6 +543,7 @@ enum QuestionCall {
 
 /// Runs the agent's arko tools for Claude Code's MCP calls.
 struct ToolHost {
+    hand_offs: Arc<HandOffs>,
     environment: Arc<RunEnvironment>,
     config: AgentConfig,
     registry: Arc<ToolRegistry>,
@@ -512,7 +597,11 @@ impl ToolHost {
             ));
         };
         let id = admitted.id;
+        let call_id = admitted.call_id.clone();
         let (outcome, output) = self.run(name, tool, &arguments, admitted, false).await;
+        // The result goes back to the CLI next, which may then send its
+        // request, so the moment is read first.
+        self.hand_offs.call(call_id.as_deref(), Stamp::now());
         // The CLI may report only a call's text in its hook. Keep the
         // actual images until the runtime records that completed result.
         let images = output
@@ -693,6 +782,9 @@ struct PendingUsage {
     /// When the runtime first saw the request, at its first streamed token, or
     /// at its response for one that wasn't streamed.
     seen_at: chrono::DateTime<chrono::Utc>,
+    /// The request's anchor, frozen when it was first seen (`HandOffs`), or
+    /// `None` when nothing counted before it.
+    anchor: Option<Stamp>,
     /// The response finished when its final `message_delta` came, or when it came
     /// whole without streaming. Only a finished response is the task's latest
     /// request. One that failed or was abandoned while it streamed is
@@ -914,6 +1006,9 @@ pub(super) struct ClaudeCodeRun {
     /// request's usage, recorded once the request is complete. See
     /// [`observe_usage`](Self::observe_usage).
     pending_usage: HashMap<Option<String>, PendingUsage>,
+    /// What bounds when each main request was sent, shared with the hooks and
+    /// the tool host. See [`HandOffs`].
+    hand_offs: Arc<HandOffs>,
     /// Requests whose usage the stream events report.
     streamed: std::collections::HashSet<String>,
     /// Indices in `usage_history` of subagents' requests, which the cache
@@ -1087,6 +1182,7 @@ impl ClaudeCodeRun {
             parsing,
             calls: HashMap::new(),
             pending_usage: HashMap::new(),
+            hand_offs: Arc::default(),
             streamed: Default::default(),
             subagent_calls: Vec::new(),
             plan_usage: None,
@@ -2206,6 +2302,7 @@ impl ClaudeCodeRun {
                 Arc::new(HookForwarder {
                     event,
                     requests: requests.clone(),
+                    hand_offs: self.hand_offs.clone(),
                 }),
             );
             hook.timeout_seconds = Some(HOOK_TIMEOUT_SECONDS);
@@ -2249,6 +2346,7 @@ impl ClaudeCodeRun {
             },
             permission_handler: Some(Arc::new(PermissionForwarder {
                 requests: requests.clone(),
+                hand_offs: self.hand_offs.clone(),
             })),
             hooks: vec![
                 hook(cc::HookEvent::PreToolUse),
@@ -2275,6 +2373,7 @@ impl ClaudeCodeRun {
             return host.clone();
         }
         let host = Arc::new(ToolHost {
+            hand_offs: self.hand_offs.clone(),
             environment: Arc::new(RunEnvironment {
                 task_id: self.task.id,
                 agent_name: self.task.agent_config.name.clone(),
@@ -2295,6 +2394,13 @@ impl ClaudeCodeRun {
                     tool_config: self.task.agent_config.tool_config.clone(),
                     events: self.events.clone(),
                 })),
+                prompt_cache: std::sync::Mutex::new(crate::tool::PromptCacheWindow::new(
+                    self.cache_lifetime(),
+                    self.task
+                        .latest_request
+                        .latest()
+                        .and_then(|request| request.sent_instant),
+                )),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),
@@ -2412,6 +2518,8 @@ impl ClaudeCodeRun {
                 .extend(crate::task::context_image_content(images));
             input_blocks(message.content.iter())
         };
+        // Sent between turns, as input that starts the next request.
+        self.hand_offs.input(Stamp::now());
         let uuid = session.send_content(sent).await?;
         self.record_sent(uuid);
         Ok(())
@@ -2530,6 +2638,9 @@ impl ClaudeCodeRun {
         self.report_tool_errors().await?;
         // The session (and what it was sent) is saved before it runs.
         self.report(true).await;
+        // The session is between turns, so this input starts the next
+        // request, and the moment is read before it is sent.
+        self.hand_offs.input(Stamp::now());
         let sent = match input {
             Value::String(text) => session.send(text).await,
             content => session.send_content(content).await,
@@ -4143,12 +4254,17 @@ impl ClaudeCodeRun {
                 ..LatestResponse::default()
             };
         }
-        if assistant
+        let calls: Vec<String> = assistant
             .content
             .iter()
-            .any(|block| matches!(block, cc::ContentBlock::ToolUse { .. }))
-        {
+            .filter_map(|block| match block {
+                cc::ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        if !calls.is_empty() {
             self.latest_response.called = true;
+            self.hand_offs.announce(calls);
         }
         if let Some(reason) = &assistant.stop_reason {
             self.latest_response.stop_reason = Some(reason.clone());
@@ -4424,11 +4540,21 @@ impl ClaudeCodeRun {
                 pending.complete |= complete;
             }
             None => {
+                // The main conversation's request, first seen. The calls its
+                // response makes count its cache from its anchor.
+                let anchor = if parent.is_none() {
+                    let anchor = self.hand_offs.freeze();
+                    self.publish_prompt_cache(anchor.map(|anchor| anchor.instant));
+                    anchor
+                } else {
+                    None
+                };
                 self.pending_usage.insert(
                     parent,
                     PendingUsage {
                         key,
                         seen_at,
+                        anchor,
                         complete,
                         usage,
                         model,
@@ -4642,10 +4768,17 @@ impl ClaudeCodeRun {
                     .latest()
                     .and_then(crate::task::LatestRequest::cache_lifetime)
             };
-            self.task.latest_request = crate::task::RequestRecord::Latest(
-                crate::task::LatestRequest::new(pending.seen_at, &info)
-                    .with_cache_lifetime(lifetime),
-            );
+            let mut request = crate::task::LatestRequest::new(
+                pending.anchor.map_or(pending.seen_at, |anchor| anchor.at),
+                &info,
+            )
+            .with_cache_lifetime(lifetime);
+            if let Some(anchor) = pending.anchor {
+                request = request.with_sent_instant(anchor.instant);
+            }
+            self.task.latest_request = crate::task::RequestRecord::Latest(request);
+            // Its writes may show another lifetime.
+            self.publish_prompt_cache(pending.anchor.map(|anchor| anchor.instant));
         }
         self.task.record_usage(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
@@ -4824,40 +4957,61 @@ impl ClaudeCodeRun {
             }
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
                 if self.slow_down.is_none() {
-                    // The configured TTL, else the one Claude Code's writes
-                    // show, else Anthropic's shorter one. Claude Code's
-                    // subagents cache for 5 minutes whatever the main TTL.
-                    let config = &self.task.agent_config;
-                    let subagents = config
-                        .tool_config
-                        .available_tool_names
-                        .iter()
-                        .any(|tool| tool == "Agent" || tool == "Task");
-                    let lifetime = if subagents {
-                        ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME
-                    } else {
-                        config
-                            .llm_config
-                            .generation_config
-                            .claude_cache_ttl()
-                            .map(ai::AnthropicCacheTtl::duration)
-                            .or(self
-                                .task
-                                .latest_request
-                                .latest()
-                                .and_then(crate::task::LatestRequest::cache_lifetime))
-                            .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
-                    };
                     super::monitor::warn_if_slow_down_outlasts_cache(
                         self.task.id,
                         delay_ms,
-                        ai::PromptCacheLifetime::Known(lifetime),
+                        self.cache_lifetime(),
                     );
                 }
                 self.slow_down = Some(Duration::from_millis(delay_ms));
             }
         }
         Ok(())
+    }
+
+    /// How long the main conversation's cache lasts. Caching off, or a
+    /// lifetime the host gave, is as `arko_ai::prompt_cache` reports it.
+    /// Otherwise it is the configured TTL, else the one Claude Code's writes
+    /// show, else Anthropic's shorter one. Claude Code's subagents cache for
+    /// 5 minutes whatever the main TTL.
+    fn cache_lifetime(&self) -> ai::PromptCacheLifetime {
+        let config = &self.task.agent_config;
+        let settings = &config.llm_config.generation_config;
+        let reported =
+            ai::prompt_cache::prompt_cache_lifetime(&config.llm_config.model, settings, false);
+        if reported == ai::PromptCacheLifetime::Disabled
+            || settings.prompt_cache_lifetime_seconds.is_some()
+        {
+            return reported;
+        }
+        let subagents = config
+            .tool_config
+            .available_tool_names
+            .iter()
+            .any(|tool| tool == "Agent" || tool == "Task");
+        ai::PromptCacheLifetime::Known(if subagents {
+            ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME
+        } else {
+            settings
+                .claude_cache_ttl()
+                .map(ai::AnthropicCacheTtl::duration)
+                .or(self
+                    .task
+                    .latest_request
+                    .latest()
+                    .and_then(crate::task::LatestRequest::cache_lifetime))
+                .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
+        })
+    }
+
+    /// Tells the calls of the agent's arko tools about the main
+    /// conversation's cache, which the latest request used at `last_used`
+    /// ([`TaskContext::prompt_cache`](crate::tool::TaskContext::prompt_cache)).
+    fn publish_prompt_cache(&self, last_used: Option<tokio::time::Instant>) {
+        if let Some(host) = &self.host {
+            *host.environment.prompt_cache.lock().unwrap() =
+                crate::tool::PromptCacheWindow::new(self.cache_lifetime(), last_used);
+        }
     }
 
     /// The opt-in cache monitor, after a request of the main conversation,
@@ -5577,7 +5731,10 @@ impl ClaudeCodeRun {
         &mut self,
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
-        let sent = match self.unsent_input()? {
+        let input = self.unsent_input()?;
+        // After a turn ended, so it starts the next request.
+        self.hand_offs.input(Stamp::now());
+        let sent = match input {
             Value::String(text) => session.send(text).await,
             content => session.send_content(content).await,
         };

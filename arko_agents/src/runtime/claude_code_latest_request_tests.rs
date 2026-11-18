@@ -63,15 +63,22 @@ async fn the_conversation_s_own_requests_are_its_latest() {
     });
     let grep_c = grep_c.latest_request.latest().unwrap().sent_at;
     assert!(started <= grep_c);
+    assert!(grep_c <= last.sent_at);
+    // A request counts from the hand-off that preceded it (here the hook
+    // of the call before), not from its first token. The fake takes 0.3
+    // seconds before it starts to answer, which the request doesn't
+    // include, so it is that much older than the end of the run.
+    let ended = chrono::Utc::now();
     assert!(
-        last.sent_at - grep_c >= chrono::Duration::milliseconds(300),
+        ended - last.sent_at >= chrono::Duration::milliseconds(300),
         "{}",
-        last.sent_at - grep_c
+        ended - last.sent_at
     );
+    assert!(last.sent_instant.is_some());
 }
 
-/// A response Claude Code got without streaming has no first token to
-/// time it, so it is timed when it comes, and is the latest all the same.
+/// A response Claude Code got without streaming has no first token, and is
+/// the latest all the same, timed from the hand-off before it.
 #[tokio::test]
 async fn a_response_that_wasn_t_streamed_is_the_latest_too() {
     let fake = Fake::new(json!([[
@@ -81,6 +88,7 @@ async fn a_response_that_wasn_t_streamed_is_the_latest_too() {
     let (task, _) = start(task).finish().await;
     let request = task.latest_request.latest().expect("a request");
     assert_eq!((request.input_tokens, request.cached_tokens), (900, 850));
+    assert!(request.sent_instant.is_some());
 }
 
 /// A compaction replaces the conversation the cache held, so the task has

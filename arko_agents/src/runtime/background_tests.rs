@@ -1138,3 +1138,258 @@ async fn a_note_sent_as_the_run_ends_stays_with_the_task() {
     drop(commands);
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A tool that keeps the prompt cache its call saw.
+#[derive(Debug, Default)]
+struct SeesCache(std::sync::Mutex<Option<crate::tool::PromptCacheWindow>>);
+
+#[async_trait]
+impl Tool for SeesCache {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "sees_cache".into(),
+            description: "Looks at the prompt cache".into(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: true,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        *self.0.lock().unwrap() = Some(context.prompt_cache);
+        Ok("seen".into())
+    }
+}
+
+/// Runs a task that calls `sees_cache` once, with `prepare` setting up its
+/// loop, and gives what the call saw of the prompt cache.
+async fn cache_seen_by_a_call(
+    config: AgentConfig,
+    prepare: impl FnOnce(&mut AgentLoop),
+) -> (crate::tool::PromptCacheWindow, Task) {
+    slow_cache_seen_by_a_call(config, Duration::ZERO, prepare).await
+}
+
+/// As [`cache_seen_by_a_call`], when the response that makes the call takes
+/// `delay` to come.
+async fn slow_cache_seen_by_a_call(
+    config: AgentConfig,
+    delay: Duration,
+    prepare: impl FnOnce(&mut AgentLoop),
+) -> (crate::tool::PromptCacheWindow, Task) {
+    use futures::StreamExt;
+    let workspace = workspace();
+    let seen = Arc::new(SeesCache::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(seen.clone());
+    let (mut agent, _events, _commands) = agent(config, registry, &workspace);
+    prepare(&mut agent);
+    let call = turn(vec![native_call(
+        "look",
+        "sees_cache",
+        serde_json::json!({}),
+    )]);
+    // The response comes whole after the delay.
+    let call = call.map(|stream| {
+        futures::stream::once(tokio::time::sleep(delay))
+            .filter_map(|()| async { None })
+            .chain(stream)
+            .boxed()
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .extend([call, complete()]);
+    let task = timeout(delay + Duration::from_secs(30), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+    let window = seen.0.lock().unwrap().expect("the call ran");
+    (window, task)
+}
+
+/// A call gets the task's cache lifetime and the monotonic time of the
+/// request that made it, which a tool that waits counts from.
+#[tokio::test]
+async fn a_call_sees_its_tasks_prompt_cache() {
+    let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(1800));
+    let started = tokio::time::Instant::now();
+    let (window, task) = cache_seen_by_a_call(config, |_| {}).await;
+    assert_eq!(
+        window.lifetime,
+        ai::PromptCacheLifetime::Known(Duration::from_secs(1800))
+    );
+    // The request that made the call came before the one that completed the task.
+    let used = window.last_used.expect("a request on record");
+    let latest = task.latest_request.latest().unwrap().sent_instant.unwrap();
+    assert!(
+        started <= used && used <= latest,
+        "{started:?} {used:?} {latest:?}"
+    );
+}
+
+/// A response that takes 10 minutes to come leaves an hour's cache 44 minutes
+/// of wait, not the 54 a cache just used leaves. The time before the
+/// response is first seen counts, however the response comes.
+#[tokio::test(start_paused = true)]
+async fn a_slow_response_uses_up_the_caches_time() {
+    let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(3600));
+    let sent = tokio::time::Instant::now();
+    let (window, _) = slow_cache_seen_by_a_call(config, Duration::from_secs(600), |_| {}).await;
+    // The anchor is when the request went out, not when its response came.
+    let anchor = window.last_used.expect("an anchor");
+    assert!(
+        anchor - sent < Duration::from_secs(1),
+        "{:?}",
+        anchor - sent
+    );
+    let left = window.cap(tokio::time::Instant::now(), Duration::from_secs(4 * 3600));
+    assert!(
+        (Duration::from_secs(44 * 60 - 1)..=Duration::from_secs(44 * 60)).contains(&left),
+        "{left:?}"
+    );
+}
+
+/// A conversation with its cache off, which a request's own setting can
+/// turn on again, has no cache to keep warm.
+#[tokio::test]
+async fn a_conversation_with_caching_off_has_no_cache_for_a_call_to_wait_inside() {
+    let hour = || {
+        let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+        config.llm_config.model = ai::Model::anthropic_claude_opus_5_5();
+        config.llm_config.generation_config =
+            ai::GenerationConfig::default().with_long_prompt_cache(true);
+        config
+    };
+    let hour_lifetime = ai::PromptCacheLifetime::Known(Duration::from_secs(3600));
+    let (window, _) = cache_seen_by_a_call(hour(), |_| {}).await;
+    assert_eq!(window.lifetime, hour_lifetime);
+    let (window, _) = cache_seen_by_a_call(hour(), |agent| {
+        agent.task.conversation.enable_cache = false;
+    })
+    .await;
+    assert_eq!(window.lifetime, ai::PromptCacheLifetime::Disabled);
+    // The agent's own setting wins over the conversation's.
+    let mut on = hour();
+    on.llm_config.generation_config.prompt_caching = Some(true);
+    let (window, _) = cache_seen_by_a_call(on, |agent| {
+        agent.task.conversation.enable_cache = false;
+    })
+    .await;
+    assert_eq!(window.lifetime, hour_lifetime);
+}
+
+/// A request to the refusal fallback's model used that model's cache, which
+/// the task's latest request doesn't record, so a call it makes gets the
+/// fallback's lifetime and no time for the cache's age.
+#[tokio::test]
+async fn a_call_after_a_fallback_request_sees_the_fallbacks_cache() {
+    use futures::StreamExt;
+    let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(1800));
+    config.refusal_fallback = Some(crate::agent_config::AgentLLMConfig {
+        model: ai::Model::openai_gpt_6_sol(),
+        generation_config: ai::GenerationConfig::default()
+            .with_prompt_cache_lifetime(Duration::from_secs(600)),
+    });
+    let (window, _) = cache_seen_by_a_call(config, |agent| {
+        let refused = super::retry_tests::refused_response(
+            ai::Message::new_assistant(""),
+            super::retry_tests::model_refusal(),
+        );
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Ok(futures::stream::iter([Ok(refused)]).boxed()));
+    })
+    .await;
+    assert_eq!(
+        window.lifetime,
+        ai::PromptCacheLifetime::Known(Duration::from_secs(600))
+    );
+    assert_eq!(window.last_used, None);
+}
+
+/// A long wait for a job, which the agent asked for as long as it likes,
+/// ends when context reaches the agent through the runtime's command channel,
+/// and its result says nothing of a cut.
+#[tokio::test]
+async fn a_long_terminal_wait_ends_when_context_arrives() {
+    let workspace = workspace();
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.join("jobs"))).unwrap();
+    let mut registry = ToolRegistry::new();
+    jobs.register_tools(&mut registry);
+    let mut config = config(ToolCallingMode::Native, &["terminal_control"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(1800));
+    let task = Task::new(
+        config,
+        "Wait for the build.".into(),
+        workspace.clone(),
+        None,
+    );
+    let job = jobs
+        .adopt_call(
+            task.id,
+            Uuid::new_v4(),
+            "build",
+            "build".into(),
+            crate::stop::StopSource::new(),
+            Box::pin(std::future::pending::<crate::terminal::CallOutput>()),
+        )
+        .unwrap();
+    let (mut agent, mut events, commands) =
+        super::tool_call_tests::agent_for(task, registry, Arc::new(ai::LLMClient::new()));
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "wait",
+            "terminal_control",
+            serde_json::json!({
+                "action": "wait",
+                "job_id": job.job_id.to_string(),
+                "revision": job.revision.to_string(),
+                // 4 hours, over the 27 minutes the cache allows.
+                "wait_ms": "14400000",
+            }),
+        )]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    wait_for(&mut events, &mut seen, |event| {
+        matches!(event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "terminal_control")
+            .then_some(())
+    })
+    .await;
+    commands
+        .send(UserCommand::InjectContext {
+            content: "The user wrote.".into(),
+        })
+        .await
+        .unwrap();
+    let task = timeout(Duration::from_secs(20), run)
+        .await
+        .expect("the wait ends when the context arrives")
+        .unwrap()
+        .unwrap();
+    let result = &result_for(&task.conversation, "wait")[0].output;
+    let result: Value = serde_json::from_str(result).unwrap();
+    assert_eq!(result["state"], "running");
+    assert!(result.get("note").is_none(), "{result}");
+    std::fs::remove_dir_all(workspace).unwrap();
+}

@@ -1159,8 +1159,9 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Wait for a revision change, input request, or completion. Never more than 30s.
-    /// The wait deadline does not terminate the process.
+    /// Waits for a revision change, input request, or completion, for at
+    /// most `duration`. The wait deadline does not terminate the process.
+    /// `terminal_control wait` bounds its deadline by the agent's prompt cache.
     pub async fn wait(
         &self,
         owner: Uuid,
@@ -1168,18 +1169,51 @@ impl TerminalManager {
         revision: u64,
         duration: Duration,
     ) -> Result<TerminalSnapshot> {
+        // A duration too long for the clock has no end. The time counts from
+        // here, before the job is looked up and its record locked.
+        let deadline = tokio::time::Instant::now().checked_add(duration);
+        Ok(self.wait_for_change(owner, id, revision, deadline).await?.0)
+    }
+
+    /// [`wait`](Self::wait) until `deadline` (none is no end), and whether it
+    /// passed with the job unchanged. The deadline is a moment the caller
+    /// fixed, so the time the lookup and the record's lock take comes out of
+    /// the wait. Updates that leave the revision and state alone (part of an
+    /// input declaration, say) don't end the wait or restart its time.
+    pub(crate) async fn wait_for_change(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+        revision: u64,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(TerminalSnapshot, bool)> {
         let job = self.owned(owner, id)?;
         let mut changes = job.changes.clone();
         changes.borrow_and_update();
-        let should_wait = {
-            let data = job.data.lock().unwrap();
-            data.record.revision == revision && !data.record.state.is_terminal()
-        };
-        if should_wait {
-            let _ = tokio::time::timeout(duration.min(Duration::from_secs(30)), changes.changed())
-                .await;
+        let mut timed_out = false;
+        loop {
+            let unchanged = {
+                let data = job.data.lock().unwrap();
+                data.record.revision == revision && !data.record.state.is_terminal()
+            };
+            if !unchanged {
+                break;
+            }
+            let woke = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, changes.changed()).await,
+                None => Ok(changes.changed().await),
+            };
+            match woke {
+                Ok(Ok(())) => {}
+                // The job's notifier is gone, so nothing will change.
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+            }
         }
-        self.status(owner, id, None)
+        Ok((self.status(owner, id, None)?, timed_out))
     }
 
     pub fn forget(&self, owner: Uuid, id: Uuid) -> Result<()> {
@@ -1339,3 +1373,5 @@ fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Resul
 mod monitor_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wait_tests;
