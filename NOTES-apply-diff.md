@@ -16,9 +16,13 @@ Deleted in the branch's last commit.
   (copied line numbers, a match apart from indentation) and names the first line that differs.
 - Bytes outside the matched lines are kept: a byte-order mark, line breaks, a missing last line
   break. In a CRLF file the search lines match CRLF lines and the replacement lines get CRLF.
-- The write is atomic (a temporary file in the same directory, renamed over the file). It keeps
-  the file's permissions, writes through a symbolic link so the link stays a link, and refuses
-  a file the process can't write, as an in-place write would.
+- A save never widens who can read a file. It keeps the owner, group, permissions, ACLs and hard
+  links, writes through a symbolic link so the link stays a link, and refuses a file the process
+  can't write, as an in-place write would. A temporary file renamed over the file is used only
+  where it keeps all of that (on Linux, an own file with one link, a settable group and no
+  extended attributes on either file), and the file is written in place otherwise. The temporary
+  file is private until it has the file's permissions, before any byte is written.
+- Anything but a regular file is refused before it is read.
 - The output carries an `EditReceipt` covering every block, as edit_file's does.
 - The description is a few plain sentences and one short example. Rare cases (a file line that
   is itself a marker) are explained by the error that meets them.

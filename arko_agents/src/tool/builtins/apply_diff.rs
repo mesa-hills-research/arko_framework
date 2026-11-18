@@ -7,9 +7,12 @@
 //! line breaks the replacement lines get. Every block matches the file as it
 //! was before the call, so blocks can't overlap, and their order in the diff
 //! doesn't matter. A call applies every block or none. It reads the file,
-//! checks every block and writes the file once, atomically, and an error names
-//! each block that failed and why. Everything outside the matched lines is
-//! kept byte for byte, a byte-order mark and the last line break included.
+//! checks every block and writes the file once, and an error names each block
+//! that failed and why. Everything outside the matched lines is kept byte for
+//! byte, a byte-order mark and the last line break included. The write keeps
+//! who can read and write the file. A new file renamed over it replaces it in
+//! one step where the new file can have its owner, group, permissions and
+//! lack of ACLs and links (on Linux), and elsewhere it is written in place.
 //!
 //! A line of the file that is itself a marker is written in a block with a
 //! backslash before it (`\=======`), as the error that meets one says. Blocks
@@ -660,12 +663,10 @@ impl Tool for ApplyDiffTool {
         contents.extend_from_slice(bom);
         contents.extend_from_slice(edited.as_bytes());
         let target = absolute_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::utils::rewrite_file_atomically(&target, &contents)
-        })
-        .await
-        .map_err(|error| ToolError::ExecutionFailed(format!("The write stopped: {error}")))?
-        .map_err(io)?;
+        tokio::task::spawn_blocking(move || crate::utils::rewrite_file(&target, &contents))
+            .await
+            .map_err(|error| ToolError::ExecutionFailed(format!("The write stopped: {error}")))?
+            .map_err(io)?;
         let receipt = ToolReceipt::Edit(edit_receipt(text, &edited, &replaced));
 
         let starts: Vec<usize> = replaced
@@ -1272,6 +1273,63 @@ mod tests {
         if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
             ws.refused_diff("run.sh", &block("echo three", "echo four"))
                 .await;
+        }
+    }
+
+    /// Who can read and write the file stays as it was. A file of another
+    /// group keeps its group and permissions, a hard link sees the edit, and
+    /// an ACL is kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_write_keeps_who_can_read_the_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let ws = Workspace::new();
+        ws.write("shared.txt", b"one\n");
+        let path = ws.root.join("shared.txt");
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8(groups.stdout)
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .map(|group| group.parse::<u32>().unwrap());
+        match other {
+            Some(group) => {
+                std::os::unix::fs::chown(&path, None, Some(group)).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+                ws.apply("shared.txt", &block("one", "two")).await;
+                let metadata = std::fs::metadata(&path).unwrap();
+                assert_eq!((metadata.gid(), metadata.mode() & 0o7777), (group, 0o640));
+                assert_eq!(ws.text("shared.txt"), "two\n");
+            }
+            None => eprintln!("skipped the other group, since the process has one group"),
+        }
+
+        ws.write("a.txt", b"one\n");
+        std::fs::hard_link(ws.root.join("a.txt"), ws.root.join("b.txt")).unwrap();
+        ws.apply("a.txt", &block("one", "two")).await;
+        assert_eq!(ws.text("b.txt"), "two\n");
+        assert_eq!(std::fs::metadata(ws.root.join("a.txt")).unwrap().nlink(), 2);
+
+        ws.write("acl.txt", b"one\n");
+        let acl = ws.root.join("acl.txt");
+        let set = std::process::Command::new("setfacl")
+            .args(["-m", "u:nobody:r"])
+            .arg(&acl)
+            .output();
+        match set {
+            Ok(set) if set.status.success() => {
+                ws.apply("acl.txt", &block("one", "two")).await;
+                let listed = std::process::Command::new("getfacl")
+                    .arg(&acl)
+                    .output()
+                    .unwrap();
+                let listed = String::from_utf8(listed.stdout).unwrap();
+                assert!(listed.contains("user:nobody:r--"), "{listed}");
+                assert_eq!(ws.text("acl.txt"), "two\n");
+            }
+            _ => eprintln!(
+                "skipped the ACL, since setfacl isn't here or the file system has no ACLs"
+            ),
         }
     }
 
