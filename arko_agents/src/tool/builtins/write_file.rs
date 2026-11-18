@@ -14,25 +14,40 @@ const CONTENT_PARAM_NAME: &str = "content";
 /// offered `edit_file`.
 pub const EDIT_FILE_HINT: &str = "To change part of a file, use `edit_file`.";
 
+/// The sentence `write_file`'s description gains when the agent is also
+/// offered `apply_diff`.
+pub const APPLY_DIFF_HINT: &str = "To change part of a file, use `apply_diff`.";
+
 /// `write_file`'s definition as an agent with `tool_config` is shown it.
 /// The built-in `write_file` (not a host's own tool of that name) gains
-/// [`EDIT_FILE_HINT`] when the agent is also offered `edit_file`. Any other
-/// definition is returned unchanged. As with
+/// [`APPLY_DIFF_HINT`] when the agent is also offered `apply_diff`, else
+/// [`EDIT_FILE_HINT`] when it is offered `edit_file`. Any other definition
+/// is returned unchanged. As with
 /// [`read_file::offered_definition`](super::read_file::offered_definition),
 /// the same configuration always shows the same definition.
 pub fn offered_definition(
     mut definition: ToolDefinition,
     tool_config: &crate::agent_config::AgentToolConfig,
 ) -> ToolDefinition {
-    if definition.name == WRITE_FILE_TOOL_NAME
-        && matches!(definition.tool_type_details, ToolTypeDetails::BuiltIn)
-        && tool_config
+    if definition.name != WRITE_FILE_TOOL_NAME
+        || !matches!(definition.tool_type_details, ToolTypeDetails::BuiltIn)
+    {
+        return definition;
+    }
+    let offered = |tool: &str| {
+        tool_config
             .available_tool_names
             .iter()
-            .any(|name| name == super::EDIT_FILE_TOOL_NAME)
-    {
-        definition.description = format!("{} {EDIT_FILE_HINT}", definition.description);
-    }
+            .any(|name| name == tool)
+    };
+    let hint = if offered(super::APPLY_DIFF_TOOL_NAME) {
+        APPLY_DIFF_HINT
+    } else if offered(super::EDIT_FILE_TOOL_NAME) {
+        EDIT_FILE_HINT
+    } else {
+        return definition;
+    };
+    definition.description = format!("{} {hint}", definition.description);
     definition
 }
 
@@ -177,7 +192,7 @@ mod tests {
     use crate::agent_config::AgentToolConfig;
 
     #[test]
-    fn the_description_points_to_edit_file_when_it_is_offered() {
+    fn the_description_points_to_the_editing_tool_offered() {
         let config = |names: &[&str]| AgentToolConfig {
             available_tool_names: names.iter().map(|name| name.to_string()).collect(),
             ..AgentToolConfig::default()
@@ -189,12 +204,20 @@ mod tests {
             offered.description,
             format!("{} {EDIT_FILE_HINT}", plain.description)
         );
-        for names in [&["write_file"][..], &["write_file", "apply_diff"]] {
+        // apply_diff, when it is offered, with edit_file or without.
+        for names in [
+            &["write_file", "apply_diff"][..],
+            &["edit_file", "write_file", "apply_diff"],
+        ] {
             assert_eq!(
                 offered_definition(plain.clone(), &config(names)).description,
-                plain.description
+                format!("{} {APPLY_DIFF_HINT}", plain.description)
             );
         }
+        assert_eq!(
+            offered_definition(plain.clone(), &config(&["write_file"])).description,
+            plain.description
+        );
         // A host's own write_file is shown as it is.
         let custom = ToolDefinition {
             tool_type_details: ToolTypeDetails::DeveloperDefined,
