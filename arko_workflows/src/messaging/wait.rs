@@ -39,10 +39,6 @@ pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(270);
 /// The longest time limit the builder accepts, 24 hours.
 pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The least time an automatic limit leaves between the end of a wait and
-/// the end of the cache lifetime, for the model request that follows.
-const MIN_CACHE_MARGIN: Duration = Duration::from_secs(30);
-
 /// The least an automatic limit leaves for a wait, however long ago the last
 /// model request was.
 const MIN_AUTO_WAIT: Duration = Duration::from_secs(1);
@@ -63,12 +59,13 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// and a long wait is several of them. The agent calls `wait_for_message`
 /// again, keeping the cache warm. `Auto` keeps each wait inside the agent's
 /// lifetime, from [`LLMClient::prompt_cache_lifetime`] for its model and
-/// settings, calculated as the lifetime minus a margin of a tenth of it, at least 30
-/// seconds. That is 4 minutes 30 seconds for a 5-minute cache (Anthropic's
-/// default, and OpenAI's with an API key before GPT-5.6, reported
-/// conservatively), 27 minutes for a 30-minute cache (OpenAI GPT-5.6 and
-/// later, and ChatGPT OAuth), and 54 minutes with Anthropic's 1-hour TTL, an
-/// explicit opt-in. A host's
+/// settings, calculated as the lifetime minus a margin of a tenth of it, at
+/// least 30 seconds ([`PromptCacheLifetime::longest_wait`]). That is 4
+/// minutes 30 seconds for a 5-minute cache (Anthropic's default, and
+/// OpenAI's with an API key before GPT-5.6, reported conservatively), 27
+/// minutes for a 30-minute cache (OpenAI GPT-5.6 and later, and ChatGPT
+/// OAuth), and 54 minutes with Anthropic's 1-hour TTL, an explicit opt-in. A
+/// host's
 /// `GenerationConfig::prompt_cache_lifetime_seconds` replaces the lifetime.
 /// With an unknown lifetime, or caching off, it is
 /// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]. With nothing to keep warm, a
@@ -105,8 +102,8 @@ impl WaitForMessageTimeout {
     pub fn resolve(self, lifetime: PromptCacheLifetime) -> Duration {
         match (self, lifetime) {
             (Self::Fixed(timeout), _) => timeout,
-            (Self::Auto, PromptCacheLifetime::Known(lifetime)) => lifetime
-                .saturating_sub((lifetime / 10).max(MIN_CACHE_MARGIN))
+            (Self::Auto, PromptCacheLifetime::Known(_)) => lifetime
+                .longest_wait()
                 .clamp(Duration::from_secs(1), MAX_WAIT_FOR_MESSAGE_TIMEOUT),
             (Self::Auto, PromptCacheLifetime::Unknown | PromptCacheLifetime::Disabled) => {
                 DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT
@@ -466,6 +463,7 @@ mod tests {
         assert_eq!(known(48 * 60 * MINUTE), MAX_WAIT_FOR_MESSAGE_TIMEOUT);
         for lifetime in [PromptCacheLifetime::Unknown, PromptCacheLifetime::Disabled] {
             assert_eq!(auto.resolve(lifetime), DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT);
+            assert_eq!(lifetime.longest_wait(), DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT);
         }
         let fixed = WaitForMessageTimeout::from(Duration::from_secs(600));
         assert_eq!(
