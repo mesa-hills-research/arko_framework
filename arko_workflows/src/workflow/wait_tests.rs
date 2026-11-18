@@ -411,7 +411,8 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
             client.clone(),
         )
     };
-    assert_eq!(limit("claude").limit().await, Duration::from_secs(600));
+    // Cut to the 5-minute cache's longest wait.
+    assert_eq!(limit("claude").limit().await, Duration::from_secs(270));
     assert_eq!(limit("fixed").limit().await, Duration::from_secs(270));
 }
 
@@ -476,10 +477,11 @@ async fn an_automatic_limit_follows_the_run_s_own_model() {
     assert_eq!(result, "No messages after 270 s.");
 }
 
-/// However long ago the run's last model request was, an automatic limit
-/// leaves a wait a second.
+/// An automatic limit leaves a wait a second while the cache lasts that
+/// long, however long ago the run's last model request was, and nothing once
+/// the cache has lapsed.
 #[tokio::test(start_paused = true)]
-async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
+async fn an_automatic_limit_leaves_a_wait_a_second_only_inside_the_cache() {
     let workspace = Workspace::new();
     let workflow = builder(&workspace, &["lead", "worker"]).build().unwrap();
     let context = workflow.context();
@@ -489,15 +491,73 @@ async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
         "lead".to_string(),
         Arc::new(LLMClient::new()),
     );
-    // The limit is 27 minutes, and the model took longer than that to call
-    // the tool.
+    // The limit is 27 minutes of a 30-minute cache. The model took 28
+    // minutes to call the tool, so the limit is spent and the cache holds
+    // for 2 more.
     tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
-    tokio::time::advance(Duration::from_secs(30 * 60)).await;
+    tokio::time::advance(Duration::from_secs(28 * 60)).await;
     let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
     let started = tokio::time::Instant::now();
     let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
     assert_eq!(result, "No messages after 1 s.");
     assert_eq!(started.elapsed(), Duration::from_secs(1));
+    // The model took 30 minutes, so the cache lapsed and no wait is left.
+    tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
+    tokio::time::advance(Duration::from_secs(30 * 60)).await;
+    let started = tokio::time::Instant::now();
+    let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
+    assert_eq!(result, "No messages after 0 s.");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+}
+
+/// A fixed limit longer than what is left of the cache is cut to it, in
+/// the workflow's setting and an agent's, for a fresh cache, a part spent
+/// and a lapsed one. A shorter one is kept.
+#[tokio::test(start_paused = true)]
+async fn a_fixed_limit_never_runs_past_the_cache() {
+    let workspace = Workspace::new();
+    let client = Arc::new(LLMClient::new());
+    // GPT-5.6 Luna's 30-minute cache gives 27 minutes from a request.
+    for (limit, modelled, expected) in [
+        // Longer than the cache, so cut to it.
+        (Duration::from_secs(4 * 3600), 0, 27 * 60),
+        (Duration::from_secs(4 * 3600), 600, 17 * 60),
+        // Inside what is left, so kept.
+        (Duration::from_secs(300), 600, 300),
+        (Duration::from_secs(20 * 60), 600, 17 * 60),
+        // Past the margin, so nothing is left.
+        (Duration::from_secs(4 * 3600), 28 * 60, 0),
+        (Duration::from_secs(4 * 3600), 40 * 60, 0),
+    ] {
+        for per_agent in [false, true] {
+            let setup = builder(&workspace, &["lead", "worker"]);
+            let workflow = if per_agent {
+                setup.agent_wait_for_message_timeout("lead", limit)
+            } else {
+                setup.wait_for_message_timeout(limit)
+            }
+            .build()
+            .unwrap();
+            let context = workflow.context();
+            let lead = run(&workflow, "lead");
+            let tool = WaitForMessageTool::new(context.clone(), "lead".to_string(), client.clone());
+            tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
+            tokio::time::advance(Duration::from_secs(modelled)).await;
+            let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
+            let started = tokio::time::Instant::now();
+            tool.execute(&task_context, HashMap::new()).await.unwrap();
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(expected),
+                "{limit:?} after {modelled} s, {}",
+                if per_agent {
+                    "the agent's"
+                } else {
+                    "the workflow's"
+                }
+            );
+        }
+    }
 }
 
 /// A wait that found a message not yet forwarded (the run's command channel
