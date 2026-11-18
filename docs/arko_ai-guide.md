@@ -152,6 +152,10 @@ implicit cache, which no request configures. Gemini and other OpenRouter models 
 `Unknown`. Models without caching, and caching turned off where the request can turn it off
 (Anthropic, Claude on OpenRouter, GPT-5.6 and later with an API key), report `Disabled`. The `prompt_cache`
 module has the constants and the providers' documentation links.
+`PromptCacheLifetime::longest_wait()` is the longest an agent may wait before its next request and
+still find the prompt cached. It is the lifetime less a margin of a tenth of it, at least 30 seconds,
+so 4 min 30 s for 5 minutes and 27 min for 30 minutes. An unknown lifetime, or caching off, gives the
+5-minute cache's.
 
 `GenerationConfig::with_long_prompt_cache(true)` asks for the longer of the provider's two
 lifetimes on every route that has two. That is 1 hour on Claude (Anthropic, OpenRouter and

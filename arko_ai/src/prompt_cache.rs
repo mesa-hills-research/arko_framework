@@ -88,6 +88,30 @@ pub const OPENAI_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(
 /// 40-minute idle gaps.
 pub const CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
+impl PromptCacheLifetime {
+    /// The longest an agent may wait for something (a message, a job)
+    /// before its next model request and still find its prompt cached. It is
+    /// the lifetime less a margin for that request, the larger of a tenth of
+    /// the lifetime and [`MIN_CACHE_MARGIN`]. That is 4 minutes 30 seconds
+    /// for a 5-minute cache, 27 minutes for 30 minutes and 54 minutes for an
+    /// hour. It counts from the cache's last use, the agent's last request.
+    ///
+    /// With an unknown lifetime, or caching off, it is the 5-minute
+    /// cache's, since there is nothing to keep warm and a bounded wait lets
+    /// the agent look around now and then.
+    pub fn longest_wait(self) -> Duration {
+        let lifetime = match self {
+            Self::Known(lifetime) => lifetime,
+            Self::Unknown | Self::Disabled => ANTHROPIC_PROMPT_CACHE_LIFETIME,
+        };
+        lifetime.saturating_sub((lifetime / 10).max(MIN_CACHE_MARGIN))
+    }
+}
+
+/// The least that [`PromptCacheLifetime::longest_wait`] leaves between the
+/// end of a wait and the end of the lifetime, 30 seconds.
+pub const MIN_CACHE_MARGIN: Duration = Duration::from_secs(30);
+
 impl AnthropicCacheTtl {
     /// How long the entry lasts after its last use.
     pub fn duration(self) -> Duration {
@@ -404,6 +428,25 @@ mod tests {
         assert_eq!(saved["prompt_cache_lifetime_seconds"], 3600);
         let loaded: GenerationConfig = serde_json::from_value(saved).unwrap();
         assert_eq!(loaded.prompt_cache_lifetime_seconds, Some(3600));
+    }
+
+    #[test]
+    fn the_longest_wait_leaves_a_margin_of_a_tenth_or_30_seconds() {
+        let seconds = Duration::from_secs;
+        assert_eq!(Known(5 * MINUTE).longest_wait(), seconds(270));
+        assert_eq!(Known(30 * MINUTE).longest_wait(), 27 * MINUTE);
+        assert_eq!(Known(60 * MINUTE).longest_wait(), 54 * MINUTE);
+        assert_eq!(
+            Known(12 * 60 * MINUTE).longest_wait(),
+            seconds(12 * 3600 * 9 / 10)
+        );
+        // A lifetime under 5 minutes keeps the 30 seconds, and one under 30
+        // seconds has no wait.
+        assert_eq!(Known(2 * MINUTE).longest_wait(), seconds(90));
+        assert_eq!(Known(seconds(20)).longest_wait(), Duration::ZERO);
+        // The 5-minute cache's, when there is no lifetime to keep.
+        assert_eq!(Unknown.longest_wait(), seconds(270));
+        assert_eq!(Disabled.longest_wait(), seconds(270));
     }
 
     #[test]
