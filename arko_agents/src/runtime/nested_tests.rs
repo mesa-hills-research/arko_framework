@@ -1009,17 +1009,22 @@ async fn a_start_event_holds_its_arguments_cut() {
     let log = Arc::new(Log::default());
     let (events, mut received) = mpsc::channel(1000);
     let calls = nested_calls(registry(&log, &[("a", returns("a ran"))]), events);
-    let big = "é".repeat(512 * 1024);
-    for _ in 0..100 {
+    let big = "é".repeat(64 * 1024);
+    for _ in 0..20 {
         let mut params = HashMap::from([
             ("content".to_string(), Value::String(big.clone())),
             ("list".to_string(), serde_json::json!([big.clone()])),
             ("n".to_string(), serde_json::json!(1)),
         ]);
-        // Arguments the tool doesn't take, many of them.
-        for extra in 0..50 {
+        // Arguments the tool doesn't take, many of them, and one whose name
+        // is long.
+        for extra in 0..40 {
             params.insert(format!("x{extra:02}"), Value::String(big.clone()));
         }
+        params.insert(
+            format!("a{}", "n".repeat(1024 * 1024)),
+            serde_json::json!(0),
+        );
         calls.call("a", params).await;
     }
     drop(calls);
@@ -1044,9 +1049,20 @@ async fn a_start_event_holds_its_arguments_cut() {
                     .unwrap()
                     .ends_with(" more arguments")
             );
-            assert!(*parameters_bytes > 50 * 1024 * 1024);
+            assert!(*parameters_bytes > 40 * 128 * 1024);
+            assert!(
+                parameters
+                    .keys()
+                    .any(|name| name.starts_with("annn") && name.ends_with(" more bytes left out]"))
+            );
         }
         most = most.max(serde_json::to_string(&event).unwrap().len());
     }
     assert!(most < 6 * NESTED_OUTPUT_BYTES, "an event of {most} bytes");
+    // The size counted is the arguments' JSON.
+    let params = HashMap::from([("say".to_string(), Value::String("a \"quote\"".into()))]);
+    assert_eq!(
+        super::super::nested::json_bytes(&params),
+        serde_json::to_string(&params).unwrap().len()
+    );
 }

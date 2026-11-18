@@ -423,41 +423,56 @@ fn cut(text: &str) -> &str {
     &text[..end]
 }
 
-/// A call's arguments as its start event holds them, and their whole size
-/// as JSON. Each is cut at [`NESTED_OUTPUT_BYTES`] (an argument longer
-/// than that, or one that isn't text whose JSON is, becomes text that ends
-/// saying how many bytes were left out), in the order of their names, and
-/// once they hold four times that, the rest are left out, with an argument
+/// The longest argument name a start event holds whole, in bytes.
+const NESTED_NAME_BYTES: usize = 256;
+
+/// A call's arguments as its start event holds them, and the size of them
+/// all as JSON. Each value is cut at [`NESTED_OUTPUT_BYTES`] and each name
+/// at 256 bytes (a value longer than that, or one that isn't text whose
+/// JSON is, becomes text that ends saying how many bytes were left out, and
+/// so does a name). In the order of their names, once they hold four times
+/// [`NESTED_OUTPUT_BYTES`], the rest are left out, with an argument
 /// `(left out)` saying how many.
 fn bounded(params: &HashMap<String, Value>) -> (HashMap<String, Value>, usize) {
+    let marked = |text: &str, most: usize| {
+        let mut end = text.len().min(most);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}[{} more bytes left out]", &text[..end], text.len() - end)
+    };
     let mut names: Vec<&String> = params.keys().collect();
     names.sort();
-    let mut total = 0;
     let mut held = 0;
     let mut left_out = 0;
     let mut kept = HashMap::new();
     for name in names {
-        let value = &params[name];
-        let text = match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
-        total += name.len() + text.len();
         if held >= 4 * NESTED_OUTPUT_BYTES {
             left_out += 1;
             continue;
         }
-        let value = if text.len() <= NESTED_OUTPUT_BYTES {
-            value.clone()
-        } else {
-            let part = cut(&text);
-            Value::String(format!(
-                "{part}[{} more bytes left out]",
-                text.len() - part.len()
-            ))
+        let value = &params[name];
+        let value = match value {
+            Value::String(text) if text.len() > NESTED_OUTPUT_BYTES => {
+                Value::String(marked(text, NESTED_OUTPUT_BYTES))
+            }
+            Value::String(_) => value.clone(),
+            other => {
+                let text = other.to_string();
+                if text.len() > NESTED_OUTPUT_BYTES {
+                    Value::String(marked(&text, NESTED_OUTPUT_BYTES))
+                } else {
+                    other.clone()
+                }
+            }
         };
-        held += name.len() + value.to_string().len();
-        kept.insert(name.clone(), value);
+        let name = if name.len() > NESTED_NAME_BYTES {
+            marked(name, NESTED_NAME_BYTES)
+        } else {
+            name.clone()
+        };
+        held += name.len() + json_bytes(&value);
+        kept.insert(name, value);
     }
     if left_out > 0 {
         kept.insert(
@@ -465,7 +480,24 @@ fn bounded(params: &HashMap<String, Value>) -> (HashMap<String, Value>, usize) {
             Value::String(format!("{left_out} more arguments")),
         );
     }
-    (kept, total)
+    (kept, json_bytes(params))
+}
+
+/// The size of `value` as JSON, counted without writing it out.
+pub(super) fn json_bytes(value: &impl serde::Serialize) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
 }
 
 /// The end event of a nested call, with at most [`NESTED_OUTPUT_BYTES`] of
