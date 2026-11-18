@@ -112,7 +112,8 @@ Each provider takes its own `ReasoningConfig` variant, built with
 minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5) and
 returns no thought summaries. An explicit level is validated against the model. Only
 Gemini 4 Hydrogen takes `GeminiThinkingLevel::XHigh`, and the Gemini 4 models reject
-`Minimal`.
+`Minimal`. `GeminiThinkingLevel` is non-exhaustive since 0.3.0, so a `match` on it outside
+arko_ai needs a `_` arm.
 
 ### Reasoning summaries
 

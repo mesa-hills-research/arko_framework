@@ -53,8 +53,10 @@ pub enum AnthropicReasoningEffort {
 /// only Gemini 4 Hydrogen takes `XHigh`.
 ///
 /// Supported values are validated against the selected model when a request
-/// is built.
+/// is built. Google adds levels with new models, so the enum is
+/// non-exhaustive, and a `match` on it outside this crate needs a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum GeminiThinkingLevel {
     #[serde(rename = "MINIMAL")]
     Minimal,
