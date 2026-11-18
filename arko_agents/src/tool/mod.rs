@@ -11,6 +11,7 @@ pub mod definition;
 pub mod error;
 pub mod interceptor;
 pub mod middleware;
+pub mod prompt_cache;
 pub mod receipt;
 pub mod registry;
 pub mod types;
@@ -25,6 +26,7 @@ pub use middleware::{
     ToolCallContext, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
     ToolExecutionOutcome,
 };
+pub use prompt_cache::PromptCacheWindow;
 pub use receipt::{
     EDIT_RECEIPT_BYTES, EDIT_RECEIPT_CONTEXT, EDIT_RECEIPT_LINE_BYTES, EDIT_RECEIPT_LINES,
     EditHunk, EditLine, EditReceipt, LineChange, ToolReceipt,
@@ -361,6 +363,10 @@ pub struct TaskContext<'a> {
     /// shows the model only a short preview of a very long tool result. A
     /// tool with long results can keep them short for it.
     pub runs_in_claude_code: bool,
+    /// How long the task's prompt cache lasts and when its latest model
+    /// request used it. A tool that waits keeps the wait inside it. Unknown
+    /// in Claude Code, which chooses its own lifetime.
+    pub prompt_cache: PromptCacheWindow,
 }
 
 impl<'a> TaskContext<'a> {
@@ -385,6 +391,7 @@ impl<'a> TaskContext<'a> {
             moved: MoveSignal::never(),
             context_arrived: ContextSignal::never(),
             runs_in_claude_code: false,
+            prompt_cache: PromptCacheWindow::default(),
         }
     }
 

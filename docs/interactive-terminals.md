@@ -41,17 +41,31 @@ through these tools. The runtime's approval and middleware path applies to
 terminal tools as to any other tool, and their results bypass tool-result
 distillers so output reaches the agent unchanged. The agent's host-side tool time
 limit does not apply to them (a job runs in the background with its own deadline,
-and a wait ends after at most 30 seconds), unless a per-tool setting gives one.
+and a wait ends before the agent's prompt cache lapses), unless a per-tool setting gives one.
 
 | Tool | Behavior |
 | --- | --- |
 | `terminal_start` | Run `command` in the task's working directory and return a job ID immediately. `terminal` selects PTY or pipes. `detect_prompts` toggles inferred input notices. `timeout_ms` sets an execution deadline. |
 | `terminal_status` | Read the job state and a bounded output window, optionally starting at `after_output`. |
 | `terminal_input` | Deliver `text`, citing the latest `revision`. For an ordinary line prompt send `\n` on Unix and in pipe mode, or `\r` in a Windows PTY. For a raw key send the key alone. A program request receives a JSON reply carrying its request ID. |
-| `terminal_control` | `list`, `wait`, `cancel`, or `forget`. A wait ends after at most 30 seconds and does not stop the job. `forget` removes a finished job from the catalog and keeps its artifacts. |
+| `terminal_control` | `list`, `wait`, `cancel`, or `forget`. A wait lasts `wait_ms` (1 second by default) and does not stop the job. New output, the job's end or an input request, context that reaches the agent and a stop end it sooner. `forget` removes a finished job from the catalog and keeps its artifacts. |
 
 Integer parameters are passed as strings in both native and text-based tool
 calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
+
+A wait may be as long as the agent asks, up to the longest wait that ends before its
+prompt cache lapses (`PromptCacheLifetime::longest_wait`, the lifetime less a margin of a
+tenth of it, at least 30 seconds). That is 4 min 30 s for a 5-minute cache and 27 min for a 30-minute cache,
+counted from the agent's latest model request, so the time the model took to call the tool
+is included. `TaskContext::prompt_cache` carries the lifetime and the request's time. With
+an unknown lifetime, or caching off, the ceiling is 4 min 30 s from the start of the wait,
+and Claude Code agents get it too, since Claude Code chooses its own lifetime. A longer
+request is cut to the ceiling. If the wait then runs out, the result has a `note` that says
+so and when the cache lapses.
+
+```text
+"note": "The wait ended after 4 min 30 s, not the 25 min you asked for, because your prompt cache lapses at 14:35:12 UTC. Call terminal_control wait again to keep waiting."
+```
 
 Each update reaches its owner once. An update that finds no runtime bound (the
 agent's turn has ended) waits for the next runtime the owner binds, such as the

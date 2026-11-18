@@ -1159,8 +1159,9 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Wait for a revision change, input request, or completion. Never more than 30s.
-    /// The wait deadline does not terminate the process.
+    /// Waits for a revision change, input request, or completion, for at
+    /// most `duration`. The wait deadline does not terminate the process.
+    /// `terminal_control wait` bounds `duration` by the agent's prompt cache.
     pub async fn wait(
         &self,
         owner: Uuid,
@@ -1176,8 +1177,7 @@ impl TerminalManager {
             data.record.revision == revision && !data.record.state.is_terminal()
         };
         if should_wait {
-            let _ = tokio::time::timeout(duration.min(Duration::from_secs(30)), changes.changed())
-                .await;
+            let _ = tokio::time::timeout(duration, changes.changed()).await;
         }
         self.status(owner, id, None)
     }
@@ -1339,3 +1339,5 @@ fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Resul
 mod monitor_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wait_tests;

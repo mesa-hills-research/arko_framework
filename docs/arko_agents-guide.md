@@ -583,7 +583,9 @@ works in both tool calling modes.
 A host that calls a tool itself (outside a runtime, or in a test) builds its context with
 `TaskContext::new(task_id, agent_name, initial_task_prompt, working_directory)`, which
 leaves the call fields unset and its stop signal one that never fires. Set the public
-fields afterwards, or the stop signal with `with_stop`. `TaskContext` is `#[non_exhaustive]`,
+fields afterwards, or the stop signal with `with_stop`. `TaskContext::prompt_cache` says how
+long the task's prompt cache lasts and when its latest request used it, so a tool that waits
+can keep the wait inside it (`terminal_control wait` does). `TaskContext` is `#[non_exhaustive]`,
 so fields can be added without breaking callers. Outside this crate it can't be built with
 a struct literal, so use `new`.
 

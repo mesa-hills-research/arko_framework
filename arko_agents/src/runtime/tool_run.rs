@@ -50,6 +50,8 @@ pub(super) struct RunEnvironment {
     /// The agent is offered `terminal_status` and `terminal_control`, which
     /// a moved call's result names.
     pub terminal_tools: bool,
+    /// The task's prompt cache. See [`TaskContext::prompt_cache`].
+    pub prompt_cache: crate::tool::PromptCacheWindow,
 }
 
 /// What a call sees of a stop, a move and context arriving.
@@ -75,6 +77,7 @@ impl RunEnvironment {
             moved: signals.moved.clone(),
             context_arrived: signals.context_arrived.clone(),
             runs_in_claude_code: self.model.provider == arko_ai::Provider::ClaudeCode,
+            prompt_cache: self.prompt_cache,
         }
     }
 

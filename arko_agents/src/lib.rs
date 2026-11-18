@@ -77,11 +77,11 @@ pub use task::{
 };
 pub use tool::{
     ContextSignal, ContextSource, ImageRoom, InterceptedResult, InterceptionFailurePolicy,
-    InterceptorConfig, MoveSignal, MoveSource, TaskContext, Tool, ToolBackground, ToolCallContext,
-    ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
-    ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput,
-    ToolParameterDefinition, ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor,
-    ToolTypeDetails, builtins,
+    InterceptorConfig, MoveSignal, MoveSource, PromptCacheWindow, TaskContext, Tool,
+    ToolBackground, ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext,
+    ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink,
+    ToolOutput, ToolParameterDefinition, ToolParameterType, ToolRecovery, ToolRegistry,
+    ToolResultInterceptor, ToolTypeDetails, builtins,
 };
 
 pub use arko_ai::ModelCallUsage;

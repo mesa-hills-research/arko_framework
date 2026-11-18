@@ -1138,3 +1138,72 @@ async fn a_note_sent_as_the_run_ends_stays_with_the_task() {
     drop(commands);
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A tool that keeps the prompt cache its call saw.
+#[derive(Debug, Default)]
+struct SeesCache(std::sync::Mutex<Option<crate::tool::PromptCacheWindow>>);
+
+#[async_trait]
+impl Tool for SeesCache {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "sees_cache".into(),
+            description: "Looks at the prompt cache".into(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: true,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        *self.0.lock().unwrap() = Some(context.prompt_cache);
+        Ok("seen".into())
+    }
+}
+
+/// A call gets the task's cache lifetime and the time of the request that
+/// made it, which a tool that waits counts from.
+#[tokio::test]
+async fn a_call_sees_its_tasks_prompt_cache() {
+    let workspace = workspace();
+    let seen = Arc::new(SeesCache::default());
+    let mut registry = ToolRegistry::new();
+    registry.register(seen.clone());
+    let mut config = config(ToolCallingMode::Native, &["sees_cache"]);
+    config.llm_config.generation_config =
+        ai::GenerationConfig::default().with_prompt_cache_lifetime(Duration::from_secs(1800));
+    let (mut agent, _events, _commands) = agent(config, registry, &workspace);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "look",
+            "sees_cache",
+            serde_json::json!({}),
+        )]),
+        complete(),
+    ]);
+    let started = std::time::SystemTime::now();
+    let task = timeout(Duration::from_secs(30), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let window = seen.0.lock().unwrap().expect("the call ran");
+    assert_eq!(
+        window.lifetime,
+        ai::PromptCacheLifetime::Known(Duration::from_secs(1800))
+    );
+    // The request that made the call came before the one that completed the task.
+    let used = window.last_used.expect("a request on record");
+    let latest = std::time::SystemTime::from(task.latest_request.latest().unwrap().sent_at);
+    assert!(
+        started <= used && used <= latest,
+        "{started:?} {used:?} {latest:?}"
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}

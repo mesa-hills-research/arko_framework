@@ -2290,6 +2290,8 @@ impl ClaudeCodeRun {
                 #[cfg(any(unix, windows))]
                 jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
+                // Claude Code chooses its cache's lifetime.
+                prompt_cache: Default::default(),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),

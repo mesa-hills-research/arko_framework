@@ -56,7 +56,7 @@ const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[
 
 impl AgentLoop {
     /// What the task's tool calls see of it. See [`RunEnvironment`].
-    fn run_environment(&self) -> Arc<RunEnvironment> {
+    fn run_environment(&self, prompt_cache: crate::tool::PromptCacheWindow) -> Arc<RunEnvironment> {
         Arc::new(RunEnvironment {
             task_id: self.task.id,
             agent_name: self.task.agent_config.name.clone(),
@@ -74,7 +74,27 @@ impl AgentLoop {
             #[cfg(any(unix, windows))]
             jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
+            prompt_cache,
         })
+    }
+
+    /// The task's prompt cache for the calls of a response. The cache was
+    /// last used by the request that made them, the latest one on record.
+    async fn prompt_cache_window(&self) -> crate::tool::PromptCacheWindow {
+        let lifetime = self
+            .llm_client
+            .prompt_cache_lifetime(
+                &self.task.conversation.model,
+                &self.task.agent_config.llm_config.generation_config,
+            )
+            .await;
+        crate::tool::PromptCacheWindow::new(
+            lifetime,
+            self.task
+                .latest_request
+                .latest()
+                .map(|request| request.sent_at.into()),
+        )
     }
 
     /// How a tool's results are intercepted, by the configured interceptor,
@@ -219,7 +239,7 @@ impl AgentLoop {
         });
         self.report_task(durable).await;
         let interruptible = runs.iter().all(|run| run.interruptible);
-        let environment = self.run_environment();
+        let environment = self.run_environment(self.prompt_cache_window().await);
         let mut outcomes: Vec<Option<_>> = runs.iter().map(|_| None).collect();
         let mut calls: futures::stream::FuturesUnordered<_> = runs
             .into_iter()
