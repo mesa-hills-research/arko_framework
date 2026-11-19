@@ -108,10 +108,10 @@ Each provider takes its own `ReasoningConfig` variant, built with
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and
 `openrouter_effort(effort)`. Without a reasoning configuration, Gemini requests send no
 `thinking_level` or `thinking_summaries`, so each model thinks at its documented default
-(medium on Gemini 4 Carbon and Argon and on 3.5 to 3.8 Flash, high on Gemini 4 Hydrogen,
-minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5) and
-returns no thought summaries. An explicit level is validated against the model. Only
-Gemini 4 Hydrogen takes `GeminiThinkingLevel::XHigh`, and the Gemini 4 models reject
+(medium on Gemini 4 Carbon and Argon and on 3.5 to 3.8 Flash, high on Gemini 4 Neon and
+Hydrogen, minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on
+2.5) and returns no thought summaries. An explicit level is validated against the model. Only
+Gemini 4 Neon and Hydrogen take `GeminiThinkingLevel::XHigh`, and the Gemini 4 models reject
 `Minimal`. `GeminiThinkingLevel` is non-exhaustive since 0.3.0, so a `match` on it outside
 arko_ai needs a `_` arm.
 

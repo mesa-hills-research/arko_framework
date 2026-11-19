@@ -719,9 +719,9 @@ impl GoogleClient {
     /// optional in the Interactions API, so without a reasoning configuration
     /// neither is sent and the model's own defaults apply, with thinking at its
     /// documented default level (medium on Gemini 4 Carbon and Argon and on
-    /// 3.5 to 3.8 Flash, high on Gemini 4 Hydrogen, minimal on 3.1 and 3.5
-    /// Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5) and no
-    /// thought summaries.
+    /// 3.5 to 3.8 Flash, high on Gemini 4 Neon and Hydrogen, minimal on 3.1
+    /// and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro, dynamic on 2.5)
+    /// and no thought summaries.
     /// https://ai.google.dev/gemini-api/docs/thinking
     /// https://ai.google.dev/static/api/interactions-v1.openapi.json
     fn resolve_thinking(
@@ -861,11 +861,11 @@ impl GoogleClient {
             )));
         }
 
-        // Only Gemini 4 Hydrogen takes XHIGH.
+        // Only Gemini 4 Neon and Hydrogen take XHIGH.
         // https://ai.google.dev/gemini-api/docs/thinking
         if matches!(level, GeminiThinkingLevel::XHigh) && !model.supports_gemini_xhigh_thinking() {
             return Err(Error::InvalidRequest(format!(
-                "Model '{}' doesn't take the XHIGH thinking level. Gemini 4 Hydrogen does.",
+                "Model '{}' doesn't take the XHIGH thinking level. Gemini 4 Neon and Hydrogen do.",
                 model.id
             )));
         }
@@ -2135,8 +2135,8 @@ mod model_rule_tests {
         );
     }
 
-    /// The Gemini 4 models take low, medium and high, Hydrogen also xhigh,
-    /// and every one rejects minimal, also from a zero budget.
+    /// The Gemini 4 models take low, medium and high, Neon and Hydrogen also
+    /// xhigh, and every one rejects minimal, also from a zero budget.
     /// https://ai.google.dev/gemini-api/docs/thinking
     #[test]
     fn gemini_4_takes_its_documented_levels() {
@@ -2148,6 +2148,7 @@ mod model_rule_tests {
         for model in [
             Model::google_gemini_4_carbon(),
             Model::google_gemini_4_argon(),
+            Model::google_gemini_4_neon(),
             Model::google_gemini_4_hydrogen(),
         ] {
             for (wanted, sent) in [

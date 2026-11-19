@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Models
+
+- Gemini 4 Neon, with a 1,048,576-token window and 65,536 output tokens per synchronous
+  response, like the other Gemini 4 models. It costs $3 per million input tokens and $15 per
+  million output tokens, and $0.15 for cached input. It thinks at low, medium, high or xhigh,
+  and at high when a request names no level. `Model::supports_gemini_xhigh_thinking` is true
+  for it, as for Hydrogen.
+
 ## 0.3.1 (2026-11-18)
 
 ### Prompt caching

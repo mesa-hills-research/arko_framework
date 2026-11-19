@@ -50,7 +50,7 @@ pub enum AnthropicReasoningEffort {
 ///
 /// Gemini 3.5 Flash supports `Minimal`, `Low`, `Medium`, and `High`, with
 /// `Medium` as its provider default. Gemini 4 models reject `Minimal`, and
-/// only Gemini 4 Hydrogen takes `XHigh`.
+/// only Gemini 4 Neon and Hydrogen take `XHigh`.
 ///
 /// Supported values are validated against the selected model when a request
 /// is built. Google adds levels with new models, so the enum is

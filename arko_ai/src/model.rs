@@ -1980,8 +1980,8 @@ impl Model {
     /// one 1,048,576-token window, and a synchronous response stops at 65,536
     /// tokens (longer ones need background execution, which this client does
     /// not use). Image input, implicit caching only, one price across the
-    /// window. Thinking levels low, medium and high (Hydrogen adds xhigh), and
-    /// `minimal` returns an error.
+    /// window. Thinking levels low, medium and high (Neon and Hydrogen add
+    /// xhigh), and `minimal` returns an error.
     /// <https://ai.google.dev/gemini-api/docs/thinking>
     fn google_gemini_4(id: &str, pricing: ModelPricing) -> Self {
         Self {
@@ -2035,6 +2035,24 @@ impl Model {
         Self::google_gemini_4(
             "gemini-4-argon",
             Self::google_gemini_4_carbon_and_argon_pricing(),
+        )
+    }
+
+    /// Gemini 4 with frontier-level intelligence and fast end-to-end task
+    /// completion for complex software engineering, knowledge work and
+    /// science, between Hydrogen and Carbon. $3/$15 (cached $0.15) across the
+    /// window. Thinking levels low, medium, high (default) and xhigh.
+    /// <https://ai.google.dev/gemini-api/docs/models/gemini-4-neon>
+    /// <https://ai.google.dev/gemini-api/docs/pricing>
+    pub fn google_gemini_4_neon() -> Self {
+        Self::google_gemini_4(
+            "gemini-4-neon",
+            ModelPricing {
+                input_cost_per_million: 3.00,
+                output_cost_per_million: 15.00,
+                cached_input_cost_per_million: Some(0.15),
+                ..ModelPricing::default()
+            },
         )
     }
 
@@ -2187,6 +2205,7 @@ impl Model {
         vec![
             Self::google_gemini_4_carbon(),
             Self::google_gemini_4_argon(),
+            Self::google_gemini_4_neon(),
             Self::google_gemini_4_hydrogen(),
             Self::google_gemini_3_8_flash(),
             Self::google_gemini_3_7_flash(),
@@ -2813,18 +2832,18 @@ impl Model {
         self.is_gemini_2_5_pro() || self.is_gemini_2_5_flash() || self.is_gemini_2_5_flash_lite()
     }
 
-    /// Gemini 4 Carbon, Argon and Hydrogen.
+    /// Gemini 4 Carbon, Argon, Neon and Hydrogen.
     pub fn is_gemini_4(&self) -> bool {
         matches!(
             self.id.as_str(),
-            "gemini-4-carbon" | "gemini-4-argon" | "gemini-4-hydrogen"
+            "gemini-4-carbon" | "gemini-4-argon" | "gemini-4-neon" | "gemini-4-hydrogen"
         )
     }
 
     /// Whether the model takes the `xhigh` thinking level, which only Gemini 4
-    /// Hydrogen does. <https://ai.google.dev/gemini-api/docs/thinking>
+    /// Neon and Hydrogen do. <https://ai.google.dev/gemini-api/docs/thinking>
     pub fn supports_gemini_xhigh_thinking(&self) -> bool {
-        self.id == "gemini-4-hydrogen"
+        matches!(self.id.as_str(), "gemini-4-neon" | "gemini-4-hydrogen")
     }
 
     pub fn uses_gemini_thinking_levels(&self) -> bool {
@@ -3078,9 +3097,10 @@ mod tests {
     }
 
     /// Gemini 4 Carbon and Argon cost $2/$10 (cached $0.10) through
-    /// 2026-11-30 and $4/$20 (cached $0.20) from 2026-12-01. Hydrogen costs
-    /// $1.50/$7.50 (cached $0.075). One price across the 1,048,576-token
-    /// window, and 65,536 output tokens per synchronous response.
+    /// 2026-11-30 and $4/$20 (cached $0.20) from 2026-12-01. Neon costs
+    /// $3/$15 (cached $0.15) and Hydrogen $1.50/$7.50 (cached $0.075). One
+    /// price across the 1,048,576-token window, and 65,536 output tokens per
+    /// synchronous response.
     /// https://ai.google.dev/gemini-api/docs/pricing
     #[test]
     fn gemini_4_is_registered_with_its_documented_prices_and_limits() {
@@ -3090,7 +3110,12 @@ mod tests {
                 .unwrap();
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64)
         };
-        for id in ["gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] {
+        for id in [
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
+        ] {
             let model = Model::get(Provider::Google, id).unwrap();
             assert_eq!(model.model_type, ModelType::Reasoning);
             assert_eq!(
@@ -3111,14 +3136,15 @@ mod tests {
                     pricing.cached_input_cost_per_million,
                 )
             };
-            let (now, later) = if id == "gemini-4-hydrogen" {
-                ((1.50, 7.50, Some(0.075)), (1.50, 7.50, Some(0.075)))
-            } else {
-                ((2.00, 10.00, Some(0.10)), (4.00, 20.00, Some(0.20)))
+            let (now, later) = match id {
+                "gemini-4-hydrogen" => ((1.50, 7.50, Some(0.075)), (1.50, 7.50, Some(0.075))),
+                "gemini-4-neon" => ((3.00, 15.00, Some(0.15)), (3.00, 15.00, Some(0.15))),
+                _ => ((2.00, 10.00, Some(0.10)), (4.00, 20.00, Some(0.20))),
             };
             assert_eq!(prices(pricing.at(date("2026-11-30"))), now, "{id}");
             assert_eq!(prices(pricing.at(date("2026-12-01"))), later, "{id}");
         }
+        assert!(Model::google_gemini_4_neon().supports_gemini_xhigh_thinking());
         assert!(Model::google_gemini_4_hydrogen().supports_gemini_xhigh_thinking());
         assert!(!Model::google_gemini_4_carbon().supports_gemini_xhigh_thinking());
         assert!(!Model::google_gemini_4_argon().supports_gemini_xhigh_thinking());
