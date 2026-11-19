@@ -99,7 +99,9 @@ impl ToolRegistry {
     /// A registry with only the tools of this one that `names` lists. Names
     /// not registered here are skipped. The runtime runs a task with the
     /// tools its configuration offers
-    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names)).
+    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names)),
+    /// and the calls made from inside a call with those it can run
+    /// ([`AgentToolConfig::runnable_tool_names`](crate::agent_config::AgentToolConfig::runnable_tool_names)).
     pub fn restricted_to<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
         let tools = names
             .into_iter()

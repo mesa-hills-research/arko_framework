@@ -169,7 +169,8 @@ impl AgentLoop {
         let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();
         for name in &self.task.agent_config.tool_config.available_tool_names {
             if let Some(tool) = self.tool_registry.get(name) {
-                tool_defs_for_prompt.push(tool.definition());
+                tool_defs_for_prompt
+                    .push(tool.offered_definition(&self.task.agent_config.tool_config));
             } else {
                 log::warn!(
                     "Agent {} configured with tool '{}' but it was not found in the registry.",
@@ -183,7 +184,8 @@ impl AgentLoop {
             .any(|def| def.name == COMPLETE_TASK_TOOL_NAME)
             && let Some(ct_tool) = self.tool_registry.get(COMPLETE_TASK_TOOL_NAME)
         {
-            tool_defs_for_prompt.push(ct_tool.definition());
+            tool_defs_for_prompt
+                .push(ct_tool.offered_definition(&self.task.agent_config.tool_config));
         }
         tool_defs_for_prompt
     }

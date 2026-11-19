@@ -102,8 +102,14 @@ macro_rules! step {
 pub struct AgentLoop {
     task: Task,
     llm_client: Arc<ai::LLMClient>,
-    /// The tools the task's configuration offers, the only ones that run.
+    /// The tools the task's configuration offers, the only ones the model
+    /// can call.
     tool_registry: Arc<ToolRegistry>,
+    /// Those and the tools reached only from inside a call
+    /// ([`AgentToolConfig::runnable_tool_names`](crate::agent_config::AgentToolConfig::runnable_tool_names)),
+    /// which the nested calls' gate allows and which are reset and bound
+    /// with the task.
+    runnable_tools: Arc<ToolRegistry>,
     /// Every tool the runtime was given, offered or not, for a handover that
     /// changes the configuration ([`HandoverHook::handover_config`]).
     all_tools: Arc<ToolRegistry>,
@@ -253,14 +259,14 @@ impl AgentLoop {
             _ => llm_client,
         };
         let now = Instant::now();
-        // The tools offered are the only tools that run, so a call to any other
-        // one is answered as unavailable, in either tool calling mode.
-        let offered = task.agent_config.tool_config.offered_tool_names();
+        // The tools offered are the only tools the model can call, so a call
+        // to any other one is answered as unavailable, in either tool calling
+        // mode.
         let all_tools = tool_registry;
-        let tool_registry = Arc::new(all_tools.restricted_to(offered.iter().map(String::as_str)));
-
-        for name in tool_registry.list_tool_names() {
-            if let Some(tool) = tool_registry.get(&name) {
+        let (tool_registry, runnable_tools) =
+            super::registries(&all_tools, &task.agent_config.tool_config);
+        for name in runnable_tools.list_tool_names() {
+            if let Some(tool) = runnable_tools.get(&name) {
                 tool.reset_context(task.id);
             }
         }
@@ -269,6 +275,7 @@ impl AgentLoop {
             task,
             llm_client,
             tool_registry,
+            runnable_tools,
             all_tools,
             command_sender: None,
             event_sender,
@@ -331,8 +338,8 @@ impl AgentLoop {
     /// background jobs, whose notes go there.
     pub(super) fn bind_tools(&mut self, sender: &mpsc::Sender<UserCommand>) {
         self.command_sender = Some(sender.downgrade());
-        for name in self.tool_registry.list_tool_names() {
-            if let Some(tool) = self.tool_registry.get(&name) {
+        for name in self.runnable_tools.list_tool_names() {
+            if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
             }
         }

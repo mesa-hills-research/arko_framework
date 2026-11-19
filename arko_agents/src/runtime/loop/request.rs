@@ -25,7 +25,7 @@ impl AgentLoop {
         let agent_config = &self.task.agent_config;
         let offered = |tool: Arc<dyn crate::tool::Tool>| {
             agent_config
-                .offered_tool_definition(tool.definition())
+                .offered_definition_of(tool.as_ref())
                 .to_arko_ai_tool_definition()
         };
         let mut ai_tools = Vec::new();

@@ -20,9 +20,9 @@ pub const APPLY_DIFF_HINT: &str = "To change part of a file, use `apply_diff`.";
 
 /// `write_file`'s definition as an agent with `tool_config` is shown it.
 /// The built-in `write_file` (not a host's own tool of that name) gains
-/// [`APPLY_DIFF_HINT`] when the agent is also offered `apply_diff`, else
-/// [`EDIT_FILE_HINT`] when it is offered `edit_file`. Any other definition
-/// is returned unchanged. As with
+/// [`APPLY_DIFF_HINT`] when the agent also has `apply_diff`, else
+/// [`EDIT_FILE_HINT`] when it has `edit_file`, offered or reached only from
+/// inside a call. Any other definition is returned unchanged. As with
 /// [`read_file::offered_definition`](super::read_file::offered_definition),
 /// the same configuration always shows the same definition.
 pub fn offered_definition(
@@ -39,6 +39,7 @@ pub fn offered_definition(
             .available_tool_names
             .iter()
             .any(|name| name == tool)
+            || tool_config.is_nested_only(tool)
     };
     let hint = if offered(super::APPLY_DIFF_TOOL_NAME) {
         APPLY_DIFF_HINT

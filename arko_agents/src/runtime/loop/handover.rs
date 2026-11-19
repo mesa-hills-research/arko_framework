@@ -277,18 +277,16 @@ impl AgentLoop {
             self.skill_prompt_context = prompt;
         }
         self.parsing_config = self.task.agent_config.get_tool_parsing_config();
-        let offered = self.task.agent_config.tool_config.offered_tool_names();
-        let registry = self
-            .all_tools
-            .restricted_to(offered.iter().map(String::as_str));
-        for name in registry.list_tool_names() {
-            let Some(tool) = registry.get(&name) else {
+        let (offered, runnable) =
+            super::super::registries(&self.all_tools, &self.task.agent_config.tool_config);
+        for name in runnable.list_tool_names() {
+            let Some(tool) = runnable.get(&name) else {
                 continue;
             };
             if self
-                .tool_registry
+                .runnable_tools
                 .get(&name)
-                .is_some_and(|offered| Arc::ptr_eq(&offered, &tool))
+                .is_some_and(|known| Arc::ptr_eq(&known, &tool))
             {
                 continue;
             }
@@ -297,7 +295,8 @@ impl AgentLoop {
                 tool.bind_runtime(self.task.id, sender.clone());
             }
         }
-        self.tool_registry = Arc::new(registry);
+        self.tool_registry = offered;
+        self.runnable_tools = runnable;
         if let Some(hook) = &self.handover_hook {
             hook.handover_config_taken(&self.task);
         }

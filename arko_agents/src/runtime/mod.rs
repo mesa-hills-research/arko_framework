@@ -36,6 +36,20 @@ mod keep_warm_live_tests;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 
+/// The tools of `all_tools` a task with `tool_config` is offered, the only
+/// ones the model can call, and those it can run, which add the tools it
+/// reaches only from inside a call. Both runtimes run a task with these.
+fn registries(
+    all_tools: &ToolRegistry,
+    tool_config: &crate::agent_config::AgentToolConfig,
+) -> (Arc<ToolRegistry>, Arc<ToolRegistry>) {
+    let runnable =
+        all_tools.restricted_to(tool_config.runnable_tool_names().iter().map(String::as_str));
+    let offered =
+        runnable.restricted_to(tool_config.offered_tool_names().iter().map(String::as_str));
+    (Arc::new(offered), Arc::new(runnable))
+}
+
 /// What a prompt-cache refresh asks after the conversation. It wants a one-word
 /// reply (see [`AgentRuntime::refresh_prompt_cache`]).
 pub(crate) const CACHE_PING: &str =

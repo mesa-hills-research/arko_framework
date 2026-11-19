@@ -30,7 +30,8 @@ pub const NEVER_NESTED: [&str; 4] = [
 
 /// What the checks of a nested call need beside the run's environment.
 pub(super) struct Gate {
-    /// The tools the task's configuration offers, the only ones that run.
+    /// The tools the task can run, meaning those its configuration offers
+    /// and those it reaches only from inside a call, the only ones that run.
     pub registry: Arc<ToolRegistry>,
     /// The agent's tool configuration, for its path and approval policies
     /// and its time limits.
@@ -74,12 +75,15 @@ pub enum NestedOutcome {
 /// the tool being run. Each call is checked as a call of the model's is,
 /// and the checks are shared with the native loop's.
 ///
-/// 1. The tool is one the task's configuration offers, and not one of
-///    [`NEVER_NESTED`] or the calling tool itself.
+/// 1. The tool is one the task's configuration offers or lists as reached
+///    only from inside a call
+///    ([`nested_only_tool_names`](crate::agent_config::AgentToolConfig::nested_only_tool_names)),
+///    and not one of [`NEVER_NESTED`] or the calling tool itself.
 /// 2. Its paths pass the path policy, and it needs no approval. A call
 ///    that would wait for approval (the tool isn't auto-approved, or a path
 ///    outside the workspace asks for it) is refused at once, with a message
-///    to call the tool directly.
+///    to call the tool directly, unless the tool is reached only from
+///    inside a call.
 /// 3. The execution middleware's `before` and `after` see it, so every hook
 ///    judges it. A decision that fails, cancels or pauses the task at it
 ///    does so at the outer call.
@@ -217,8 +221,8 @@ impl NestedCalls {
     }
 
     /// Whether `tool_name` is a tool these calls may reach, meaning one the
-    /// task's configuration offers, not one of [`NEVER_NESTED`] and not the
-    /// calling tool. It says nothing of a call's paths, approval or hooks.
+    /// task can run (offered, or reached only from inside a call), not one
+    /// of [`NEVER_NESTED`] and not the calling tool. It says nothing of a call's paths, approval or hooks.
     pub fn may_call(&self, tool_name: &str) -> bool {
         self.refusal(tool_name).is_none()
     }
@@ -317,8 +321,14 @@ impl NestedCalls {
             PathVerdict::Invalid(reason) => return NestedOutcome::Refused(reason),
         };
         if needs_approval {
+            // (A tool reached only from inside a call can't be called directly.)
+            let instead = if config.is_nested_only(tool_name) {
+                String::new()
+            } else {
+                format!(" Call {tool_name} directly instead.")
+            };
             return NestedOutcome::Refused(format!(
-                "This call of {tool_name} needs the user's approval, which a call from inside {} can't wait for. Call {tool_name} directly instead.",
+                "This call of {tool_name} needs the user's approval, which a call from inside {} can't wait for.{instead}",
                 self.outer_tool_name
             ));
         }

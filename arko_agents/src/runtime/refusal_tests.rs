@@ -448,6 +448,7 @@ async fn tools_observe_the_changed_history_from_the_start() {
     let mut registry = ToolRegistry::new();
     registry.register(observer.clone());
     agent.tool_registry = Arc::new(registry);
+    agent.runnable_tools = agent.tool_registry.clone();
     push(&mut agent, refused());
     push(&mut agent, complete_response());
     let resets_before = observer.resets.load(std::sync::atomic::Ordering::SeqCst);

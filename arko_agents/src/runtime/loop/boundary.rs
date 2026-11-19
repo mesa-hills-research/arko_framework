@@ -38,10 +38,10 @@ impl AgentLoop {
 
     pub(super) fn observe_committed_tool_context(&mut self) {
         let tools = self
-            .tool_registry
+            .runnable_tools
             .list_tool_names()
             .into_iter()
-            .filter_map(|name| self.tool_registry.get(&name))
+            .filter_map(|name| self.runnable_tools.get(&name))
             .collect::<Vec<_>>();
         if self.tool_context_cursor > self.task.conversation.messages.len() {
             for tool in &tools {

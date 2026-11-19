@@ -975,6 +975,11 @@ pub(super) struct ClaudeCodeRun {
     task: Task,
     /// The tools the task's configuration offers, the only ones served.
     registry: Arc<ToolRegistry>,
+    /// Those and the tools reached only from inside a call
+    /// ([`AgentToolConfig::runnable_tool_names`](crate::agent_config::AgentToolConfig::runnable_tool_names)),
+    /// which the nested calls' gate allows and which are reset and bound
+    /// with the task.
+    runnable_tools: Arc<ToolRegistry>,
     /// Every tool the runtime was given, offered or not, for a handover that
     /// changes the configuration ([`HandoverHook::handover_config`]).
     all_tools: Arc<ToolRegistry>,
@@ -1149,11 +1154,11 @@ impl ClaudeCodeRun {
         interceptor: Option<InterceptorConfig>,
         middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     ) -> Self {
-        let offered = task.agent_config.tool_config.offered_tool_names();
         let all_tools = registry;
-        let registry = Arc::new(all_tools.restricted_to(offered.iter().map(String::as_str)));
-        for name in registry.list_tool_names() {
-            if let Some(tool) = registry.get(&name) {
+        let (registry, runnable_tools) =
+            super::registries(&all_tools, &task.agent_config.tool_config);
+        for name in runnable_tools.list_tool_names() {
+            if let Some(tool) = runnable_tools.get(&name) {
                 tool.reset_context(task.id);
             }
         }
@@ -1165,6 +1170,7 @@ impl ClaudeCodeRun {
         Self {
             task,
             registry,
+            runnable_tools,
             all_tools,
             command_sender: None,
             events,
@@ -1242,8 +1248,8 @@ impl ClaudeCodeRun {
     /// Binds the task's tools to its command channel.
     pub(super) fn bind_tools(&mut self, sender: &mpsc::Sender<UserCommand>) {
         self.command_sender = Some(sender.downgrade());
-        for name in self.registry.list_tool_names() {
-            if let Some(tool) = self.registry.get(&name) {
+        for name in self.runnable_tools.list_tool_names() {
+            if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.bind_runtime(self.task.id, sender.downgrade());
             }
         }
@@ -2250,7 +2256,7 @@ impl ClaudeCodeRun {
             let Some(tool) = self.registry.get(&name) else {
                 continue;
             };
-            let offered = config.offered_tool_definition(tool.definition());
+            let offered = config.offered_definition_of(tool.as_ref());
             let read_only = offered.read_only;
             let definition = offered.to_arko_ai_tool_definition();
             served.push(definition.clone());
@@ -2391,7 +2397,7 @@ impl ClaudeCodeRun {
                 jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),
                 gate: Some(Arc::new(super::nested::Gate {
-                    registry: self.registry.clone(),
+                    registry: self.runnable_tools.clone(),
                     tool_config: self.task.agent_config.tool_config.clone(),
                     events: self.events.clone(),
                 })),
@@ -4283,8 +4289,8 @@ impl ClaudeCodeRun {
         let Some(message) = self.task.conversation.messages.last() else {
             return;
         };
-        for name in self.registry.list_tool_names() {
-            if let Some(tool) = self.registry.get(&name) {
+        for name in self.runnable_tools.list_tool_names() {
+            if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.observe_context(self.task.id, message);
             }
         }
@@ -5777,8 +5783,8 @@ impl ClaudeCodeRun {
         self.task.claude_code_entries.clear();
         self.answered = None;
         self.step_results = false;
-        for name in self.registry.list_tool_names() {
-            if let Some(tool) = self.registry.get(&name) {
+        for name in self.runnable_tools.list_tool_names() {
+            if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.reset_context(self.task.id);
             }
         }
@@ -5975,18 +5981,16 @@ impl ClaudeCodeRun {
             self.skill_prompt_context = prompt;
         }
         self.parsing = self.task.agent_config.get_tool_parsing_config();
-        let offered = self.task.agent_config.tool_config.offered_tool_names();
-        let registry = self
-            .all_tools
-            .restricted_to(offered.iter().map(String::as_str));
-        for name in registry.list_tool_names() {
-            let Some(tool) = registry.get(&name) else {
+        let (registry, runnable) =
+            super::registries(&self.all_tools, &self.task.agent_config.tool_config);
+        for name in runnable.list_tool_names() {
+            let Some(tool) = runnable.get(&name) else {
                 continue;
             };
             if self
-                .registry
+                .runnable_tools
                 .get(&name)
-                .is_some_and(|served| Arc::ptr_eq(&served, &tool))
+                .is_some_and(|known| Arc::ptr_eq(&known, &tool))
             {
                 continue;
             }
@@ -5995,7 +5999,8 @@ impl ClaudeCodeRun {
                 tool.bind_runtime(self.task.id, sender.clone());
             }
         }
-        self.registry = Arc::new(registry);
+        self.registry = registry;
+        self.runnable_tools = runnable;
         self.served_tools = None;
         // The fresh session's tools are served by a host set up for them.
         if let Some(host) = self.host.take() {
@@ -6081,8 +6086,8 @@ impl ClaudeCodeRun {
         self.task.claude_code_entries.clear();
         self.task.claude_code_resume_at = None;
         self.task.claude_code_fork_of = None;
-        for name in self.registry.list_tool_names() {
-            if let Some(tool) = self.registry.get(&name) {
+        for name in self.runnable_tools.list_tool_names() {
+            if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.reset_context(self.task.id);
             }
         }

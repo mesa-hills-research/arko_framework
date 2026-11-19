@@ -105,7 +105,8 @@ impl Tool for Target {
 
 /// A tool that calls the tools its `calls` argument lists (`[name,
 /// arguments]` pairs) from inside its call, one after another, or all at
-/// once with `together`, and returns what each got.
+/// once with `together`, and returns what each got. Its description names
+/// the tools the agent reaches only through it.
 #[derive(Debug)]
 struct Caller {
     log: Arc<Log>,
@@ -124,6 +125,20 @@ impl Tool for Caller {
             read_only: false,
             raw_json_schema_override: None,
         }
+    }
+
+    fn offered_definition(
+        &self,
+        tool_config: &crate::agent_config::AgentToolConfig,
+    ) -> ToolDefinition {
+        let mut definition = self.definition();
+        if !tool_config.nested_only_tool_names.is_empty() {
+            definition.description = format!(
+                "Calls tools, such as {}",
+                tool_config.nested_only_tool_names.join(" and ")
+            );
+        }
+        definition
     }
 
     async fn execute(
@@ -482,6 +497,132 @@ async fn the_turns_own_tools_the_caller_and_unknown_tools_are_refused() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let summary = serde_json::to_string(&task.current_state).unwrap();
     assert!(!summary.contains("done early"), "{summary}");
+}
+
+/// A tool reached only from inside a call isn't offered, and a direct call
+/// of it is answered as unavailable, while the gate runs it. A call of it
+/// that would wait for approval is refused without telling the agent to
+/// call it directly. The tool that reaches it describes it.
+#[tokio::test]
+async fn a_nested_only_tool_runs_only_from_inside_a_call() {
+    let log = Arc::new(Log::default());
+    let mut config = config(ToolCallingMode::Native, &["caller"]);
+    config.tool_config.nested_only_tool_names = vec!["a".into(), "b".into()];
+    config.tool_config.tool_specific_configs.insert(
+        "b".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(config.validate().is_ok());
+    let workspace = workspace();
+    let (mut agent, mut events, _commands) = agent(
+        config,
+        registry(
+            &log,
+            &[
+                ("a", returns("a ran")),
+                ("b", returns("b ran")),
+                ("c", returns("c ran")),
+            ],
+        ),
+        &workspace,
+    );
+    let offered: Vec<(String, String)> = agent
+        .build_native_tool_config(&agent.task.conversation.model, None)
+        .tools
+        .into_iter()
+        .map(|tool| (tool.name, tool.description))
+        .collect();
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert_eq!(
+        offered[0],
+        (
+            "caller".to_string(),
+            "Calls tools, such as a and b".to_string()
+        )
+    );
+    assert_eq!(offered[1].0, "complete_task");
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call("direct", "a", serde_json::json!({}))]),
+        turn(vec![caller_call(serde_json::json!([
+            ["a", {}],
+            ["b", {}],
+            ["c", {}]
+        ]))]),
+        complete(),
+    ]);
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+    let events = drain(&mut events);
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let direct = &super::tool_call_tests::result_for(&task.conversation, "direct")[0];
+    assert!(
+        direct.is_error && direct.output.contains("Tool 'a' is not available."),
+        "{direct:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::UnavailableToolAttempted { tool_name } if tool_name == "a"
+    )));
+    assert_eq!(
+        outer_result(&task),
+        "finished: a ran\n\
+         refused: This call of b needs the user's approval, which a call from inside caller can't wait for.\n\
+         refused: Tool 'c' is not available."
+    );
+    assert_eq!(
+        log.entries()
+            .iter()
+            .filter(|entry| entry.starts_with("start "))
+            .collect::<Vec<_>>(),
+        ["start a"]
+    );
+}
+
+/// A configuration refuses a tool reached only from inside a call that it
+/// also offers, that no nested call may call, or that a chat lists.
+#[test]
+fn a_nested_only_tool_is_neither_offered_nor_the_turns_own() {
+    let refusal = |change: &dyn Fn(&mut crate::agent_config::AgentConfig)| {
+        let mut config = config(ToolCallingMode::Native, &["caller"]);
+        change(&mut config);
+        config.validate().err().map(|error| error.to_string())
+    };
+    assert_eq!(refusal(&|_| {}), None);
+    let offered = refusal(&|config| {
+        config.tool_config.nested_only_tool_names = vec!["caller".into()];
+    })
+    .unwrap();
+    assert!(
+        offered.contains(
+            "nested_only_tool_names lists 'caller', but available_tool_names lists it too"
+        ),
+        "{offered}"
+    );
+    let own = refusal(&|config| {
+        config.tool_config.nested_only_tool_names = vec!["ask_user".into()];
+    })
+    .unwrap();
+    assert!(
+        own.contains("nested_only_tool_names lists 'ask_user', but no call made from inside a call may call it"),
+        "{own}"
+    );
+    let chat = refusal(&|config| {
+        config.tool_config = crate::agent_config::AgentToolConfig {
+            nested_only_tool_names: vec!["a".into()],
+            ..crate::agent_config::AgentToolConfig::chat()
+        };
+    })
+    .unwrap();
+    assert!(
+        chat.contains("a chat has no tools, but nested_only_tool_names lists 'a'"),
+        "{chat}"
+    );
 }
 
 #[tokio::test]

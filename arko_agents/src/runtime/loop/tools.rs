@@ -54,7 +54,7 @@ impl AgentLoop {
             jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),
             gate: Some(Arc::new(super::super::nested::Gate {
-                registry: self.tool_registry.clone(),
+                registry: self.runnable_tools.clone(),
                 tool_config: self.task.agent_config.tool_config.clone(),
                 events: self.event_sender.clone(),
             })),

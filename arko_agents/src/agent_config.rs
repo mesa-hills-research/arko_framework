@@ -463,6 +463,20 @@ pub struct AgentToolConfig {
     /// result and `AgentEvent::UnavailableToolAttempted`, and output-based
     /// parsing recognizes only these tools' tags.
     pub available_tool_names: Vec<String>,
+    /// Tools the agent reaches only from inside another tool's call
+    /// ([`NestedCalls`](crate::tool::NestedCalls)), such as code that calls
+    /// them. They are not offered to the model, a direct call of one is
+    /// answered as unavailable, and the nested calls' gate allows them as it
+    /// does the offered tools. A tool that calls them can describe them to
+    /// the model in its own definition
+    /// ([`Tool::offered_definition`](crate::tool::Tool::offered_definition)).
+    /// A host's tool registered for every run of the agent (a workflow's
+    /// agent tool) isn't offered when listed here.
+    /// [`AgentConfig::validate`] refuses a name that `available_tool_names`
+    /// lists too, one of [`NEVER_NESTED`](crate::tool::NEVER_NESTED), and
+    /// any for a chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_only_tool_names: Vec<String>,
     /// Ask for one tool call per response (off by default). In native mode
     /// the request disables parallel tool calls where the provider can
     /// (OpenAI `parallel_tool_calls: false`, Anthropic
@@ -625,6 +639,8 @@ fn default_tool_timeout_seconds() -> Option<u64> {
 struct AgentToolConfigRepr {
     available_tool_names: Vec<String>,
     #[serde(default)]
+    nested_only_tool_names: Vec<String>,
+    #[serde(default)]
     one_tool_call_per_turn: bool,
     #[serde(default = "default_auto_approve_tool_use_false")]
     default_auto_approve_tool_use: bool,
@@ -666,6 +682,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
         }
         Self {
             available_tool_names: repr.available_tool_names,
+            nested_only_tool_names: repr.nested_only_tool_names,
             one_tool_call_per_turn: repr.one_tool_call_per_turn,
             default_auto_approve_tool_use: repr.default_auto_approve_tool_use,
             default_out_of_workspace_path_policy: repr.default_out_of_workspace_path_policy,
@@ -715,6 +732,44 @@ impl AgentToolConfig {
             .chain(offers_complete_task.then(|| complete_task.to_string()))
             .filter(|name| offers_complete_task || name != complete_task)
             .collect()
+    }
+
+    /// The names of the tools the agent can run, meaning those it is offered
+    /// ([`offered_tool_names`](Self::offered_tool_names)) and those it
+    /// reaches only from inside a call
+    /// ([`nested_only_tool_names`](Self::nested_only_tool_names)). None for a
+    /// chat.
+    pub fn runnable_tool_names(&self) -> HashSet<String> {
+        let mut names = self.offered_tool_names();
+        if !self.chat {
+            names.extend(self.nested_only_tool_names.iter().cloned());
+        }
+        names
+    }
+
+    /// Whether the agent reaches `tool_name` only from inside a call
+    /// ([`nested_only_tool_names`](Self::nested_only_tool_names)).
+    pub fn is_nested_only(&self, tool_name: &str) -> bool {
+        self.nested_only_tool_names
+            .iter()
+            .any(|name| name == tool_name)
+    }
+
+    /// A tool's definition as an agent with this configuration is shown it,
+    /// directly or in a definition that describes it, with the built-in
+    /// `read_file`, `write_file` and `ask_user` as the agent's tools shape
+    /// them (see
+    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition),
+    /// [`write_file::offered_definition`](crate::tool::builtins::write_file::offered_definition)
+    /// and [`ask_user::offered_definition`](crate::tool::builtins::ask_user::offered_definition)).
+    /// Any other definition is returned unchanged.
+    pub fn offered_tool_definition(
+        &self,
+        definition: crate::tool::ToolDefinition,
+    ) -> crate::tool::ToolDefinition {
+        let definition = crate::tool::builtins::write_file::offered_definition(definition, self);
+        let definition = crate::tool::builtins::ask_user::offered_definition(definition, self);
+        crate::tool::builtins::read_file::offered_definition(definition, self)
     }
 
     /// Whether a reply in plain text, without a tool call, ends the task.
@@ -808,6 +863,10 @@ impl AgentToolConfig {
                     "a chat's reply ends its task, so text_reply_as_message can't be on"
                         .to_string(),
                 )
+            } else if let Some(name) = self.nested_only_tool_names.first() {
+                Some(format!(
+                    "a chat has no tools, but nested_only_tool_names lists '{name}'"
+                ))
             } else {
                 self.available_tool_names
                     .iter()
@@ -829,6 +888,19 @@ impl AgentToolConfig {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "AgentToolConfig".into(),
                 message: "text_reply_ends_task and text_reply_as_message can't both be on. One makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
+            });
+        }
+        for name in &self.nested_only_tool_names {
+            let problem = if self.available_tool_names.contains(name) {
+                "available_tool_names lists it too, so it would be offered"
+            } else if crate::tool::NEVER_NESTED.contains(&name.as_str()) {
+                "no call made from inside a call may call it"
+            } else {
+                continue;
+            };
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentToolConfig".into(),
+                message: format!("nested_only_tool_names lists '{name}', but {problem}."),
             });
         }
         if self.result_limits.max_result_tokens == Some(0)
@@ -869,6 +941,7 @@ impl Default for AgentToolConfig {
     fn default() -> Self {
         Self {
             available_tool_names: vec![crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.to_string()],
+            nested_only_tool_names: Vec::new(),
             one_tool_call_per_turn: false,
             default_auto_approve_tool_use: false,
             default_out_of_workspace_path_policy: PathSafetyPolicy::default(),
@@ -1582,10 +1655,7 @@ impl AgentConfig {
     /// mode, with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
     /// as `complete_task`'s `summary` description, and the built-in
     /// `read_file`, `write_file` and `ask_user` as the agent's tools shape
-    /// them (see
-    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition),
-    /// [`write_file::offered_definition`](crate::tool::builtins::write_file::offered_definition)
-    /// and [`ask_user::offered_definition`](crate::tool::builtins::ask_user::offered_definition)).
+    /// them ([`AgentToolConfig::offered_tool_definition`]).
     ///
     /// The definition follows from the configuration alone, so the same
     /// configuration always shows the same definitions (the prompt cache
@@ -1607,11 +1677,18 @@ impl AgentConfig {
                 }
             }
         }
-        let definition =
-            crate::tool::builtins::write_file::offered_definition(definition, &self.tool_config);
-        let definition =
-            crate::tool::builtins::ask_user::offered_definition(definition, &self.tool_config);
-        crate::tool::builtins::read_file::offered_definition(definition, &self.tool_config)
+        self.tool_config.offered_tool_definition(definition)
+    }
+
+    /// `tool`'s definition as the agent is shown it, starting from the one
+    /// the tool gives for the agent's tools
+    /// ([`Tool::offered_definition`](crate::tool::Tool::offered_definition)).
+    /// See [`offered_tool_definition`](Self::offered_tool_definition).
+    pub(crate) fn offered_definition_of(
+        &self,
+        tool: &dyn crate::tool::Tool,
+    ) -> crate::tool::ToolDefinition {
+        self.offered_tool_definition(tool.offered_definition(&self.tool_config))
     }
 
     /// Gets the tool parsing configuration, using the override if present.

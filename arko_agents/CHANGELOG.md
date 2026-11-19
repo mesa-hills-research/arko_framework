@@ -24,11 +24,29 @@
 - `write_file`'s description points to `apply_diff` when the agent is offered it
   (`write_file::APPLY_DIFF_HINT`).
 
+### Tools reached only from inside a call
+
+- `AgentToolConfig::nested_only_tool_names` lists tools an agent reaches only through
+  `NestedCalls`, such as code that calls them. They aren't offered to the model, in either
+  runtime, and a direct call of one is answered as unavailable. The nested calls' gate allows
+  them, and they are reset and bound with the task as offered tools are. `runnable_tool_names`
+  gives both kinds, and `is_nested_only` tells them apart. `AgentConfig::validate` refuses a
+  name listed in `available_tool_names` too, one of `NEVER_NESTED`, and any for a chat.
+- `Tool::offered_definition(tool_config)` gives the definition an agent with that configuration
+  is offered, by default `definition()`, so a tool that calls nested-only tools can describe
+  them. `AgentToolConfig::offered_tool_definition` shows another tool's definition as such an
+  agent would see it, with the built-in tools' changes.
+- The gate's refusal of a call that would wait for approval tells the agent to call the tool
+  directly only when it can.
+- `write_file`'s hint names `apply_diff` or `edit_file` also when the agent reaches that tool
+  only from inside a call.
+
 ### Breaking changes
 
 - An `apply_diff` call with a block that fails is an error and writes nothing.
 - A line of the file that is itself a marker is written with a backslash before it
   (`\=======`). The `AD_ESC::` prefix is gone.
+- `AgentToolConfig` has a new public field, `nested_only_tool_names`.
 
 ## 0.9.1 (2026-11-18)
 

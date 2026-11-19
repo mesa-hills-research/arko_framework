@@ -453,6 +453,23 @@ pub trait Tool: Debug + Send + Sync {
     /// Returns the definition of the tool.
     fn definition(&self) -> ToolDefinition;
 
+    /// The definition an agent with `tool_config` is offered, by default
+    /// [`definition`](Self::definition). A tool whose definition depends on
+    /// the agent's tools gives it here, such as one that calls the agent's
+    /// [`nested_only_tool_names`](crate::agent_config::AgentToolConfig::nested_only_tool_names)
+    /// and describes them. It must follow from `tool_config` alone, so the
+    /// same configuration is always shown the same definition and the
+    /// prompt cache holds. The runtime offers it with the changes its own
+    /// built-in tools get
+    /// ([`AgentToolConfig::offered_tool_definition`](crate::agent_config::AgentToolConfig::offered_tool_definition)).
+    fn offered_definition(
+        &self,
+        tool_config: &crate::agent_config::AgentToolConfig,
+    ) -> ToolDefinition {
+        let _ = tool_config;
+        self.definition()
+    }
+
     /// Stateful, exact-result protocols can opt out of result transformation.
     fn allow_result_interception(&self) -> bool {
         true

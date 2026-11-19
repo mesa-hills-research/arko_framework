@@ -94,6 +94,7 @@ fn install(agent: &mut AgentLoop, fixture: &Fixture) -> Arc<ContextTool> {
     let mut registry = ToolRegistry::new();
     registry.register(tool.clone());
     agent.tool_registry = Arc::new(registry);
+    agent.runnable_tools = agent.tool_registry.clone();
     agent.task.current_working_directory = fixture.0.clone();
     agent
         .task
@@ -630,6 +631,7 @@ async fn load_skill_results_are_intercepted_only_when_opted_in() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(Skill));
         agent.tool_registry = Arc::new(registry);
+        agent.runnable_tools = agent.tool_registry.clone();
         agent.task.agent_config.skills_config = Some(crate::skill::SkillsConfig {
             load_skill_interception: opt_in,
             ..Default::default()

@@ -420,6 +420,9 @@ fn agent_config(
         // The tools offered besides complete_task, which is always offered.
         // Default complete_task only. The workflow adds its own tools.
         available_tool_names: built_in_tools.iter().map(|tool| tool.to_string()).collect(),
+        // Default empty. Tools reached only from inside another tool's call,
+        // such as code that calls them, and not offered to the model.
+        nested_only_tool_names: Vec::new(),
         // Default Native. The provider's tool calling. OutputBased is legacy.
         tool_calling_mode: ToolCallingMode::Native,
         // Default false. Every call except ask_user waits for approval,

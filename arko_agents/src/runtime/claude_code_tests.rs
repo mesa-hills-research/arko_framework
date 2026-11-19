@@ -8118,7 +8118,8 @@ async fn a_claude_code_agent_reaches_mcp_servers_through_the_bridge() {
 }
 
 /// An arko tool that calls tools from inside its call, and returns what
-/// each call got.
+/// each call got. Its description names the tools the agent reaches only
+/// through it.
 #[derive(Debug)]
 struct CallsFromInside;
 
@@ -8130,6 +8131,17 @@ impl crate::tool::Tool for CallsFromInside {
             description: "Calls tools".into(),
             ..WaitsForContext::default().definition()
         }
+    }
+
+    fn offered_definition(&self, tool_config: &AgentToolConfig) -> crate::tool::ToolDefinition {
+        let mut definition = self.definition();
+        if !tool_config.nested_only_tool_names.is_empty() {
+            definition.description = format!(
+                "Calls tools, such as {}",
+                tool_config.nested_only_tool_names.join(" and ")
+            );
+        }
+        definition
     }
 
     async fn execute(
@@ -8207,6 +8219,82 @@ async fn a_claude_code_agents_calls_reach_tools_through_the_gate() {
         !events
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolCallAwaitingApproval { .. }))
+    );
+    let ends = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::NestedToolCallFinished { .. }))
+        .count();
+    assert_eq!(ends, 3);
+}
+
+/// A Claude Code agent's tools reached only from inside a call aren't
+/// served, a direct call of one is refused, and the gate runs them, without
+/// telling the agent to call them directly. The tool that reaches them is
+/// served with the definition it gives for them.
+#[tokio::test]
+async fn a_claude_code_agents_nested_only_tools_run_only_from_inside_a_call() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__says_runtime", "input": {}},
+        {"tool": "mcp__arko__calls_from_inside", "input": {}},
+        complete("Done"),
+    ]]));
+    let mut config = config(&fake, &["calls_from_inside"]);
+    config.tool_config.nested_only_tool_names =
+        vec!["says_runtime".into(), "needs_approval".into()];
+    config.tool_config.tool_specific_configs.insert(
+        "needs_approval".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..PerToolConfigOverride::default()
+        },
+    );
+    let task = Task::new(config, "Call them.".into(), fake.workspace(), None);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(CallsFromInside));
+    registry.register(Arc::new(SaysRuntime));
+    registry.register(Arc::new(NeedsApproval));
+    let (events, commands, handle) = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, events) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let served = &fake.logged("tools")[0]["tools"];
+    let served: Vec<(&str, &str)> = served
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| {
+            (
+                tool["name"].as_str().unwrap(),
+                tool["description"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(served.len(), 2, "{served:?}");
+    assert_eq!(
+        served[0],
+        (
+            "calls_from_inside",
+            "Calls tools, such as says_runtime and needs_approval"
+        )
+    );
+    assert_eq!(served[1].0, "complete_task");
+    let posts = fake.logged("post");
+    let direct = posts[0]["output"].as_str().unwrap();
+    assert!(
+        direct.contains("Tool 'says_runtime' is not available."),
+        "{direct}"
+    );
+    let output = posts[1]["output"].as_str().unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines[0], "finished: true");
+    assert_eq!(
+        lines[1],
+        "refused: This call of needs_approval needs the user's approval, which a call from inside calls_from_inside can't wait for."
     );
     let ends = events
         .iter()
