@@ -296,6 +296,55 @@ async fn a_kept_configuration_needs_its_tools() {
     assert!(tool_names(&last).contains(&"probe".to_string()), "{last}");
 }
 
+/// An agent tool the configuration reaches only from inside a call isn't
+/// offered to its runs, and a kept run needs it registered to resume.
+#[tokio::test]
+async fn a_nested_only_agent_tool_is_not_offered_and_a_kept_run_needs_it() {
+    let workspace = Workspace::new();
+    let server =
+        ResponsesServer::start(|index, _| Some(text_turn(&format!("t{index}"), "Sure."))).await;
+    let mut config = agent();
+    config.tool_config.available_tool_names.clear();
+    config.tool_config.nested_only_tool_names = vec!["probe".into()];
+    let workflow = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", config.clone())
+        .agent_tool("main", ProbeTool::new("probe", false))
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("main", "Hello.").await.unwrap();
+    let body: Value = serde_json::from_str(server.bodies().last().unwrap()).unwrap();
+    assert!(!tool_names(&body).contains(&"probe".to_string()), "{body}");
+    let saved = &first.info().agent_config.tool_config;
+    assert!(!saved.available_tool_names.contains(&"probe".to_string()));
+    assert!(saved.is_nested_only("probe"));
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let refused = Workflow::builder()
+        .name("reconfigure-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("main", config)
+        .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+        .resume_from(latest_checkpoint(&workspace))
+        .keep_saved_configs(["main"])
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        refused.contains(&format!(
+            "agent 'main' run {} offers tool 'probe', which isn't registered",
+            first.agent_run_id
+        )),
+        "{refused}"
+    );
+}
+
 /// A tool registered for saved runs only (`resume_only_agent_tool`) lets a
 /// kept run resume. The run is offered it and calls it. A new run, and a run
 /// continued with a configuration that doesn't list it, are not offered it,

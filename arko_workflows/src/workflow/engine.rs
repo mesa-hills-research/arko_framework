@@ -5280,12 +5280,12 @@ impl WorkflowEngine {
     }
 }
 
+/// Offers `tool_name` to an agent with `config`, unless it is offered
+/// already or reached only from inside a call.
 fn ensure_tool_name(config: &mut AgentConfig, tool_name: &str) {
-    if !config
-        .tool_config
-        .available_tool_names
-        .iter()
-        .any(|n| n == tool_name)
+    let tools = &config.tool_config;
+    if !tools.is_nested_only(tool_name)
+        && !tools.available_tool_names.iter().any(|n| n == tool_name)
     {
         config
             .tool_config

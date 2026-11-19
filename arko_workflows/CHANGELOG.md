@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Tools reached only from inside a call
+
+- An agent tool listed in the agent's `nested_only_tool_names` isn't offered to its runs. A saved
+  run needs its nested-only tools registered to resume, as it does its offered ones, and the
+  freshness configuration and distillers may name them.
+
 ## 0.10.1 (2026-11-18)
 
 ### Waits inside the prompt cache

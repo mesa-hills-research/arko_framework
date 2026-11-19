@@ -3215,13 +3215,18 @@ fn validate_resumed_agent_configs(
                     .chain(agent_tools.get(&result.agent_name).into_iter().flatten())
                     .any(|tool| tool.name() == *name)
             };
-            let missing = saved.tool_config.available_tool_names.iter().find(|name| {
-                !provided.contains(*name)
-                    && built_in.get(name).is_none()
-                    && !registered(name)
-                    && !(claude_code
-                        && arko_agents::claude_code::BUILT_IN_TOOLS.contains(&name.as_str()))
-            });
+            let tools = &saved.tool_config;
+            let missing = tools
+                .available_tool_names
+                .iter()
+                .chain(&tools.nested_only_tool_names)
+                .find(|name| {
+                    !provided.contains(*name)
+                        && built_in.get(name).is_none()
+                        && !registered(name)
+                        && !(claude_code
+                            && arko_agents::claude_code::BUILT_IN_TOOLS.contains(&name.as_str()))
+                });
             if let Some(missing) = missing {
                 return Err(WorkflowError::BuilderInvalid(format!(
                     "agent '{}' run {} offers tool '{missing}', which isn't registered. Register it to resume the run",
@@ -3437,11 +3442,14 @@ fn warn_unknown_tool_names(
             .iter()
             .map(|name| name.to_string()),
     );
-    known.extend(
-        agents
+    known.extend(agents.iter().flat_map(|(_, config)| {
+        let tools = &config.tool_config;
+        tools
+            .available_tool_names
             .iter()
-            .flat_map(|(_, config)| config.tool_config.available_tool_names.iter().cloned()),
-    );
+            .chain(&tools.nested_only_tool_names)
+            .cloned()
+    }));
     // Claude Code's built-in tools, which the default freshness mapping
     // names for agents that run in Claude Code.
     known.extend(
