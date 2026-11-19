@@ -465,14 +465,16 @@ impl NoteBoard {
         self.state.lock().seen.get(&task_id).copied().unwrap_or(0)
     }
 
-    /// Whether run `task_id` of `agent` (not a completion verifier's review)
-    /// receives a note it hasn't been given.
-    pub(crate) fn has_update(&self, agent: &str, task_id: Uuid) -> bool {
+    /// Whether run `task_id` of `agent` (`review` for a completion
+    /// verifier's review) receives a note it hasn't been given, which its
+    /// next update gives ([`update_with_seqs`](Self::update_with_seqs)).
+    /// Asking changes nothing.
+    pub(crate) fn has_update(&self, agent: &str, task_id: Uuid, review: bool) -> bool {
         let state = self.state.lock();
         let seen = state.seen.get(&task_id).copied().unwrap_or(0);
         state.notes.iter().any(|posted| {
             posted.seq > seen
-                && self.receives(&posted.note, agent, false)
+                && self.receives(&posted.note, agent, review)
                 && for_run(&posted.note, task_id)
                 && !skipped(&state, task_id, posted)
         })
@@ -1538,6 +1540,54 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
         !crate::messaging::is_context_notice(content)
             && !content.starts_with(crate::freshness::CHANGED_NOTICE_HEAD)
             && self.inner.wakes_calls(content)
+    }
+
+    /// A note the run receives and hasn't been given, mail that wakes it (a
+    /// review gets none), or what the inner source holds that wakes calls.
+    /// The activity notices (an agent started or finished, a wrap-up) wait
+    /// for the boundary, as the context notices do.
+    fn has_waking_update(&self, task_id: Uuid) -> bool {
+        self.context
+            .notes
+            .has_update(&self.agent_name, task_id, self.review)
+            || (!self.review && self.context.subagents.has_waking_mail(task_id))
+            || self.inner.has_waking_update(task_id)
+    }
+
+    /// The next note posted, the next change of the mailbox, or the inner
+    /// source's next change.
+    fn update_changed(
+        &self,
+        task_id: Uuid,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+        // Subscribed now, before the caller's check.
+        let mut notes = self.context.notes.watch();
+        let mut mail = self.context.subagents.changes();
+        let inner = self.inner.update_changed(task_id);
+        Some(Box::pin(async move {
+            let inner = async move {
+                match inner {
+                    Some(inner) => inner.await,
+                    None => std::future::pending().await,
+                }
+            };
+            // A channel that closed can't change again.
+            let notes = async move {
+                if notes.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let mail = async move {
+                if mail.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::select! {
+                () = notes => {}
+                () = mail => {}
+                () = inner => {}
+            }
+        }))
     }
 
     fn hold_request(&self, task_id: Uuid) -> Option<String> {

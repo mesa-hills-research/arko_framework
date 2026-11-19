@@ -549,6 +549,17 @@ impl Board {
         }
     }
 
+    /// Whether run `task_id` has mail that wakes it (every kind but a copy)
+    /// that it hasn't received, which its next [`update`](Self::update)
+    /// gives. Asking changes nothing.
+    pub(crate) fn has_waking_mail(&self, task_id: Uuid) -> bool {
+        self.state
+            .lock()
+            .mail
+            .iter()
+            .any(|item| item.to == task_id && item.delivered_at.is_none() && item.kind.wakes())
+    }
+
     /// The mail for run `task_id`'s next turn boundary, oldest first, as
     /// much as fits ([`UPDATE_MAX_MAIL_BYTES`]), with the items' ids
     /// (`mail:<id>`). It counts as delivered.
@@ -1866,6 +1877,10 @@ impl Board {
             context_arrived,
             claude_code,
         } = signals;
+        // The wait takes its mail and sees its notes itself, below, so mail
+        // from runs it doesn't wait for, which the run's turn context source
+        // holds too, doesn't end it.
+        let context_arrived = &context_arrived.without_updates();
         // Only a caller in Claude Code has a limit on its result.
         let budget = if *claude_code {
             WAIT_MAIL_BYTES
@@ -2019,7 +2034,7 @@ impl Board {
                     budget,
                 ));
             }
-            if ctx.notes.has_update(agent_name, me) {
+            if ctx.notes.has_update(agent_name, me, false) {
                 return Ok(wait_result(
                     Some(NOTE_ARRIVED),
                     &collected,

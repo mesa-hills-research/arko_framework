@@ -534,11 +534,12 @@ or shared automatically:
 
 A note steers the agents while the workflow runs, with a correction, a workaround found
 meanwhile, or a change of priority. Running agents get it at their next turn boundary,
-in a context update labelled with its source, and every later run of its audience
-gets it in its initial prompt (newest first, capped). Agents are told that a note
-refines their task and doesn't change their role's rules. A note never touches an
-agent's `AgentConfig`, so a resume still accepts the agents' saved tasks. Notes are
-the supported way to change instructions in a running or resumed workflow.
+in a context update labelled with its source. A call of theirs that waits
+(`terminal_control wait`, `wait_for_message`, `wait_for_agents`) ends for it. Every later
+run of its audience gets it in its initial prompt (newest first, capped). Agents are told
+that a note refines their task and doesn't change their role's rules. A note never touches
+an agent's `AgentConfig`, so a resume still accepts the agents' saved tasks. Notes are the
+supported way to change instructions in a running or resumed workflow.
 
 ```rust
 use arko_workflows::notes::{Note, NoteSource};
@@ -819,7 +820,9 @@ result stays under about 40,000 bytes, with the rest in the next update. Like
 moves it to the background, after what it collected.
 
 - A report, failure, stop or message reaches a running agent at its
-  next turn boundary. A message to a subagent that finished continues its run, with
+  next turn boundary, and ends a call that waits for it, such as a `terminal_control
+  wait` (a `wait_for_agents` given `runs` waits on for the others' mail). A copy for a
+  lead ends no wait. A message to a subagent that finished continues its run, with
   its conversation, and a message from its lead restarts a stopped one. When the
   recipient is a run the host drives and it is idle, `subscribe_subagents()` sends
   `NewsWaiting` so the host can start its next turn.

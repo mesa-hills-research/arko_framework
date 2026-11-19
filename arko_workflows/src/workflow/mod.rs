@@ -3534,6 +3534,10 @@ mod user_image_tests;
 #[path = "background_tests.rs"]
 mod background_tests;
 
+#[cfg(all(test, unix))]
+#[path = "arrival_tests.rs"]
+mod arrival_tests;
+
 #[cfg(test)]
 #[path = "reconfigure_tests.rs"]
 mod reconfigure_tests;

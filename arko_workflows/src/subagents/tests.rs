@@ -2729,6 +2729,104 @@ async fn a_wait_ends_when_moved_or_when_context_arrives() {
     }
 }
 
+/// A turn context source with nothing of its own, for `WithNotes`.
+struct Nothing;
+
+impl arko_agents::TurnContextSource for Nothing {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+}
+
+/// A wait for some runs goes on while another run's report waits in the
+/// mailbox, although the call's signal reads the lead's turn context
+/// source, which holds that report and wakes other calls with it. A note for
+/// the lead ends the wait, and the report stays for the next update.
+#[tokio::test]
+async fn a_wait_for_some_runs_goes_on_while_the_others_mail_waits() {
+    // r1 works until the server is dropped, and r2 finishes at once.
+    let server = ResponsesServer::start(|_, body| match role(body).as_str() {
+        "r2" => Some(tool_call_turn(
+            "r2_0",
+            "complete_task",
+            json!({ "summary": "r2 found it" }),
+        )),
+        _ => None,
+    })
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    for task in ["Search slowly.", "Search quickly."] {
+        ctx.subagents
+            .start(
+                ctx,
+                lead,
+                "lead",
+                0,
+                &workspace.0,
+                "worker",
+                task,
+                None,
+                false,
+                None,
+                None,
+                std::collections::BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+    until(|| {
+        workflow
+            .subagents()
+            .iter()
+            .any(|run| run.handle == "r2" && run.state == SubagentState::Finished)
+    })
+    .await;
+    let source: Arc<dyn arko_agents::TurnContextSource> = Arc::new(crate::notes::WithNotes {
+        inner: Nothing,
+        context: ctx.clone(),
+        agent_name: "lead".into(),
+        review: false,
+    });
+    let mut task_context = TaskContext::new(lead, "lead", "", &workspace.0);
+    task_context.context_arrived = arko_agents::ContextSource::new()
+        .signal()
+        .with_updates(&source, lead);
+    assert!(
+        task_context.context_arrived.has_arrived(),
+        "r2's report wakes the lead's other calls"
+    );
+    let tool = WaitForAgentsTool::new(ctx.clone(), "lead".into(), Arc::new(server.client()));
+    let for_r1 = HashMap::from([
+        ("runs".to_string(), json!("r1")),
+        ("timeout_seconds".to_string(), json!(1)),
+    ]);
+    let result = within(tool.execute(&task_context, for_r1.clone()))
+        .await
+        .unwrap();
+    assert!(result.starts_with("Nothing new in 1 s."), "{result}");
+
+    let (result, ()) = within(async {
+        tokio::join!(tool.execute(&task_context, for_r1), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            workflow
+                .post_note(crate::notes::Note::new("Look at r2.").to(["lead"]))
+                .unwrap();
+        })
+    })
+    .await;
+    assert!(result.unwrap().starts_with(board::NOTE_ARRIVED));
+    let pending = workflow.pending_news(lead);
+    assert!(
+        pending.iter().any(|item| item.body.contains("r2 found it")),
+        "{pending:?}"
+    );
+}
+
 /// `wait_for_agents` takes its time from the call's prompt cache, as
 /// `wait_for_message` does. It waits as long as the cache's deadline
 /// leaves, however the request that made the call was timed, and not at all
