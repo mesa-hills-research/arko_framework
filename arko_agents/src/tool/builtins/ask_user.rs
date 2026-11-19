@@ -32,8 +32,8 @@ const ASYNC_DESCRIPTION: &str = "Asks the user and, by default, waits for the an
 
 /// What both descriptions say of a reply that isn't an answer.
 const NON_ANSWER: &str = "A reply that doesn't answer a question (a new request, or words \
-    about something else) leaves it unanswered. Respond to what the user said, ask the question \
-    again in the same words, and end with a short reminder such as \"The question about the \
+    about something else) leaves it unanswered. Respond to what the user said, repeat the \
+    question in the same words, and end with a short reminder such as \"The question about the \
     branch is still waiting for your answer.\"";
 
 const QUESTIONS_DESCRIPTION: &str = "The questions, as a list. Each has `question` (what you \
