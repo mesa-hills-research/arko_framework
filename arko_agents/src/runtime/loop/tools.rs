@@ -49,6 +49,7 @@ impl AgentLoop {
                 &self.task.conversation.messages,
             ))),
             context: self.context_arrivals.clone(),
+            turn_context: self.turn_context.as_ref().map(Arc::downgrade),
             #[cfg(any(unix, windows))]
             jobs: self.background_jobs.as_ref().map(Arc::downgrade),
             terminal_tools: RunEnvironment::offers_terminal_tools(&self.tool_registry),

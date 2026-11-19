@@ -359,7 +359,12 @@ pub struct TaskContext<'a> {
     /// Fires when context (a note, a terminal update) arrives for the task
     /// while the call runs. A tool that waits can return early, so the model
     /// reads it. Context that arrived after the request the call came from
-    /// (while an earlier call of the turn ran, say) fires it at once.
+    /// (while an earlier call of the turn ran, say) fires it at once, and so
+    /// does context the task's turn context source holds for its next update
+    /// ([`TurnContextSource::has_waking_update`](crate::runtime::TurnContextSource::has_waking_update)),
+    /// such as a workflow's note. A call made from inside a call
+    /// ([`NestedCalls`]) gets a signal that never fires, since only the
+    /// outer call can end so the model reads the context.
     pub context_arrived: ContextSignal,
     /// The task's model runs in Claude Code
     /// ([`Provider::ClaudeCode`](arko_ai::Provider::ClaudeCode)), which

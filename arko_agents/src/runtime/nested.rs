@@ -85,7 +85,10 @@ pub enum NestedOutcome {
 ///    does so at the outer call.
 /// 4. It runs under its tool's own time limit, with a [`TaskContext`](crate::tool::TaskContext) of
 ///    its own, a new call ID and the outer call's stop signal. It doesn't
-///    move to the background, and it gets no `nested` of its own.
+///    move to the background, and it gets no `nested` of its own. Its
+///    `context_arrived` never fires, since the model reads what arrived
+///    only once the outer call ends, so the outer call watches its own
+///    signal and decides when to return.
 /// 5. Calls run one at a time, in the order they were made.
 /// 6. Each emits [`AgentEvent::NestedToolCallStarted`] and
 ///    [`AgentEvent::NestedToolCallFinished`], naming the outer call. A

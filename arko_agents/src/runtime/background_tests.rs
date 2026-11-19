@@ -561,9 +561,20 @@ async fn a_moved_call_outlives_its_turn_and_stops_with_its_job() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A moved call doesn't keep its manager alive. Dropping the host's last
-/// handle stops the call, as it stops the manager's other jobs, and frees
-/// the manager's directory.
+/// A turn context source that holds the terminal manager, as a workflow's
+/// holds its shared context and with it the manager.
+struct HoldsManager(#[allow(dead_code)] Arc<TerminalManager>);
+
+impl crate::runtime::TurnContextSource for HoldsManager {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        None
+    }
+}
+
+/// A moved call doesn't keep its manager alive, also through the task's
+/// turn context source, which its context signal reads. Dropping the
+/// host's last handle stops the call, as it stops the manager's other jobs,
+/// and frees the manager's directory.
 #[tokio::test]
 async fn dropping_the_manager_stops_a_moved_call() {
     let workspace = workspace();
@@ -576,6 +587,7 @@ async fn dropping_the_manager_stops_a_moved_call() {
     config.tool_config.tool_timeout_seconds = None;
     let (mut agent, _events, _commands) = agent(config, registry, &workspace);
     agent.background_jobs = Some(jobs.clone());
+    agent.turn_context = Some(Arc::new(HoldsManager(jobs.clone())));
     let task_id = agent.task.id;
     agent.scripted_responses.get_mut().unwrap().extend([
         turn(vec![native_call("slow", "slow", serde_json::json!({}))]),

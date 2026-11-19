@@ -41,6 +41,10 @@ pub(super) struct RunEnvironment {
     /// Notified as context arrives for the task. Each call gets a signal
     /// made as it starts. See [`TaskContext::context_arrived`].
     pub context: ContextSource,
+    /// The task's turn context source, whose context for the next update
+    /// that wakes calls fires each call's signal too. Held weakly, as
+    /// `jobs` is, since it can hold the manager.
+    pub turn_context: Option<std::sync::Weak<dyn super::TurnContextSource>>,
     /// The terminal manager calls move to the background with. See
     /// [`AgentRuntime::with_background_jobs`](super::AgentRuntime::with_background_jobs).
     /// A moved call's future owns the environment, so the manager is held
@@ -85,6 +89,22 @@ impl RunEnvironment {
             runs_in_claude_code: self.model.provider == arko_ai::Provider::ClaudeCode,
             nested: None,
             prompt_cache: *self.prompt_cache.lock().unwrap(),
+        }
+    }
+
+    /// The context signal of a call starting now. Context that arrives from
+    /// now on reaches the call, and so does context taken earlier that the
+    /// conversation doesn't hold yet, and the context the task's turn
+    /// context source holds that wakes calls.
+    fn call_signal(&self) -> ContextSignal {
+        let signal = self.context.call_signal();
+        match self
+            .turn_context
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            Some(source) => signal.with_updates(&source, self.task_id),
+            None => signal,
         }
     }
 
@@ -211,9 +231,7 @@ pub(super) async fn run_tool(
     let signals = CallSignals {
         stop: environment.stop.clone(),
         moved: MoveSignal::never(),
-        // Context that arrives from now on reaches the call, and so does
-        // context taken earlier that the conversation doesn't hold yet.
-        context_arrived: environment.context.call_signal(),
+        context_arrived: environment.call_signal(),
     };
     #[cfg(any(unix, windows))]
     if run.background != ToolBackground::Never
@@ -227,8 +245,10 @@ pub(super) async fn run_tool(
 /// Runs a call made from inside a call ([`NestedCalls`]) with `stop`, the
 /// outer call's stop signal. The middleware's `before` and `after` see it,
 /// and it runs under its time limit, in the foreground, with no images
-/// kept, no interception and no [`NestedCalls`] of its own. `starting` is
-/// called once `before` lets it run, as the tool starts.
+/// kept, no interception and no [`NestedCalls`] of its own. Its context
+/// signal never fires, since only the outer call's end lets the model read
+/// what arrived. `starting` is called once `before` lets it run, as the
+/// tool starts.
 pub(super) async fn run_nested(
     environment: Arc<RunEnvironment>,
     run: ToolRun,

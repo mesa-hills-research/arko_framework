@@ -865,6 +865,7 @@ fn nested_calls_with(
         image_sink: None,
         image_room: None,
         context: ContextSource::new(),
+        turn_context: None,
         #[cfg(any(unix, windows))]
         jobs: None,
         terminal_tools: false,

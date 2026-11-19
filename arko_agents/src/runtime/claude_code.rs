@@ -2386,6 +2386,7 @@ impl ClaudeCodeRun {
                 // Claude Code holds the conversation and keeps its own count.
                 image_room: None,
                 context: self.context_arrivals.clone(),
+                turn_context: self.turn_context.as_ref().map(Arc::downgrade),
                 #[cfg(any(unix, windows))]
                 jobs: self.background_jobs.as_ref().map(Arc::downgrade),
                 terminal_tools: RunEnvironment::offers_terminal_tools(&self.registry),

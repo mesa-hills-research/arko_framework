@@ -119,6 +119,34 @@ pub trait TurnContextSource: Send + Sync {
         true
     }
 
+    /// Whether the source holds context for task `task_id`'s next update
+    /// that a call that waits should return for, such as a note posted for
+    /// it. That is context the host gives in the update rather than sending
+    /// with [`InjectContext`](crate::runtime::command::UserCommand::InjectContext),
+    /// which nothing else tells a running call of. While this says so, the
+    /// task's calls see their [`context_arrived`](crate::tool::TaskContext::context_arrived)
+    /// signal fired. The update still gives the context where it gives it
+    /// otherwise, so asking takes nothing. It is asked while calls run, from
+    /// inside them too, so it is quick, and it calls nothing out while it
+    /// holds a lock. `false` (the default) for a source that holds nothing a
+    /// call should return for.
+    fn has_waking_update(&self, _task_id: Uuid) -> bool {
+        false
+    }
+
+    /// A future that resolves once what
+    /// [`has_waking_update`](Self::has_waking_update) says of task `task_id`
+    /// may have changed since this call. The source subscribes to its
+    /// changes here, before it returns, so a change between this call and
+    /// the check that follows still resolves it. `None` (the default) for a
+    /// source whose answer never changes.
+    fn update_changed(
+        &self,
+        _task_id: Uuid,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+        None
+    }
+
     /// Whether to hold the task's next model request, and why. With
     /// `Some(reason)` the request isn't made and the task pauses for
     /// error-recovery approval with

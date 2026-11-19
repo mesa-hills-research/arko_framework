@@ -12,15 +12,17 @@
 //! fire and moves itself.
 //!
 //! [`TaskContext::context_arrived`](super::TaskContext::context_arrived)
-//! tells a call that waits (for other agents, for a message) that a note, a
-//! terminal update or other context arrived for its task, so it can return
-//! and let the model read it.
+//! tells a call that waits (for other agents, for a message, for a job)
+//! that a note, a terminal update or other context arrived for its task, so
+//! it can return and let the model read it.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use tokio::sync::watch;
+
+use crate::runtime::TurnContextSource;
 
 /// How a running call of a tool can move to the background. See
 /// [`Tool::background_mode`](super::Tool::background_mode).
@@ -138,7 +140,10 @@ impl fmt::Debug for MoveSource {
 /// Whether context arrived for a call's task that the model hasn't read.
 /// The runtime makes the signal as the call starts. It counts the context
 /// that arrives from then on, and any that arrived after the model's
-/// request the call came from. See
+/// request the call came from. It also counts, for as long as it is there,
+/// the context the task's turn context source holds for the next update
+/// that wakes calls ([`TurnContextSource::has_waking_update`]), such as a
+/// note posted for the task. See
 /// [`TaskContext::context_arrived`](super::TaskContext::context_arrived).
 ///
 /// Clones share the same starting point. [`never`](Self::never) (also the
@@ -150,6 +155,11 @@ pub struct ContextSignal {
     start: u64,
     /// The source's word on whether a note the user typed waits.
     note: Option<Arc<AtomicBool>>,
+    /// The turn context source asked for what it holds, and the task. Held
+    /// weakly, since a call moved to the background owns its signal, and
+    /// the source can hold what owns the call (a workflow's holds the
+    /// terminal manager).
+    updates: Option<(Weak<dyn TurnContextSource>, uuid::Uuid)>,
 }
 
 impl ContextSignal {
@@ -159,8 +169,43 @@ impl ContextSignal {
         Self::default()
     }
 
-    /// Whether context arrived since the signal was made.
+    /// This signal, also fired while `source` holds context for task
+    /// `task_id` that wakes calls ([`TurnContextSource::has_waking_update`]).
+    /// The runtime gives its calls such a signal for the task's own source.
+    /// For a host that runs tools itself, and for tests. The signal doesn't
+    /// keep the source alive. Once it is dropped, only the context the
+    /// runtime took fires the signal.
+    pub fn with_updates(
+        mut self,
+        source: &Arc<dyn TurnContextSource>,
+        task_id: uuid::Uuid,
+    ) -> Self {
+        self.updates = Some((Arc::downgrade(source), task_id));
+        self
+    }
+
+    /// This signal without what the turn context source holds, for a call
+    /// that takes that context itself, as `wait_for_agents` takes its mail.
+    pub fn without_updates(&self) -> Self {
+        Self {
+            updates: None,
+            ..self.clone()
+        }
+    }
+
+    /// Whether context arrived since the signal was made, or the turn
+    /// context source holds some that wakes calls.
     pub fn has_arrived(&self) -> bool {
+        self.taken()
+            || self.updates.as_ref().is_some_and(|(source, task_id)| {
+                source
+                    .upgrade()
+                    .is_some_and(|source| source.has_waking_update(*task_id))
+            })
+    }
+
+    /// Whether context the runtime took arrived since the signal was made.
+    fn taken(&self) -> bool {
         self.source
             .as_ref()
             .is_some_and(|source| *source.borrow() != self.start)
@@ -177,9 +222,17 @@ impl ContextSignal {
     }
 
     /// Resolves once context arrives (at once if some arrived since the
-    /// signal was made). A signal that can no longer fire, such as
+    /// signal was made, or the turn context source holds some that wakes
+    /// calls). A signal that can no longer fire, such as
     /// [`never`](Self::never), never resolves.
     pub async fn arrived(&self) {
+        tokio::select! {
+            () = self.taken_arrives() => {}
+            () = self.update_arrives() => {}
+        }
+    }
+
+    async fn taken_arrives(&self) {
         let Some(source) = &self.source else {
             return std::future::pending().await;
         };
@@ -189,13 +242,39 @@ impl ContextSignal {
             std::future::pending::<()>().await;
         }
     }
+
+    async fn update_arrives(&self) {
+        let Some((source, task_id)) = &self.updates else {
+            return std::future::pending().await;
+        };
+        loop {
+            let changed = {
+                let Some(source) = source.upgrade() else {
+                    return std::future::pending().await;
+                };
+                // Made before the check, so a change after it resolves it.
+                let changed = source.update_changed(*task_id);
+                if source.has_waking_update(*task_id) {
+                    return;
+                }
+                // The source isn't held while the wait goes on.
+                changed
+            };
+            match changed {
+                Some(changed) => changed.await,
+                None => return std::future::pending().await,
+            }
+        }
+    }
 }
 
 impl fmt::Debug for ContextSignal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Without asking the source, which a formatter shouldn't do.
         formatter
             .debug_struct("ContextSignal")
-            .field("arrived", &self.has_arrived())
+            .field("arrived", &self.taken())
+            .field("reads_updates", &self.updates.is_some())
             .finish()
     }
 }
@@ -232,6 +311,7 @@ impl ContextSource {
             source: Some(source),
             start,
             note: Some(self.note.clone()),
+            updates: None,
         }
     }
 
@@ -243,6 +323,7 @@ impl ContextSource {
             source: Some(self.arrivals.subscribe()),
             start: self.caught_up.load(Ordering::Acquire),
             note: Some(self.note.clone()),
+            updates: None,
         }
     }
 
@@ -369,5 +450,127 @@ mod tests {
         assert!(signal.note_waits() && source.call_signal().note_waits());
         source.set_note_waits(false);
         assert!(!signal.note_waits());
+    }
+
+    /// A turn context source that holds context while `waiting` is set. With
+    /// `post_after_check`, its next answer of `false` is followed at once by
+    /// a post, as a note posted just after a wait looked.
+    #[derive(Default)]
+    struct Held {
+        waiting: AtomicBool,
+        post_after_check: AtomicBool,
+        changes: watch::Sender<u64>,
+    }
+
+    impl Held {
+        fn post(&self) {
+            self.waiting.store(true, Ordering::SeqCst);
+            self.changes.send_modify(|count| *count += 1);
+        }
+    }
+
+    impl TurnContextSource for Held {
+        fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+            None
+        }
+
+        fn has_waking_update(&self, _task_id: uuid::Uuid) -> bool {
+            let waiting = self.waiting.load(Ordering::SeqCst);
+            if !waiting && self.post_after_check.swap(false, Ordering::SeqCst) {
+                self.post();
+            }
+            waiting
+        }
+
+        fn update_changed(
+            &self,
+            _task_id: uuid::Uuid,
+        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+            let mut changes = self.changes.subscribe();
+            Some(Box::pin(async move {
+                let _ = changes.changed().await;
+            }))
+        }
+    }
+
+    /// The signal counts what the source holds for as long as it holds it,
+    /// and asking takes nothing.
+    #[tokio::test]
+    async fn a_signal_counts_what_the_turn_context_source_holds() {
+        let held = Arc::new(Held::default());
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let task_id = uuid::Uuid::new_v4();
+        let signal = ContextSource::new()
+            .call_signal()
+            .with_updates(&source, task_id);
+        assert!(!signal.has_arrived());
+        let waiting = tokio::spawn({
+            let signal = signal.clone();
+            async move { signal.arrived().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished());
+        held.post();
+        timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(signal.has_arrived() && signal.has_arrived(), "still held");
+        assert!(!signal.without_updates().has_arrived());
+        // Once the runtime took it, nothing is left to count.
+        held.waiting.store(false, Ordering::SeqCst);
+        assert!(!signal.has_arrived());
+    }
+
+    /// Context the source gets just after a wait looked still ends the wait,
+    /// since the wait subscribed to the source's changes before it looked.
+    #[tokio::test]
+    async fn context_held_just_after_the_check_ends_the_wait() {
+        let held = Arc::new(Held::default());
+        held.post_after_check.store(true, Ordering::SeqCst);
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let signal = ContextSource::new()
+            .signal()
+            .with_updates(&source, uuid::Uuid::new_v4());
+        timeout(Duration::from_secs(5), signal.arrived())
+            .await
+            .expect("the change after the check ends it");
+    }
+
+    /// The signal holds its source weakly, also while it waits. Once the
+    /// source is gone, only the context the runtime took fires it.
+    #[tokio::test]
+    async fn a_dropped_source_leaves_the_taken_context() {
+        let held = Arc::new(Held::default());
+        held.post();
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let signal = ContextSource::new()
+            .signal()
+            .with_updates(&source, uuid::Uuid::new_v4());
+        assert!(signal.has_arrived());
+        drop((held, source));
+        assert!(!signal.has_arrived());
+
+        let held = Arc::new(Held::default());
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let arrivals = ContextSource::new();
+        let signal = arrivals
+            .signal()
+            .with_updates(&source, uuid::Uuid::new_v4());
+        let waiting = tokio::spawn({
+            let signal = signal.clone();
+            async move { signal.arrived().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let gone = Arc::downgrade(&source);
+        drop((held, source));
+        assert!(gone.upgrade().is_none(), "the waiting signal holds it");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished());
+        arrivals.notify();
+        timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
