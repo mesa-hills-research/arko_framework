@@ -111,14 +111,14 @@ E {"ToolCallFormatted":{"parameters":{"path":"../outside.txt","what":"a"},"tool_
 E {"ToolCallInitiated":{"tool_call_id":"id16","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"fail"},"tool_call_id":"id16","tool_name":"step"}}
 S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=25ab02a1ddaec3b7
-E {"TaskStateChanged":{"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}}}
-E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Execution failed: step could not do it","requires_approval_to_retry":false,"tool_call_id":"id16"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=0d5e69cee0a7597b
+E {"TaskStateChanged":{"Failed":{"reason":"Tool 'step' execution failed: step could not do it"}}}
+E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: step could not do it","requires_approval_to_retry":false,"tool_call_id":"id16"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: step could not do it"}} task=a87c52c576eaf582
 E {"ToolRejected":{"reason":"The task failed on an earlier tool error, so this call was not run.","tool_call_id":"id15","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=a13f28c59ae1466c
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: step could not do it"}} task=46eefafd24dad72b
 E {"ToolRejected":{"reason":"The task failed on an earlier tool error, so this call was not run.","tool_call_id":"id17","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=3fb3bd0ea9079dec
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=0d5e69cee0a7597b
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: step could not do it"}} task=96afe89e57950d51
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: step could not do it"}} task=a87c52c576eaf582
 E "TaskStreamEnd"
 --- conversation: 2 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}

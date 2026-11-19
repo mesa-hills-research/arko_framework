@@ -6603,7 +6603,7 @@ mod tests {
         let second = &server.bodies()[1];
         assert!(
             second.contains(
-                "[redacted]\\n\\n[A tool-result interceptor failed (Execution failed: summarizer offline), so this result skipped that step.]"
+                "[redacted]\\n\\n[A tool-result interceptor failed (summarizer offline), so this result skipped that step.]"
             ),
             "{second}"
         );

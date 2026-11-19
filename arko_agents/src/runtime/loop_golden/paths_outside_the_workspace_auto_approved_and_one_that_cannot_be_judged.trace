@@ -50,27 +50,27 @@ S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 inje
 E {"AssistantResponseChunk":"\n\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id7","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"path":"bad\u0000name.txt","what":"invalid"},"tool_call_id":"id7","tool_name":"step"}}
-E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Execution failed: Path validation failed for parameter 'path': I/O Error: the path contains a NUL byte","requires_approval_to_retry":false,"tool_call_id":"id7"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=fea0578ab28e837b
-S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a0351eb76ad926ea
-R msgs=5 model=gpt-5.6-luna request=80e6182228c39823
-E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":124,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":217}}}
+E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Path validation failed for parameter 'path': I/O Error: the path contains a NUL byte","requires_approval_to_retry":false,"tool_call_id":"id7"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=73bffeb26d8c6422
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=abf5dc87a819a6bf
+R msgs=5 model=gpt-5.6-luna request=fc39e55856be7db6
+E {"ModelRequestStarted":{"bytes_per_token":3.0,"model":"gpt-5.6-luna","sent_at":"<time>","sizes":{"assistant_text":124,"image_tokens":0,"images":0,"system_prompt":1023,"tool_calls":0,"tool_definitions":0,"tool_results":0,"user_text":199}}}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8d8e190de15c3cf0
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=50fcdaf9ba60250f
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id8","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id8","tool_name":"complete_task"}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c6b07cbf3ca39b3d
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c5a8747810c2c432
 E {"ToolResult":{"output":"done","tool_call_id":"id8","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=aa59d941b4ff5664
-S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=c469686ccb72f571
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=aa5a9ebef8835a95
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=9062502b55e91c42
 E "TaskStreamEnd"
 --- conversation: 6 messages, system prompt 08c6670afdf61d85
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<step>\n<what>outside</what>\n<path>../outside.txt</path>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool step finished with the following result:\nstep ran outside"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<step>\n<what>invalid</what>\n<path>bad\u0000name.txt</path>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
-M {"content":[{"Text":"Tool step failed during execution. Error: Execution failed: Path validation failed for parameter 'path': I/O Error: the path contains a NUL byte"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"Tool step failed during execution. Error: Path validation failed for parameter 'path': I/O Error: the path contains a NUL byte"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

@@ -1107,7 +1107,7 @@ async fn the_monitor_tools_start_list_rearm_and_stop_monitors() {
         .unwrap_err();
     assert_eq!(
         after.to_string(),
-        format!("Execution failed: monitor {id} has ended. monitor_start starts a new one")
+        format!("monitor {id} has ended. monitor_start starts a new one")
     );
 
     // Parameters that don't go together, or out of range.

@@ -9,7 +9,10 @@ pub enum ToolError {
     #[error("Missing required parameter: '{param_name}'")]
     MissingParameter { param_name: String },
 
-    #[error("Execution failed: {0}")]
+    /// The tool ran and couldn't do what was asked. It reads as its message
+    /// alone, since the loop that ran the call says the tool failed
+    /// ("Tool 'read_file' execution failed: {message}").
+    #[error("{0}")]
     ExecutionFailed(String),
 
     /// A check inside the tool refused the call before it did anything,
@@ -17,7 +20,7 @@ pub enum ToolError {
     /// [`ExecutionFailed`](Self::ExecutionFailed) does, and a call made from
     /// inside another call
     /// ([`NestedCalls`](crate::tool::NestedCalls)) counts it as refused.
-    #[error("Execution failed: {0}")]
+    #[error("{0}")]
     Refused(String),
 
     #[error("Configuration error for tool '{tool_name}': {message}")]

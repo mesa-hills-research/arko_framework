@@ -47,6 +47,10 @@
 - A line of the file that is itself a marker is written with a backslash before it
   (`\=======`). The `AD_ESC::` prefix is gone.
 - `AgentToolConfig` has a new public field, `nested_only_tool_names`.
+- `ToolError::ExecutionFailed` and `ToolError::Refused` read as their message alone. The loop
+  already says the tool failed, so a failed call read "Tool 'read_file' execution failed:
+  Execution failed: …" to the model, in the events and in saved conversations. It now reads
+  "Tool 'read_file' execution failed: …".
 
 ## 0.9.1 (2026-11-18)
 

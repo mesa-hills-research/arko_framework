@@ -809,7 +809,7 @@ async fn a_refusal_inside_the_tool_is_a_refusal_and_a_failure_a_failure() {
     .await;
     assert_eq!(
         outer_result(&task),
-        "refused: the guard said no\nfailed: Execution failed: it broke"
+        "refused: the guard said no\nfailed: it broke"
     );
 }
 
