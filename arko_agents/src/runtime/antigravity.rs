@@ -158,7 +158,7 @@ pub(super) struct AntigravityRun {
 
 impl AntigravityRun {
     pub(super) async fn start(
-        run: &mut CliRun,
+        run: &mut ExternalCliRun,
         requests: mpsc::UnboundedSender<HostRequest>,
     ) -> Result<Self, CliError> {
         let config = &run.task.agent_config;
@@ -518,7 +518,7 @@ impl AntigravityTurn {
     }
 }
 
-impl CliRun {
+impl ExternalCliRun {
     fn antigravity_tool_server(
         &mut self,
         requests: mpsc::UnboundedSender<HostRequest>,

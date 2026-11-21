@@ -6993,7 +6993,7 @@ async fn a_typed_arrival_says_it_is_a_note_before_waking_calls() {
     let task = Task::new(config(&fake, &[]), "Wait.".into(), fake.workspace(), None);
     let (events, _receiver) = mpsc::channel(16);
     let (_sender, commands) = mpsc::channel(16);
-    let mut run = super::CliRun::new(
+    let mut run = super::ExternalCliRun::new(
         task,
         Arc::new(ToolRegistry::new()),
         events,

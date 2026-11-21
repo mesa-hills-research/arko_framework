@@ -14,7 +14,7 @@
 //! ([`Task::claude_code_session`]) when it continues. A handover starts a
 //! new session, after the report. A turn over the model's input limit has
 //! the report written in the session resumed at an earlier message
-//! (`CliRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+//! (`ExternalCliRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
 //! keeps it. The runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
@@ -147,7 +147,7 @@ fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolO
 const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal. A Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
 
 /// Heads the note on the calls that were open when the task stopped. See
-/// [`CliRun::recover_open_calls`].
+/// [`ExternalCliRun::recover_open_calls`].
 const RESTARTED_NOTE: &str = "The task stopped while tool calls were open (arko's host or Claude Code stopped). As arko recorded them, and whatever Claude Code reports of them (it may call them interrupted):";
 
 /// The arko tool a Claude Code tool name serves, if it is one.
@@ -894,7 +894,7 @@ impl From<PauseCause> for ErrorRecoveryCause {
 
 /// The pause a turn asked for, applied when it ends. The strongest cause
 /// stands, and the reasons of every offer go with it, in order. The turn's
-/// tool errors are kept apart (`CliRun::tool_errors`), as they are
+/// tool errors are kept apart (`ExternalCliRun::tool_errors`), as they are
 /// reported on their own unless a tool error is the pause's cause.
 #[derive(Debug, Default)]
 struct TurnPause(Option<(PauseCause, Vec<String>)>);
@@ -1014,7 +1014,7 @@ enum Stopping {
     Closed,
 }
 
-pub(super) struct CliRun {
+pub(super) struct ExternalCliRun {
     task: Task,
     /// The tools the task's configuration offers, the only ones served.
     registry: Arc<ToolRegistry>,
@@ -1188,7 +1188,7 @@ pub(super) struct CliRun {
     pub(super) background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
 }
 
-impl CliRun {
+impl ExternalCliRun {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         task: Task,
