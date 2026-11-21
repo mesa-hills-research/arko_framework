@@ -1,17 +1,17 @@
 //! Models that run through the installed Antigravity CLI on the user's plan.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The host executable and the arguments before `relay`, `gate` or `tripwire`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HelperCommand {
-    pub program: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-}
+mod profile;
+mod relay;
+
+pub use profile::{
+    AGENT_NAME, HelperCommand, MCP_SERVER_NAME, Profile, ProfileSpec, qualified_tool_name,
+    run_gate, run_tripwire,
+};
+pub use relay::{RELAY_TOKEN_ENV, RelayHost, run_relay, write_address_file};
 
 /// The usage windows Antigravity reports for a set of models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +29,59 @@ pub struct UsageBucket {
     pub window: String,
     pub remaining_fraction: f64,
     pub reset_time: String,
+}
+
+/// The usage group that names the model. The CLI lists the model names in
+/// the description unless the group is for just one model.
+pub fn group_for_model<'a>(groups: &'a [UsageGroup], display_name: &str) -> Option<&'a UsageGroup> {
+    groups
+        .iter()
+        .find(|group| {
+            group
+                .description
+                .strip_prefix("Models within this group:")
+                .is_some_and(|list| {
+                    list.split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .any(|name| {
+                            display_name == name
+                                || display_name
+                                    .strip_prefix(name)
+                                    .is_some_and(|rest| rest.starts_with(" ("))
+                        })
+                })
+        })
+        .or_else(|| groups.iter().find(|group| group.name == display_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_match_listed_names_or_the_group_name() {
+        let groups = [
+            UsageGroup {
+                name: "Claude and GPT models".into(),
+                description:
+                    "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B"
+                        .into(),
+                buckets: Vec::new(),
+            },
+            UsageGroup {
+                name: "Gemini 4 Argon".into(),
+                description: "Argon has a separate quota.".into(),
+                buckets: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            group_for_model(&groups, "GPT-OSS 120B (Medium)"),
+            Some(&groups[0])
+        );
+        assert_eq!(group_for_model(&groups, "Gemini 4 Argon"), Some(&groups[1]));
+        assert_eq!(group_for_model(&groups, "Claude Opus 5.50"), None);
+    }
 }
 
 /// The lowest version Arko supports.
@@ -69,23 +122,4 @@ pub fn find_agy() -> Option<PathBuf> {
 
 pub async fn check_sign_in(_cli: Option<&Path>) -> Result<SignIn, SignInProblem> {
     Err(SignInProblem::Missing)
-}
-
-pub async fn run_relay(_path: &Path) -> io::Result<()> {
-    unavailable()
-}
-
-pub fn run_gate(_path: &Path) -> io::Result<()> {
-    unavailable()
-}
-
-pub fn run_tripwire(_path: &Path) -> io::Result<()> {
-    unavailable()
-}
-
-fn unavailable() -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Antigravity is not available yet.",
-    ))
 }
