@@ -32,7 +32,9 @@ fn body(model: Model, config: &GenerationConfig, oauth: bool) -> String {
         Provider::OpenRouter => OpenRouterClient::new("test")
             .build_request(&conversation, config)
             .map(|prepared| serde_json::to_string(&prepared.body).unwrap()),
-        Provider::ClaudeCode => unreachable!("Claude Code models are run by the CLI"),
+        Provider::ClaudeCode | Provider::Antigravity => {
+            unreachable!("Claude Code models are run by the CLI")
+        }
     }
     .unwrap()
 }
@@ -148,7 +150,9 @@ fn body_of(conversation: &Conversation, config: &GenerationConfig, oauth: bool) 
         Provider::OpenRouter => OpenRouterClient::new("test")
             .build_request(conversation, config)
             .map(|prepared| serde_json::to_string(&prepared.body).unwrap()),
-        Provider::ClaudeCode => unreachable!("Claude Code models are run by the CLI"),
+        Provider::ClaudeCode | Provider::Antigravity => {
+            unreachable!("Claude Code models are run by the CLI")
+        }
     }
     .unwrap()
 }

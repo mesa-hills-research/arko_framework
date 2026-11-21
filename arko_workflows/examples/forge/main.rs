@@ -1183,6 +1183,7 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
             let own = match subscription {
                 SubscriptionPlan::ClaudeCode => plan.claude_code.limit(window),
                 SubscriptionPlan::ChatGpt => plan.chatgpt.limit(window),
+                SubscriptionPlan::Antigravity => continue,
             };
             let span = match window {
                 PlanWindow::FiveHour => "5h",
@@ -1193,6 +1194,7 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
                 (Some(_), SubscriptionPlan::ClaudeCode) => {
                     format!("--claude-code-budget-{span} <points>")
                 }
+                (Some(_), SubscriptionPlan::Antigravity) => continue,
                 (Some(_), SubscriptionPlan::ChatGpt) => {
                     format!("--chatgpt-budget-{span} <points>")
                 }

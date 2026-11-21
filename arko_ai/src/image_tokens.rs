@@ -34,7 +34,10 @@ impl Model {
             (provider, _) => (provider, self.id.as_str()),
         };
         match provider {
-            Provider::Anthropic | Provider::ClaudeCode => {
+            Provider::Antigravity if id.starts_with("gemini-") => {
+                size.map_or(UNKNOWN_SIZE_TOKENS, gemini_tokens)
+            }
+            Provider::Anthropic | Provider::ClaudeCode | Provider::Antigravity => {
                 anthropic_tokens(size, AnthropicTier::of(id))
             }
             Provider::OpenAI => openai_tokens(size, id),

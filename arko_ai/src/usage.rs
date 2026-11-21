@@ -111,6 +111,9 @@ pub struct PlanUsage {
     /// the plan's windows are used up), as Claude Code reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
+    /// All model groups in the Antigravity plan, as reported by the CLI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub antigravity_groups: Vec<crate::antigravity::UsageGroup>,
 }
 
 /// A Claude account's extra usage, which Claude Code now calls usage
@@ -196,17 +199,20 @@ pub enum SubscriptionPlan {
     /// (`rate_limit_event`).
     #[serde(rename = "claude_code")]
     ClaudeCode,
+    /// The Google plan the Antigravity CLI is signed in to.
+    #[serde(rename = "antigravity")]
+    Antigravity,
 }
 
 impl SubscriptionPlan {
-    pub const ALL: [SubscriptionPlan; 2] =
-        [SubscriptionPlan::ChatGpt, SubscriptionPlan::ClaudeCode];
+    pub const ALL: [SubscriptionPlan; 3] = [Self::ChatGpt, Self::ClaudeCode, Self::Antigravity];
 
     /// `"chatgpt"` or `"claude_code"`.
     pub fn key(self) -> &'static str {
         match self {
             SubscriptionPlan::ChatGpt => "chatgpt",
             SubscriptionPlan::ClaudeCode => "claude_code",
+            SubscriptionPlan::Antigravity => "antigravity",
         }
     }
 
@@ -215,6 +221,7 @@ impl SubscriptionPlan {
         match self {
             SubscriptionPlan::ChatGpt => "ChatGPT",
             SubscriptionPlan::ClaudeCode => "Claude Code",
+            SubscriptionPlan::Antigravity => "Antigravity",
         }
     }
 }
@@ -290,6 +297,7 @@ impl PlanUsage {
             secondary: window("secondary"),
             credits,
             extra_usage: None,
+            antigravity_groups: Vec::new(),
         };
         (usage != Self::default()).then_some(Self {
             plan: Some(SubscriptionPlan::ChatGpt),

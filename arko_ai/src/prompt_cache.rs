@@ -208,7 +208,9 @@ fn provider_prompt_cache_lifetime(
             .map_or(PromptCacheLifetime::Unknown, |ttl| {
                 PromptCacheLifetime::Known(ttl.duration())
             }),
-        Provider::OpenRouter | Provider::Google => PromptCacheLifetime::Unknown,
+        Provider::OpenRouter | Provider::Google | Provider::Antigravity => {
+            PromptCacheLifetime::Unknown
+        }
         Provider::OpenAI if openai_chatgpt_oauth => {
             PromptCacheLifetime::Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
         }

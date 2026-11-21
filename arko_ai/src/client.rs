@@ -186,7 +186,7 @@ impl LLMClient {
             Provider::Anthropic => set.anthropic.is_some(),
             Provider::Google => set.google.is_some(),
             Provider::OpenRouter => set.openrouter.is_some(),
-            Provider::ClaudeCode => false,
+            Provider::ClaudeCode | Provider::Antigravity => false,
         };
         is_set || self.get_provider(provider).is_ok()
     }
@@ -826,7 +826,7 @@ impl LLMClient {
                     providers::openrouter::OpenRouterClient::with_stream_idle_timeout,
                 )))
             }
-            Provider::ClaudeCode => None,
+            Provider::ClaudeCode | Provider::Antigravity => None,
         }
     }
 
@@ -853,6 +853,9 @@ impl LLMClient {
                 .as_ref()
                 .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("OpenRouter".to_string())),
+            Provider::Antigravity => Err(Error::ModelNotSupported(
+                "Antigravity models run through the Antigravity CLI. Use arko_agents to run them.".into(),
+            )),
             Provider::ClaudeCode => Err(Error::ModelNotSupported(
                 "Claude Code models run in a Claude Code session (arko_ai::claude_code), which arko_agents drives for an agent. They take no LLMClient requests.".to_string(),
             )),

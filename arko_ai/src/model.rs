@@ -15,6 +15,31 @@ pub enum Provider {
     /// arko_agents' Claude Code runtime, not [`LLMClient`](crate::LLMClient)
     /// requests.
     ClaudeCode,
+    /// Models run through the installed Antigravity CLI on the user's Google plan.
+    Antigravity,
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_models_keep_the_base_metadata() {
+        let base = Model::anthropic_claude_opus_5_5();
+        let model = Model::antigravity(base.clone());
+        assert_eq!(model.provider, Provider::Antigravity);
+        assert_eq!(
+            model.pricing.input_cost_per_million,
+            base.pricing.input_cost_per_million
+        );
+        assert_eq!(model.max_input_tokens, base.max_input_tokens);
+        assert_eq!(model.antigravity_family(), Some("claude-opus-5-5"));
+        assert_eq!(Model::list(Provider::Antigravity).len(), 7);
+        assert_eq!(
+            Model::find(&model.id).unwrap().provider,
+            Provider::Anthropic
+        );
+    }
 }
 
 impl Provider {
@@ -25,6 +50,7 @@ impl Provider {
             Provider::Google => "gemini",
             Provider::OpenRouter => "openrouter",
             Provider::ClaudeCode => "claude_code",
+            Provider::Antigravity => "antigravity",
         }
     }
 }
@@ -2264,6 +2290,22 @@ impl Model {
                 .into_iter()
                 .map(Self::claude_code)
                 .collect(),
+            Provider::Antigravity => [
+                Self::google_gemini_4_neon(),
+                Self::google_gemini_4_argon(),
+                Self::google_gemini_4_hydrogen(),
+                Self::google_gemini_3_8_flash(),
+                Self::anthropic_claude_opus_5_5(),
+                Self::anthropic_claude_sonnet_5_5(),
+                Self {
+                    supports_image_input: false,
+                    model_type: ModelType::Reasoning,
+                    ..Self::openrouter("gpt-oss-120b-medium")
+                },
+            ]
+            .into_iter()
+            .map(Self::antigravity)
+            .collect(),
         }
     }
 
@@ -2278,9 +2320,33 @@ impl Model {
         }
     }
 
-    /// Every registered model, across providers. Claude Code models share
-    /// their ids with the Anthropic models and are listed only by
-    /// [`Model::list`].
+    /// Runs `model` through Antigravity, keeping its limits and list prices.
+    pub fn antigravity(model: Model) -> Self {
+        Self {
+            provider: Provider::Antigravity,
+            ..model
+        }
+    }
+
+    /// The family to select in the Antigravity CLI for this model.
+    pub fn antigravity_family(&self) -> Option<&'static str> {
+        if self.provider != Provider::Antigravity {
+            return None;
+        }
+        [
+            "gemini-4-neon",
+            "gemini-4-argon",
+            "gemini-4-hydrogen",
+            "gemini-3.8-flash",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-oss-120b-medium",
+        ]
+        .into_iter()
+        .find(|family| self.id == *family)
+    }
+
+    /// Every registered API model. CLI models are listed only by [`Model::list`].
     pub fn all() -> Vec<Self> {
         [Provider::OpenAI, Provider::Anthropic, Provider::Google]
             .into_iter()
@@ -2328,7 +2394,7 @@ impl Model {
     pub fn supports_forced_tool_choice(&self, config: &crate::config::GenerationConfig) -> bool {
         match self.provider {
             // Claude Code chooses its own tool calls.
-            Provider::ClaudeCode => false,
+            Provider::ClaudeCode | Provider::Antigravity => false,
             Provider::Anthropic => {
                 let manual_thinking = config.anthropic_thinking_enabled != Some(false)
                     && matches!(
@@ -2396,7 +2462,7 @@ impl Model {
     pub fn supports_disabling_parallel_tool_calls(&self) -> bool {
         match self.provider {
             Provider::OpenAI | Provider::Anthropic | Provider::OpenRouter => true,
-            Provider::Google | Provider::ClaudeCode => false,
+            Provider::Google | Provider::ClaudeCode | Provider::Antigravity => false,
         }
     }
 
@@ -2410,7 +2476,8 @@ impl Model {
             | Provider::Anthropic
             | Provider::Google
             | Provider::OpenRouter
-            | Provider::ClaudeCode => true,
+            | Provider::ClaudeCode
+            | Provider::Antigravity => true,
         }
     }
 
@@ -2463,7 +2530,7 @@ impl Model {
     pub fn accepts_tool_result_images(&self) -> bool {
         self.supports_image_input
             && match self.provider {
-                Provider::OpenAI | Provider::Anthropic => true,
+                Provider::OpenAI | Provider::Anthropic | Provider::Antigravity => true,
                 Provider::Google => gemini_major_version(&self.id).is_some_and(|major| major >= 3),
                 // Its in-process tools return text.
                 Provider::OpenRouter | Provider::ClaudeCode => false,
@@ -2485,7 +2552,10 @@ impl Model {
             Image::Url(_)
                 if matches!(
                     self.provider,
-                    Provider::Anthropic | Provider::Google | Provider::ClaudeCode
+                    Provider::Anthropic
+                        | Provider::Google
+                        | Provider::ClaudeCode
+                        | Provider::Antigravity
                 ) =>
             {
                 Some(format!(

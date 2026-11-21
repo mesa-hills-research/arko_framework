@@ -129,6 +129,7 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
         ],
         // Claude Code takes the reasoning effort, fast mode and the cache
         // TTL, and it decides the rest itself.
+        Provider::Antigravity => vec![],
         Provider::ClaudeCode => vec![
             &VERBOSITY,
             &OPENAI_REASONING_MODE,
@@ -182,6 +183,7 @@ fn reasoning_hint(provider: &Provider) -> &'static str {
         Provider::OpenRouter => {
             "OpenRouter models take ReasoningConfig::OpenRouter. Convert another variant with ReasoningConfig::to_openrouter"
         }
+        Provider::Antigravity => "Antigravity takes its own thought level in AntigravitySettings",
         Provider::ClaudeCode => {
             "Claude Code models take ReasoningConfig::AnthropicAdaptive or ::Anthropic, whose effort becomes Claude Code's --effort"
         }

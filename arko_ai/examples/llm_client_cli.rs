@@ -676,6 +676,9 @@ fn reasoning_config(
             }
             ReasoningConfig::openrouter(reasoning)
         }
+        Provider::Antigravity => {
+            return Err(invalid("Antigravity models require arko_agents.".into()));
+        }
         Provider::ClaudeCode => {
             return Err(invalid(format!(
                 "{} runs through Claude Code, which this client doesn't drive. See the claude_code_live example.",

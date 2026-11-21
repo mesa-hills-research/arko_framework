@@ -104,7 +104,10 @@ impl PlanBudget {
     /// own.
     pub(crate) fn slots() -> impl Iterator<Item = (Option<SubscriptionPlan>, PlanWindow)> {
         std::iter::once(None)
-            .chain(SubscriptionPlan::ALL.map(Some))
+            .chain([
+                Some(SubscriptionPlan::ChatGpt),
+                Some(SubscriptionPlan::ClaudeCode),
+            ])
             .flat_map(|plan| PlanWindow::ALL.map(move |window| (plan, window)))
     }
 
@@ -114,6 +117,7 @@ impl PlanBudget {
             None => self.limit(window),
             Some(SubscriptionPlan::ChatGpt) => self.chatgpt.limit(window),
             Some(SubscriptionPlan::ClaudeCode) => self.claude_code.limit(window),
+            Some(SubscriptionPlan::Antigravity) => None,
         }
     }
 
@@ -131,6 +135,7 @@ impl PlanBudget {
             },
             Some(SubscriptionPlan::ChatGpt) => self.chatgpt.slot(window),
             Some(SubscriptionPlan::ClaudeCode) => self.claude_code.slot(window),
+            Some(SubscriptionPlan::Antigravity) => return,
         };
         *slot = limit;
     }

@@ -62,7 +62,9 @@ fn body(conversation: &Conversation, oauth: bool) -> Result<Value, Error> {
                 .build_request(conversation, &GenerationConfig::default())?;
             serde_json::to_string(&prepared.body).unwrap()
         }
-        Provider::ClaudeCode => unreachable!("Claude Code sends no HTTP request"),
+        Provider::ClaudeCode | Provider::Antigravity => {
+            unreachable!("Claude Code sends no HTTP request")
+        }
     };
     Ok(serde_json::from_str(&text).unwrap())
 }
@@ -77,7 +79,7 @@ fn user_contents(body: &Value, provider: Provider) -> Vec<Value> {
         Provider::OpenAI => ("input", |item| item["role"] == "user"),
         Provider::Anthropic | Provider::OpenRouter => ("messages", |item| item["role"] == "user"),
         Provider::Google => ("input", |item| item["type"] == "user_input"),
-        Provider::ClaudeCode => unreachable!(),
+        Provider::ClaudeCode | Provider::Antigravity => unreachable!(),
     };
     body[items]
         .as_array()

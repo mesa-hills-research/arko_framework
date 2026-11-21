@@ -11,6 +11,7 @@
 //! handover.
 
 pub mod agent_config;
+pub mod antigravity;
 pub mod claude_code;
 #[cfg(all(test, windows))]
 mod console_probe;
@@ -41,6 +42,7 @@ pub use agent_config::{
     PlanUsageAction, PlanUsageThreshold, ReminderInjectionFrequency, ToolCallingMode,
     ToolErrorPolicy, ToolResultLimits, UsageLimitPolicy, UserReminder,
 };
+pub use antigravity::AntigravitySettings;
 pub use claude_code::{ClaudeCodeSettings, ClaudeCodeTools};
 pub use error::ArkoAgentsError;
 pub use handover::{

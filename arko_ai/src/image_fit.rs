@@ -122,7 +122,8 @@ impl Model {
     /// the strictest, for other OpenRouter models.
     pub fn image_limits(&self) -> ImageLimits {
         match self.provider {
-            Provider::Anthropic | Provider::ClaudeCode => ANTHROPIC,
+            Provider::Antigravity if self.id.starts_with("gemini-") => GOOGLE,
+            Provider::Anthropic | Provider::ClaudeCode | Provider::Antigravity => ANTHROPIC,
             Provider::OpenAI => OPENAI,
             Provider::Google => GOOGLE,
             Provider::OpenRouter => match self.id.split_once('/').map(|(vendor, _)| vendor) {

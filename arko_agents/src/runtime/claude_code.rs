@@ -6162,6 +6162,7 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         secondary,
         credits: None,
         extra_usage: extra_usage_of(info),
+        antigravity_groups: Vec::new(),
     }
 }
 

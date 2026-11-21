@@ -1,9 +1,9 @@
-use crate::claude_code::ClaudeCodeSettings;
 use crate::error::ArkoAgentsError;
 use crate::handover::HandoverConfig;
 use crate::parsing::ToolParsingConfig;
 use crate::skill::SkillsConfig;
 use crate::task::Task;
+use crate::{AntigravitySettings, claude_code::ClaudeCodeSettings};
 use arko_ai::{
     GenerationConfig as LLMGenerationConfig, Model as LLMModel, Provider as LLMProvider,
 };
@@ -1567,6 +1567,9 @@ pub struct AgentConfig {
     /// Code model. See [`crate::claude_code`]. `None` uses the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code: Option<ClaudeCodeSettings>,
+    /// How the CLI runs for an Antigravity model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity: Option<AntigravitySettings>,
 }
 
 impl AgentConfig {
@@ -1797,6 +1800,11 @@ impl AgentConfig {
         self.llm_config.model.provider == arko_ai::Provider::ClaudeCode
     }
 
+    /// Whether the agent's model runs in Antigravity.
+    pub fn runs_in_antigravity(&self) -> bool {
+        self.llm_config.model.provider == arko_ai::Provider::Antigravity
+    }
+
     /// The Claude Code rules of [`validate`](Self::validate), namely built-in tools
     /// only for Claude Code models, and for those, only the settings the
     /// Claude Code runtime applies.
@@ -1880,6 +1888,7 @@ pub struct AgentConfigBuilder {
     refusal_fallback: Option<AgentLLMConfig>,
     handover: Option<HandoverConfig>,
     claude_code: Option<ClaudeCodeSettings>,
+    antigravity: Option<AntigravitySettings>,
 }
 
 impl AgentConfigBuilder {
@@ -1891,6 +1900,12 @@ impl AgentConfigBuilder {
             llm_config: Some(llm_config),
             ..Default::default()
         }
+    }
+
+    /// Sets how the Antigravity CLI runs.
+    pub fn antigravity(mut self, settings: AntigravitySettings) -> Self {
+        self.antigravity = Some(settings);
+        self
     }
 
     /// Sets the role description for the agent.
@@ -2038,6 +2053,7 @@ impl AgentConfigBuilder {
             refusal_fallback: self.refusal_fallback,
             handover: self.handover,
             claude_code: self.claude_code,
+            antigravity: self.antigravity,
         };
         config.validate()?;
         Ok(config)

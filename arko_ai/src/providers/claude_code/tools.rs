@@ -120,7 +120,7 @@ impl ToolServer {
     }
 
     /// Answers one JSON-RPC message. `None` for a notification.
-    pub(super) async fn handle(&self, message: &Value) -> Option<Value> {
+    pub(crate) async fn handle(&self, message: &Value) -> Option<Value> {
         let id = message.get("id").cloned()?;
         let method = message
             .get("method")
