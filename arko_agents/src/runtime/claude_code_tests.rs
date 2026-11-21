@@ -459,6 +459,25 @@ async fn messages_reach_the_user_through_the_tool_and_open_turns() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_code_refuses_a_link_outside_the_workspace() {
+    let fake = Fake::new(json!([[
+        {"tool": "Write", "input": {"file_path": "link/../marker", "content": "outside"}},
+        complete("Done"),
+    ]]));
+    let outside = fake.dir.join("outside");
+    std::fs::create_dir_all(outside.join("deep")).unwrap();
+    std::os::unix::fs::symlink(outside.join("deep"), fake.workspace().join("link")).unwrap();
+    let mut config = config(&fake, &["Write"]);
+    config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::AutoApprove;
+    let task = Task::new(config, "Write a marker.".into(), fake.workspace(), None);
+    let (_, events) = start(task).finish().await;
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolRejected { reason: Some(reason), .. } if reason.contains("symbolic link outside"))));
+    assert_eq!(fake.logged("post")[0]["is_error"], true);
+    assert!(!outside.join("marker").exists());
+}
+
 #[tokio::test]
 async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
     // An absolute path outside the workspace on every platform.

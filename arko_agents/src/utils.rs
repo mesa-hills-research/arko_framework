@@ -54,7 +54,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 
 /// Resolves a tool's path parameter against a task's working directory.
 /// Returns the path the built-in file tools (`read_file`, `write_file`, `edit_file`,
-/// `apply_diff`, `list_files`) open, and the path [`is_path_in_workspace`] checks.
+/// `apply_diff`, `list_files`) open. Use [`is_path_in_workspace`] for admission.
 ///
 /// - Surrounding whitespace is trimmed.
 /// - The path is taken literally, so `~` and `$VAR` are not expanded (`~/notes`
@@ -114,18 +114,13 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Whether `path` resolves (with [`resolve_path`]) inside `workspace`, the
-/// task's working directory, compared component by component. The check is
-/// lexical, like the resolution, so a symbolic link inside the workspace that
-/// points outside it is not detected.
-///
-/// On Windows, whose file systems usually ignore case, components are
-/// compared without regard to ASCII case (`c:\work\x` is inside `C:\Work`),
-/// and a verbatim prefix matches its ordinary form (`\\?\C:\` and `C:\`,
-/// `\\?\UNC\server\share` and `\\server\share`). A directory with case
-/// sensitivity turned on is still compared without regard to case. On other
-/// platforms the comparison is exact, also on macOS file systems that
-/// ignore case, so a path spelled in another case is judged outside.
+/// Whether the path the filesystem would open is inside the task's workspace.
+/// Resolves symlinks before checking containment. For a new path, the deepest
+/// existing parent must resolve. Once the remaining components are known to
+/// be missing, check their lexical resolution too.
+/// Checks both the path as supplied to a CLI and the one [`resolve_path`]
+/// gives a built-in tool, since the tools do not all handle whitespace or
+/// `..` alike. The filesystem may still change before the tool opens the path.
 ///
 /// A path that starts with `~` (`~` alone, or `~/`, and on Windows `~\` too)
 /// is always outside. [`resolve_path`] takes it as a directory name, but
@@ -141,50 +136,79 @@ pub(crate) fn path_in_workspace(
     path: &str,
     workspace: &Path,
 ) -> Result<Option<PathBuf>, ArkoAgentsError> {
-    let root = normalize_path(&absolute(workspace)?);
-    let resolved = resolve_path(path, workspace)?;
     if starts_with_home(path) {
         return Ok(None);
     }
-    let mut components = resolved.components();
-    let inside = root.components().all(|root_component| {
-        components
-            .next()
-            .is_some_and(|c| same_component(c, root_component))
-    });
-    Ok(inside.then(|| components.as_path().to_path_buf()))
+    let normalized = resolve_path(path, workspace)?;
+    let supplied = absolute(&workspace.join(path))?;
+    let workspace = absolute(workspace)?;
+    let root = effective_path(&workspace)?;
+    let actual = effective_path(&supplied)?;
+    let Ok(relative) = actual.strip_prefix(&root) else {
+        if normalized.starts_with(normalize_path(&workspace)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the path follows a symbolic link outside the workspace",
+            )
+            .into());
+        }
+        return Ok(None);
+    };
+    if supplied != normalized && !effective_path(&normalized)?.starts_with(&root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path has more than one workspace resolution",
+        )
+        .into());
+    }
+    Ok(Some(relative.to_path_buf()))
+}
+
+fn effective_path(path: &Path) -> std::io::Result<PathBuf> {
+    use std::io::ErrorKind;
+    let mut prefix = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(prefix) {
+            Ok(mut resolved) => {
+                if !missing.is_empty() && !std::fs::metadata(&resolved)?.is_dir() {
+                    return Err(ErrorKind::NotADirectory.into());
+                }
+                let fold = missing.contains(&Component::ParentDir);
+                resolved.extend(missing.into_iter().rev());
+                if fold {
+                    // Some tools normalize paths before opening them. Check
+                    // the names exposed by folding this missing suffix too.
+                    return effective_path(&normalize_path(&resolved));
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // A dangling link occupies the name even when canonicalize
+                // can't open its target. Treating it like a missing entry
+                // would remove the link from the very check meant to find it.
+                match std::fs::symlink_metadata(prefix) {
+                    Err(missing_entry) if missing_entry.kind() == ErrorKind::NotFound => {}
+                    Err(inaccessible) => return Err(inaccessible),
+                    Ok(_) => return Err(error),
+                }
+                let Some(component @ (Component::Normal(_) | Component::ParentDir)) =
+                    prefix.components().next_back()
+                else {
+                    return Err(error);
+                };
+                missing.push(component);
+                prefix = prefix.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Whether the first component of `path` is `~`.
 fn starts_with_home(path: &str) -> bool {
     let path = path.trim();
     path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\"))
-}
-
-#[cfg(not(windows))]
-fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
-    a == b
-}
-
-#[cfg(windows)]
-fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
-    use std::path::Prefix::{Disk, UNC, VerbatimDisk, VerbatimUNC};
-    let same_text = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
-        a.as_encoded_bytes()
-            .eq_ignore_ascii_case(b.as_encoded_bytes())
-    };
-    match (a, b) {
-        (Component::Prefix(a), Component::Prefix(b)) => match (a.kind(), b.kind()) {
-            (Disk(a) | VerbatimDisk(a), Disk(b) | VerbatimDisk(b)) => a.eq_ignore_ascii_case(&b),
-            (
-                UNC(server_a, share_a) | VerbatimUNC(server_a, share_a),
-                UNC(server_b, share_b) | VerbatimUNC(server_b, share_b),
-            ) => same_text(server_a, server_b) && same_text(share_a, share_b),
-            _ => same_text(a.as_os_str(), b.as_os_str()),
-        },
-        (Component::Normal(a), Component::Normal(b)) => same_text(a, b),
-        (a, b) => a == b,
-    }
 }
 
 /// Generates a file tree string for the given root path.
@@ -311,32 +335,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_workspace_check_judges_the_path_the_tools_open() {
-        let workspace = Path::new("/workspace/project");
-        for (path, inside) in [
-            ("src/lib.rs", true),
-            ("src/../../project/lib.rs", true),
-            ("../outside", false),
-            (" ../outside", false),
-            ("/workspace/project-other/x", false),
-            // `$PWD` and `$HOME` are directory names, so two `..` leave the
-            // workspace whatever the variables hold.
-            ("$PWD/../../outside", false),
-            ("$HOME/..", true),
-        ] {
-            assert_eq!(
-                is_path_in_workspace(path, workspace).unwrap(),
-                inside,
-                "{path}"
-            );
-            assert_eq!(
-                resolve_path(path, workspace)
-                    .unwrap()
-                    .starts_with(workspace),
-                inside,
-                "{path}"
-            );
+    fn the_workspace_check_follows_links_before_parent_components() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("arko-workspace-policy-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::create_dir_all(outside.join("deep")).unwrap();
+        std::fs::write(outside.join("existing"), "outside").unwrap();
+        symlink(outside.join("deep"), workspace.join("out")).unwrap();
+        symlink(outside.join("deep"), workspace.join("spaced ")).unwrap();
+        symlink(workspace.join("sub"), workspace.join("in")).unwrap();
+        symlink(outside.join("missing"), workspace.join("dangling")).unwrap();
+        for path in ["out/new", "out/../existing", "out/../new", "spaced "] {
+            assert!(is_path_in_workspace(path, &workspace).is_err(), "{path}");
         }
+        assert!(!is_path_in_workspace("../outside/more", &workspace).unwrap());
+        for path in [
+            "in/new",
+            "in/../new",
+            "sub/nonexistent/file",
+            "missing/../file",
+        ] {
+            assert!(is_path_in_workspace(path, &workspace).unwrap(), "{path}");
+        }
+        for path in ["dangling", "dangling/sub/new", "missing/../dangling"] {
+            assert!(is_path_in_workspace(path, &workspace).is_err(), "{path}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// `~` as the first component may be the home directory to Claude Code's
@@ -366,7 +393,9 @@ mod tests {
     /// The part below the workspace follows the rule of `is_path_in_workspace`.
     #[test]
     fn the_part_of_a_path_below_the_workspace() {
-        let workspace = std::env::temp_dir().join("arko-below-workspace");
+        let workspace =
+            std::env::temp_dir().join(format!("arko-below-workspace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
         let below = |path: &str| path_in_workspace(path, &workspace).unwrap();
         assert_eq!(
             below("src/./lib.rs"),
@@ -381,30 +410,30 @@ mod tests {
         for outside in ["../a.txt", "src/../../a.txt", "~/a.txt"] {
             assert_eq!(below(outside), None, "{outside}");
         }
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn the_part_below_a_windows_workspace_ignores_case_and_a_verbatim_prefix() {
-        let workspace = Path::new(r"C:\Work\Project");
-        for path in [
-            r"c:\work\project\src\lib.rs",
-            r"\\?\C:\Work\Project\src\lib.rs",
-        ] {
+    fn a_windows_workspace_matches_its_canonical_spelling() {
+        let workspace =
+            std::env::temp_dir().join(format!("arko-workspace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let canonical = std::fs::canonicalize(&workspace).unwrap();
+        for path in [workspace.join(r"src\lib.rs"), canonical.join(r"src\lib.rs")] {
             assert_eq!(
-                path_in_workspace(path, workspace).unwrap(),
-                Some(PathBuf::from(r"src\lib.rs")),
-                "{path}"
+                path_in_workspace(path.to_str().unwrap(), &workspace).unwrap(),
+                Some(PathBuf::from(r"src\lib.rs"))
             );
         }
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_paths_resolve_and_compare_as_windows_opens_them() {
+    fn windows_paths_resolve_as_windows_opens_them() {
         let workspace = Path::new(r"C:\Work\Project");
         let resolve = |path: &str| resolve_path(path, workspace).unwrap();
-        let inside = |path: &str| is_path_in_workspace(path, workspace).unwrap();
         let file = PathBuf::from(r"C:\Work\Project\src\lib.rs");
         // `\` and `/` both separate components, mixed too.
         assert_eq!(resolve(r"src\lib.rs"), file);
@@ -427,54 +456,12 @@ mod tests {
             relative_to_working_directory(&resolve_path("src/lib.rs", verbatim).unwrap(), verbatim),
             PathBuf::from(r".\src\lib.rs")
         );
-        for (path, expected) in [
-            (r"src\lib.rs", true),
-            // Drive letters and names compare without regard to case.
-            (r"c:\work\project\x", true),
-            (r"C:\WORK\PROJECT\x", true),
-            (r"C:/Work/Project/x", true),
-            // A verbatim prefix matches its ordinary form.
-            (r"\\?\C:\Work\Project\x", true),
-            (r"\\?\c:\work\project\x", true),
-            (r"C:\Work\Project\..\..\Work\Project\x", true),
-            (r"C:\Work\Project2\x", false),
-            (r"C:\Work\x", false),
-            (r"..\x", false),
-            (r"..\..\..\..\x", false),
-            (r"\x", false),
-            // Another drive, absolute or drive-relative.
-            (r"D:\Work\Project\x", false),
-            ("D:x", false),
-            // Win32 leaves a verbatim path as written, and its `..` is resolved
-            // lexically and still leaves.
-            (r"\\?\C:\Work\Project\..\x", false),
-        ] {
-            assert_eq!(inside(path), expected, "{path}");
-        }
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_unc_and_drive_relative_working_directories() {
         let share = Path::new(r"\\Server\Share\work");
-        for (path, expected) in [
-            ("x", true),
-            (r"sub/x", true),
-            (r"\\server\share\WORK\x", true),
-            (r"\\?\UNC\server\share\work\x", true),
-            (r"\\server\other\work\x", false),
-            (r"\\other\share\work\x", false),
-            // The root of a UNC working directory is its share's root.
-            (r"\x", false),
-            (r"..\x", false),
-            (r"..\..\..\x", false),
-        ] {
-            assert_eq!(
-                is_path_in_workspace(path, share).unwrap(),
-                expected,
-                "{path}"
-            );
-        }
         assert_eq!(
             resolve_path("x", share).unwrap(),
             PathBuf::from(r"\\Server\Share\work\x")
@@ -488,13 +475,11 @@ mod tests {
             resolve_path("x", drive_relative).unwrap(),
             absolute.join("x")
         );
-        assert!(is_path_in_workspace("x", drive_relative).unwrap());
-        assert!(!is_path_in_workspace(r"..\x", drive_relative).unwrap());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_symlinked_directories_are_compared_as_written() {
+    fn macos_aliases_resolve_to_the_same_workspace() {
         // `/var`, where temporary directories live, links to `/private/var`.
         assert_eq!(
             std::fs::canonicalize("/var").unwrap(),
@@ -504,12 +489,9 @@ mod tests {
         let canonical = Path::new("/private/var/folders");
         assert!(is_path_in_workspace("x", written).unwrap());
         assert!(is_path_in_workspace("/var/folders/x", written).unwrap());
-        // Symlinks are not followed, so the other spelling is outside.
-        assert!(!is_path_in_workspace("/private/var/folders/x", written).unwrap());
-        assert!(!is_path_in_workspace("/var/folders/x", canonical).unwrap());
+        assert!(is_path_in_workspace("/private/var/folders/x", written).unwrap());
+        assert!(is_path_in_workspace("/var/folders/x", canonical).unwrap());
         assert!(is_path_in_workspace("/private/var/folders/x", canonical).unwrap());
-        // Names compare exactly, though the file system may ignore case.
-        assert!(!is_path_in_workspace("/private/var/FOLDERS/x", canonical).unwrap());
     }
 
     #[test]
@@ -524,8 +506,6 @@ mod tests {
             assert!(is_path_in_workspace("a.txt", workspace).unwrap());
             assert!(is_path_in_workspace("./sub/../a.txt", workspace).unwrap());
             assert!(!is_path_in_workspace("../a.txt", workspace).unwrap());
-            // Lexically, `ws/../../ws/x` would drop the leading `..` and stay
-            // in `ws`, but it names `../ws/x`, outside.
             assert!(!is_path_in_workspace("../../ws/x", workspace).unwrap());
         }
     }
