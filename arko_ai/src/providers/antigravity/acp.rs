@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -158,6 +157,14 @@ pub enum AcpError {
     FrameTooLarge,
     #[error("Antigravity sent an unexpected reply. {0}")]
     Protocol(String),
+}
+
+impl AcpError {
+    /// Whether `session/new` refused to start without a sign-in.
+    pub fn requires_sign_in(&self) -> bool {
+        matches!(self, Self::Rpc { method, error }
+            if method == "session/new" && error.code == -32000 && error.message == "Authentication required")
+    }
 }
 
 /// A JSON-RPC error.
@@ -1069,11 +1076,7 @@ impl Router {
             return;
         }
         let request = PermissionRequest::parse(params);
-        // A policy that panics cancels the turn, so agy still gets an answer.
-        let decided =
-            std::panic::catch_unwind(AssertUnwindSafe(|| self.permissions.decide(&request)))
-                .unwrap_or(PermissionDecision::Cancel);
-        let allow = match decided {
+        let allow = match self.permissions.decide(&request) {
             PermissionDecision::Allow => request.allow_once().map(str::to_string),
             PermissionDecision::Cancel => None,
         };
@@ -1873,24 +1876,6 @@ for line in sys.stdin:
             received[answer]["result"]["outcome"],
             json!({"outcome": "cancelled"})
         );
-    }
-
-    #[tokio::test]
-    async fn a_policy_that_panics_cancels_the_turn() {
-        let fake = Fake::new();
-        let policy = |_: &PermissionRequest| -> PermissionDecision { panic!("the policy failed") };
-        let mut client = start_with(fake.options(), Arc::new(policy)).await;
-        timed(client.new_session(&fake.work())).await.unwrap();
-        let request = prompt(&client, "tool mcp_arko_read_file").await;
-        let events = turn(&mut client, request).await;
-        assert_eq!(
-            decisions(&events),
-            [(
-                Some("mcp_arko_read_file".to_string()),
-                PermissionDecision::Cancel
-            )]
-        );
-        assert!(finished(&events).cancelled());
     }
 
     #[tokio::test]

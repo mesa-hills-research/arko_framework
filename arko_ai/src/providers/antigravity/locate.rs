@@ -170,14 +170,7 @@ fn problem(error: AcpError) -> SignInProblem {
         AcpError::Spawn { source, .. } if source.kind() == io::ErrorKind::NotFound => {
             SignInProblem::Missing
         }
-        // How agy 1.5.14 refuses a session without a sign-in.
-        AcpError::Rpc { method, error: rpc }
-            if method == "session/new"
-                && rpc.code == -32000
-                && rpc.message.eq_ignore_ascii_case("Authentication required") =>
-        {
-            SignInProblem::SignedOut
-        }
+        _ if error.requires_sign_in() => SignInProblem::SignedOut,
         _ => SignInProblem::Failed(error.to_string()),
     }
 }

@@ -19,29 +19,6 @@ pub enum Provider {
     Antigravity,
 }
 
-#[cfg(test)]
-mod antigravity_tests {
-    use super::*;
-
-    #[test]
-    fn antigravity_models_keep_the_base_metadata() {
-        let base = Model::anthropic_claude_opus_5_5();
-        let model = Model::antigravity(base.clone());
-        assert_eq!(model.provider, Provider::Antigravity);
-        assert_eq!(
-            model.pricing.input_cost_per_million,
-            base.pricing.input_cost_per_million
-        );
-        assert_eq!(model.max_input_tokens, base.max_input_tokens);
-        assert_eq!(model.antigravity_family(), Some("claude-opus-5-5"));
-        assert_eq!(Model::list(Provider::Antigravity).len(), 7);
-        assert_eq!(
-            Model::find(&model.id).unwrap().provider,
-            Provider::Anthropic
-        );
-    }
-}
-
 impl Provider {
     pub fn as_telemetry_str(&self) -> &'static str {
         match self {
@@ -2946,6 +2923,24 @@ fn gemini_major_version(id: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_models_keep_the_base_metadata() {
+        let base = Model::anthropic_claude_opus_5_5();
+        let model = Model::antigravity(base.clone());
+        assert_eq!(model.provider, Provider::Antigravity);
+        assert_eq!(
+            model.pricing.input_cost_per_million,
+            base.pricing.input_cost_per_million
+        );
+        assert_eq!(model.max_input_tokens, base.max_input_tokens);
+        assert_eq!(model.antigravity_family(), Some("claude-opus-5-5"));
+        assert_eq!(Model::list(Provider::Antigravity).len(), 7);
+        assert_eq!(
+            Model::find(&model.id).unwrap().provider,
+            Provider::Anthropic
+        );
+    }
 
     #[test]
     fn tool_result_images_are_accepted_by_openai_anthropic_and_gemini_3_and_later() {
