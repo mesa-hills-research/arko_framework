@@ -1458,6 +1458,60 @@ async fn runs_work_in_their_own_directories() {
     assert!(error.to_string().contains("does not exist"), "{error}");
 }
 
+/// `start_agent`'s `workspace` is judged as the agents' path check judges a
+/// path. A link inside the caller's directory that leads outside it is
+/// refused, and one that stays inside is taken.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_workspace_through_a_link_out_of_the_callers_directory_is_refused() {
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.0.join("a/b")).unwrap();
+    std::fs::create_dir_all(workspace.0.join("outside")).unwrap();
+    std::os::unix::fs::symlink("../outside", workspace.0.join("a/out")).unwrap();
+    std::os::unix::fs::symlink("b", workspace.0.join("a/in")).unwrap();
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Escape.", "workspace": "out" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Escape.", "workspace": "out/" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Where are you?", "workspace": "in" }),
+                ),
+                wait(),
+            ],
+        ),
+        ("r1", vec![("where", json!({}))]),
+    ])
+    .await;
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .global_tool(Arc::new(Where))
+        .build()
+        .unwrap();
+    within(workflow.run_agent_with("lead", "Look.", crate::RunOptions::new().workspace("a")))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    for (body, call) in [(1, 0), (2, 1)] {
+        let refused = result_of(&lead[body], "lead", call);
+        assert!(
+            refused.contains("must be inside your working directory")
+                && refused.contains("symbolic link outside"),
+            "{refused}"
+        );
+    }
+    let runs = workflow.subagents();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].workspace, workspace.0.join("a/in"));
+}
+
 /// A start that is refused, by the host's hook or for its workspace, doesn't
 /// use up a handle. The next one gets the handle the refused one would have had.
 #[tokio::test]

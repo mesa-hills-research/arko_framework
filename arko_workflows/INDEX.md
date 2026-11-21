@@ -859,7 +859,7 @@ A subagent is an ordinary run of the workflow, with its own run ID (`SubagentRec
 | `peer_messages` | `bool` | `true`. The lead may let its subagents message each other (`start_agent`'s `peers` and `group`, `link_agents`). |
 | `max_peer_messages` | `u32` | `DEFAULT_MAX_PEER_MESSAGES`, 20. Messages two subagents may send each other between two of their lead's messages to either of them. Over it, `message_agent` is refused and says to ask the lead. |
 | `copy_peer_messages_to_lead` | `bool` | `false`. The lead gets a copy of each message its subagents send each other. A copy ends no wait and wakes no one. |
-| `workspaces_anywhere` | `bool` | `false`. `start_agent`'s `workspace` may name any directory, instead of one inside the caller's working directory. |
+| `workspaces_anywhere` | `bool` | `false`. `start_agent`'s `workspace` may name any directory, instead of one inside the caller's working directory as arko_agents' workspace check judges it, with symbolic links resolved. |
 | `offer_blocking_tool` | `bool` | `true`. Callers are offered `run_workflow_agent` too. |
 | `questions_to_lead` | `bool` | `true`. A subagent's `ask_user` goes to its lead as a message (`MailKind::Question`), and the lead's next message to it is the answer. The subagent always waits for it, whatever its `async_questions`. Off, it goes to the workflow's `UserInputHandler`, as other runs' questions do. |
 | `workspace_provider` | `Option<Arc<dyn WorkspaceProvider>>` | None. Creates and removes isolated workspaces. With one, `start_agent` offers `isolated` and `stop_agent` offers `remove_workspace`. |
