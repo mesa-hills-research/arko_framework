@@ -280,7 +280,7 @@ impl AgentRuntime {
         let (event_sender, _events) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (_commands, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
         let refresh = if task.agent_config.runs_in_claude_code() {
-            let usage = claude_code::ClaudeCodeRun::new(
+            let usage = claude_code::CliRun::new(
                 task,
                 tool_registry,
                 event_sender,
@@ -346,7 +346,7 @@ impl AgentRuntime {
         let (command_sender, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
 
         if task.agent_config.runs_in_claude_code() || task.agent_config.runs_in_antigravity() {
-            let mut run = claude_code::ClaudeCodeRun::new(
+            let mut run = claude_code::CliRun::new(
                 task,
                 tool_registry,
                 event_sender,

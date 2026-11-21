@@ -379,12 +379,18 @@ impl HandoverThreshold {
     /// configuration's, up to the cap for `config` (see
     /// [`with_most`](Self::with_most)).
     pub(crate) fn of(&self, config: &AgentConfig) -> Option<usize> {
-        let threshold = self.get().or_else(|| {
-            config
-                .handover
-                .as_ref()?
-                .threshold(config.llm_config.model.max_input_tokens)
-        })?;
+        self.of_input_limit(config, config.llm_config.model.max_input_tokens)
+    }
+
+    /// As in [`Self::of`], using a context limit reported by the provider.
+    pub(crate) fn of_input_limit(
+        &self,
+        config: &AgentConfig,
+        max_input_tokens: usize,
+    ) -> Option<usize> {
+        let threshold = self
+            .get()
+            .or_else(|| config.handover.as_ref()?.threshold(max_input_tokens))?;
         let most = self.most.as_ref().and_then(|most| most(config));
         Some(most.map_or(threshold, |most| threshold.min(most)))
     }

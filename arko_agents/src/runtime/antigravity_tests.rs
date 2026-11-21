@@ -103,6 +103,14 @@ impl Fake {
     fn log(&self) -> String {
         std::fs::read_to_string(self.dir.join("wire.jsonl")).unwrap_or_default()
     }
+
+    fn logged(&self, name: &str) -> Vec<Value> {
+        self.log()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|entry| entry["event"] == name)
+            .collect()
+    }
 }
 
 impl Drop for Fake {
@@ -342,7 +350,9 @@ async fn antigravity_asks_without_waiting() {
 #[tokio::test]
 async fn antigravity_puts_a_note_into_the_running_turn() {
     let fake = Fake::new(json!([[
-        {"thought": "Waiting for a note."}, {"wait_for": "note"}, {"text": "Got it."}
+        {"thought": "Waiting for a note.", "usage": {"inputTokens": 200, "outputTokens": 10}},
+        {"wait_for": "note"},
+        {"text": "Got it.", "usage": {"inputTokens": 150, "outputTokens": 5, "cachedReadTokens": 75}}
     ]]));
     let mut run = Run::start(fake.task(chat()));
     run.until(|event| matches!(event, AgentEvent::ReasoningChunk(_)))
@@ -365,6 +375,8 @@ async fn antigravity_puts_a_note_into_the_running_turn() {
             .iter()
             .any(|event| matches!(event, AgentEvent::ContextInjected { .. }))
     );
+    assert_eq!(task.usage_history[0].input_tokens, 425);
+    assert_eq!(task.usage_history[0].output_tokens, 15);
     assert!(fake.log().contains("A note about the example."));
 }
 
@@ -443,7 +455,7 @@ async fn antigravity_hands_over_from_its_context_count() {
         [complete("Done after handover")]
     ]));
     let mut task = fake.task(tools(&[]));
-    task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1000));
+    task.agent_config.handover = Some(HandoverConfig::at_context_fraction(0.1));
     let (task, events) = Run::start(task).finish().await;
     assert!(
         matches!(task.current_state, TaskState::Completed { summary } if summary == "Done after handover"),
@@ -453,6 +465,191 @@ async fn antigravity_hands_over_from_its_context_count() {
     assert_eq!(task.handovers.len(), 1);
     assert!(events.iter().any(|event| matches!(event, AgentEvent::ConversationHandedOver { report, input_tokens: 2000, .. } if report == "Report on the example.")));
     assert!(fake.log().contains("Report on the example."));
+}
+
+#[tokio::test]
+async fn antigravity_returns_an_error_if_the_new_session_also_fails() {
+    let fake = Fake::new(json!([
+        [{"fail": "First failure"}], [{"fail": "Second failure"}], [{"text": "Must not run"}]
+    ]));
+    let mut run = Run::start(fake.task(chat()));
+    let events = run
+        .until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::ErrorEncountered { error_message, .. } if error_message.contains("Second failure"))));
+    run.commands
+        .send(UserCommand::RejectErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("Second failure"))
+    );
+    assert_eq!(fake.logged("prompt").len(), 2);
+    let launches = fake.logged("session_new");
+    assert_eq!(launches.len(), 2);
+    assert_ne!(launches[0]["pid"], launches[1]["pid"]);
+}
+
+#[tokio::test]
+async fn antigravity_allows_the_inert_built_ins_but_does_not_record_them_as_arko_calls() {
+    let fake = Fake::new(json!([[
+        {"builtin": "manage_task", "input": {"Action": "list"}},
+        {"builtin": "list_resources"}, {"builtin": "read_resource"},
+        {"text": "No resources or background tasks."}
+    ]]));
+    let (task, events) = Run::start(fake.task(chat())).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallFormatted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn antigravity_checks_the_fallback_hooks_during_the_turn() {
+    let fake =
+        Fake::new(json!({"fallback": "silent", "turns": [[{"text": "From the default agent"}]]}));
+    let (task, _) = Run::start(fake.task(chat())).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("fallback hook")),
+        "{}",
+        fake.log()
+    );
+    assert_eq!(fake.logged("hook").len(), 1);
+}
+
+#[tokio::test]
+async fn antigravity_keeps_images_from_tool_results() {
+    let fake = Fake::new(json!([[
+        {"tool": "read_file", "input": {"path": "example.png"}},
+        complete("Saw the image")
+    ]]));
+    let task = fake.task(tools(&["read_file"]));
+    image::RgbImage::from_pixel(1, 1, image::Rgb([38, 84, 17]))
+        .save(task.current_working_directory.join("example.png"))
+        .unwrap();
+    let (task, _) = Run::start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        fake.logged("tool_result")
+            .iter()
+            .any(|entry| entry.to_string().contains("image/png")),
+        "{}",
+        fake.log()
+    );
+    assert!(
+        task.conversation
+            .messages
+            .iter()
+            .any(|message| message.content.iter().any(|content| content
+                .as_tool_result()
+                .is_some_and(|result| result.images.len() == 1)))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn antigravity_runs_share_one_usage_read_even_when_it_fails() {
+    for fails in [false, true] {
+        let turns = vec![vec![json!({"text": "Done"})]; 5];
+        let script = if fails {
+            json!({"turns": turns, "usage_fail": {"exit": 1, "stderr": "No usage"}})
+        } else {
+            json!({"turns": turns})
+        };
+        let fake = Fake::new(script);
+        let run = || Run::start(fake.task(chat())).finish();
+        let all = tokio::time::timeout(
+            Duration::from_secs(15),
+            futures::future::join_all((0..4).map(|_| run())),
+        )
+        .await
+        .unwrap();
+        let (task, events) = run().await;
+        for (task, events) in all.into_iter().chain([(task, events)]) {
+            assert!(
+                matches!(task.current_state, TaskState::Completed { summary } if summary == "Done")
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::PlanUsageReported(_))),
+                !fails
+            );
+        }
+        assert_eq!(fake.logged("usage_command").len(), 1, "{}", fake.log());
+        let launches = fake.logged("session_new");
+        let pids: std::collections::HashSet<String> = launches
+            .iter()
+            .map(|launch| launch["pid"].to_string())
+            .collect();
+        assert_eq!(pids.len(), 5, "{}", fake.log());
+    }
+}
+
+#[tokio::test]
+async fn antigravity_only_selects_a_thought_level_the_model_offers() {
+    let fake = Fake::new(json!({
+        "models": [{"value": "gemini-4-neon", "name": "Gemini 4 Neon", "levels": ["medium", "high"]}],
+        "turns": [[{"text": "Done"}]]
+    }));
+    let (task, _) = Run::start(fake.task(chat())).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{}",
+        fake.log()
+    );
+    assert_eq!(fake.logged("prompt")[0]["model"], "gemini-4-neon-high");
+}
+
+#[tokio::test]
+async fn antigravity_resumes_from_the_saved_transcript() {
+    let fake = Fake::new(json!([
+        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
+    ]));
+    let (task, _) = Run::start(fake.task(chat())).finish().await;
+    let mut task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
+    assert!(task.agent_config.runs_in_antigravity());
+    task.prepare_for_resumption_from_completed("One more example, please.".into())
+        .unwrap();
+    let (task, _) = Run::start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { summary } if summary == "The follow-up answer.")
+    );
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts.len(), 2);
+    assert_ne!(prompts[0]["sessionId"], prompts[1]["sessionId"]);
+    let replay = prompts[1]["text"].as_str().unwrap();
+    assert!(replay.contains("An example answer."), "{replay}");
+    assert!(replay.contains("One more example, please."), "{replay}");
+}
+
+#[tokio::test]
+async fn antigravity_reads_call_arguments_only_from_mcp() {
+    let contents = "An example beginning with a result label.\n{}\n";
+    let fake = Fake::new(json!([[
+        {"tool": "write_file", "input": {"path": "example.txt", "content": contents}},
+        complete("Wrote the file")
+    ]]));
+    let task = fake.task(tools(&["write_file"]));
+    let path = task.current_working_directory.join("example.txt");
+    let (task, events) = Run::start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+    let args = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallFormatted {
+                tool_name,
+                parameters,
+                ..
+            } if tool_name == "write_file" => Some(parameters),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(args["content"], contents);
+    assert!(!args.contains_key("toolSummary"));
 }
 
 #[tokio::test]

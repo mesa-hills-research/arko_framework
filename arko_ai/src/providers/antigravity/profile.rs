@@ -459,7 +459,7 @@ mod tests {
         let dir = root.path().join("profile");
         let profile = write(&dir).unwrap();
         super::super::relay::write_address_file(
-            &profile.relay_file(),
+            profile.relay_file(),
             "127.0.0.1:4000".parse().unwrap(),
         )
         .unwrap();

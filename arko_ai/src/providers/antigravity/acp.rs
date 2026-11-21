@@ -3,9 +3,9 @@
 //!
 //! [`AcpClient::start`] runs the CLI in a process tree of its own and
 //! completes `initialize`. Requests wait for their replies. Everything else
-//! agy sends arrives in order through [`AcpClient::next_event`]: session
-//! updates, the results of prompts, other notifications, and agy's permission
-//! requests with the answers they got. A prompt's result is an event too, so
+//! agy sends (session updates, the results of prompts, other notifications,
+//! and agy's permission requests with the answers they got) arrives in order
+//! through [`AcpClient::next_event`]. A prompt's result is an event too, so
 //! it comes after the updates of its turn. A prompt sent while a turn runs
 //! joins that turn, and the earlier prompt's result then comes at once.
 //!
@@ -62,7 +62,7 @@ const STDERR_TAIL: usize = 16 * 1024;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 /// How to run `agy acp`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpOptions {
     /// The `agy` executable.
     pub program: PathBuf,
@@ -80,9 +80,8 @@ pub struct AcpOptions {
     /// Variables set on top of the inherited environment. [`NO_AUTO_UPDATE`]
     /// is set after them.
     pub env: Vec<(String, String)>,
-    /// The name and version `initialize` sends (`clientInfo`). None sends
-    /// none.
-    pub client_info: Option<ClientInfo>,
+    /// The name and version `initialize` sends (`clientInfo`).
+    pub client_info: ClientInfo,
 }
 
 /// The client's name and version, as `initialize` sends them.
@@ -107,7 +106,10 @@ impl AcpOptions {
             log_file: None,
             working_directory: working_directory.into(),
             env: Vec::new(),
-            client_info: None,
+            client_info: ClientInfo {
+                name: "arko_ai".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
         }
     }
 
@@ -332,15 +334,10 @@ pub fn turn_failure(text: &str, result: &PromptResult) -> Option<String> {
     if result.usage.is_some() || result.stop_reason != "end_turn" {
         return None;
     }
-    let reason = text
-        .rfind('⚠')
-        .map(|start| text[start + '⚠'.len_utf8()..].trim())
-        .filter(|reason| !reason.is_empty());
-    Some(
-        reason
-            .unwrap_or("The turn failed in Antigravity.")
-            .to_string(),
-    )
+    text.rsplit_once('⚠')
+        .map(|(_, reason)| reason.trim())
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether agy's log says it couldn't load `agent` and ran its default agent
@@ -708,16 +705,14 @@ impl AcpClient {
             writer,
             initialization: Value::Null,
         };
-        let mut params = json!({
+        let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
+            "clientInfo": {"name": options.client_info.name, "version": options.client_info.version},
             "clientCapabilities": {
                 "fs": {"readTextFile": false, "writeTextFile": false},
                 "terminal": false,
             },
         });
-        if let Some(info) = &options.client_info {
-            params["clientInfo"] = json!({"name": info.name, "version": info.version});
-        }
         let initialization = client
             .request("initialize", params, INITIALIZE_TIMEOUT)
             .await?;
@@ -784,10 +779,10 @@ impl AcpClient {
         Ok(ConfigOption::parse_all(&reply))
     }
 
-    /// Sends a prompt (`session/prompt`) and returns its request ID once it is
-    /// written. Its result comes as an [`AcpEvent::PromptFinished`] with that
-    /// ID. A prompt sent while a turn runs joins the turn, the earlier
-    /// prompt's result comes at once, and this one's ends the turn.
+    /// Queues a prompt (`session/prompt`) and returns its request ID.
+    /// [`AcpEvent::PromptFinished`] carries its result and ID. A prompt sent
+    /// while a turn runs joins it. The earlier result comes at once and the
+    /// new result ends the turn.
     pub async fn prompt(&self, session_id: &str, prompt: Vec<Value>) -> Result<u64, AcpError> {
         self.send_request(
             "session/prompt",
@@ -1638,10 +1633,7 @@ for line in sys.stdin:
             .as_deref(),
             Some("failed to construct executor: unknown component")
         );
-        assert_eq!(
-            turn_failure("", &failed).as_deref(),
-            Some("The turn failed in Antigravity.")
-        );
+        assert_eq!(turn_failure("", &failed), None);
     }
 
     #[tokio::test]
@@ -1810,7 +1802,7 @@ for line in sys.stdin:
             initialize["clientCapabilities"]["fs"]["readTextFile"],
             false
         );
-        assert!(initialize.get("clientInfo").is_none());
+        assert_eq!(initialize["clientInfo"]["name"], "arko_ai");
         assert_eq!(received[1]["params"]["mcpServers"], json!([]));
         assert_eq!(
             received[3]["params"]["prompt"],
@@ -1822,10 +1814,10 @@ for line in sys.stdin:
     async fn client_info_is_sent_when_set() {
         let fake = Fake::new();
         let mut options = fake.options();
-        options.client_info = Some(ClientInfo {
+        options.client_info = ClientInfo {
             name: "example-host".into(),
             version: "2.0.0".into(),
-        });
+        };
         let client = start_with(options, Arc::new(ArkoToolsOnly)).await;
         timed(client.close()).await.unwrap();
         assert_eq!(

@@ -1,5 +1,5 @@
-//! The runtime of agents whose model runs in Claude Code. See
-//! [`crate::claude_code`].
+//! The shared host for agents whose models run in a CLI. See
+//! [`crate::claude_code`] and [`crate::antigravity`].
 //!
 //! Claude Code runs the agent loop in a session of the installed CLI. This
 //! runtime starts the session, sends it the task's user messages, answers
@@ -14,7 +14,7 @@
 //! ([`Task::claude_code_session`]) when it continues. A handover starts a
 //! new session, after the report. A turn over the model's input limit has
 //! the report written in the session resumed at an earlier message
-//! (`ClaudeCodeRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+//! (`CliRun::hand_over_without_the_step`). A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
 //! keeps it. The runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
@@ -144,7 +144,7 @@ fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolO
 const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal. A Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
 
 /// Heads the note on the calls that were open when the task stopped. See
-/// [`ClaudeCodeRun::recover_open_calls`].
+/// [`CliRun::recover_open_calls`].
 const RESTARTED_NOTE: &str = "The task stopped while tool calls were open (arko's host or Claude Code stopped). As arko recorded them, and whatever Claude Code reports of them (it may call them interrupted):";
 
 /// The arko tool a Claude Code tool name serves, if it is one.
@@ -869,7 +869,7 @@ impl From<PauseCause> for ErrorRecoveryCause {
 
 /// The pause a turn asked for, applied when it ends. The strongest cause
 /// stands, and the reasons of every offer go with it, in order. The turn's
-/// tool errors are kept apart (`ClaudeCodeRun::tool_errors`), as they are
+/// tool errors are kept apart (`CliRun::tool_errors`), as they are
 /// reported on their own unless a tool error is the pause's cause.
 #[derive(Debug, Default)]
 struct TurnPause(Option<(PauseCause, Vec<String>)>);
@@ -989,7 +989,7 @@ enum Stopping {
     Closed,
 }
 
-pub(super) struct ClaudeCodeRun {
+pub(super) struct CliRun {
     task: Task,
     /// The tools the task's configuration offers, the only ones served.
     registry: Arc<ToolRegistry>,
@@ -1163,7 +1163,7 @@ pub(super) struct ClaudeCodeRun {
     pub(super) background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
 }
 
-impl ClaudeCodeRun {
+impl CliRun {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         task: Task,
@@ -1508,6 +1508,8 @@ impl ClaudeCodeRun {
         for call in open {
             let served = if call.built_in {
                 call.tool_name.clone()
+            } else if self.task.agent_config.runs_in_antigravity() {
+                ai::antigravity::qualified_tool_name(&call.tool_name)
             } else {
                 format!("mcp__{ARKO_TOOL_SERVER}__{}", call.tool_name)
             };
@@ -2477,7 +2479,7 @@ impl ClaudeCodeRun {
         if let Some(tools) = session.initialization().get("tools") {
             log::debug!("Task {}: Claude Code tools: {tools}", self.task.id);
         }
-        Ok((CliSession::Claude(session), receiver))
+        Ok((CliSession::Claude(Box::new(session)), receiver))
     }
 
     /// The task's input the session hasn't received, namely user messages added
@@ -2609,7 +2611,7 @@ impl ClaudeCodeRun {
         if self.compaction.is_none()
             && self.compacts()
             && !self.handover_due()
-            && let Some(size) = self.over_threshold(self.latest_size())
+            && let Some(size) = self.over_threshold(self.latest_size(), None)
         {
             log::info!(
                 "Task {}: Compaction due at {size} input tokens.",
@@ -2633,7 +2635,7 @@ impl ClaudeCodeRun {
             && !self.report_delivered;
         if chat_reports
             && !self.handover_due()
-            && let Some(size) = self.over_threshold(self.latest_size())
+            && let Some(size) = self.over_threshold(self.latest_size(), None)
         {
             log::info!(
                 "Task {}: Handover due at {size} input tokens.",
@@ -2743,6 +2745,17 @@ impl ClaudeCodeRun {
                     }
                 }
                 Some(request) = requests.recv() => {
+                    if let CliSession::Antigravity(backend) = &session {
+                        if backend.tripped().await {
+                            let _ = session.interrupt().await;
+                            self.antigravity_setup_failed("Antigravity ran a fallback hook instead of Arko's agent.".into()).await?;
+                            break SessionEnd::Stop;
+                        }
+                        if matches!(&request, HostRequest::PreToolUse { .. }) {
+                            self.commit_antigravity_text(&mut agy_turn).await?;
+                            self.latest_response.called = true;
+                        }
+                    }
                     self.handle_request(request, &session).await?;
                 }
                 _ = sleep_until(approval_deadline), if approval_deadline.is_some() => {
@@ -4037,7 +4050,7 @@ impl ClaudeCodeRun {
                         .retain(|running| running.output.is_none());
                     self.report(false).await;
                 }
-                self.check_handover_threshold().await?;
+                self.check_handover_threshold(None).await?;
             }
             cc::Message::User(user) if user.parent_tool_use_id.is_none() => {
                 self.flush_usage().await?;
@@ -4177,7 +4190,7 @@ impl ClaudeCodeRun {
                             (sent_at, false),
                         )
                         .await?;
-                        self.check_handover_threshold().await?;
+                        self.check_handover_threshold(None).await?;
                     }
                 }
                 Some("message_delta") => {
@@ -5239,8 +5252,12 @@ impl ClaudeCodeRun {
     /// of a conversation whose first request didn't. A conversation that
     /// starts over the threshold would start over it again after another
     /// handover or compaction.
-    fn over_threshold(&mut self, size: usize) -> Option<usize> {
-        let threshold = self.handover_threshold.of(&self.task.agent_config)?;
+    fn over_threshold(&mut self, size: usize, context_limit: Option<usize>) -> Option<usize> {
+        let config = &self.task.agent_config;
+        let threshold = match context_limit {
+            Some(limit) => self.handover_threshold.of_input_limit(config, limit),
+            None => self.handover_threshold.of(config),
+        }?;
         if size < threshold {
             return None;
         }
@@ -5269,11 +5286,17 @@ impl ClaudeCodeRun {
     /// the result of its next tool call, or as a message when its turn ends.
     /// An agent that compacts holds its next call instead and ends its turn,
     /// and Claude Code compacts the conversation then.
-    async fn check_handover_threshold(&mut self) -> Result<(), ArkoAgentsError> {
+    async fn check_handover_threshold(
+        &mut self,
+        context_limit: Option<usize>,
+    ) -> Result<(), ArkoAgentsError> {
         if self.handover_due() || self.compaction.is_some() {
             return Ok(());
         }
-        let Some(size) = self.context_size.and_then(|size| self.over_threshold(size)) else {
+        let Some(size) = self
+            .context_size
+            .and_then(|size| self.over_threshold(size, context_limit))
+        else {
             return Ok(());
         };
         if self.compacts() {

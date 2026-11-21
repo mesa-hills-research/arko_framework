@@ -18,7 +18,7 @@ pub(super) enum CliError {
 }
 
 pub(super) enum CliSession {
-    Claude(cc::ClaudeSession),
+    Claude(Box<cc::ClaudeSession>),
     Antigravity(Box<AntigravityRun>),
 }
 
@@ -144,7 +144,7 @@ pub(super) struct AntigravityRun {
 
 impl AntigravityRun {
     pub(super) async fn start(
-        run: &mut ClaudeCodeRun,
+        run: &mut CliRun,
         requests: mpsc::UnboundedSender<HostRequest>,
     ) -> Result<Self, CliError> {
         let config = &run.task.agent_config;
@@ -202,10 +202,10 @@ impl AntigravityRun {
         let mut options =
             agy::AcpOptions::new(cli.clone(), profile.0.dir().to_path_buf(), cwd.clone());
         options.agent = Some(agy::AGENT_NAME.into());
-        options.client_info = Some(agy::ClientInfo {
+        options.client_info = agy::ClientInfo {
             name: "arko_agents".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-        });
+        };
         options.log_file = Some(profile.0.log_file());
         options.env.clone_from(&env);
         let (key, token) = relay.env();
@@ -278,6 +278,10 @@ impl AntigravityRun {
             let _ = reply.send(result);
         });
         answer
+    }
+
+    pub(super) async fn tripped(&self) -> bool {
+        profile_tripped(&self.profile.0).await
     }
 
     async fn prompt(&self, blocks: Vec<Value>) -> Result<String, CliError> {
@@ -506,7 +510,7 @@ impl AntigravityTurn {
     }
 }
 
-impl ClaudeCodeRun {
+impl CliRun {
     fn antigravity_tool_server(
         &mut self,
         requests: mpsc::UnboundedSender<HostRequest>,
@@ -681,7 +685,7 @@ impl ClaudeCodeRun {
                     update: agy::SessionUpdate::ToolCall(_) | agy::SessionUpdate::ToolCallUpdate(_),
                     ..
                 }
-        ) && profile_tripped(&agy_session.profile.0).await
+        ) && agy_session.tripped().await
         {
             let _ = session.interrupt().await;
             return self
@@ -718,25 +722,23 @@ impl ClaudeCodeRun {
                         if used > 0 {
                             self.context_size = Some(used as usize);
                             self.first_context_size.get_or_insert(used as usize);
-                            self.check_handover_threshold().await?;
+                            self.check_handover_threshold(turn.context_limit).await?;
                         }
                     }
                     agy::SessionUpdate::ToolCall(call)
                     | agy::SessionUpdate::ToolCallUpdate(call) => {
-                        if let Some(name) = call.name.as_deref() {
-                            if !name.starts_with("mcp_arko_")
-                                && !matches!(
-                                    name,
-                                    "list_resources" | "read_resource" | "manage_task"
-                                )
-                            {
-                                let _ = session.interrupt().await;
-                                return self.antigravity_setup_failed(format!("Antigravity tried to run '{name}', which is not an Arko tool.")).await;
-                            }
-                            if name.starts_with("mcp_arko_") {
-                                self.commit_antigravity_text(turn).await?;
-                                self.latest_response.called = true;
-                            }
+                        // ACP names tell us which tools agy tried to run.
+                        // Only the MCP requests and replies describe Arko calls.
+                        if let Some(name) = call.name.as_deref()
+                            && !name.starts_with(agy::ARKO_TOOL_PREFIX)
+                            && !matches!(name, "list_resources" | "read_resource" | "manage_task")
+                        {
+                            let _ = session.interrupt().await;
+                            return self
+                                .antigravity_setup_failed(format!(
+                                    "Antigravity tried to run '{name}', which is not an Arko tool."
+                                ))
+                                .await;
                         }
                     }
                     _ => {}
@@ -763,7 +765,7 @@ impl ClaudeCodeRun {
                 let result = match outcome {
                     Ok(result) => result,
                     Err(error) => {
-                        return self.antigravity_failed(error.to_string()).await.map(Some);
+                        return self.session_failed(error.to_string()).await.map(Some);
                     }
                 };
                 if let Some(message) =
@@ -817,7 +819,7 @@ impl ClaudeCodeRun {
         Ok(None)
     }
 
-    async fn commit_antigravity_text(
+    pub(super) async fn commit_antigravity_text(
         &mut self,
         turn: &mut AntigravityTurn,
     ) -> Result<(), ArkoAgentsError> {

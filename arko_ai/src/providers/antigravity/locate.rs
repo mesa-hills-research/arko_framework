@@ -27,11 +27,7 @@ use super::{AvailableModel, MINIMUM_VERSION, SignIn, SignInProblem};
 /// How long `agy --version` may take.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The names `agy` is installed under.
-#[cfg(windows)]
-const PROGRAM_NAMES: [&str; 2] = ["agy.exe", "agy.cmd"];
-#[cfg(not(windows))]
-const PROGRAM_NAMES: [&str; 1] = ["agy"];
+const PROGRAM_NAME: &str = if cfg!(windows) { "agy.exe" } else { "agy" };
 
 /// The `agy` executable, from `PATH` or else `~/.local/bin`, where its
 /// installer puts it.
@@ -51,7 +47,7 @@ fn find_in(
         .flat_map(|path| std::env::split_paths(path))
         .filter(|directory| !directory.as_os_str().is_empty())
         .chain(installed)
-        .flat_map(|directory| PROGRAM_NAMES.map(|name| directory.join(name)))
+        .map(|directory| directory.join(PROGRAM_NAME))
         .find(|candidate| is_executable(candidate.as_path()))
 }
 
@@ -74,7 +70,7 @@ pub async fn cli_version(cli: &Path) -> Result<String, SignInProblem> {
 }
 
 /// Whether version `found` is `minimum` or later. Each is compared by its
-/// numbers (`1.5.14`), and a suffix such as `-beta` is left out.
+/// major, minor and patch numbers.
 pub fn version_at_least(found: &str, minimum: &str) -> bool {
     match (version_numbers(found), version_numbers(minimum)) {
         (Some(found), Some(minimum)) => found >= minimum,
@@ -82,19 +78,19 @@ pub fn version_at_least(found: &str, minimum: &str) -> bool {
     }
 }
 
-fn version_numbers(version: &str) -> Option<Vec<u64>> {
-    let version = version.trim();
-    let version = version.strip_prefix('v').unwrap_or(version);
-    let numbers = version.split(['-', '+']).next()?;
-    numbers.split('.').map(|part| part.parse().ok()).collect()
+fn version_numbers(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.');
+    let numbers = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
+    parts.next().is_none().then_some(numbers)
 }
 
-/// The first word of `--version`'s output that looks like a version.
 fn parse_version(output: &str) -> Option<&str> {
-    output
-        .split_whitespace()
-        .map(|word| word.strip_prefix('v').unwrap_or(word))
-        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()) && word.contains('.'))
+    let version = output.trim();
+    version_numbers(version).map(|_| version)
 }
 
 /// Checks that the CLI (by default the one [`find_agy`] finds) is installed,
@@ -126,7 +122,7 @@ async fn check(launch: Launch) -> Result<SignIn, SignInProblem> {
     let mut options = AcpOptions::new(launch.program.clone(), profile, work.clone());
     options.prefix_args = launch.prefix_args.clone();
     options.env = launch.env.clone();
-    // The default agent asks before its own tools, and none should run.
+    // The sign-in check sends no prompt.
     let refuse: Arc<dyn PermissionPolicy> =
         Arc::new(|_: &PermissionRequest| PermissionDecision::Cancel);
     let client = AcpClient::start(options, refuse).await.map_err(problem)?;
@@ -138,9 +134,12 @@ async fn check(launch: Launch) -> Result<SignIn, SignInProblem> {
         .map(|option| option.options.clone())
         .unwrap_or_default();
     let mut models = Vec::with_capacity(families.len());
-    // The thought levels on offer depend on the model, so each model is
-    // chosen in turn. It changes only this session.
-    for family in families {
+    let supported = crate::Model::list(crate::Provider::Antigravity);
+    // Read the levels for each supported model in the account.
+    for family in families
+        .into_iter()
+        .filter(|family| supported.iter().any(|model| model.id == family.value))
+    {
         let settings = client
             .set_config_option(&session.session_id, "model", &family.value)
             .await
@@ -175,10 +174,7 @@ fn problem(error: AcpError) -> SignInProblem {
         AcpError::Rpc { method, error: rpc }
             if method == "session/new"
                 && rpc.code == -32000
-                && rpc
-                    .message
-                    .to_ascii_lowercase()
-                    .contains("authentication required") =>
+                && rpc.message.eq_ignore_ascii_case("Authentication required") =>
         {
             SignInProblem::SignedOut
         }
@@ -413,7 +409,7 @@ pub(super) mod tests {
 
     #[test]
     fn agy_is_found_on_the_path_first() {
-        let name = PROGRAM_NAMES[0];
+        let name = PROGRAM_NAME;
         let on_path = folder("tools").join(name);
         let installed = folder(".local").join("bin").join(name);
         assert_eq!(
@@ -424,7 +420,7 @@ pub(super) mod tests {
             Some(on_path)
         );
         assert_eq!(
-            find_with(&[folder("bin")], &[installed.clone()]),
+            find_with(&[folder("bin")], std::slice::from_ref(&installed)),
             Some(installed)
         );
         assert_eq!(find_with(&[folder("bin")], &[]), None);
@@ -435,16 +431,14 @@ pub(super) mod tests {
     fn versions_compare_by_their_numbers() {
         assert!(version_at_least("1.5.14", MINIMUM_VERSION));
         assert!(version_at_least("1.5.15", "1.5.14"));
-        assert!(version_at_least("1.6", "1.5.14"));
+        assert!(version_at_least("1.6.0", "1.5.14"));
         assert!(version_at_least("2.0.0", "1.5.14"));
-        assert!(version_at_least("v1.5.14", "1.5.14"));
-        assert!(version_at_least("1.5.14-beta.1", "1.5.14"));
         assert!(!version_at_least("1.5.13", "1.5.14"));
         assert!(!version_at_least("1.5", "1.5.14"));
         assert!(!version_at_least("1.4.99", "1.5.14"));
         assert!(!version_at_least("unknown", "1.5.14"));
         assert_eq!(parse_version("1.5.13\n"), Some("1.5.13"));
-        assert_eq!(parse_version("agy version 1.5.14 (linux)"), Some("1.5.14"));
+        assert_eq!(parse_version("agy version 1.5.14 (linux)"), None);
         assert_eq!(parse_version(""), None);
     }
 
