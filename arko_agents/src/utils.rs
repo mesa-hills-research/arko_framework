@@ -69,9 +69,8 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 ///   trailing dots and spaces are dropped. A verbatim path (`\\?\C:\...`) is
 ///   kept as written. On Unix, `\` is an ordinary character.
 /// - `.` and `..` are then resolved lexically with [`normalize_path`].
-///   Symbolic links are not followed. On macOS, `/var` is a link to
-///   `/private/var`, so a path written through one of them is not inside a
-///   working directory written through the other.
+///   Symbolic links are not followed here, so `link/..` is the working
+///   directory. [`is_path_in_workspace`] resolves links.
 ///
 /// Fails when the path contains a NUL byte, or when a relative path needs
 /// the process's current directory and it is unavailable.
@@ -114,13 +113,29 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Whether the path the filesystem would open is inside the task's workspace.
-/// Resolves symlinks before checking containment. For a new path, the deepest
-/// existing parent must resolve. Once the remaining components are known to
-/// be missing, check their lexical resolution too.
-/// Checks both the path as supplied to a CLI and the one [`resolve_path`]
-/// gives a built-in tool, since the tools do not all handle whitespace or
-/// `..` alike. The filesystem may still change before the tool opens the path.
+/// Whether the path a tool would open is inside the task's workspace, when
+/// the check runs.
+///
+/// The workspace and the path are compared in canonical form, with symbolic
+/// links resolved (on Windows also junctions, case and short names). So a
+/// link to the workspace, its canonical form and the form it was given in
+/// all get the same answer. For a path that doesn't exist yet, its deepest
+/// existing parent is resolved. A trailing separator or a final `.` doesn't
+/// hide a link, so `link/` is judged as `link`.
+///
+/// Tools don't all read a path alike. [`resolve_path`] trims it and resolves
+/// `..` by name, while a program may take it untrimmed, or leave `..` to the
+/// operating system, which follows a link before going up. Each of these
+/// readings is judged, and the path is inside only when all of them are.
+///
+/// It fails, so the call is refused under every path policy, for a path that
+/// enters the workspace and leaves it through a link (`link/x` or
+/// `link/../x`, where `link` points outside), for one that some readings
+/// find inside and others outside, and for one through a link whose target
+/// is missing.
+///
+/// The check holds nothing open, so a link created or changed between the
+/// check and the tool's use of the path isn't seen.
 ///
 /// A path that starts with `~` (`~` alone, or `~/`, and on Windows `~\` too)
 /// is always outside. [`resolve_path`] takes it as a directory name, but
@@ -131,42 +146,99 @@ pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAg
 }
 
 /// The part of `path` below `workspace`, when [`is_path_in_workspace`] finds
-/// it inside (empty for the workspace itself), else `None`. It holds no `..`.
+/// it inside (empty for the workspace itself), else `None`. It is the rest of
+/// the path as [`resolve_path`] spells it, after the point where the path
+/// enters the workspace, so a link below that point keeps its name. It holds
+/// no `..`.
 pub(crate) fn path_in_workspace(
     path: &str,
     workspace: &Path,
 ) -> Result<Option<PathBuf>, ArkoAgentsError> {
+    const ESCAPE: &str = "the path follows a symbolic link outside the workspace";
+    const AMBIGUOUS: &str =
+        "the path is inside the workspace or outside it, depending on how a tool reads it";
     if starts_with_home(path) {
         return Ok(None);
     }
-    let normalized = resolve_path(path, workspace)?;
-    let supplied = absolute(&workspace.join(path))?;
     let workspace = absolute(workspace)?;
+    // Each pair is the path with `..` resolved by name, then with `..` left
+    // to the operating system. Arko's file tools trim the path and resolve
+    // `..` by name (`resolve_path`). A program may do neither.
+    let opened = resolve_path(path, &workspace)?;
+    let untrimmed = absolute(&workspace.join(path))?;
+    let readings = [
+        (opened, absolute(&workspace.join(path.trim()))?),
+        (normalize_path(&untrimmed), untrimmed),
+    ];
     let root = effective_path(&workspace)?;
-    let actual = effective_path(&supplied)?;
-    let Ok(relative) = actual.strip_prefix(&root) else {
-        if normalized.starts_with(normalize_path(&workspace)) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the path follows a symbolic link outside the workspace",
-            )
-            .into());
-        }
-        return Ok(None);
-    };
-    if supplied != normalized && !effective_path(&normalized)?.starts_with(&root) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "the path has more than one workspace resolution",
-        )
-        .into());
+    // Every reading is resolved, so a link that fails to resolve in any of
+    // them refuses the path.
+    let mut inside = [[false; 2]; 2];
+    for ((by_name, by_system), inside) in readings.iter().zip(&mut inside) {
+        *inside = [
+            effective_path(by_name)?.starts_with(&root),
+            effective_path(by_system)?.starts_with(&root),
+        ];
     }
-    Ok(Some(relative.to_path_buf()))
+    if inside.iter().flatten().all(|inside| *inside) {
+        return entry(&readings[0].0, &root)?
+            .map(Some)
+            .ok_or_else(|| refusal(AMBIGUOUS));
+    }
+    // A reading by name that enters the workspace has left it through a
+    // link when it, or the same path read by the operating system, ends
+    // outside.
+    for ((by_name, _), inside) in readings.iter().zip(inside) {
+        if inside != [true, true] && entry(by_name, &root)?.is_some() {
+            return Err(refusal(ESCAPE));
+        }
+    }
+    if inside.iter().flatten().any(|inside| *inside) {
+        return Err(refusal(AMBIGUOUS));
+    }
+    Ok(None)
 }
 
+fn refusal(reason: &'static str) -> ArkoAgentsError {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into()
+}
+
+/// Where the absolute, `..`-free `path` enters the workspace whose canonical
+/// form is `root`, as a path below `root`. The first ancestor of `path`, from
+/// the file system's root down, that resolves inside `root` gives its place
+/// there, and the rest of `path` follows as written. `None` when no ancestor
+/// resolves inside. After that point the path can leave the workspace only
+/// through a link.
+fn entry(path: &Path, root: &Path) -> std::io::Result<Option<PathBuf>> {
+    let ancestors: Vec<&Path> = path.ancestors().collect();
+    for ancestor in ancestors.into_iter().rev() {
+        let resolved = effective_path(ancestor)?;
+        let Ok(place) = resolved.strip_prefix(root) else {
+            continue;
+        };
+        let mut below = place.to_path_buf();
+        below.extend(path.strip_prefix(ancestor).unwrap_or(Path::new("")));
+        return Ok(Some(below));
+    }
+    Ok(None)
+}
+
+/// `path` as the file system resolves it, with every symbolic link followed.
+/// For a path that doesn't exist yet, its deepest existing parent is
+/// resolved and the missing names are appended. When those hold `..`, the
+/// result is resolved again, as for a tool that creates the missing
+/// directories first.
+///
+/// The probes use the path rebuilt from its components, so they look up the
+/// names that `Path::parent` and `Path::components` give. With a trailing
+/// separator, the file system follows a final link even for
+/// `symlink_metadata`, and a dangling link written `link/` would look like a
+/// missing name. A name that exists only as a link whose target is missing
+/// is refused.
 fn effective_path(path: &Path) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
-    let mut prefix = path;
+    let path: PathBuf = path.components().collect();
+    let mut prefix = path.as_path();
     let mut missing = Vec::new();
     loop {
         match std::fs::canonicalize(prefix) {
@@ -190,7 +262,12 @@ fn effective_path(path: &Path) -> std::io::Result<PathBuf> {
                 match std::fs::symlink_metadata(prefix) {
                     Err(missing_entry) if missing_entry.kind() == ErrorKind::NotFound => {}
                     Err(inaccessible) => return Err(inaccessible),
-                    Ok(_) => return Err(error),
+                    Ok(_) => {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            "the path goes through a symbolic link whose target doesn't exist",
+                        ));
+                    }
                 }
                 let Some(component @ (Component::Normal(_) | Component::ParentDir)) =
                     prefix.components().next_back()
@@ -366,6 +443,283 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[derive(Debug, PartialEq)]
+    enum Verdict {
+        Inside(PathBuf),
+        Outside,
+        Refused(String),
+    }
+
+    /// A workspace `real` with directories `sub` and `sub/deeper`, a link
+    /// `alias` to it, and a directory `outside` beside it holding `deep`.
+    #[cfg(unix)]
+    struct Linked {
+        root: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Linked {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("arko-linked-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("real/sub/deeper")).unwrap();
+            std::fs::create_dir_all(root.join("outside/deep")).unwrap();
+            std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
+            Linked { root }
+        }
+
+        /// A link at `name` in the workspace, to `target` as written.
+        fn link(&self, name: &str, target: &str) {
+            std::os::unix::fs::symlink(target, self.root.join("real").join(name)).unwrap();
+        }
+
+        /// The verdict on `path`, relative to the workspace. It must be the
+        /// same with the workspace given as `real` and as `alias`, and with
+        /// `path` given relative and absolute through either of them.
+        fn verdict(&self, path: &str) -> Verdict {
+            let spellings = [self.root.join("real"), self.root.join("alias")];
+            let mut verdicts = Vec::new();
+            for workspace in &spellings {
+                let mut given = vec![path.to_string()];
+                for base in &spellings {
+                    given.push(format!("{}/{path}", base.display()));
+                }
+                for path in given {
+                    let verdict = match path_in_workspace(&path, workspace) {
+                        Ok(Some(below)) => Verdict::Inside(below),
+                        Ok(None) => Verdict::Outside,
+                        Err(error) => Verdict::Refused(error.to_string()),
+                    };
+                    verdicts.push((path, workspace.clone(), verdict));
+                }
+            }
+            for (given, workspace, verdict) in &verdicts {
+                assert_eq!(
+                    verdict,
+                    &verdicts[0].2,
+                    "{given} in {}",
+                    workspace.display()
+                );
+            }
+            verdicts.remove(0).2
+        }
+
+        fn refused(&self, path: &str) -> String {
+            match self.verdict(path) {
+                Verdict::Refused(reason) => reason,
+                other => panic!("{path}: {other:?}"),
+            }
+        }
+
+        fn inside(&self, path: &str) -> PathBuf {
+            match self.verdict(path) {
+                Verdict::Inside(below) => below,
+                other => panic!("{path}: {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Linked {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// With a trailing `/` the file system follows a final link even for
+    /// `symlink_metadata`, so a dangling link looked like a missing name. A
+    /// tool that drops the `/` then writes through the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_separator_does_not_hide_a_dangling_link() {
+        let linked = Linked::new();
+        linked.link("dangling", "../outside/new-file");
+        linked.link("chained", "dangling");
+        linked.link("inner", "sub/missing");
+        for path in [
+            "dangling",
+            "dangling/",
+            "dangling//",
+            "dangling/.",
+            "dangling/./",
+            "./dangling/",
+            "sub/../dangling/",
+            "chained/",
+            "dangling/new/",
+            "inner/",
+        ] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("target doesn't exist"), "{path}: {reason}");
+        }
+        assert!(!linked.root.join("outside/new-file").exists());
+    }
+
+    /// A link out of the workspace, to a directory or a file, is refused
+    /// whether the path names the workspace through a link to it or by its
+    /// canonical form, and whichever of them the workspace was given as.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_workspace_is_refused_in_every_spelling_of_it() {
+        let linked = Linked::new();
+        std::fs::write(linked.root.join("outside/secret.txt"), "").unwrap();
+        std::fs::write(linked.root.join("real/sub/notes.txt"), "").unwrap();
+        linked.link("out", "../outside/deep");
+        linked.link("in", "sub");
+        linked.link("secret", "../outside/secret.txt");
+        linked.link("notes", "sub/notes.txt");
+        for path in [
+            "out",
+            "out/",
+            "out/new",
+            "out/../new",
+            "in/../out/x",
+            "secret",
+            "secret/",
+            "in/../secret",
+        ] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        assert_eq!(linked.verdict("../outside/x"), Verdict::Outside);
+        assert_eq!(linked.verdict("../outside/deep/x"), Verdict::Outside);
+        assert_eq!(linked.verdict("../outside/secret.txt"), Verdict::Outside);
+        assert_eq!(linked.inside("."), PathBuf::new());
+        assert_eq!(linked.inside("in/x"), PathBuf::from("in/x"));
+        assert_eq!(linked.inside("notes"), PathBuf::from("notes"));
+    }
+
+    /// Links that lead to links, and relative targets that go up with `..`,
+    /// are followed to their end before the path's own `..` applies.
+    #[cfg(unix)]
+    #[test]
+    fn link_chains_and_relative_links_with_parent_components() {
+        let linked = Linked::new();
+        linked.link("b", "../outside/deep");
+        linked.link("a", "b");
+        linked.link("c", "a");
+        linked.link("up", "..");
+        linked.link("here", ".");
+        linked.link("back", "../real/sub/deeper");
+        linked.link("d1", "d2");
+        linked.link("d2", "../outside/missing");
+        // `c/../x` is `real/x` by name, and `outside/x` by the file system.
+        // `here/../x` is `real/x` by name, and `x` beside `real` by the file
+        // system.
+        for path in ["c", "c/x", "c/", "c/../x", "up/outside/x", "here/../x"] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        for path in ["d1", "d1/", "d1/x"] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("target doesn't exist"), "{path}: {reason}");
+        }
+        // Outside both by name and by the file system.
+        assert_eq!(linked.verdict("a/../../x"), Verdict::Outside);
+        assert_eq!(linked.inside("back/new"), PathBuf::from("back/new"));
+        // `real/new` by name, and `real/sub/new` by the file system.
+        assert_eq!(linked.inside("back/../new"), PathBuf::from("new"));
+        assert_eq!(
+            linked.inside("up/real/sub/new"),
+            PathBuf::from("up/real/sub/new")
+        );
+    }
+
+    /// A new file below a link to a directory is judged by where the link
+    /// leads, and keeps the link's name in the part below the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_under_a_linked_directory() {
+        let linked = Linked::new();
+        linked.link("in", "sub");
+        linked.link("out", "../outside/deep");
+        let outside = linked.root.join("outside").display().to_string();
+        linked.link("absolute", &outside);
+        for path in ["in/new.txt", "in/new/deeper.txt", "in/new/"] {
+            assert_eq!(
+                linked.inside(path),
+                PathBuf::from(path.trim_end_matches('/')),
+                "{path}"
+            );
+        }
+        for path in ["out/new.txt", "out/new/deeper.txt", "absolute/new.txt"] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        // A file below a file is no new file.
+        std::fs::write(linked.root.join("real/sub/file"), "").unwrap();
+        assert!(matches!(linked.verdict("in/file/new"), Verdict::Refused(_)));
+    }
+
+    /// The workspace may be a link, or sit below one. Paths inside, outside
+    /// and leaving through a link get the same answers as for its target. A
+    /// workspace that is a dangling link refuses every path.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_that_is_a_link() {
+        use std::os::unix::fs::symlink;
+        let linked = Linked::new();
+        linked.link("out", "../outside/deep");
+        symlink(".", linked.root.join("here")).unwrap();
+        let below_link = linked.root.join("here/alias");
+        let canonical = std::fs::canonicalize(linked.root.join("real")).unwrap();
+        for (path, expected) in [
+            ("sub/x".to_string(), Some(PathBuf::from("sub/x"))),
+            (
+                format!("{}/sub/x", canonical.display()),
+                Some(PathBuf::from("sub/x")),
+            ),
+            ("../outside/x".to_string(), None),
+            (format!("{}/x", linked.root.join("outside").display()), None),
+        ] {
+            assert_eq!(
+                path_in_workspace(&path, &below_link).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
+        for path in [
+            "out/x".to_string(),
+            format!("{}/out/x", canonical.display()),
+        ] {
+            assert!(path_in_workspace(&path, &below_link).is_err(), "{path}");
+        }
+        symlink("missing", linked.root.join("gone")).unwrap();
+        for path in ["x", "../outside/x"] {
+            assert!(
+                path_in_workspace(path, &linked.root.join("gone")).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    /// A program that resolves `..` by name without trimming the path reads
+    /// `" x/../evil "` as `evil ` in the workspace, while trimming reads
+    /// `evil` and leaving `..` to the file system reads `sub/evil `.
+    #[cfg(unix)]
+    #[test]
+    fn every_reading_of_a_path_is_judged() {
+        let linked = Linked::new();
+        linked.link(" x", "sub/deeper");
+        linked.link("evil ", "../outside/deep");
+        let workspace = linked.root.join("real");
+        for path in [" x/../evil ", "sub/deeper/../../ x/../evil "] {
+            let reason = path_in_workspace(path, &workspace).unwrap_err().to_string();
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        // Trimmed it leaves the workspace, untrimmed it names ` ..`.
+        let reason = path_in_workspace(" ../outside", &workspace)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            reason.contains("depending on how a tool reads it"),
+            "{reason}"
+        );
+        assert_eq!(
+            path_in_workspace(" sub/x ", &workspace).unwrap(),
+            Some(PathBuf::from("sub/x"))
+        );
+    }
+
     /// `~` as the first component may be the home directory to Claude Code's
     /// search tools and to programs, so it is outside though `resolve_path`
     /// takes it as a directory name. Elsewhere it is an ordinary name.
@@ -413,18 +767,46 @@ mod tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    /// The workspace as written, in its canonical `\\?\` form and in upper
+    /// case are one directory. Either separator, a trailing one included,
+    /// gives the same part below it.
     #[cfg(windows)]
     #[test]
-    fn a_windows_workspace_matches_its_canonical_spelling() {
+    fn a_windows_workspace_matches_every_spelling_of_it() {
         let workspace =
             std::env::temp_dir().join(format!("arko-workspace-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let canonical = std::fs::canonicalize(&workspace).unwrap();
-        for path in [workspace.join(r"src\lib.rs"), canonical.join(r"src\lib.rs")] {
+        let upper = PathBuf::from(workspace.to_string_lossy().to_uppercase());
+        let spellings = [&workspace, &canonical, &upper];
+        let below = PathBuf::from(r"src\lib.rs");
+        for written in spellings {
+            let mut paths: Vec<String> = [
+                r"src\lib.rs",
+                "src/lib.rs",
+                r"src\lib.rs\",
+                "src/lib.rs/",
+                r"src\x\..\lib.rs",
+            ]
+            .map(String::from)
+            .into();
+            for base in spellings {
+                paths.push(format!(r"{}\src\lib.rs", base.display()));
+                paths.push(format!(r"{}\src\lib.rs\", base.display()));
+            }
+            for path in &paths {
+                assert_eq!(
+                    path_in_workspace(path, written).unwrap(),
+                    Some(below.clone()),
+                    "{path} in {}",
+                    written.display()
+                );
+            }
             assert_eq!(
-                path_in_workspace(path.to_str().unwrap(), &workspace).unwrap(),
-                Some(PathBuf::from(r"src\lib.rs"))
+                path_in_workspace(".", written).unwrap(),
+                Some(PathBuf::new())
             );
+            assert_eq!(path_in_workspace(r"..\x", written).unwrap(), None);
         }
         std::fs::remove_dir_all(workspace).unwrap();
     }

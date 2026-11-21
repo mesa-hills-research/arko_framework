@@ -446,32 +446,48 @@ result and `ToolRejected`. An output-based call is rejected as a tool error, und
 `on_tool_execution_error`. A path that cannot be resolved, such as one holding a NUL
 byte, is rejected this way under every policy.
 
-The check and the built-in file tools resolve a path the same way, with
-`arko_agents::utils::resolve_path`. Surrounding whitespace is trimmed, `~` and `$VAR` are
-not expanded (`~/notes` names a directory called `~`), a relative path is joined to the
-working directory, and the result is made absolute and its `.` and `..` resolved. On
-Windows this follows Win32, so `\` and `/` both separate components, a drive-relative
-`C:dir` uses that drive's current directory, trailing dots and spaces are dropped, and a
-verbatim `\\?\` path is kept as written. A custom tool with an `is_path` parameter should
-open the path `resolve_path` returns, so the check judges the path the tool opens.
-End-user command tools receive that path. A non-string value for an `is_path` parameter
-is rejected.
+The built-in file tools resolve a path with `arko_agents::utils::resolve_path`.
+Surrounding whitespace is trimmed, `~` and `$VAR` are not expanded (`~/notes` names a
+directory called `~`), a relative path is joined to the working directory, and the result
+is made absolute and its `.` and `..` resolved by name, so `link/..` is the working
+directory. On Windows this follows Win32, so `\` and `/` both separate components, a
+drive-relative `C:dir` uses that drive's current directory, trailing dots and spaces are
+dropped, and a verbatim `\\?\` path is kept as written. A custom tool with an `is_path`
+parameter should open the path `resolve_path` returns. End-user command tools receive
+that path. A non-string value for an `is_path` parameter is rejected.
 
 A path that starts with `~` (`~` alone, `~/...`, and `~\...` on Windows) is always outside,
 because Claude Code's search tools and programs a tool starts may expand it to the home
 directory.
 
-The check compares the resolved path with the working directory component by component.
-On Windows it ignores ASCII case (`c:\work\x` is inside `C:\Work`) and matches a verbatim
-prefix with its ordinary form (`\\?\C:\` with `C:\`, `\\?\UNC\server\share` with
-`\\server\share`), also in a directory with case sensitivity turned on. Elsewhere the
-comparison is exact, so on a macOS file system that ignores case, a path spelled in
-another case is judged outside. The check isn't a sandbox. Symbolic links aren't
-followed, so a link inside the workspace can lead outside it, and a path spelled through
-a link is compared as written. On macOS, for example, `/var` links to `/private/var`,
-where temporary directories live. Give the working directory in canonical form
-(`std::fs::canonicalize`, as the README's example does), since programs such as `pwd` report
-canonical paths.
+The check resolves symbolic links in the working directory and in the path, and on
+Windows junctions, case and short 8.3 names too. It compares the two in canonical form,
+component by component, so a link to the working directory, its canonical form and the
+spelling it was given in all get the same answer. On macOS, for example, `/var` links to
+`/private/var`, where temporary directories live. For a path that doesn't exist yet, its
+deepest existing parent is resolved and the missing names are added to it. A trailing
+separator or a final `.` doesn't change the answer, so `link/` is judged as `link`.
+
+Tools don't all read a path alike. `resolve_path` trims it and resolves `..` by name, while
+a program, such as one behind Claude Code's built-in tools, may take it untrimmed, or leave
+`..` to the operating system, which follows a link before going up. The check judges each
+of these readings, and a path is inside only when all of them are. These paths are rejected
+under every policy, as one that cannot be resolved is:
+
+- A path that enters the working directory and leaves it through a symbolic link, such as
+  `link/x` or `link/../x` where `link` points outside, however the path and the working
+  directory are spelled.
+- A path through a link whose target doesn't exist.
+- A path that some readings find inside and others outside, such as ` ../x`, which names a
+  directory ` ..` when it isn't trimmed.
+
+The check isn't a sandbox. It judges a path when the call is admitted, and the tool opens it
+later, so a link created or changed in between isn't seen. A wait for approval can make that
+interval long. It covers `is_path` parameters and the path inputs of Claude Code's file and
+search tools. Paths inside other arguments, a command's working directory, what a program
+does with the paths it gets, the files a search tool reads below the directory it was
+given, and a direct `Tool::execute` call are outside it. So are hard links and bind mounts,
+which the check can't tell from ordinary files and directories.
 
 ### Tool errors
 
@@ -1866,8 +1882,9 @@ wrote them. Claude Code makes the `file_path` of `Read`, `Edit` and `Write` (and
 `notebook_path` of `NotebookEdit`) absolute from the session's directory before the hook runs.
 The runtime maps a path under that directory and outside the task's workspace to the same path
 under the task's directory, and the path policy, the host and the CLI all see the mapped path.
-A path inside the workspace stays as it is. On Windows the match ignores case and a `\\?\`
-prefix, as the path policy does.
+A path inside the workspace stays as it is. The match resolves links as the path policy does,
+so a link to the session's directory counts as the directory, and on Windows so do another
+case and a `\\?\` prefix. The part of the path below it keeps its names as written.
 
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
 handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
