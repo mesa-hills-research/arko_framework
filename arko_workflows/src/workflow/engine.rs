@@ -1805,7 +1805,7 @@ async fn answer_saved_wait(
     } = *drive;
     match &task.current_state {
         TaskState::AwaitingToolApproval { .. } | TaskState::AwaitingBatchToolApproval { .. }
-            if task.running_tool_calls.is_empty() && !task.agent_config.runs_in_claude_code() =>
+            if task.running_tool_calls.is_empty() && !task.agent_config.runs_in_cli() =>
         {
             let Some(AgentPause::ToolApproval { calls }) = AgentPause::of(&task.current_state)
             else {
@@ -4811,10 +4811,15 @@ impl WorkflowEngine {
                         "ResolveRefusal needs at least one change to the refused input".to_string(),
                     ));
                 }
-                if previous_task.agent_config.runs_in_claude_code() {
-                    return Err(WorkflowError::BuilderInvalid(
-                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation). Continue or fail it".to_string(),
-                    ));
+                if previous_task.agent_config.runs_in_cli() {
+                    let backend = if previous_task.agent_config.runs_in_claude_code() {
+                        "Claude Code"
+                    } else {
+                        "Antigravity"
+                    };
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "A {backend} agent's refused input can't be changed. Continue or fail the run instead."
+                    )));
                 }
                 Decision::Command(UserCommand::ResolveRefusal { changes })
             }

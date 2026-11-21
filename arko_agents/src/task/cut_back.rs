@@ -205,11 +205,10 @@ impl Task {
     /// no result yet. A result the task holds for one goes in. A call that
     /// was running reads as one a restarted task settles
     /// ([`RESTARTED_CALL`]), and one that never ran as not run
-    /// ([`UNREACHED_CALL`]). A Claude Code task's session keeps its own
-    /// record of the turn.
+    /// ([`UNREACHED_CALL`]). CLI runs settle their own open calls.
     fn answer_open_calls(&mut self) {
         if self.agent_config.tool_config.tool_calling_mode != ToolCallingMode::Native
-            || self.agent_config.runs_in_claude_code()
+            || self.agent_config.runs_in_cli()
         {
             return;
         }

@@ -1721,7 +1721,7 @@ impl AgentConfig {
         if let Some(handover) = &self.handover {
             handover.validate()?;
             if self.is_native_tool_calling()
-                && !self.runs_in_claude_code()
+                && !self.runs_in_cli()
                 && self
                     .tool_config
                     .available_tool_names
@@ -1803,6 +1803,11 @@ impl AgentConfig {
     /// Whether the agent's model runs in Antigravity.
     pub fn runs_in_antigravity(&self) -> bool {
         self.llm_config.model.provider == arko_ai::Provider::Antigravity
+    }
+
+    /// Whether the agent runs in a CLI session rather than through the API client.
+    pub fn runs_in_cli(&self) -> bool {
+        self.runs_in_claude_code() || self.runs_in_antigravity()
     }
 
     /// The Claude Code rules of [`validate`](Self::validate), namely built-in tools
@@ -2164,6 +2169,24 @@ mod validation_tests {
         .instructions("i".into())
         .build()
         .unwrap()
+    }
+
+    #[test]
+    fn cli_agents_do_not_reserve_the_native_handover_tool_name() {
+        let native = LLMModel::google_gemini_4_neon();
+        let agy = LLMModel::antigravity(native.clone());
+        let cc = LLMModel::claude_code(LLMModel::anthropic_claude_opus_5_5());
+        for (model, cli) in [(native, false), (agy, true), (cc, true)] {
+            let mut config = config(model, LLMGenerationConfig::default());
+            assert_eq!(config.runs_in_cli(), cli);
+            config.handover = Some(HandoverConfig::at_context_fraction(0.5));
+            config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+            config
+                .tool_config
+                .available_tool_names
+                .push(crate::handover::HANDOVER_REPORT_TOOL_NAME.into());
+            assert_eq!(config.validate().is_ok(), cli);
+        }
     }
 
     fn luna() -> AgentConfig {

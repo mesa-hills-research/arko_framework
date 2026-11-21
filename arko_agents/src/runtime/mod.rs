@@ -345,7 +345,7 @@ impl AgentRuntime {
         let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (command_sender, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
 
-        if task.agent_config.runs_in_claude_code() || task.agent_config.runs_in_antigravity() {
+        if task.agent_config.runs_in_cli() {
             let mut run = claude_code::CliRun::new(
                 task,
                 tool_registry,
