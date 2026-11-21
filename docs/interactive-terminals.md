@@ -370,6 +370,8 @@ loop's. Their notes reach it with its next tool call's result (the
 | Prompt rules (`prompt_rules`) | Y/N, password/passphrase, and "press a key" prompts |
 | Quiet environment for PTY jobs (`quiet_terminal_environment`) | On |
 | Command guard (`command_guard`) | On, so drastic commands are refused (see [Command guard](#command-guard)) |
+| Child OOM score adjustment (`oom_score_adj`) | `Some(500)` on Linux (clamped to `-1000..=1000`, ignored elsewhere) |
+| Per-command memory cap (`memory_max_bytes`) | `None` (on Linux uses `systemd-run --user --scope` when available, on Windows uses Job Object memory limit, no-op on macOS) |
 
 PTY jobs run with the host's environment plus `TERM=dumb`, `NO_COLOR=1`,
 `PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to a UTF-8

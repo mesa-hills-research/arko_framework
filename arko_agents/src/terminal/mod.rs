@@ -88,6 +88,23 @@ pub struct TerminalConfig {
     /// devices) or a path outside the job's working directory. On by
     /// default. See [`CommandGuard`] for the opt-ins.
     pub command_guard: CommandGuard,
+    /// Value written to `/proc/self/oom_score_adj` for each child process on
+    /// Linux (default `Some(500)`, clamped to `-1000..=1000`). Raising it
+    /// makes the kernel OOM killer end a runaway command before the host
+    /// process. Set `None` to leave the child at the host's score. Ignored
+    /// outside Linux, and write errors are ignored so restricted sandboxes
+    /// still spawn jobs.
+    pub oom_score_adj: Option<i16>,
+    /// Optional memory cap per command, in bytes (default `None`). On Linux,
+    /// runs each job in a transient `systemd-run --user --scope` cgroup with
+    /// `MemoryMax` set to this cap and `MemorySwapMax=0` when a systemd user
+    /// session is available, and falls back without a hard cap otherwise
+    /// (keeping [`oom_score_adj`](Self::oom_score_adj) and avoiding
+    /// `RLIMIT_AS`, which breaks virtual-memory-heavy runtimes). On Windows,
+    /// applies `JOB_OBJECT_LIMIT_JOB_MEMORY` across the job and its
+    /// descendants. On macOS, has no effect because the OS provides no
+    /// unprivileged hard physical-memory cap for arbitrary child runtimes.
+    pub memory_max_bytes: Option<u64>,
 }
 
 /// The UTF-8 locale PTY jobs get, set to `C.UTF-8`, except on macOS, which may
@@ -147,8 +164,41 @@ impl TerminalConfig {
             default_timeout: None,
             quiet_terminal_environment: true,
             command_guard: CommandGuard::default(),
+            oom_score_adj: Some(500),
+            memory_max_bytes: None,
         }
     }
+
+    /// Sets [`oom_score_adj`](Self::oom_score_adj), clamping any `Some` value
+    /// to Linux's `-1000..=1000` range.
+    pub fn with_oom_score_adj(mut self, score: Option<i16>) -> Self {
+        self.oom_score_adj = score.map(|value| value.clamp(-1000, 1000));
+        self
+    }
+
+    /// Sets [`memory_max_bytes`](Self::memory_max_bytes).
+    pub fn with_memory_max_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.memory_max_bytes = bytes;
+        self
+    }
+}
+
+/// Kills the process group of every active [`TerminalManager`] job and monitor
+/// check in this process at once (`SIGKILL` on Unix, no effect on Windows).
+///
+/// For a host about to exit without unwinding (`std::process::exit`), which
+/// runs no destructors. On Unix each job starts a new session with `setsid`, so
+/// the terminal's Ctrl-C does not reach it and it would outlive an abrupt exit
+/// unless killed here. On Windows every job is bound to a
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object, so OS process exit closes
+/// the job handles and ends all descendants automatically.
+///
+/// Call it right before exiting, alongside
+/// [`kill_stop_aware_commands`](crate::kill_stop_aware_commands) and
+/// [`kill_mcp_servers`](crate::kill_mcp_servers). `arko_workflows`'
+/// `stop_on_signals` calls it before exiting on a third signal.
+pub fn kill_terminal_jobs() {
+    io::kill_all();
 }
 
 #[derive(Debug, Clone)]
@@ -588,6 +638,7 @@ impl TerminalManager {
             || config.max_log_bytes == 0
             || config.prompt_quiet_ms == 0
             || config.prompt_quiet_ms > 60_000
+            || config.memory_max_bytes == Some(0)
             || config.default_timeout.is_some_and(|value| {
                 value.is_zero() || std::time::Instant::now().checked_add(value).is_none()
             })
@@ -724,6 +775,7 @@ impl TerminalManager {
             }
         }
         *manager.interrupted.lock().unwrap() = interrupted;
+        io::start_memory_limit_probe(&manager.config);
         Ok(manager)
     }
 
@@ -922,6 +974,7 @@ impl TerminalManager {
             ));
         }
         self.check_command(command, context.current_working_directory)?;
+        io::prepare_memory_limit_sync(&self.config);
         let mut jobs = self.jobs.lock().unwrap();
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TerminalError::Invalid(

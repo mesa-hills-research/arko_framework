@@ -2086,3 +2086,462 @@ async fn heuristic_prompt_match_keeps_revision_so_input_is_not_stale() {
     assert!(done.output.text.contains("ANSWER=Y"), "{done:?}");
     f.manager.shutdown().await;
 }
+
+#[test]
+fn terminal_config_oom_and_memory_defaults_and_builders() {
+    let root = std::env::temp_dir().join(format!("arko-oom-config-test-{}", Uuid::new_v4()));
+    let config = TerminalConfig::new(&root);
+    assert_eq!(config.oom_score_adj, Some(500));
+    assert_eq!(config.memory_max_bytes, None);
+
+    let custom = config
+        .clone()
+        .with_oom_score_adj(Some(2000))
+        .with_memory_max_bytes(Some(64 * 1024 * 1024));
+    assert_eq!(custom.oom_score_adj, Some(1000));
+    assert_eq!(custom.memory_max_bytes, Some(64 * 1024 * 1024));
+
+    assert_eq!(
+        config.clone().with_oom_score_adj(Some(-2000)).oom_score_adj,
+        Some(-1000)
+    );
+    assert_eq!(config.clone().with_oom_score_adj(None).oom_score_adj, None);
+
+    assert!(matches!(
+        TerminalManager::new(config.with_memory_max_bytes(Some(0))),
+        Err(TerminalError::Invalid(_))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+struct PidCleanup(Vec<i32>);
+
+#[cfg(unix)]
+impl Drop for PidCleanup {
+    fn drop(&mut self) {
+        for &pid in &self.0 {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn read_pid_file(path: &Path) -> i32 {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the child wrote its process ID")
+}
+
+#[cfg(unix)]
+async fn assert_pid_gone(pid: i32) {
+    timeout(Duration::from_secs(10), async {
+        while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("process {pid} is still running"));
+}
+
+#[cfg(unix)]
+const KILL_TERMINAL_DIR_ENV: &str = "ARKO_TEST_KILL_TERMINAL_DIR";
+
+/// `kill_terminal_jobs` kills the `setsid` process groups started by
+/// `TerminalManager` before an abrupt `std::process::exit` (without dropping
+/// the manager), including their grandchildren.
+#[cfg(unix)]
+#[test]
+fn kill_terminal_jobs_kills_child_groups_before_an_exit() {
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = TempDir(std::env::temp_dir().join(format!("arko-term-kill-{}", Uuid::new_v4())));
+    std::fs::create_dir_all(&root.0).unwrap();
+    let helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "terminal::tests::exits_after_killing_terminal_jobs",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(KILL_TERMINAL_DIR_ENV, &root.0)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        helper.status.code(),
+        Some(7),
+        "helper exited unexpectedly: {}{}",
+        String::from_utf8_lossy(&helper.stdout),
+        String::from_utf8_lossy(&helper.stderr)
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let pty_grandchild = read_pid_file(&root.0.join("pty.pid")).await;
+        let pipe_grandchild = read_pid_file(&root.0.join("pipe.pid")).await;
+        let _cleanup = PidCleanup(vec![pty_grandchild, pipe_grandchild]);
+        assert_pid_gone(pty_grandchild).await;
+        assert_pid_gone(pipe_grandchild).await;
+    });
+}
+
+/// Child process of [`kill_terminal_jobs_kills_child_groups_before_an_exit`].
+/// Does nothing in a normal test run.
+#[cfg(unix)]
+#[tokio::test]
+async fn exits_after_killing_terminal_jobs() {
+    let Some(root) = std::env::var_os(KILL_TERMINAL_DIR_ENV) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let manager = TerminalManager::new(TerminalConfig::new(root.join("jobs"))).unwrap();
+    let owner = Uuid::new_v4();
+    let ctx = TaskContext::new(owner, "tester", "kill terminal jobs", &root);
+    let pty_pid_file = root.join("pty.pid");
+    let pipe_pid_file = root.join("pipe.pid");
+    manager
+        .start(
+            &ctx,
+            &format!("sleep 30 & echo $! > '{}'; wait", pty_pid_file.display()),
+            StartOptions {
+                terminal: true,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    manager
+        .start(
+            &ctx,
+            &format!("sleep 30 & echo $! > '{}'; wait", pipe_pid_file.display()),
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    read_pid_file(&pty_pid_file).await;
+    read_pid_file(&pipe_pid_file).await;
+    // Exit without dropping `manager`, just like a forced signal exit.
+    crate::kill_terminal_jobs();
+    std::process::exit(7);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_process_groups_unregister_on_completion_and_cancellation() {
+    let f = Fixture::new(|_| {});
+
+    // Normal completion unregisters the group.
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            "echo PID=$$; read line; echo DONE=$line",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let started = f
+        .until(job.job_id, |s| s.output.text.contains("PID="))
+        .await;
+    let pgid: i32 = started
+        .output
+        .text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PID="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        io::armed_groups_snapshot().contains(&pgid),
+        "running job pgid {pgid} should be registered"
+    );
+    f.input(f.owner, job.job_id, started.revision, "ok\n".into())
+        .await
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert!(
+        !io::armed_groups_snapshot().contains(&pgid),
+        "completed job pgid {pgid} should be unregistered"
+    );
+
+    // Cancellation unregisters the group.
+    let job2 = f
+        .manager
+        .start(
+            &f.context(),
+            "echo PID=$$; sleep 30",
+            StartOptions {
+                terminal: true,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let started2 = f
+        .until(job2.job_id, |s| s.output.text.contains("PID="))
+        .await;
+    let pgid2: i32 = started2
+        .output
+        .text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PID="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        io::armed_groups_snapshot().contains(&pgid2),
+        "running PTY job pgid {pgid2} should be registered"
+    );
+    f.manager.cancel(f.owner, job2.job_id).unwrap();
+    let done2 = f.finished(job2.job_id).await;
+    assert_eq!(done2.state, JobState::Cancelled, "{done2:?}");
+    assert!(
+        !io::armed_groups_snapshot().contains(&pgid2),
+        "cancelled job pgid {pgid2} should be unregistered"
+    );
+
+    f.manager.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_oom_score_adj_applies_default_custom_clamped_and_none() {
+    let parent_score: i16 = std::fs::read_to_string("/proc/self/oom_score_adj")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // Default (Some(500)) in both pipe and PTY mode.
+    let f = Fixture::new(|_| {});
+    for terminal in [false, true] {
+        let job = f
+            .manager
+            .start(
+                &f.context(),
+                "cat /proc/self/oom_score_adj",
+                StartOptions {
+                    terminal,
+                    detect_prompts: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let done = f.finished(job.job_id).await;
+        assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+        let score: i16 = done.output.text.trim().parse().unwrap();
+        assert_eq!(score, parent_score.max(500));
+    }
+    f.manager.shutdown().await;
+
+    // Custom higher score.
+    let custom = (parent_score.max(500) + 200).min(1000);
+    let f = Fixture::new(|c| {
+        c.oom_score_adj = Some(custom);
+    });
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            "cat /proc/self/oom_score_adj",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert_eq!(done.output.text.trim().parse::<i16>().unwrap(), custom);
+    f.manager.shutdown().await;
+
+    // Out-of-range value set directly on the field is clamped to 1000.
+    let f = Fixture::new(|c| {
+        c.oom_score_adj = Some(5000);
+    });
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            "cat /proc/self/oom_score_adj",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert_eq!(done.output.text.trim().parse::<i16>().unwrap(), 1000);
+    f.manager.shutdown().await;
+
+    // None leaves the child at the parent's score.
+    let f = Fixture::new(|c| {
+        c.oom_score_adj = None;
+    });
+    let job = f
+        .manager
+        .start(
+            &f.context(),
+            "cat /proc/self/oom_score_adj",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert_eq!(
+        done.output.text.trim().parse::<i16>().unwrap(),
+        parent_score
+    );
+    f.manager.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_memory_max_bytes_runs_pipe_pty_cancels_and_enforces_oom() {
+    const CAP_BYTES: u64 = 64 * 1024 * 1024;
+    let f = Fixture::new(|c| {
+        c.memory_max_bytes = Some(CAP_BYTES);
+    });
+
+    // Small commands succeed in both pipe and PTY mode and preserve `$` signs.
+    for terminal in [false, true] {
+        let job = f
+            .manager
+            .start(
+                &f.context(),
+                "printf 'PID=%s DOLLAR=%s LITERAL=%s\\n' \"$$\" '$$' '$HOME'",
+                StartOptions {
+                    terminal,
+                    detect_prompts: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let done = f.finished(job.job_id).await;
+        assert_eq!(
+            done.state,
+            JobState::Succeeded,
+            "terminal={terminal}: {done:?}"
+        );
+        assert!(
+            done.output.text.contains("DOLLAR=$$"),
+            "terminal={terminal}: {done:?}"
+        );
+        assert!(
+            done.output.text.contains("LITERAL=$HOME"),
+            "terminal={terminal}: {done:?}"
+        );
+    }
+
+    // Interactive PTY prompt and input work under memory_max_bytes.
+    let interactive = f.python(
+        "print('Continue? [Y/n] ', end='', flush=True); print('ANSWER=' + input())",
+        StartOptions::default(),
+    );
+    let prompted = f.until(interactive.job_id, |s| s.input.is_some()).await;
+    f.input(f.owner, interactive.job_id, prompted.revision, "Y\n".into())
+        .await
+        .unwrap();
+    let done = f.finished(interactive.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert!(done.output.text.contains("ANSWER=Y"), "{done:?}");
+
+    // Cancelling a memory-capped command kills its grandchild group.
+    let pid_file = f.root.join("capped-cancel.pid");
+    let running = f
+        .manager
+        .start(
+            &f.context(),
+            &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            StartOptions {
+                terminal: true,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let grandchild = read_pid_file(&pid_file).await;
+    let _cleanup = PidCleanup(vec![grandchild]);
+    f.manager.cancel(f.owner, running.job_id).unwrap();
+    let cancelled = f.finished(running.job_id).await;
+    assert_eq!(cancelled.state, JobState::Cancelled, "{cancelled:?}");
+    assert_pid_gone(grandchild).await;
+
+    // Check whether this host's systemd user scope enforces memory.max.
+    let probe = f
+        .manager
+        .start(
+            &f.context(),
+            "cat /sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)/memory.max 2>/dev/null || true",
+            StartOptions {
+                terminal: false,
+                detect_prompts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let probe_done = f.finished(probe.job_id).await;
+    if probe_done.output.text.trim() == CAP_BYTES.to_string() {
+        eprintln!("systemd user scope memory.max={CAP_BYTES} is active, verifying OOM kill");
+        for terminal in [false, true] {
+            let oom = f.python(
+                "data = b'\\x01' * (128 * 1024 * 1024); print('SURVIVED', len(data))",
+                StartOptions {
+                    terminal,
+                    detect_prompts: false,
+                    ..Default::default()
+                },
+            );
+            let done = f.finished(oom.job_id).await;
+            assert_eq!(
+                done.state,
+                JobState::Failed,
+                "expected OOM kill in terminal={terminal}: {done:?}"
+            );
+            assert!(
+                !done.output.text.contains("SURVIVED"),
+                "child survived past cap in terminal={terminal}: {done:?}"
+            );
+        }
+    } else {
+        eprintln!(
+            "systemd user scope memory.max is unavailable on this host (saw {:?}), skipped OOM-kill check",
+            probe_done.output.text.trim()
+        );
+    }
+
+    f.manager.shutdown().await;
+}

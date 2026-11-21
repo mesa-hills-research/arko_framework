@@ -163,6 +163,7 @@ async fn run_check(
 ) -> CheckRun {
     let started = Instant::now();
     let at = SystemTime::now();
+    io::prepare_memory_limit(config).await;
     let process = match io::spawn_check(config, command, cwd, directory) {
         Ok(process) => process,
         Err(error) => return CheckRun::failed_to_run(error),

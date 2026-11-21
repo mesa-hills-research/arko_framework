@@ -1207,6 +1207,7 @@ impl TerminalManager {
                 ),
             });
         }
+        io::prepare_memory_limit(&self.config).await;
         let started = self.start_job(
             context,
             command,

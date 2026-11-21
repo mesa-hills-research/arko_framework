@@ -319,21 +319,22 @@ impl Tool for TerminalTool {
         params: HashMap<String, Value>,
     ) -> std::result::Result<String, ToolError> {
         let result = match self.operation {
-            Operation::Start => serde_json::to_value(
-                self.manager
-                    .start(
-                        context,
-                        string(&params, "command")?,
-                        StartOptions {
-                            terminal: boolean(&params, "terminal", true)?,
-                            detect_prompts: boolean(&params, "detect_prompts", true)?,
-                            timeout: number(&params, "timeout_ms")?.map(Duration::from_millis),
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(tool_error)?,
-            )
-            .map_err(tool_error)?,
+            Operation::Start => {
+                let command = string(&params, "command")?;
+                let options = StartOptions {
+                    terminal: boolean(&params, "terminal", true)?,
+                    detect_prompts: boolean(&params, "detect_prompts", true)?,
+                    timeout: number(&params, "timeout_ms")?.map(Duration::from_millis),
+                    ..Default::default()
+                };
+                io::prepare_memory_limit(&self.manager.config).await;
+                serde_json::to_value(
+                    self.manager
+                        .start(context, command, options)
+                        .map_err(tool_error)?,
+                )
+                .map_err(tool_error)?
+            }
             Operation::Status => serde_json::to_value(
                 self.manager
                     .status(

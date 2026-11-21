@@ -69,6 +69,10 @@ pub use stop::{
     ChildStop, STOP_FILE_ENV, StopAwareCommand, StopAwareOutput, StopSignal, StopSource,
     kill_stop_aware_commands,
 };
+#[cfg(any(unix, windows))]
+pub use terminal::kill_terminal_jobs;
+#[cfg(not(any(unix, windows)))]
+pub fn kill_terminal_jobs() {}
 pub use task::{
     ApprovalReason, ContextRecord, DeferredToolError, ErrorRecoveryCause, Holding, LatestRequest,
     PendingContext, PendingKind, PendingToolCallInfo, PlanUsageWindowMark, RecordedPart,

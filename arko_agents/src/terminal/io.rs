@@ -23,18 +23,52 @@ struct ControlPaths {
     replies: PathBuf,
 }
 pub(super) struct ChildProcess {
+    /// Dropped first so the process group is killed and unlisted before the
+    /// child handle can be reaped.
+    pub group: platform::ProcessGroup,
     pub child: platform::Child,
     pub input: Writer,
     pub output: Vec<Reader>,
-    pub group: platform::ProcessGroup,
 }
 pub(super) struct Process {
+    /// Dropped first so the process group is killed and unlisted before the
+    /// child handle can be reaped.
+    pub group: platform::ProcessGroup,
     pub child: platform::Child,
     pub input: Writer,
     pub output: Vec<Reader>,
     pub requests: Reader,
     pub replies: Writer,
-    pub group: platform::ProcessGroup,
+}
+
+pub(super) fn kill_all() {
+    platform::kill_all();
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn armed_groups_snapshot() -> Vec<i32> {
+    platform::armed_groups_snapshot()
+}
+
+pub(super) fn start_memory_limit_probe(config: &TerminalConfig) {
+    #[cfg(target_os = "linux")]
+    platform::start_memory_limit_probe(config);
+    #[cfg(not(target_os = "linux"))]
+    let _ = config;
+}
+
+pub(super) async fn prepare_memory_limit(config: &TerminalConfig) {
+    #[cfg(target_os = "linux")]
+    platform::prepare_memory_limit(config).await;
+    #[cfg(not(target_os = "linux"))]
+    let _ = config;
+}
+
+pub(super) fn prepare_memory_limit_sync(config: &TerminalConfig) {
+    #[cfg(target_os = "linux")]
+    platform::prepare_memory_limit_sync(config);
+    #[cfg(not(target_os = "linux"))]
+    let _ = config;
 }
 
 // Both participants append complete JSON lines and flush. EOF means "no new
@@ -143,10 +177,10 @@ pub(super) fn spawn(
         .open(&paths.replies)?;
     let child = platform::spawn(config, command, cwd, terminal, &paths)?;
     Ok(Process {
+        group: child.group,
         child: child.child,
         input: child.input,
         output: child.output,
-        group: child.group,
         requests: Box::pin(Requests {
             file: requests,
             cursor: 0,

@@ -208,6 +208,10 @@ impl Drop for Console {
     }
 }
 
+/// Windows binds every child to a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job
+/// Object, so process exit closes the job handles and ends all descendants.
+pub(crate) fn kill_all() {}
+
 pub(crate) struct ProcessGroup {
     job: OwnedHandle,
     console: Option<Console>,
@@ -390,6 +394,10 @@ pub(super) fn spawn(
         };
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(bytes) = config.memory_max_bytes {
+            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            limits.JobMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
+        }
         checked(SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
@@ -482,10 +490,10 @@ pub(super) fn spawn(
         drop(thread);
         drop(error_pipe);
         Ok(ChildProcess {
+            group,
             child,
             input,
             output,
-            group,
         })
     }
 }
