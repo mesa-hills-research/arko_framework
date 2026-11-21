@@ -16,6 +16,8 @@
   from the working directory as given or from its canonical form, or by the operating system. A
   path that some readings find inside and others outside is refused. A path from `~` still counts
   as outside, and is refused when a link named `~` in the workspace leads outside.
+- On Windows junctions are followed as links are. A `\\?\` path holding `/` and a name with `:`
+  (a stream of a file) are refused, since tools read them differently.
 - The check judges a path when the call is admitted, so a link created or changed before the tool
   opens the path isn't seen. It covers `is_path` parameters and the path inputs of Claude Code's
   file and search tools. Parameters not marked `is_path`, paths inside other arguments, a shell's

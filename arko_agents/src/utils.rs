@@ -183,6 +183,8 @@ fn below_workspace(path: &str, workspace: &Path) -> Result<Option<PathBuf>, Arko
             readings.push((normalize_path(&joined), joined));
         }
     }
+    #[cfg(windows)]
+    refuse_names_tools_read_differently(path, &readings)?;
     // Every reading is resolved, so a link that fails to resolve in any of
     // them refuses the path.
     let mut inside = Vec::with_capacity(readings.len());
@@ -226,17 +228,20 @@ fn refusal(reason: &'static str) -> ArkoAgentsError {
 /// file system's root, steps from inside `root` to outside it on a name
 /// rather than on `..`. Only a link takes a name out of the directory that
 /// holds it.
+///
+/// The steps are the ancestors of `path`, as for [`entry`]. They start at
+/// the root directory (`/`, `C:\`, `\\?\C:\`), never at a Windows prefix
+/// alone, since `\\?\C:` opens the volume itself.
 fn steps_out_through_link(path: &Path, root: &Path) -> std::io::Result<bool> {
-    let mut prefix = PathBuf::new();
+    let ancestors: Vec<&Path> = path.ancestors().collect();
     let mut was_inside = false;
-    for component in path.components() {
-        prefix.push(component);
-        // A Windows drive alone (`C:`) is that drive's current directory.
-        if !prefix.is_absolute() {
-            continue;
-        }
-        let inside = effective_path(&prefix)?.starts_with(root);
-        if was_inside && !inside && matches!(component, Component::Normal(_)) {
+    for ancestor in ancestors.into_iter().rev() {
+        let inside = effective_path(ancestor)?.starts_with(root);
+        let on_a_name = matches!(
+            ancestor.components().next_back(),
+            Some(Component::Normal(_))
+        );
+        if was_inside && !inside && on_a_name {
             return Ok(true);
         }
         was_inside = inside;
@@ -296,12 +301,12 @@ fn effective_path(path: &Path) -> std::io::Result<PathBuf> {
                 }
                 return Ok(resolved);
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(error) if missing_name(&error, prefix) => {
                 // A dangling link occupies the name even when canonicalize
                 // can't open its target. Treating it like a missing entry
                 // would remove the link from the very check meant to find it.
                 match std::fs::symlink_metadata(prefix) {
-                    Err(missing_entry) if missing_entry.kind() == ErrorKind::NotFound => {}
+                    Err(missing_entry) if missing_name(&missing_entry, prefix) => {}
                     Err(inaccessible) => return Err(inaccessible),
                     Ok(_) => {
                         return Err(std::io::Error::new(
@@ -321,6 +326,70 @@ fn effective_path(path: &Path) -> std::io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Whether the lookup of `prefix` failed because a name in it doesn't
+/// exist. On Windows that includes a name holding a control character, such
+/// as a line break, which Win32 rejects as invalid (`ERROR_INVALID_NAME`)
+/// and no file can have. It is judged by the directory it would be in. Other
+/// invalid names, such as one holding a `?`, are refused.
+fn missing_name(error: &std::io::Error, prefix: &Path) -> bool {
+    const ERROR_INVALID_NAME: i32 = 123;
+    error.kind() == std::io::ErrorKind::NotFound
+        || (cfg!(windows)
+            && error.raw_os_error() == Some(ERROR_INVALID_NAME)
+            && prefix.components().any(|component| {
+                matches!(component, Component::Normal(name)
+                    if name.as_encoded_bytes().iter().any(|byte| *byte < 0x20))
+            }))
+}
+
+/// Refuses, on Windows, a path that tools read differently, before anything
+/// is resolved. In a `\\?\` path Win32 takes `/` as part of a name, while
+/// Node and other tools take it as a separator. A `:` in a name opens a
+/// stream of the file named before it, and a stream that doesn't exist yet
+/// on a link would look like a missing name in the workspace, though
+/// writing it follows the link.
+#[cfg(windows)]
+fn refuse_names_tools_read_differently(
+    path: &str,
+    readings: &[(PathBuf, PathBuf)],
+) -> Result<(), ArkoAgentsError> {
+    if path.trim().starts_with(r"\\?\") && path.contains('/') {
+        return Err(refusal(
+            r"the path is a `\\?\` path holding `/`, which tools read differently",
+        ));
+    }
+    let names_a_stream = readings
+        .iter()
+        .flat_map(|(by_name, by_system)| [by_name, by_system])
+        .flat_map(|reading| reading.components())
+        .any(|component| {
+            matches!(component, Component::Normal(name) if name.as_encoded_bytes().contains(&b':'))
+        });
+    if names_a_stream {
+        return Err(refusal("the path names a stream of a file (`name:stream`)"));
+    }
+    Ok(())
+}
+
+/// Makes a directory junction at `link` to `target` with `mklink /J`, which
+/// needs no privilege, unlike a symbolic link.
+#[cfg(all(test, windows))]
+pub(crate) fn junction(link: &Path, target: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "mklink /J {} {}",
+        link.display(),
+        target.display()
+    );
 }
 
 /// Whether the first component of `path` is `~`.
@@ -884,6 +953,107 @@ mod tests {
         assert_eq!(below("."), Some(PathBuf::new()));
         for outside in ["../a.txt", "src/../../a.txt", "~/a.txt"] {
             assert_eq!(below(outside), None, "{outside}");
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    /// Junctions are followed as links are, whichever spelling of the
+    /// workspace is given, whether as written, canonical (`\\?\`), in upper
+    /// case or through a junction to it. Win32 resolves `..` by name before the file
+    /// system sees the path, so `out\..\x` is `x` in the workspace.
+    #[cfg(windows)]
+    #[test]
+    fn windows_junctions_are_judged_as_links() {
+        let root = std::env::temp_dir().join(format!("arko-junctions-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(workspace.join(r"sub\deeper")).unwrap();
+        std::fs::create_dir_all(root.join(r"outside\deep")).unwrap();
+        std::fs::create_dir_all(root.join(r"outside\gone")).unwrap();
+        junction(&workspace.join("out"), &root.join(r"outside\deep"));
+        junction(&workspace.join("in"), &workspace.join("sub"));
+        junction(&workspace.join("gone"), &root.join(r"outside\gone"));
+        std::fs::remove_dir(root.join(r"outside\gone")).unwrap();
+        junction(&root.join("alias"), &workspace);
+        let spellings = [
+            workspace.clone(),
+            std::fs::canonicalize(&workspace).unwrap(),
+            PathBuf::from(workspace.to_string_lossy().to_uppercase()),
+            root.join("alias"),
+        ];
+        for written in &spellings {
+            let judge =
+                |path: &str| path_in_workspace(path, written).map_err(|error| error.to_string());
+            let mut escapes: Vec<String> = [
+                r"out",
+                r"out\",
+                "out/",
+                r"out\new.txt",
+                r"in\..\out\x",
+                "out\\x\n",
+            ]
+            .map(String::from)
+            .into();
+            for base in &spellings {
+                escapes.push(format!(r"{}\out\new.txt", base.display()));
+            }
+            for path in &escapes {
+                let reason = judge(path).unwrap_err();
+                assert!(
+                    reason.contains("symbolic link outside"),
+                    "{path:?} in {}: {reason}",
+                    written.display()
+                );
+            }
+            for path in [r"gone", r"gone\", "gone/", r"gone\x"] {
+                let reason = judge(path).unwrap_err();
+                assert!(
+                    reason.contains("target doesn't exist"),
+                    "{path} in {}: {reason}",
+                    written.display()
+                );
+            }
+            assert_eq!(judge(r"in\new.txt"), Ok(Some(PathBuf::from(r"in\new.txt"))));
+            assert_eq!(judge(r"out\..\x"), Ok(Some(PathBuf::from("x"))));
+            assert_eq!(judge(r"..\outside\x"), Ok(None));
+            // Untrimmed, the last name holds a line break, which Win32
+            // rejects. No file can have it, so it is judged as missing.
+            assert_eq!(judge(" sub/../c.txt\n"), Ok(Some(PathBuf::from("c.txt"))));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// On Windows tools read some names differently, so these are refused
+    /// before any lookup. A `\\?\` path holding `/` is one, since Win32 takes
+    /// the `/` as part of a name and Node as a separator. A name with `:` is
+    /// another, since it opens a stream of the file before it. A name Win32
+    /// rejects is refused too, unless it holds a control character, which no
+    /// tool can open. On Unix they are all ordinary names.
+    #[test]
+    fn names_that_windows_tools_read_differently() {
+        let workspace = std::env::temp_dir().join(format!("arko-names-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src").join("notes.txt"), "").unwrap();
+        let below = |path: &str| path_in_workspace(path, &workspace);
+        if cfg!(windows) {
+            let canonical = std::fs::canonicalize(&workspace).unwrap();
+            let verbatim = format!(r"{}\src/lib.rs", canonical.display());
+            for path in [
+                verbatim.as_str(),
+                r"src\notes.txt:stream",
+                r"src\notes.txt::$DATA",
+                "src:new",
+                r"src\o?t",
+            ] {
+                assert!(below(path).is_err(), "{path}");
+            }
+            assert_eq!(
+                below("src\\a\u{1}b").unwrap(),
+                Some(PathBuf::from("src\\a\u{1}b"))
+            );
+        } else {
+            for path in ["src/notes.txt:stream", "src/o?t", "src/a\u{1}b"] {
+                assert_eq!(below(path).unwrap(), Some(PathBuf::from(path)), "{path}");
+            }
         }
         std::fs::remove_dir_all(workspace).unwrap();
     }
