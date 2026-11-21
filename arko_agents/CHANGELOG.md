@@ -12,9 +12,10 @@
 - A path that enters the workspace and leaves it through a link, such as `link/x` or `link/../x`
   where `link` points outside, is refused under every path policy, however it's spelled. So is a
   path through a link whose target doesn't exist, also when it ends in a separator (`link/`).
-- The check judges each way a tool may read the path, trimmed or not and with `..` resolved by
-  name or by the operating system. A path that some readings find inside and others outside is
-  refused.
+- The check judges each way a tool may read the path, trimmed or not, with `..` resolved by name
+  from the working directory as given or from its canonical form, or by the operating system. A
+  path that some readings find inside and others outside is refused. A path from `~` still counts
+  as outside, and is refused when a link named `~` in the workspace leads outside.
 - The check judges a path when the call is admitted, so a link created or changed before the tool
   opens the path isn't seen. It covers `is_path` parameters and the path inputs of Claude Code's
   file and search tools. Parameters not marked `is_path`, paths inside other arguments, a shell's

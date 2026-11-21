@@ -124,7 +124,9 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 /// hide a link, so `link/` is judged as `link`.
 ///
 /// Tools don't all read a path alike. [`resolve_path`] trims it and resolves
-/// `..` by name, while a program may take it untrimmed, or leave `..` to the
+/// `..` by name from the workspace as given. A program may take it
+/// untrimmed, resolve `..` by name from its current directory, which the
+/// operating system reports in canonical form, or leave `..` to the
 /// operating system, which follows a link before going up. Each of these
 /// readings is judged, and the path is inside only when all of them are.
 ///
@@ -138,9 +140,9 @@ fn absolute(path: &Path) -> std::io::Result<PathBuf> {
 /// check and the tool's use of the path isn't seen.
 ///
 /// A path that starts with `~` (`~` alone, or `~/`, and on Windows `~\` too)
-/// is always outside. [`resolve_path`] takes it as a directory name, but
-/// Claude Code's search tools and programs a tool starts may expand it to the
-/// home directory.
+/// is outside when it isn't refused. [`resolve_path`] takes it as a
+/// directory name, but Claude Code's search tools and programs a tool starts
+/// may expand it to the home directory.
 pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
     Ok(path_in_workspace(path, workspace)?.is_some())
 }
@@ -154,42 +156,52 @@ pub(crate) fn path_in_workspace(
     path: &str,
     workspace: &Path,
 ) -> Result<Option<PathBuf>, ArkoAgentsError> {
-    const ESCAPE: &str = "the path follows a symbolic link outside the workspace";
-    const AMBIGUOUS: &str =
-        "the path is inside the workspace or outside it, depending on how a tool reads it";
+    let below = below_workspace(path, workspace)?;
+    // Judged first, so that a link named `~` that leads outside is refused.
     if starts_with_home(path) {
         return Ok(None);
     }
+    Ok(below)
+}
+
+fn below_workspace(path: &str, workspace: &Path) -> Result<Option<PathBuf>, ArkoAgentsError> {
+    const ESCAPE: &str = "the path follows a symbolic link outside the workspace";
+    const AMBIGUOUS: &str =
+        "the path is inside the workspace or outside it, depending on how a tool reads it";
     let workspace = absolute(workspace)?;
-    // Each pair is the path with `..` resolved by name, then with `..` left
-    // to the operating system. Arko's file tools trim the path and resolve
-    // `..` by name (`resolve_path`). A program may do neither.
     let opened = resolve_path(path, &workspace)?;
-    let untrimmed = absolute(&workspace.join(path))?;
-    let readings = [
-        (opened, absolute(&workspace.join(path.trim()))?),
-        (normalize_path(&untrimmed), untrimmed),
-    ];
     let root = effective_path(&workspace)?;
+    // Each pair is the path with `..` resolved by name, then with `..` left
+    // to the operating system. The first is `opened`, the path Arko's file
+    // tools open. A program may not trim the path, and a relative path may
+    // be resolved from the workspace's canonical form, the current
+    // directory a program started there sees.
+    let mut readings = Vec::with_capacity(4);
+    for base in [&workspace, &root] {
+        for given in [path.trim(), path] {
+            let joined = absolute(&base.join(given))?;
+            readings.push((normalize_path(&joined), joined));
+        }
+    }
     // Every reading is resolved, so a link that fails to resolve in any of
     // them refuses the path.
-    let mut inside = [[false; 2]; 2];
-    for ((by_name, by_system), inside) in readings.iter().zip(&mut inside) {
-        *inside = [
+    let mut inside = Vec::with_capacity(readings.len());
+    for (by_name, by_system) in &readings {
+        inside.push([
             effective_path(by_name)?.starts_with(&root),
             effective_path(by_system)?.starts_with(&root),
-        ];
+        ]);
     }
     if inside.iter().flatten().all(|inside| *inside) {
-        return entry(&readings[0].0, &root)?
+        return entry(&opened, &root)?
             .map(Some)
             .ok_or_else(|| refusal(AMBIGUOUS));
     }
     // A reading by name that enters the workspace has left it through a
     // link when it, or the same path read by the operating system, ends
     // outside.
-    for ((by_name, _), inside) in readings.iter().zip(inside) {
-        if inside != [true, true] && entry(by_name, &root)?.is_some() {
+    for ((by_name, _), inside) in readings.iter().zip(&inside) {
+        if *inside != [true, true] && entry(by_name, &root)?.is_some() {
             return Err(refusal(ESCAPE));
         }
     }
@@ -690,6 +702,60 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    /// A path from `~` counts as outside, since a tool may expand `~` to the
+    /// home directory. Read as a name, as `write_file` does, it is judged
+    /// first, so a link named `~` that leads outside is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_named_tilde_is_judged_before_the_home_rule() {
+        let linked = Linked::new();
+        let workspace = linked.root.join("real");
+        assert_eq!(path_in_workspace("~/x", &workspace).unwrap(), None);
+        linked.link("~", "../outside/deep");
+        for path in ["~", "~/", "~/x", " ~/x", "~/../x"] {
+            let reason = path_in_workspace(path, &workspace).unwrap_err().to_string();
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        let inner = Linked::new();
+        inner.link("~", "sub");
+        assert_eq!(
+            path_in_workspace("~/x", &inner.root.join("real")).unwrap(),
+            None
+        );
+    }
+
+    /// A program started in the workspace sees its current directory in
+    /// canonical form, and may resolve `..` by name from there. With the
+    /// workspace given as `elsewhere/into`, a link to `real`, `../alias/out/x`
+    /// is `elsewhere/alias/out/x` from the workspace as given, plainly
+    /// outside, but `alias/out/x` from `real`, which leaves through `out`.
+    /// `d/../../into/y` comes back through `into` from the workspace as
+    /// given, and the file system keeps it in `real`, but from `real` it is
+    /// `into/y` beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_path_is_also_read_from_the_canonical_workspace() {
+        let linked = Linked::new();
+        std::fs::create_dir_all(linked.root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("../real", linked.root.join("elsewhere/into")).unwrap();
+        linked.link("out", "../outside/deep");
+        linked.link("d", "sub/deeper");
+        let workspace = linked.root.join("elsewhere/into");
+        let judge =
+            |path: &str| path_in_workspace(path, &workspace).map_err(|error| error.to_string());
+        for path in ["../alias/out/x", "../elsewhere/into/out/x"] {
+            let reason = judge(path).unwrap_err();
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        for path in ["d/../../into/y", "../elsewhere/into/sub/x"] {
+            let reason = judge(path).unwrap_err();
+            assert!(reason.contains("depending on how"), "{path}: {reason}");
+        }
+        assert_eq!(judge("sub/x"), Ok(Some(PathBuf::from("sub/x"))));
+        assert_eq!(judge("d/../x"), Ok(Some(PathBuf::from("x"))));
+        assert_eq!(judge("../outside/x"), Ok(None));
     }
 
     /// A program that resolves `..` by name without trimming the path reads
