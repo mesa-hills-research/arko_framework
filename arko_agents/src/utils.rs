@@ -205,6 +205,13 @@ fn below_workspace(path: &str, workspace: &Path) -> Result<Option<PathBuf>, Arko
             return Err(refusal(ESCAPE));
         }
     }
+    // Read by the operating system, a path may come into the workspace only
+    // through a link outside it and `..`, and then leave through a link.
+    for ((_, by_system), [_, inside]) in readings.iter().zip(&inside) {
+        if !inside && steps_out_through_link(by_system, &root)? {
+            return Err(refusal(ESCAPE));
+        }
+    }
     if inside.iter().flatten().any(|inside| *inside) {
         return Err(refusal(AMBIGUOUS));
     }
@@ -213,6 +220,28 @@ fn below_workspace(path: &str, workspace: &Path) -> Result<Option<PathBuf>, Arko
 
 fn refusal(reason: &'static str) -> ArkoAgentsError {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into()
+}
+
+/// Whether the absolute `path`, followed one component at a time from the
+/// file system's root, steps from inside `root` to outside it on a name
+/// rather than on `..`. Only a link takes a name out of the directory that
+/// holds it.
+fn steps_out_through_link(path: &Path, root: &Path) -> std::io::Result<bool> {
+    let mut prefix = PathBuf::new();
+    let mut was_inside = false;
+    for component in path.components() {
+        prefix.push(component);
+        // A Windows drive alone (`C:`) is that drive's current directory.
+        if !prefix.is_absolute() {
+            continue;
+        }
+        let inside = effective_path(&prefix)?.starts_with(root);
+        if was_inside && !inside && matches!(component, Component::Normal(_)) {
+            return Ok(true);
+        }
+        was_inside = inside;
+    }
+    Ok(false)
 }
 
 /// Where the absolute, `..`-free `path` enters the workspace whose canonical
@@ -616,8 +645,17 @@ mod tests {
         linked.link("d2", "../outside/missing");
         // `c/../x` is `real/x` by name, and `outside/x` by the file system.
         // `here/../x` is `real/x` by name, and `x` beside `real` by the file
-        // system.
-        for path in ["c", "c/x", "c/", "c/../x", "up/outside/x", "here/../x"] {
+        // system. `a/../../x` is `x` beside `real` either way, but the file
+        // system gets there through `a`.
+        for path in [
+            "c",
+            "c/x",
+            "c/",
+            "c/../x",
+            "up/outside/x",
+            "here/../x",
+            "a/../../x",
+        ] {
             let reason = linked.refused(path);
             assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
         }
@@ -625,8 +663,6 @@ mod tests {
             let reason = linked.refused(path);
             assert!(reason.contains("target doesn't exist"), "{path}: {reason}");
         }
-        // Outside both by name and by the file system.
-        assert_eq!(linked.verdict("a/../../x"), Verdict::Outside);
         assert_eq!(linked.inside("back/new"), PathBuf::from("back/new"));
         // `real/new` by name, and `real/sub/new` by the file system.
         assert_eq!(linked.inside("back/../new"), PathBuf::from("new"));
@@ -702,6 +738,25 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    /// By name, `../outside/into/../out/x` is `outside/out/x`, and never in
+    /// the workspace. The file system follows `into` to `real/sub`, goes up
+    /// to `real`, and leaves through `out`.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_the_file_system_takes_in_and_out_through_links() {
+        let linked = Linked::new();
+        std::os::unix::fs::symlink("../real/sub", linked.root.join("outside/into")).unwrap();
+        linked.link("out", "../outside/deep");
+        for path in ["../outside/into/../out/x", "../outside/into/../out"] {
+            let reason = linked.refused(path);
+            assert!(reason.contains("symbolic link outside"), "{path}: {reason}");
+        }
+        assert_eq!(linked.inside("../outside/into/x"), PathBuf::from("sub/x"));
+        let reason = linked.refused("../outside/into/../x");
+        assert!(reason.contains("depending on how"), "{reason}");
+        assert_eq!(linked.verdict("../outside/deep/../x"), Verdict::Outside);
     }
 
     /// A path from `~` counts as outside, since a tool may expand `~` to the
