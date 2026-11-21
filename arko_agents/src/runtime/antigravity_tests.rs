@@ -38,6 +38,10 @@ with socket.create_connection((host, int(port))) as conn:
     def send():
         for line in sys.stdin.buffer:
             conn.sendall(line)
+            marker = os.environ.get('FAKE_AGY_MCP_CANCEL_MARKER')
+            if marker and json.loads(line).get('method') == 'notifications/cancelled':
+                with open(marker, 'w'):
+                    pass
         conn.shutdown(socket.SHUT_WR)
 
     threading.Thread(target=send, daemon=True).start()
@@ -98,6 +102,41 @@ impl Fake {
             self.dir.join("work"),
             None,
         )
+    }
+
+    fn script(&self, script: &Value) {
+        std::fs::write(self.dir.join("script.json"), script.to_string()).unwrap();
+    }
+
+    fn hold_usage(&self, task: &mut Task) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let proxy = self.dir.join("agy-with-held-usage");
+        let started = self.dir.join("usage-started");
+        let release = self.dir.join("usage-release");
+        std::fs::write(
+            &proxy,
+            r#"#!/usr/bin/env python3
+import os, pathlib, sys, time
+original = os.environ['FAKE_AGY_ORIGINAL']
+if sys.argv[1] == '-p':
+    pathlib.Path(os.environ['FAKE_AGY_USAGE_STARTED']).touch()
+    while not pathlib.Path(os.environ['FAKE_AGY_USAGE_RELEASE']).exists():
+        time.sleep(0.01)
+os.execv(original, [original, *sys.argv[1:]])
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let settings = task.agent_config.antigravity.as_mut().unwrap();
+        let original = settings.cli_path.replace(proxy).unwrap();
+        for (key, path) in [
+            ("FAKE_AGY_ORIGINAL", &original),
+            ("FAKE_AGY_USAGE_STARTED", &started),
+            ("FAKE_AGY_USAGE_RELEASE", &release),
+        ] {
+            settings.env.insert(key.into(), path.display().to_string());
+        }
+        (started, release)
     }
 
     fn log(&self) -> String {
@@ -191,12 +230,24 @@ fn complete(summary: &str) -> Value {
 async fn antigravity_streams_the_reply_and_reports_plan_usage() {
     let fake = Fake::new(json!([[
         {"thought": "Check the example.", "usage": {"inputTokens": 100, "outputTokens": 10, "thoughtTokens": 4}},
+        {"wait_for": "note"},
         {"text": "The example works."},
         {"update": {"sessionUpdate": "usage_update", "used": 92, "size": 12345}}
     ]]));
     let mut task = fake.task(chat());
     task.initial_task_images = vec![Image::from_bytes(b"example image", "image/png")];
-    let (task, events) = Run::start(task).finish().await;
+    let mut run = Run::start(task);
+    let mut events = run
+        .until(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+        .await;
+    run.commands
+        .send(UserCommand::InjectContext {
+            content: "Continue the example.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, rest) = run.finish().await;
+    events.extend(rest);
     assert!(
         matches!(task.current_state, TaskState::Completed { summary } if summary == "The example works."),
         "{}",
@@ -417,7 +468,7 @@ async fn antigravity_refuses_a_fallback_before_the_first_prompt() {
     let fake = Fake::new(json!({"fallback": true, "turns": [[{"text": "Must not run."}]]}));
     let (task, _) = Run::start(fake.task(chat())).finish().await;
     assert!(
-        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("did not load Arko's agent")),
+        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("didn't load Arko's agent")),
         "{}",
         fake.log()
     );
@@ -513,7 +564,7 @@ async fn antigravity_checks_the_fallback_hooks_during_the_turn() {
         Fake::new(json!({"fallback": "silent", "turns": [[{"text": "From the default agent"}]]}));
     let (task, _) = Run::start(fake.task(chat())).finish().await;
     assert!(
-        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("fallback hook")),
+        matches!(task.current_state, TaskState::Failed { reason, .. } if reason.contains("didn't load Arko's agent")),
         "{}",
         fake.log()
     );
@@ -552,7 +603,7 @@ async fn antigravity_keeps_images_from_tool_results() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn antigravity_runs_share_one_usage_read_even_when_it_fails() {
     for fails in [false, true] {
-        let turns = vec![vec![json!({"text": "Done"})]; 5];
+        let turns = vec![vec![json!({"sleep": 0.2}), json!({"text": "Done"})]; 5];
         let script = if fails {
             json!({"turns": turns, "usage_fail": {"exit": 1, "stderr": "No usage"}})
         } else {
@@ -566,16 +617,10 @@ async fn antigravity_runs_share_one_usage_read_even_when_it_fails() {
         )
         .await
         .unwrap();
-        let (task, events) = run().await;
-        for (task, events) in all.into_iter().chain([(task, events)]) {
+        let last = run().await;
+        for (task, _) in all.into_iter().chain([last]) {
             assert!(
                 matches!(task.current_state, TaskState::Completed { summary } if summary == "Done")
-            );
-            assert_eq!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, AgentEvent::PlanUsageReported(_))),
-                !fails
             );
         }
         assert_eq!(fake.logged("usage_command").len(), 1, "{}", fake.log());
@@ -621,8 +666,18 @@ async fn antigravity_resumes_from_the_saved_transcript() {
     assert_eq!(prompts.len(), 2);
     assert_ne!(prompts[0]["sessionId"], prompts[1]["sessionId"]);
     let replay = prompts[1]["text"].as_str().unwrap();
-    assert!(replay.contains("An example answer."), "{replay}");
+    assert!(
+        replay.contains("## assistant\n\nAn example answer."),
+        "{replay}"
+    );
     assert!(replay.contains("One more example, please."), "{replay}");
+    let text_blocks = prompts[1]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["type"] == "text")
+        .count();
+    assert_eq!(text_blocks, 1);
 }
 
 #[tokio::test]
@@ -665,4 +720,327 @@ async fn antigravity_does_not_refresh_the_prompt_cache() {
         ArkoAgentsError::LLM(arko_ai::Error::UnsupportedFeature(_))
     ));
     assert!(fake.log().is_empty());
+}
+
+#[tokio::test]
+async fn antigravity_finishes_without_waiting_for_a_plan_usage_read() {
+    let fake = Fake::new(json!([]));
+    let mut task = fake.task(chat());
+    let (started, release) = fake.hold_usage(&mut task);
+    fake.script(&json!([[{"wait_file": started}, {"text": "Done"}]]));
+    let result = tokio::time::timeout(Duration::from_secs(2), Run::start(task).finish()).await;
+    std::fs::write(release, "").unwrap();
+    let (task, events) = result.expect("a turn must not wait for plan usage");
+    assert!(matches!(task.current_state, TaskState::Completed { summary } if summary == "Done"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+    );
+}
+
+fn streamed(events: &[AgentEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AssistantResponseChunk(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two chunks of the model's reply that both start with a warning sign.
+#[tokio::test]
+async fn two_chunks_that_start_with_a_warning_sign_both_arrive() {
+    let fake = Fake::new(json!([[
+        {"text": "⚠ The first check failed.\n"},
+        {"text": "⚠ The second check failed.\n"},
+        {"text": "Both need a look."}
+    ]]));
+    let (task, events) = Run::start(fake.task(chat())).finish().await;
+    let expected = "⚠ The first check failed.\n⚠ The second check failed.\nBoth need a look.";
+    assert_eq!(streamed(&events), expected, "{}", fake.log());
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == expected),
+        "{:?}",
+        task.current_state
+    );
+}
+
+/// Text that starts with a warning sign, then a tool call.
+#[tokio::test]
+async fn a_chunk_with_a_warning_sign_stays_before_the_call_after_it() {
+    let fake = Fake::new(json!([[
+        {"text": "⚠ The example file may be stale."},
+        {"tool": "read_file", "input": {"path": "example.txt"}},
+        complete("It was fine.")
+    ]]));
+    let task = fake.task(tools(&["read_file"]));
+    std::fs::write(
+        task.current_working_directory.join("example.txt"),
+        "Example.",
+    )
+    .unwrap();
+    let (task, events) = Run::start(task).finish().await;
+    let chunk = events.iter().position(
+        |event| matches!(event, AgentEvent::AssistantResponseChunk(text) if text.contains("stale")),
+    );
+    let call = events.iter().position(|event| {
+        matches!(event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "read_file")
+    });
+    let text_at = task.conversation.messages.iter().position(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| content.as_text().is_some_and(|text| text.contains("stale")))
+    });
+    let call_at = task.conversation.messages.iter().position(|message| {
+        message
+            .tool_calls
+            .iter()
+            .any(|call| call.name == "read_file")
+    });
+    assert!(
+        chunk.is_some() && chunk < call && text_at.is_some() && text_at < call_at,
+        "event: chunk {chunk:?}, call {call:?}; transcript: text {text_at:?}, call {call_at:?}"
+    );
+}
+
+/// Control: the same text without the warning sign.
+#[tokio::test]
+async fn a_plain_chunk_stays_before_the_call_after_it() {
+    let fake = Fake::new(json!([[
+        {"text": "The example file may be stale."},
+        {"tool": "read_file", "input": {"path": "example.txt"}},
+        complete("It was fine.")
+    ]]));
+    let task = fake.task(tools(&["read_file"]));
+    std::fs::write(
+        task.current_working_directory.join("example.txt"),
+        "Example.",
+    )
+    .unwrap();
+    let (task, events) = Run::start(task).finish().await;
+    let chunk = events.iter().position(
+        |event| matches!(event, AgentEvent::AssistantResponseChunk(text) if text.contains("stale")),
+    );
+    let call = events.iter().position(|event| {
+        matches!(event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "read_file")
+    });
+    let text_at = task.conversation.messages.iter().position(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| content.as_text().is_some_and(|text| text.contains("stale")))
+    });
+    let call_at = task.conversation.messages.iter().position(|message| {
+        message
+            .tool_calls
+            .iter()
+            .any(|call| call.name == "read_file")
+    });
+    assert!(
+        chunk.is_some() && chunk < call && text_at.is_some() && text_at < call_at,
+        "event: chunk {chunk:?}, call {call:?}; transcript: text {text_at:?}, call {call_at:?}"
+    );
+}
+
+/// A task resumed with an open call, on Antigravity.
+#[tokio::test]
+async fn the_recovery_note_on_antigravity_names_no_other_cli() {
+    let fake = Fake::new(json!([[{"text": "Noted."}]]));
+    let mut task = fake.task(chat());
+    task.running_tool_calls.push(crate::task::RunningToolCall {
+        tool_call_id: uuid::Uuid::new_v4(),
+        call_id: Some("call-1".into()),
+        tool_name: "read_file".into(),
+        parameters: [("path".to_string(), json!("example.txt"))]
+            .into_iter()
+            .collect(),
+        custom_output: None,
+        message_to_agent: None,
+        built_in: false,
+        output: Some("Example content.".into()),
+        output_images: Vec::new(),
+    });
+    let (_task, _) = Run::start(task).finish().await;
+    let prompts = fake.logged("prompt");
+    let text = prompts[0]["text"].as_str().unwrap_or_default().to_string();
+    assert!(text.contains("tool calls were open"), "{text}");
+    assert!(!text.contains("Claude Code"), "{text}");
+}
+
+/// A chat on Antigravity that ended its turn over the handover size, then
+/// gets the user's next message.
+#[tokio::test]
+async fn a_chat_report_on_antigravity_sees_the_conversation() {
+    let fake = Fake::new(json!([
+        [
+            {"thought": "Read the question.", "usage": {"inputTokens": 1000, "outputTokens": 10}},
+            {"text": "The first answer mentions the blue example.",
+             "usage": {"inputTokens": 299990, "outputTokens": 10}}
+        ],
+        [{"text": "Report of the chat."}],
+        [{"text": "The second answer."}],
+        [{"text": "A spare answer."}]
+    ]));
+    let mut task = fake.task(chat());
+    task.agent_config.handover = Some(HandoverConfig::at_context_fraction(0.1));
+    let (task, _) = Run::start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let mut task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
+    task.prepare_for_resumption_from_completed("Another question about it.".into())
+        .unwrap();
+    // The user asks for a handover with the next message.
+    let run = Run::start(task);
+    run.commands
+        .send(UserCommand::RequestHandover)
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(task.handovers.len(), 1);
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts.len(), 3, "{prompts:#?}");
+    let report_prompt = &prompts[1];
+    assert!(
+        report_prompt["text"]
+            .as_str()
+            .unwrap()
+            .contains("Reply with that summary")
+    );
+    assert!(
+        report_prompt["text"]
+            .as_str()
+            .unwrap()
+            .contains("blue example"),
+        "the report request went to a new session without the conversation: {prompts:#?}"
+    );
+}
+
+/// Antigravity can't start a session (signed out), as against a Claude Code
+/// CLI that can't start.
+#[tokio::test]
+async fn a_session_that_cant_start_can_be_retried() {
+    let fake = Fake::new(json!({"signed_out": true, "turns": [[{"text": "Done"}]]}));
+    let mut run = Run::start(fake.task(chat()));
+    let events = run
+        .until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(
+        matches!(events.last(), Some(AgentEvent::ErrorEncountered {
+        error_message, requires_approval_to_retry: true, ..
+    }) if error_message == "Run `agy` to sign in."),
+        "{events:?}"
+    );
+    fake.script(&json!([[{"text": "Done after sign-in."}]]));
+    run.commands
+        .send(UserCommand::ApproveErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { summary } if summary == "Done after sign-in.")
+    );
+}
+
+/// A tool that runs until the test releases it.
+#[derive(Debug)]
+struct NonInterruptibleTool {
+    started: Arc<tokio::sync::Notify>,
+    released: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for NonInterruptibleTool {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "slow".into(),
+            description: "Waits for permission to finish.".into(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
+            read_only: false,
+            raw_json_schema_override: None,
+        }
+    }
+
+    fn interruptible(&self) -> bool {
+        false
+    }
+
+    async fn execute(
+        &self,
+        _: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        self.started.notify_one();
+        self.released.notified().await;
+        Ok("Finished the call.".into())
+    }
+}
+
+/// The user cancels while that tool's call runs.
+#[tokio::test]
+async fn a_call_running_at_a_cancel_gets_an_outcome() {
+    let fake = Fake::new(json!([[
+        {"tool": "slow", "input": {}},
+        complete("Done")
+    ]]));
+    let cancel_marker = fake.dir.join("mcp-cancelled");
+    let mut task = fake.task(tools(&["slow"]));
+    task.agent_config.antigravity.as_mut().unwrap().env.insert(
+        "FAKE_AGY_MCP_CANCEL_MARKER".into(),
+        cancel_marker.display().to_string(),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NonInterruptibleTool {
+        started: started.clone(),
+        released: released.clone(),
+    }));
+    let runtime = AgentRuntime::new(Arc::new(LLMClient::new()));
+    let (events, commands, handle) =
+        runtime.run_task(task, Arc::new(registry), None, false, None, None, None);
+    let mut run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let seen = run
+        .until(|event| matches!(event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "slow"))
+        .await;
+    let Some(AgentEvent::ToolCallFormatted { tool_call_id, .. }) = seen.last() else {
+        panic!()
+    };
+    let id = *tool_call_id;
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cancel_marker.is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!run.handle.is_finished());
+    released.notify_one();
+    let (task, events) = run.finish().await;
+    let settled = events.iter().any(|event| {
+        matches!(event, AgentEvent::ToolResult { tool_call_id, output, .. }
+        if *tool_call_id == id && output == "Finished the call.")
+    });
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    assert!(task.running_tool_calls.is_empty());
+    assert!(
+        settled,
+        "the call has no outcome after the cancel: {events:#?}"
+    );
 }

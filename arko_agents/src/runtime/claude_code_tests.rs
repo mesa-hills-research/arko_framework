@@ -24,6 +24,8 @@ use crate::tool::ToolRegistry;
 #[path = "claude_code_latest_request_tests.rs"]
 mod latest_request;
 
+#[path = "claude_code_path_compat_tests.rs"]
+mod path_compat;
 #[path = "claude_code_wait_tests.rs"]
 mod waits;
 
@@ -8343,4 +8345,120 @@ impl crate::tool::Tool for NeedsApproval {
     ) -> Result<String, crate::tool::ToolError> {
         panic!("a call that needs approval never runs from inside a call")
     }
+}
+
+/// The run's command sender is dropped while a turn runs.
+#[tokio::test]
+async fn a_closed_command_channel_mid_turn_ends_the_run() {
+    let fake = Fake::new(json!([[
+        {"text": "Working.", "input_tokens": 100},
+        {"sleep": 1.0},
+        complete("Done"),
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Work.".into(), fake.workspace(), None);
+    let run = start(task);
+    until(|| fake.logged("user").len() == 1).await;
+    let Run {
+        mut events,
+        commands,
+        handle,
+    } = run;
+    drop(commands);
+    let drained = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut count = 0usize;
+        while events.recv().await.is_some() {
+            count += 1;
+            if count > 20_000 {
+                return Err(count);
+            }
+        }
+        Ok(count)
+    })
+    .await;
+    assert!(
+        matches!(drained, Ok(Ok(_))),
+        "the run didn't end: {drained:?}"
+    );
+    let task = handle.await.unwrap().unwrap();
+    assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+}
+
+/// The user suspends, then cancels, while a turn runs.
+#[tokio::test]
+async fn a_cancel_after_a_suspend_cancels() {
+    let fake = Fake::new(json!([[
+        {"text": "Working.", "input_tokens": 100},
+        {"sleep": 1.5},
+        complete("Done"),
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Work.".into(), fake.workspace(), None);
+    let run = start(task);
+    until(|| fake.logged("user").len() == 1).await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Cancelled { .. }),
+        "{:?}",
+        task.current_state
+    );
+}
+
+/// The user writes a note just after suspending, while the turn still runs.
+#[tokio::test]
+async fn a_note_written_after_a_suspend_is_kept() {
+    let fake = Fake::new(json!([[
+        {"text": "Working.", "input_tokens": 100},
+        {"sleep": 1.5},
+        complete("Done"),
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Work.".into(), fake.workspace(), None);
+    let run = start(task);
+    until(|| fake.logged("user").len() == 1).await;
+    run.commands.send(UserCommand::SuspendTask).await.unwrap();
+    run.commands
+        .send(UserCommand::InjectContext {
+            content: "Also check the example.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    let kept = task
+        .pending_context_injections
+        .iter()
+        .any(|item| format!("{item:?}").contains("Also check the example."))
+        || task.conversation.messages.iter().any(|message| {
+            message.content.iter().any(|content| {
+                content
+                    .as_text()
+                    .is_some_and(|text| text.contains("Also check the example."))
+            })
+        });
+    assert!(
+        kept,
+        "the note is gone: {:?}",
+        task.pending_context_injections
+    );
+}
+
+/// a Claude Code CLI that can't start.
+#[tokio::test]
+async fn cc_a_session_that_cant_start_can_be_retried() {
+    let fake = Fake::new(json!([[complete("Done")]]));
+    let mut config = config(&fake, &[]);
+    config.claude_code.as_mut().unwrap().cli_path = Some(fake.dir.join("missing-claude"));
+    let task = Task::new(config, "Work.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::ErrorEncountered {
+            requires_approval_to_retry: true,
+            ..
+        })
+    ));
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let _ = run.finish().await;
 }

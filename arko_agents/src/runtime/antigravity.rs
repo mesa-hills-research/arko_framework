@@ -15,7 +15,11 @@ pub(super) enum CliError {
     Antigravity(#[from] agy::AcpError),
     #[error("{0}")]
     Setup(String),
+    #[error("{0}")]
+    BrokenSetup(String),
 }
+
+pub(super) const UNTRUSTED_AGENT: &str = "Antigravity didn't load Arko's agent.";
 
 pub(super) enum CliSession {
     Claude(Box<cc::ClaudeSession>),
@@ -45,17 +49,7 @@ impl CliSession {
             Self::Antigravity(session) => {
                 let blocks = match content {
                     Value::String(text) => vec![agy::text_block(&text)],
-                    Value::Array(blocks) => blocks
-                        .into_iter()
-                        .filter_map(|block| match block["type"].as_str()? {
-                            "text" => Some(block),
-                            "image" => Some(agy::image_block(
-                                block.pointer("/source/media_type")?.as_str()?,
-                                block.pointer("/source/data")?.as_str()?,
-                            )),
-                            _ => None,
-                        })
-                        .collect(),
+                    Value::Array(blocks) => antigravity_blocks(&blocks),
                     _ => unreachable!("A CLI prompt has text or content blocks"),
                 };
                 session.prompt(blocks).await
@@ -107,6 +101,26 @@ impl CliSession {
             Self::Antigravity(session) => Ok(session.client.close().await.map(drop)?),
         }
     }
+}
+
+/// Joins text before handing it to ACP. ACP does not set the separator
+/// between adjacent text blocks.
+fn antigravity_blocks(blocks: &[Value]) -> Vec<Value> {
+    let texts: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+    let mut prompt = Vec::new();
+    if !texts.is_empty() {
+        prompt.push(agy::text_block(&texts.join("\n\n")));
+    }
+    prompt.extend(blocks.iter().filter_map(|block| {
+        Some(agy::image_block(
+            block.pointer("/source/media_type")?.as_str()?,
+            block.pointer("/source/data")?.as_str()?,
+        ))
+    }));
+    prompt
 }
 
 /// The lifetime of one private profile. Clean up only after dropping the CLI.
@@ -343,15 +357,12 @@ async fn check_profile(profile: &agy::Profile) -> Result<(), CliError> {
     let fallback = agy::log_shows_fallback(&profile.log_file(), agy::AGENT_NAME)
         .await
         .map_err(|error| {
-            CliError::Setup(format!(
-                "Could not read Antigravity's log to check which agent loaded. {error}"
+            CliError::BrokenSetup(format!(
+                "Could not check that Antigravity loaded Arko's agent. {error}"
             ))
         })?;
     if fallback || profile_tripped(profile).await {
-        return Err(CliError::Setup(
-            "Antigravity did not load Arko's agent. No prompt was sent to its default agent."
-                .into(),
-        ));
+        return Err(CliError::BrokenSetup(UNTRUSTED_AGENT.into()));
     }
     Ok(())
 }
@@ -361,7 +372,7 @@ async fn profile_tripped(profile: &agy::Profile) -> bool {
 }
 
 fn thought_level<'a>(wanted: &str, offered: &[&'a str]) -> Option<&'a str> {
-    const LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+    const LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
     if let Some(&exact) = offered.iter().find(|level| **level == wanted) {
         return Some(exact);
     }
@@ -459,29 +470,29 @@ impl cc::ClaudeTool for AgTool {
                     .to_string(),
             ),
         };
-        let output = match refusal {
-            Some(reason) => cc::ToolOutput::error(reason),
-            None => {
-                self.tool
-                    .host
-                    .call(&self.tool.name, input, Some(&call_id))
-                    .await
-            }
-        };
-        let (recorded, done) = oneshot::channel();
-        if self
-            .requests
-            .send(HostRequest::AntigravityResult {
+        let (reply, output) = oneshot::channel();
+        let request = match refusal {
+            Some(reason) => HostRequest::AntigravityRefusal {
                 call_id,
-                output: output.clone(),
-                recorded,
-            })
-            .is_ok()
-        {
-            let _ = done.await;
+                reply,
+                reason,
+            },
+            None => HostRequest::AntigravityExecute { call_id, reply },
+        };
+        if self.requests.send(request).is_err() {
+            return cc::ToolOutput::error(STOPPING);
         }
         output
+            .await
+            .unwrap_or_else(|_| cc::ToolOutput::error(STOPPING))
     }
+}
+
+/// The host owns a running call. The relay owns only the reply receiver.
+pub(super) struct AntigravityCallResult {
+    pub(super) call_id: String,
+    pub(super) output: cc::ToolOutput,
+    pub(super) reply: oneshot::Sender<cc::ToolOutput>,
 }
 
 /// The text and usage of the current ACP turn. Notes change the ACP request
@@ -502,9 +513,6 @@ impl AntigravityTurn {
         total.cached_read_tokens = total
             .cached_read_tokens
             .saturating_add(usage.cached_read_tokens);
-        total.cached_write_tokens = total
-            .cached_write_tokens
-            .saturating_add(usage.cached_write_tokens);
         total.thought_tokens = total.thought_tokens.saturating_add(usage.thought_tokens);
         total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
     }
@@ -574,12 +582,49 @@ impl CliRun {
         Some(input_blocks(content.iter()))
     }
 
-    pub(super) async fn antigravity_result(
+    pub(super) async fn start_antigravity_call(
         &mut self,
         call_id: String,
-        output: cc::ToolOutput,
+        reply: oneshot::Sender<cc::ToolOutput>,
+        calls: &mut JoinSet<AntigravityCallResult>,
+    ) {
+        let host = self.tool_host();
+        let Some(call) = self.calls.get(&call_id) else {
+            return;
+        };
+        let Some(tool) = host.registry.get(&call.name) else {
+            return;
+        };
+        let Some(admitted) = host.take_admitted(&call.name, &call.input, Some(&call_id)) else {
+            return;
+        };
+        if self.ending() || reply.is_closed() {
+            return;
+        }
+        let (name, input) = (call.name.clone(), call.input.clone());
+        self.record_running(Some(&call_id), admitted.custom_output.clone())
+            .await;
+        calls.spawn(async move {
+            let output = host.run_admitted(&name, tool, &input, admitted).await;
+            AntigravityCallResult {
+                call_id,
+                output,
+                reply,
+            }
+        });
+    }
+
+    pub(super) async fn finish_antigravity_call(
+        &mut self,
+        completed: AntigravityCallResult,
         session: &CliSession,
+        in_turn: bool,
     ) -> Result<(), ArkoAgentsError> {
+        let AntigravityCallResult {
+            call_id,
+            output,
+            reply,
+        } = completed;
         let Some(call) = self.calls.remove(&call_id) else {
             return Ok(());
         };
@@ -591,7 +636,8 @@ impl CliRun {
         .with_images(
             output
                 .images
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|image| ai::ToolResultImage::new("", image))
                 .collect(),
         );
@@ -601,6 +647,7 @@ impl CliRun {
         self.task
             .running_tool_calls
             .retain(|running| running.call_id.as_deref() != Some(call_id.as_str()));
+        self.report(true).await;
         self.call_finished(
             call.id,
             &call.name,
@@ -611,7 +658,11 @@ impl CliRun {
         )
         .await?;
         self.report(true).await;
-        self.send_antigravity_context(session).await
+        if in_turn {
+            self.send_antigravity_context(session).await?;
+        }
+        let _ = reply.send(output);
+        Ok(())
     }
 
     pub(super) async fn send_antigravity_context(
@@ -688,11 +739,13 @@ impl CliRun {
         ) && agy_session.tripped().await
         {
             let _ = session.interrupt().await;
-            return self
-                .antigravity_setup_failed(
-                    "Antigravity ran a fallback hook instead of Arko's agent.".into(),
-                )
-                .await;
+            return self.antigravity_setup_failed(UNTRUSTED_AGENT.into()).await;
+        }
+        let immediately_failed = matches!(&event, agy::AcpEvent::PromptFinished { request, outcome: Ok(result) }
+            if *request == agy_session.latest_prompt.load(Ordering::Relaxed)
+                && turn.warning.as_deref().and_then(|text| agy::turn_failure(text, result)).is_some());
+        if !immediately_failed {
+            self.flush_antigravity_warning(turn).await?;
         }
         match event {
             agy::AcpEvent::Update { session_id, update } if session_id == agy_session.id => {
@@ -703,12 +756,6 @@ impl CliRun {
                         turn.warning = Some(text)
                     }
                     agy::SessionUpdate::AgentMessage { text } => {
-                        if let Some(warning) = turn.warning.take() {
-                            self.emit(AgentEvent::AssistantResponseChunk(warning.clone()))
-                                .await?;
-                            self.streamed_bytes.0 += warning.len();
-                            turn.text.push_str(&warning);
-                        }
                         self.streamed_bytes.0 += text.len();
                         turn.text.push_str(&text);
                         self.emit(AgentEvent::AssistantResponseChunk(text)).await?;
@@ -768,8 +815,10 @@ impl CliRun {
                         return self.session_failed(error.to_string()).await.map(Some);
                     }
                 };
-                if let Some(message) =
-                    agy::turn_failure(turn.warning.as_deref().unwrap_or(&turn.text), &result)
+                if let Some(message) = turn
+                    .warning
+                    .take()
+                    .and_then(|text| agy::turn_failure(&text, &result))
                 {
                     self.discard_unfinished_stream().await?;
                     if let Some(usage) = turn.folded_usage.take() {
@@ -779,11 +828,6 @@ impl CliRun {
                     return self.antigravity_failed(message).await.map(Some);
                 }
                 self.agy_retried = false;
-                if let Some(warning) = turn.warning.take() {
-                    self.emit(AgentEvent::AssistantResponseChunk(warning.clone()))
-                        .await?;
-                    turn.text.push_str(&warning);
-                }
                 let text = turn.text.clone();
                 self.commit_antigravity_text(turn).await?;
                 self.streamed_bytes = (0, 0);
@@ -817,6 +861,18 @@ impl CliRun {
             _ => {}
         }
         Ok(None)
+    }
+
+    pub(super) async fn flush_antigravity_warning(
+        &mut self,
+        turn: &mut AntigravityTurn,
+    ) -> Result<(), ArkoAgentsError> {
+        if let Some(text) = turn.warning.take() {
+            self.streamed_bytes.0 += text.len();
+            turn.text.push_str(&text);
+            self.emit(AgentEvent::AssistantResponseChunk(text)).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn commit_antigravity_text(
@@ -855,14 +911,10 @@ impl CliRun {
     ) -> Result<(), ArkoAgentsError> {
         // ACP reports uncached input separately from cached input. Thought
         // tokens are part of the output count.
-        let input = usage
-            .input_tokens
-            .saturating_add(usage.cached_read_tokens)
-            .saturating_add(usage.cached_write_tokens) as usize;
+        let input = usage.input_tokens.saturating_add(usage.cached_read_tokens) as usize;
         let output = usage.output_tokens as usize;
-        let mut info = ai::UsageInfo::new(input, output)
-            .with_cached_tokens(usage.cached_read_tokens as usize)
-            .with_cache_write_tokens(usage.cached_write_tokens as usize);
+        let mut info =
+            ai::UsageInfo::new(input, output).with_cached_tokens(usage.cached_read_tokens as usize);
         info.reasoning_tokens = Some(usage.thought_tokens as usize);
         let config = &self.task.agent_config.llm_config;
         let model = &config.model;

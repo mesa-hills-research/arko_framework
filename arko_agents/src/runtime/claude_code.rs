@@ -26,6 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::ContextImage;
@@ -57,7 +58,9 @@ use arko_ai::{self as ai};
 
 #[path = "antigravity.rs"]
 mod antigravity;
-use antigravity::{AntigravityRun, AntigravityTurn, CliError, CliEvent, CliSession};
+use antigravity::{
+    AntigravityCallResult, AntigravityRun, AntigravityTurn, CliError, CliEvent, CliSession,
+};
 
 /// The in-process MCP server serving the agent's arko tools.
 pub const ARKO_TOOL_SERVER: &str = "arko";
@@ -260,10 +263,14 @@ enum HostRequest {
         response: Value,
         reply: oneshot::Sender<Value>,
     },
-    AntigravityResult {
+    AntigravityExecute {
         call_id: String,
-        output: cc::ToolOutput,
-        recorded: oneshot::Sender<()>,
+        reply: oneshot::Sender<cc::ToolOutput>,
+    },
+    AntigravityRefusal {
+        call_id: String,
+        reply: oneshot::Sender<cc::ToolOutput>,
+        reason: String,
     },
 }
 
@@ -589,15 +596,17 @@ impl ToolHost {
         })
     }
 
-    async fn call(&self, name: &str, arguments: Value, call_id: Option<&str>) -> cc::ToolOutput {
-        let Some(tool) = self.registry.get(name) else {
-            return cc::ToolOutput::error(format!("Tool '{name}' is not available."));
-        };
-        let admitted = self
-            .admitted
+    fn take_admitted(
+        &self,
+        name: &str,
+        arguments: &Value,
+        call_id: Option<&str>,
+    ) -> Option<Admitted> {
+        let key = input_key(name, arguments);
+        self.admitted
             .lock()
             .unwrap()
-            .get_mut(&input_key(name, &arguments))
+            .get_mut(&key)
             .and_then(|calls| match call_id {
                 Some(id) => {
                     let index = calls
@@ -606,16 +615,32 @@ impl ToolHost {
                     calls.remove(index)
                 }
                 None => calls.pop_front(),
-            });
-        let Some(admitted) = admitted else {
+            })
+    }
+
+    async fn call(&self, name: &str, arguments: Value) -> cc::ToolOutput {
+        let Some(tool) = self.registry.get(name) else {
+            return cc::ToolOutput::error(format!("Tool '{name}' is not available."));
+        };
+        let Some(admitted) = self.take_admitted(name, &arguments, None) else {
             // Every call passes the gate first, and one that didn't isn't run.
             return cc::ToolOutput::error(format!(
                 "Tool '{name}' was called without passing the host's checks, so it was not run."
             ));
         };
+        self.run_admitted(name, tool, &arguments, admitted).await
+    }
+
+    async fn run_admitted(
+        &self,
+        name: &str,
+        tool: Arc<dyn crate::tool::Tool>,
+        arguments: &Value,
+        admitted: Admitted,
+    ) -> cc::ToolOutput {
         let id = admitted.id;
         let call_id = admitted.call_id.clone();
-        let (outcome, output) = self.run(name, tool, &arguments, admitted, false).await;
+        let (outcome, output) = self.run(name, tool, arguments, admitted, false).await;
         // The result goes back to the CLI next, which may then send its
         // request, so the moment is read first.
         self.hand_offs.call(call_id.as_deref(), Stamp::now());
@@ -789,7 +814,7 @@ impl cc::ClaudeTool for ServedTool {
         self.read_only
     }
     async fn call(&self, arguments: Value) -> cc::ToolOutput {
-        self.host.call(&self.name, arguments, None).await
+        self.host.call(&self.name, arguments).await
     }
 }
 
@@ -1641,7 +1666,12 @@ impl CliRun {
         let unsent = self.task.conversation.messages[synced..]
             .iter()
             .any(|message| message.role == ai::Role::User);
-        let mut note = format!("{RESTARTED_NOTE}\n{}", lines.join("\n"));
+        let heading = if self.task.agent_config.runs_in_antigravity() {
+            "The task stopped while tool calls were open. These are the outcomes Arko recorded."
+        } else {
+            RESTARTED_NOTE
+        };
+        let mut note = format!("{heading}\n{}", lines.join("\n"));
         if !unsent {
             note.push_str(&format!("\n\n{CONTINUE}"));
         }
@@ -1692,10 +1722,20 @@ impl CliRun {
             }
             let session = match self.start_session().await {
                 Ok(session) => session,
-                Err(error) if self.task.agent_config.runs_in_antigravity() => {
-                    self.antigravity_setup_failed(format!("Could not start Antigravity. {error}"))
-                        .await?;
+                Err(CliError::BrokenSetup(reason)) => {
+                    self.antigravity_setup_failed(reason).await?;
                     return Ok(());
+                }
+                Err(error) if self.task.agent_config.runs_in_antigravity() => {
+                    let reason = match error {
+                        CliError::Antigravity(error) if error.requires_sign_in() => {
+                            "Run `agy` to sign in.".into()
+                        }
+                        error => format!("Could not start Antigravity. {error}"),
+                    };
+                    self.pause_on_error(reason, ErrorRecoveryCause::NonRetryable)
+                        .await?;
+                    continue;
                 }
                 Err(error) => {
                     self.pause_on_error(
@@ -2687,7 +2727,7 @@ impl CliRun {
         } else {
             self.unsent_input()?
         };
-        let input = if seed_transcript && !(chat_reports && self.handover_due()) {
+        let input = if seed_transcript {
             self.antigravity_seed().unwrap_or(input)
         } else {
             input
@@ -2712,6 +2752,11 @@ impl CliRun {
         match sent {
             Ok(uuid) if !self.task.agent_config.runs_in_antigravity() => self.record_sent(uuid),
             Ok(_) => {}
+            Err(CliError::BrokenSetup(reason)) => {
+                self.antigravity_setup_failed(reason).await?;
+                let _ = session.close().await;
+                return Ok(SessionEnd::Stop);
+            }
             Err(error) => {
                 let end = self.session_failed(error.to_string()).await?;
                 let _ = session.close().await;
@@ -2724,7 +2769,9 @@ impl CliRun {
         self.questions = None;
         // Claude Code exited on its own, so it may not have saved every call.
         let mut cli_exited = false;
+        let mut commands_closed = false;
         let mut agy_turn = AntigravityTurn::default();
+        let mut agy_calls = JoinSet::new();
         let end = loop {
             let approval_deadline = self
                 .approvals
@@ -2733,7 +2780,8 @@ impl CliRun {
                 .min();
             tokio::select! {
                 biased;
-                command = self.commands.recv(), if self.stopping.is_none() => {
+                command = self.commands.recv(), if !commands_closed => {
+                    commands_closed = command.is_none();
                     self.handle_command(command, &session).await?;
                     if self.ending() {
                         // Calls held by the SlowDown don't run.
@@ -2748,15 +2796,19 @@ impl CliRun {
                     if let CliSession::Antigravity(backend) = &session {
                         if backend.tripped().await {
                             let _ = session.interrupt().await;
-                            self.antigravity_setup_failed("Antigravity ran a fallback hook instead of Arko's agent.".into()).await?;
+                            self.antigravity_setup_failed(antigravity::UNTRUSTED_AGENT.into()).await?;
                             break SessionEnd::Stop;
                         }
+                        self.flush_antigravity_warning(&mut agy_turn).await?;
                         if matches!(&request, HostRequest::PreToolUse { .. }) {
                             self.commit_antigravity_text(&mut agy_turn).await?;
                             self.latest_response.called = true;
                         }
                     }
-                    self.handle_request(request, &session).await?;
+                    self.handle_request(request, &session, &mut agy_calls).await?;
+                }
+                Some(completed) = agy_calls.join_next(), if !agy_calls.is_empty() => {
+                    self.finish_antigravity_call(completed?, &session, true).await?;
                 }
                 _ = sleep_until(approval_deadline), if approval_deadline.is_some() => {
                     self.approvals_timed_out().await?;
@@ -2800,6 +2852,10 @@ impl CliRun {
         // Late hook requests get their stopping answer.
         drop(requests);
         self.slowed.clear();
+        while let Some(completed) = agy_calls.join_next().await {
+            self.finish_antigravity_call(completed?, &session, false)
+                .await?;
+        }
         // A `/compact` whose turn didn't end. Whether it compacted is
         // unknown, and the threshold decides again.
         if matches!(self.compaction, Some(Compaction::Sent { .. })) {
@@ -2811,7 +2867,7 @@ impl CliRun {
         if self.ending() {
             self.drop_approvals();
         } else {
-            self.reject_approvals(SESSION_ENDED).await?;
+            self.reject_approvals(self.session_end_reason()).await?;
         }
         // A note written just before the turn stopped is cancelled after the
         // turn's result.
@@ -2826,6 +2882,16 @@ impl CliRun {
             Ok(_) if !cli_exited && !agy => self.task.running_tool_calls.clear(),
             Ok(_) => {}
             Err(error) => log::warn!("Task {}: Could not close {name}. {error}", self.task.id),
+        }
+        if agy && let Some(reply) = self.usage_reply.as_mut() {
+            match reply.try_recv() {
+                Ok(answer) => {
+                    self.usage_reply = None;
+                    self.extra_usage_read(Some(answer)).await?;
+                }
+                Err(oneshot::error::TryRecvError::Closed) => self.usage_reply = None,
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
         }
         self.report(false).await;
         Ok(end)
@@ -2947,6 +3013,7 @@ impl CliRun {
         &mut self,
         request: HostRequest,
         session: &CliSession,
+        agy_calls: &mut JoinSet<AntigravityCallResult>,
     ) -> Result<(), ArkoAgentsError> {
         match request {
             HostRequest::PreToolUse {
@@ -2983,7 +3050,9 @@ impl CliRun {
                     if let Some(moved) = self.input_in_task_directory(&tool_name, &input) {
                         answer["hookSpecificOutput"]["updatedInput"] = moved;
                     }
-                    self.record_running(tool_use_id.as_ref(), None).await;
+                    if !self.task.agent_config.runs_in_antigravity() {
+                        self.record_running(tool_use_id.as_ref(), None).await;
+                    }
                 }
                 match self.slow_down.filter(|_| allowed) {
                     Some(delay) => {
@@ -2998,13 +3067,25 @@ impl CliRun {
             HostRequest::Permission { request, reply } => {
                 self.permission(request, reply).await?;
             }
-            HostRequest::AntigravityResult {
+            HostRequest::AntigravityExecute { call_id, reply } => {
+                self.start_antigravity_call(call_id, reply, agy_calls).await;
+            }
+            HostRequest::AntigravityRefusal {
                 call_id,
-                output,
-                recorded,
+                reply,
+                reason,
             } => {
-                self.antigravity_result(call_id, output, session).await?;
-                let _ = recorded.send(());
+                let output = cc::ToolOutput::error(reason);
+                self.finish_antigravity_call(
+                    AntigravityCallResult {
+                        call_id,
+                        output,
+                        reply,
+                    },
+                    session,
+                    true,
+                )
+                .await?;
             }
             HostRequest::PostToolUse {
                 tool_use_id,
@@ -3134,8 +3215,8 @@ impl CliRun {
                 return self.reject_call(id, &name, refusal.message).await;
             }
         }
-        // Arko tools use the same workspace check as the native runtime.
-        if !built_in {
+        // Antigravity uses the same workspace check as the native runtime.
+        if self.task.agent_config.runs_in_antigravity() {
             let tool = self.registry.get(&name).expect("offered tool");
             let definition = tool.definition();
             let workspace = self.task.current_working_directory.clone();
@@ -3176,11 +3257,27 @@ impl CliRun {
             };
             return self.admit(&name, false, call, &input, session).await;
         }
-        // Claude Code built-ins have their own schemas.
-        let path_params = built_in_path_parameters(&name);
+        let path_params: Vec<String> = if built_in {
+            built_in_path_parameters(&name)
+                .iter()
+                .map(|param| param.to_string())
+                .collect()
+        } else {
+            self.registry
+                .get(&name)
+                .map(|tool| {
+                    tool.definition()
+                        .parameters
+                        .into_iter()
+                        .filter(|param| param.is_path)
+                        .map(|param| param.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let mut outside = None;
-        for &param in path_params {
-            let Some(path) = params.get(param).and_then(Value::as_str) else {
+        for param in path_params {
+            let Some(path) = params.get(&param).and_then(Value::as_str) else {
                 continue;
             };
             if path.is_empty() {
@@ -3628,8 +3725,10 @@ impl CliRun {
                 }
             }
         } else {
-            self.record_running(approval.tool_use_id.as_ref(), custom_output.clone())
-                .await;
+            if !self.task.agent_config.runs_in_antigravity() {
+                self.record_running(approval.tool_use_id.as_ref(), custom_output.clone())
+                    .await;
+            }
             let mut call = Admitted {
                 id,
                 call_id: approval.tool_use_id.clone(),
@@ -4847,7 +4946,7 @@ impl CliRun {
                     HostRequest::PostToolUse { reply, .. } => {
                         let _ = reply.send(cc::Hook::proceed());
                     }
-                    HostRequest::AntigravityResult { .. } => unreachable!(),
+                    HostRequest::AntigravityExecute { .. } | HostRequest::AntigravityRefusal { .. } => unreachable!(),
                 },
             }
         };
@@ -5005,12 +5104,7 @@ impl CliRun {
         let Some(reply) = self.usage_reply.take() else {
             return Ok(());
         };
-        let wait = if self.task.agent_config.runs_in_antigravity() {
-            Duration::from_secs(3)
-        } else {
-            USAGE_END_WAIT
-        };
-        let answer = tokio::time::timeout(wait, reply)
+        let answer = tokio::time::timeout(USAGE_END_WAIT, reply)
             .await
             .ok()
             .and_then(Result::ok);
@@ -5328,9 +5422,6 @@ impl CliRun {
         // The next turn's responses are its own.
         let latest_response = std::mem::take(&mut self.latest_response);
         self.flush_usage().await?;
-        if self.task.agent_config.runs_in_antigravity() {
-            self.take_usage_answer().await?;
-        }
         // The CLI's word on the notes sent may follow the result.
         self.await_note_verdicts(session).await?;
         // The amounts of extra usage after this turn are asked for as it
@@ -5656,6 +5747,14 @@ impl CliRun {
             })
     }
 
+    fn session_end_reason(&self) -> &'static str {
+        if self.task.agent_config.runs_in_antigravity() {
+            "The Antigravity session ended while this call waited for approval, so it didn't run."
+        } else {
+            SESSION_ENDED
+        }
+    }
+
     /// The session failed (it exited, or a turn ended in an error Claude
     /// Code's own retries didn't recover from), so the error policy decides.
     async fn session_failed(&mut self, message: String) -> Result<SessionEnd, ArkoAgentsError> {
@@ -5665,7 +5764,7 @@ impl CliRun {
         // The calls waiting for approval end with the session, each told
         // before the failure's state, whether or not Claude Code's requests
         // for them have gone yet.
-        self.reject_approvals(SESSION_ENDED).await?;
+        self.reject_approvals(self.session_end_reason()).await?;
         // A pause the turn asked for belongs to it, and goes with the
         // failure that ended it rather than with a later turn's end.
         let message = match self.pause_after_turn.take() {
