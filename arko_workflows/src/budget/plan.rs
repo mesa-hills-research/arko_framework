@@ -86,8 +86,12 @@ impl PlanBudget {
     }
 
     /// The limit that applies to `plan`'s `window`, the plan's own, else
-    /// [`limit`](Self::limit).
+    /// [`limit`](Self::limit). Antigravity reports separate groups that
+    /// are not counted in workflow budgets.
     pub fn limit_for(&self, plan: SubscriptionPlan, window: PlanWindow) -> Option<f64> {
+        if plan == SubscriptionPlan::Antigravity {
+            return None;
+        }
         self.own(Some(plan), window).or(self.limit(window))
     }
 
@@ -810,6 +814,19 @@ mod tests {
         assert_eq!(tracker.exceeded().unwrap().plan, CLAUDE_CODE);
         let crossed = tracker.observe(&of(CHATGPT, 52.5, 18_000, 12.0), 0);
         assert_eq!((crossed.len(), crossed[0].plan), (1, CHATGPT));
+    }
+
+    #[test]
+    fn antigravity_groups_have_no_workflow_limit() {
+        let limits = PlanBudget::none().five_hour(5.0).seven_day(10.0);
+        assert_eq!(
+            limits.limit_for(SubscriptionPlan::Antigravity, PlanWindow::FiveHour),
+            None
+        );
+        assert_eq!(
+            limits.limit_for(SubscriptionPlan::Antigravity, PlanWindow::SevenDay),
+            None
+        );
     }
 
     /// A plan's own limit replaces the general one for that plan, and only

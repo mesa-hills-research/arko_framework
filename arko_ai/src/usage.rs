@@ -207,7 +207,7 @@ pub enum SubscriptionPlan {
 impl SubscriptionPlan {
     pub const ALL: [SubscriptionPlan; 3] = [Self::ChatGpt, Self::ClaudeCode, Self::Antigravity];
 
-    /// `"chatgpt"` or `"claude_code"`.
+    /// The plan's stable id used in saved reports.
     pub fn key(self) -> &'static str {
         match self {
             SubscriptionPlan::ChatGpt => "chatgpt",
@@ -216,7 +216,7 @@ impl SubscriptionPlan {
         }
     }
 
-    /// `"ChatGPT"` or `"Claude Code"`.
+    /// The plan's display name.
     pub fn label(self) -> &'static str {
         match self {
             SubscriptionPlan::ChatGpt => "ChatGPT",
