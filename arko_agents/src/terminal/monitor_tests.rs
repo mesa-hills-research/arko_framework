@@ -507,6 +507,7 @@ async fn monitors_stopped_by_a_restart_are_listed_and_never_run_again() {
                 alerts: 3,
                 once: false,
                 lifetime: MonitorLifetime::Timed,
+                paused: false,
             })
         )
     );
@@ -1988,9 +1989,10 @@ async fn without_running_workers_a_monitor_ends_at_its_time() {
     assert!(!workers.has_running_workers(Uuid::new_v4()));
 }
 
-/// `monitor_start` takes `once`, and `lasts` only where the host says
-/// whether workers run, and its description says which to use when.
-/// `monitor_control` describes such monitors.
+/// `monitor_start` takes `once` and `lasts` (`session` always, and
+/// `while_workers_run` and `standing` where the host reports worker liveness),
+/// and its description says which to use when. `monitor_control` lists and
+/// handles rearms for all lifetimes.
 #[tokio::test]
 async fn the_monitor_tools_take_once_and_lasts() {
     use crate::tool::{Tool, ToolParameterType};
@@ -2007,24 +2009,86 @@ async fn the_monitor_tools_take_once_and_lasts() {
         parameter(start, "once").map(|param| (param.required, param.param_type)),
         Some((false, ToolParameterType::Bool))
     );
-    assert!(parameter(start, "lasts").is_none());
+    assert_eq!(
+        parameter(start, "lasts").map(|param| (param.required, param.param_type)),
+        Some((false, ToolParameterType::String))
+    );
+    let start_schema = start.definition().to_json_schema();
+    assert_eq!(
+        start_schema["properties"]["lasts"]["enum"],
+        json!(["session"])
+    );
     let description = start.definition().description;
     assert!(
         description.contains("Set once for one-shot events")
-            && !description.contains("while_workers_run"),
+            && description.contains("Set lasts to session")
+            && !description.contains("while_workers_run")
+            && !description.contains("standing"),
         "{description}"
     );
-    let refused = start
+    for worker_only in ["while_workers_run", "standing"] {
+        let refused = start
+            .execute(
+                &f.context(),
+                params(json!({"command": "x", "lasts": worker_only})),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("you have no workers here"),
+            "{worker_only}: {refused}"
+        );
+    }
+
+    // Session monitors work without WorkerLiveness, and ignore expires_minutes.
+    let session_started = start
         .execute(
             &f.context(),
-            params(json!({"command": "x", "lasts": "while_workers_run"})),
+            params(json!({
+                "command": f.command("time.sleep(60)"),
+                "pattern": "error",
+                "lasts": "session",
+                "expires_minutes": 10
+            })),
         )
         .await
-        .unwrap_err();
+        .unwrap();
+    let session_id: Uuid = session_started
+        .strip_prefix("Monitor ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(
-        refused.to_string().contains("you have no workers here"),
-        "{refused}"
+        session_started.contains(", for this session. "),
+        "{session_started}"
     );
+    let entry = listed(&f, session_id).await;
+    assert_eq!(
+        (
+            &entry["lasts"],
+            &entry["ends"],
+            entry.get("ends_in_minutes")
+        ),
+        (
+            &json!("session"),
+            &json!("when stopped or this session ends"),
+            None
+        )
+    );
+    let session_rearm = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": session_id.to_string()})),
+        )
+        .await
+        .unwrap();
+    assert!(
+        session_rearm.contains("doesn't expire and needs no rearm"),
+        "{session_rearm}"
+    );
+    f.manager.cancel(f.owner, session_id).unwrap();
+    ended(&f, session_id).await;
 
     let workers = Workers::new();
     f.manager.add_worker_liveness(workers.weak());
@@ -2035,6 +2099,8 @@ async fn the_monitor_tools_take_once_and_lasts() {
     let description = start.definition().description;
     assert!(
         description.contains("Set lasts to while_workers_run")
+            && description.contains("standing")
+            && description.contains("session")
             && control.definition().description.contains(
                 "A monitor that lasts while your workers run goes on past that while they do."
             ),
@@ -2047,7 +2113,7 @@ async fn the_monitor_tools_take_once_and_lasts() {
     );
     assert_eq!(
         start_schema["properties"]["lasts"]["enum"],
-        json!(["while_workers_run"])
+        json!(["while_workers_run", "standing", "session"])
     );
     let control_schema = control.definition().to_json_schema();
     assert_eq!(
@@ -2064,8 +2130,76 @@ async fn the_monitor_tools_take_once_and_lasts() {
     assert!(
         refused
             .to_string()
-            .contains("lasts takes while_workers_run"),
+            .contains("lasts takes while_workers_run, standing or session"),
         "{refused}"
+    );
+
+    // A standing monitor started via the tool starts paused without workers,
+    // and rearm explains that it doesn't expire.
+    let standing_started = start
+        .execute(
+            &f.context(),
+            params(json!({
+                "command": f.command("sys.exit(0)"),
+                "every_seconds": 10,
+                "lasts": "standing"
+            })),
+        )
+        .await
+        .unwrap();
+    let standing_id: Uuid = standing_started
+        .strip_prefix("Monitor ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        standing_started
+            .contains(", whenever your workers run. It is paused until a worker starts."),
+        "{standing_started}"
+    );
+    let entry = listed(&f, standing_id).await;
+    assert_eq!(
+        (
+            &entry["lasts"],
+            &entry["paused"],
+            &entry["status"],
+            &entry["ends"],
+            entry.get("ends_in_minutes")
+        ),
+        (
+            &json!("standing"),
+            &json!(true),
+            &json!("paused until a worker starts"),
+            &json!("when stopped or this session ends"),
+            None
+        )
+    );
+    let standing_rearm = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": standing_id.to_string()})),
+        )
+        .await
+        .unwrap();
+    assert!(
+        standing_rearm.contains("standing monitor")
+            && standing_rearm.contains("doesn't expire and needs no rearm"),
+        "{standing_rearm}"
+    );
+    f.manager.cancel(f.owner, standing_id).unwrap();
+    ended(&f, standing_id).await;
+    // Rearm on an ended standing monitor still reports it ended.
+    let standing_rearm_after = control
+        .execute(
+            &f.context(),
+            params(json!({"action": "rearm", "job_id": standing_id.to_string()})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        standing_rearm_after.to_string(),
+        format!("monitor {standing_id} has ended. monitor_start starts a new one")
     );
 
     let started = start
@@ -2096,7 +2230,7 @@ async fn the_monitor_tools_take_once_and_lasts() {
     let JobKind::Monitor(info) = &f.manager.jobs()[0].kind else {
         panic!("not a monitor")
     };
-    assert!(info.once && info.lifetime == MonitorLifetime::WhileWorkersRun);
+    assert!(info.once && info.lifetime == MonitorLifetime::WhileWorkersRun && !info.paused);
     let entry = listed(&f, id).await;
     assert_eq!(
         (&entry["once"], &entry["lasts"], &entry["ends_in_minutes"]),
@@ -2142,4 +2276,577 @@ async fn the_monitor_tools_take_once_and_lasts() {
         "{check}"
     );
     assert_eq!(ended(&f, id).await.state, JobState::Succeeded);
+}
+
+/// A scripted checker that also counts total check invocations.
+fn counted_scripted(
+    script: Vec<(bool, &'static str, Duration)>,
+) -> (checks::Checker, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let base = (SystemTime::now(), Instant::now());
+    let queue = Arc::new(Mutex::new(VecDeque::from(script)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let checker: checks::Checker = Arc::new({
+        let calls = calls.clone();
+        move |limit| {
+            let (queue, calls) = (queue.clone(), calls.clone());
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let at = base.0 + (Instant::now() - base.1);
+                let (success, output, took) = queue.lock().unwrap().pop_front().unwrap_or((
+                    true,
+                    "ok",
+                    Duration::from_millis(100),
+                ));
+                tokio::time::sleep(took.min(limit)).await;
+                let timed_out = (took > limit).then_some(limit);
+                checks::CheckRun {
+                    success: success && timed_out.is_none(),
+                    exit_code: timed_out.is_none().then_some(if success { 0 } else { 1 }),
+                    timed_out,
+                    error: None,
+                    output: output.as_bytes().to_vec(),
+                    more: 0,
+                    took: took.min(limit),
+                    at,
+                }
+            })
+        }
+    });
+    (checker, calls)
+}
+
+/// The `MonitorInfo` of job `id` from `TerminalManager::jobs()`.
+fn monitor_info(f: &Fixture, id: Uuid) -> MonitorInfo {
+    f.manager
+        .jobs()
+        .into_iter()
+        .find_map(|job| match (job.job_id == id, job.kind) {
+            (true, JobKind::Monitor(info)) => Some(info),
+            _ => None,
+        })
+        .expect("running monitor in jobs()")
+}
+
+/// A session monitor runs past any expiry without warnings or stopping,
+/// continues alerting with a session footer, refuses direct rearm, and stops
+/// cleanly on cancel and shutdown.
+#[tokio::test(start_paused = true)]
+async fn a_session_monitor_runs_without_expiry_until_stopped() {
+    let f = Fixture::new(|_| {});
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    let quick = Duration::from_millis(100);
+    // Steady for 10 runs (100 min), then fails, then stays failed.
+    let mut script = vec![(true, "ok", quick); 10];
+    script.extend([(false, "disk low", quick); 10]);
+    let (checker, _) = counted_scripted(script);
+    let options = MonitorOptions::check(600, CheckChange::Change)
+        .with_label("disk")
+        .with_expiry(minutes(10))
+        .with_lifetime(MonitorLifetime::Session);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(first.unwrap().success);
+    assert_eq!(monitor_info(&f, id).lifetime, MonitorLifetime::Session);
+    assert!(!monitor_info(&f, id).paused);
+    // Direct rearm is rejected without mutating anything.
+    let rearm_err = f.manager.rearm(f.owner, id, minutes(10)).unwrap_err();
+    assert!(
+        rearm_err.to_string().contains("doesn't expire"),
+        "{rearm_err}"
+    );
+    // 90 minutes pass (far past 10m and 30m) with no warning and no expiry.
+    assert_eq!(note_within(&mut receiver, minutes(95)).await, None);
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    // At 100 minutes the check fails and alerts cleanly.
+    let alert = next_note(&mut receiver).await;
+    assert!(
+        alert.contains("started failing") && alert.ends_with("\nIt lasts for this session."),
+        "{alert}"
+    );
+    // Another hour passes with no warning or expiry.
+    assert_eq!(note_within(&mut receiver, minutes(60)).await, None);
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    // Explicit stop ends it cleanly.
+    f.manager.cancel(f.owner, id).unwrap();
+    let stopped = next_note(&mut receiver).await;
+    assert!(
+        stopped.contains("stopped, as you asked. It alerted once."),
+        "{stopped}"
+    );
+    assert_eq!(ended_paused(&f, id).await.state, JobState::Cancelled);
+
+    // Shutdown also ends a session monitor cleanly.
+    let (checker, _) = counted_scripted(Vec::new());
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id2, _) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    f.manager.shutdown().await;
+    assert_eq!(
+        f.manager.status(f.owner, id2, None).unwrap().state,
+        JobState::Cancelled
+    );
+}
+
+/// A standing check monitor runs its initial baseline check, pauses with zero
+/// check executions while no worker runs, resumes immediately when a worker
+/// starts (preserving its baseline state), emits no expiry warning, flips
+/// `MonitorInfo.paused` accurately, supports `once`, and stops cleanly while
+/// paused, while active, and on shutdown.
+#[tokio::test(start_paused = true)]
+async fn a_standing_check_monitor_pauses_and_resumes_with_workers() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(|_| {});
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let minutes = |count: u64| Duration::from_secs(60 * count);
+    let quick = Duration::from_millis(100);
+    // Baseline succeeds, wave 1 fails, and wave 2 recovers.
+    let (checker, calls) = counted_scripted(vec![
+        (true, "10G free", quick),
+        (false, "144M free", quick),
+        (false, "144M free", quick),
+        (true, "8G free", quick),
+    ]);
+    let options = MonitorOptions::check(10, CheckChange::Change)
+        .with_label("disk")
+        .with_lifetime(MonitorLifetime::Standing);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id, first) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(first.unwrap().success);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let info = monitor_info(&f, id);
+    assert_eq!(
+        (info.lifetime, info.paused),
+        (MonitorLifetime::Standing, true)
+    );
+    let entry = listed(&f, id).await;
+    assert_eq!(
+        (&entry["lasts"], &entry["paused"], &entry["status"]),
+        (
+            &json!("standing"),
+            &json!(true),
+            &json!("paused until a worker starts")
+        )
+    );
+
+    // After 3 idle hours with no workers, no checks run, and no warning or expiry comes.
+    assert_eq!(note_within(&mut receiver, minutes(180)).await, None);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+
+    // When worker 1 starts, the check resumes immediately and alerts on the failure.
+    let resumed = Instant::now();
+    workers.set(f.owner, true);
+    let alert = next_note(&mut receiver).await;
+    assert!(resumed.elapsed() <= Duration::from_secs(5));
+    assert!(
+        alert.contains("started failing")
+            && alert.contains("144M free")
+            && alert.ends_with("\nIt runs whenever your workers run."),
+        "{alert}"
+    );
+    assert!(!monitor_info(&f, id).paused);
+    let entry = listed(&f, id).await;
+    assert_eq!(
+        (&entry["paused"], &entry["status"]),
+        (&json!(false), &json!("active"))
+    );
+    // Let one more steady check run so the second `(false, "144M free")` is consumed.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    // When worker 1 finishes, the monitor pauses cleanly and stops running checks.
+    workers.set(f.owner, false);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(monitor_info(&f, id).paused);
+    let calls_at_pause = calls.load(Ordering::SeqCst);
+    assert_eq!(note_within(&mut receiver, minutes(120)).await, None);
+    assert_eq!(calls.load(Ordering::SeqCst), calls_at_pause);
+
+    // When worker 2 starts, the check resumes immediately with prior state (`false`)
+    // preserved, sees recovery (`true`), and alerts!
+    let resumed2 = Instant::now();
+    workers.set(f.owner, true);
+    let alert2 = next_note(&mut receiver).await;
+    assert!(resumed2.elapsed() <= Duration::from_secs(5));
+    assert!(
+        alert2.contains("started succeeding") && alert2.contains("8G free"),
+        "{alert2}"
+    );
+    assert!(!monitor_info(&f, id).paused);
+
+    // Cancel while active ends cleanly.
+    f.manager.cancel(f.owner, id).unwrap();
+    let stopped = next_note(&mut receiver).await;
+    assert!(stopped.contains("stopped, as you asked"), "{stopped}");
+    assert_eq!(ended_paused(&f, id).await.state, JobState::Cancelled);
+
+    // Stop while paused ends cleanly.
+    workers.set(f.owner, false);
+    let (checker, _) = counted_scripted(vec![(true, "ok", quick)]);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (paused_id, _) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(monitor_info(&f, paused_id).paused);
+    f.manager.cancel(f.owner, paused_id).unwrap();
+    let stopped = next_note(&mut receiver).await;
+    assert!(stopped.contains("stopped, as you asked"), "{stopped}");
+    assert_eq!(ended_paused(&f, paused_id).await.state, JobState::Cancelled);
+
+    // Standing check with `once: true` triggers once active and ends `Succeeded`.
+    let (checker, once_calls) = counted_scripted(vec![
+        (false, "not ready", quick),
+        (true, "ready", quick),
+        (false, "ignored", quick),
+    ]);
+    let once_options = MonitorOptions::check(10, CheckChange::Success)
+        .with_label("ready")
+        .once()
+        .with_lifetime(MonitorLifetime::Standing);
+    let watching = monitor::Watching::new(&once_options, None, &f.manager.monitor_limits());
+    let (once_id, first) = f
+        .manager
+        .start_check(&f.context(), "ready".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(!first.unwrap().success);
+    assert!(monitor_info(&f, once_id).paused);
+    tokio::time::sleep(minutes(30)).await;
+    assert_eq!(once_calls.load(Ordering::SeqCst), 1);
+    workers.set(f.owner, true);
+    let once_note = next_note(&mut receiver).await;
+    assert!(
+        once_note.contains("started succeeding")
+            && once_note.contains("ended after its first alert"),
+        "{once_note}"
+    );
+    assert_eq!(ended_paused(&f, once_id).await.state, JobState::Succeeded);
+    assert_eq!(once_calls.load(Ordering::SeqCst), 2);
+
+    // Shutdown cleanly ends a paused standing check.
+    workers.set(f.owner, false);
+    let (checker, _) = counted_scripted(vec![(true, "ok", quick)]);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (shut_id, _) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(monitor_info(&f, shut_id).paused);
+    f.manager.shutdown().await;
+    assert_eq!(
+        f.manager.status(f.owner, shut_id, None).unwrap().state,
+        JobState::Cancelled
+    );
+}
+
+/// Even if a host's `WorkerLiveness` misses a `changes()` notification, a
+/// standing monitor notices within `WORKERS_RECHECK` and pauses or resumes.
+#[tokio::test(start_paused = true)]
+async fn a_standing_monitor_rechecks_liveness_without_watch_notification() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct SilentWorkers {
+        active: AtomicBool,
+        changes: watch::Sender<u64>,
+    }
+    impl WorkerLiveness for SilentWorkers {
+        fn has_running_workers(&self, _owner: Uuid) -> bool {
+            self.active.load(Ordering::SeqCst)
+        }
+        fn changes(&self) -> watch::Receiver<u64> {
+            self.changes.subscribe()
+        }
+    }
+
+    let f = Fixture::new(|_| {});
+    let silent = Arc::new(SilentWorkers {
+        active: AtomicBool::new(false),
+        changes: watch::Sender::new(0),
+    });
+    let weak: Weak<SilentWorkers> = Arc::downgrade(&silent);
+    f.manager.add_worker_liveness(weak);
+    let quick = Duration::from_millis(100);
+    let (checker, calls) = counted_scripted(vec![(true, "ok", quick); 20]);
+    let options = MonitorOptions::check(10, CheckChange::Change)
+        .with_label("disk")
+        .with_lifetime(MonitorLifetime::Standing);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id, _) = f
+        .manager
+        .start_check(&f.context(), "disk".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+    assert!(monitor_info(&f, id).paused);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Flip active without bumping `changes`.
+    silent.active.store(true, Ordering::SeqCst);
+    tokio::time::sleep(WORKERS_RECHECK + Duration::from_secs(2)).await;
+    assert!(!monitor_info(&f, id).paused);
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+
+    // Flip inactive without bumping `changes`.
+    silent.active.store(false, Ordering::SeqCst);
+    tokio::time::sleep(WORKERS_RECHECK + Duration::from_secs(2)).await;
+    assert!(monitor_info(&f, id).paused);
+    let count = calls.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), count);
+    f.manager.cancel(f.owner, id).unwrap();
+}
+
+/// Waits in real time for `id`'s paused flag to equal `expected`.
+async fn wait_paused(f: &Fixture, id: Uuid, expected: bool) {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if monitor_info(f, id).paused == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("monitor {id} did not reach paused={expected}"));
+}
+
+/// A standing line monitor stays paused with no child process while no workers
+/// run, spawns its command and alerts when a worker starts, terminates the
+/// child cleanly without a spurious exit alert when workers drop to zero,
+/// respawns and alerts on the next worker, handles `once`, and stops cleanly
+/// while paused or active and on shutdown.
+#[tokio::test]
+async fn a_standing_lines_monitor_stops_and_respawns_its_process_with_workers() {
+    let f = fixture(quick());
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    let (sender, mut receiver) = mpsc::channel(8);
+    f.manager.bind_runtime(f.owner, sender.downgrade());
+    let mut finished = f.manager.subscribe_finished();
+
+    let runs_file = f.root.join("pids.txt");
+    let code = format!(
+        "p = {path:?}\n\
+count = len(open(p).readlines()) + 1 if os.path.exists(p) else 1\n\
+fh = open(p, 'a')\n\
+fh.write(f'{{os.getpid()}}\\n')\n\
+fh.flush()\n\
+fh.close()\n\
+print(f'ERROR wave {{count}}', flush=True)\n\
+time.sleep(60)",
+        path = runs_file.display().to_string()
+    );
+    // Starts paused when no workers run, with no child process spawned.
+    let started = monitor(
+        &f,
+        &code,
+        lines("ERROR").with_lifetime(MonitorLifetime::Standing),
+    )
+    .await;
+    let id = started.job_id;
+    assert!(
+        started
+            .summary
+            .ends_with(", whenever your workers run. It is paused until a worker starts."),
+        "{}",
+        started.summary
+    );
+    assert!(monitor_info(&f, id).paused);
+    assert!(!runs_file.exists(), "no child spawned while paused");
+
+    // Wave 1 starts the worker, spawns the child, and sends the first alert.
+    workers.set(f.owner, true);
+    let note1 = note(&mut receiver).await;
+    assert!(
+        note1.contains("ERROR wave 1") && note1.ends_with("\nIt runs whenever your workers run."),
+        "{note1}"
+    );
+    assert!(!monitor_info(&f, id).paused);
+    let pids1: Vec<i32> = std::fs::read_to_string(&runs_file)
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    assert_eq!(pids1.len(), 1);
+
+    // When wave 1 ends, the child is terminated cleanly with no exit alert or JobFinished.
+    workers.set(f.owner, false);
+    wait_paused(&f, id, true).await;
+    assert_eq!(
+        note_within(&mut receiver, Duration::from_millis(600)).await,
+        None,
+        "pausing must not send a false exit alert"
+    );
+    assert!(
+        finished.try_recv().is_err(),
+        "pausing must not emit JobFinished"
+    );
+    assert_eq!(
+        f.manager.status(f.owner, id, None).unwrap().state,
+        JobState::Running
+    );
+    #[cfg(unix)]
+    {
+        // Child PID should no longer exist.
+        let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pids1[0]), None).is_ok();
+        assert!(
+            !alive,
+            "child {} should be terminated while paused",
+            pids1[0]
+        );
+    }
+
+    // Wave 2 starts the next worker, respawns the command, and alerts again.
+    workers.set(f.owner, true);
+    let note2 = note(&mut receiver).await;
+    assert!(note2.contains("ERROR wave 2"), "{note2}");
+    assert!(!monitor_info(&f, id).paused);
+    let pids2: Vec<i32> = std::fs::read_to_string(&runs_file)
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    assert_eq!(pids2.len(), 2);
+    assert_ne!(pids2[0], pids2[1]);
+
+    // Pause again, then explicitly stop while paused.
+    workers.set(f.owner, false);
+    wait_paused(&f, id, true).await;
+    f.manager.cancel(f.owner, id).unwrap();
+    let stopped = note(&mut receiver).await;
+    assert!(
+        stopped.contains("stopped, as you asked. It alerted 2 times."),
+        "{stopped}"
+    );
+    assert_eq!(ended(&f, id).await.state, JobState::Cancelled);
+    assert!(finished.try_recv().is_err());
+
+    // Standing lines monitor with `once: true` ends cleanly after its first alert.
+    let once_started = monitor(
+        &f,
+        "print('ERROR once-boom', flush=True)\ntime.sleep(60)",
+        lines("ERROR")
+            .once()
+            .with_lifetime(MonitorLifetime::Standing),
+    )
+    .await;
+    let once_id = once_started.job_id;
+    assert!(monitor_info(&f, once_id).paused);
+    workers.set(f.owner, true);
+    let once_note = note(&mut receiver).await;
+    assert!(
+        once_note.contains("ERROR once-boom") && once_note.contains("ended after its first alert"),
+        "{once_note}"
+    );
+    assert_eq!(ended(&f, once_id).await.state, JobState::Succeeded);
+
+    // Shutdown cleanly terminates both active and paused standing line monitors.
+    let active_id = monitor(
+        &f,
+        "time.sleep(60)",
+        lines("ERROR").with_lifetime(MonitorLifetime::Standing),
+    )
+    .await
+    .job_id;
+    assert!(!monitor_info(&f, active_id).paused);
+    let other_ctx = TaskContext::new(Uuid::new_v4(), "other", "test monitors", &f.root);
+    let paused_id = f
+        .manager
+        .start_monitor(
+            &other_ctx,
+            &f.command("time.sleep(60)"),
+            lines("ERROR").with_lifetime(MonitorLifetime::Standing),
+        )
+        .await
+        .unwrap()
+        .job_id;
+    assert!(monitor_info(&f, paused_id).paused);
+    f.manager.shutdown().await;
+    assert_eq!(
+        f.manager.status(f.owner, active_id, None).unwrap().state,
+        JobState::Cancelled
+    );
+    assert_eq!(
+        f.manager
+            .status(other_ctx.task_id, paused_id, None)
+            .unwrap()
+            .state,
+        JobState::Cancelled
+    );
+}
+
+/// Concurrent worker liveness toggles alongside `jobs()` reads and `rearm` /
+/// `status` calls on a standing monitor never deadlock or lose liveness state.
+#[tokio::test]
+async fn standing_monitor_handles_concurrent_toggles_and_reads() {
+    let f = fixture(quick());
+    let workers = Workers::new();
+    f.manager.add_worker_liveness(workers.weak());
+    let (checker, _) = counted_scripted(vec![(true, "ok", Duration::from_millis(5)); 200]);
+    let options = MonitorOptions::check(10, CheckChange::Change)
+        .with_label("guard")
+        .with_lifetime(MonitorLifetime::Standing);
+    let watching = monitor::Watching::new(&options, None, &f.manager.monitor_limits());
+    let (id, _) = f
+        .manager
+        .start_check(&f.context(), "guard".into(), watching, move |_| checker)
+        .await
+        .unwrap();
+
+    let manager = f.manager.clone();
+    let owner = f.owner;
+    let w = workers.clone();
+    let toggler = tokio::spawn(async move {
+        for step in 0..200 {
+            w.set(owner, step % 2 == 0);
+            tokio::task::yield_now().await;
+        }
+        w.set(owner, false);
+    });
+    let reader = tokio::spawn(async move {
+        for _ in 0..200 {
+            let jobs = manager.jobs();
+            assert!(jobs.iter().any(|job| job.job_id == id));
+            let _ = manager.status(owner, id, None).unwrap();
+            let _ = manager.rearm(owner, id, Duration::from_secs(60));
+            tokio::task::yield_now().await;
+        }
+    });
+    timeout(Duration::from_secs(5), async {
+        toggler.await.unwrap();
+        reader.await.unwrap();
+    })
+    .await
+    .expect("concurrent toggles and reads finish promptly");
+
+    wait_paused(&f, id, true).await;
+    f.manager.cancel(f.owner, id).unwrap();
+    assert_eq!(ended(&f, id).await.state, JobState::Cancelled);
 }

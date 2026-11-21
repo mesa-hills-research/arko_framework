@@ -192,3 +192,47 @@ pub(super) fn spawn(
         }),
     })
 }
+
+/// Spawns or respawns a standing monitor's command in `directory`, reusing its
+/// request and reply streams if an earlier run created them.
+pub(super) fn respawn(
+    config: &TerminalConfig,
+    command: &str,
+    cwd: &Path,
+    terminal: bool,
+    directory: &Path,
+) -> io::Result<Process> {
+    use std::io::{Seek, SeekFrom};
+    let paths = ControlPaths {
+        requests: directory.join("requests.ndjson"),
+        replies: directory.join("replies.ndjson"),
+    };
+    let mut requests = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&paths.requests)?;
+    let cursor = requests.seek(SeekFrom::End(0))?;
+    let replies = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.replies)?;
+    let written = replies.metadata()?.len();
+    let child = platform::spawn(config, command, cwd, terminal, &paths)?;
+    Ok(Process {
+        child: child.child,
+        input: child.input,
+        output: child.output,
+        group: child.group,
+        requests: Box::pin(Requests {
+            file: requests,
+            cursor,
+            timer: Box::pin(sleep(Duration::from_millis(20))),
+        }),
+        replies: Box::pin(Replies {
+            file: replies,
+            written,
+        }),
+    })
+}

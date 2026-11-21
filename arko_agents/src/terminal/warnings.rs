@@ -98,11 +98,12 @@ impl Arming {
         if self.warned {
             return None;
         }
+        let expires = self.expires?;
         // A busy agent reads the warning only after its call, when the time
         // left before the cache expires says nothing, so it comes at its
         // usual time. The host's next word on the cache plans it again.
         warning_due(
-            self.expires,
+            expires,
             self.lasts,
             limits,
             inputs.cache.filter(|_| !inputs.busy),
@@ -210,7 +211,8 @@ impl TerminalManager {
     /// [`longest`](MonitorLimits::longest), and arms its warning again.
     /// Returns its new end. One that lasts while workers run still goes on
     /// past it while they do. A monitor that ended can't be rearmed
-    /// ([`TerminalError::Finished`]).
+    /// ([`TerminalError::Finished`]), and a session or standing monitor
+    /// doesn't expire ([`TerminalError::Invalid`]).
     pub fn rearm(&self, owner: Uuid, id: Uuid, lasts: Duration) -> Result<SystemTime> {
         let limits = self.monitor_limits();
         if lasts.is_zero() || lasts > limits.longest {
@@ -222,11 +224,16 @@ impl TerminalManager {
         let job = self.owned(owner, id)?;
         let expires_at = {
             let mut data = job.data.lock().unwrap();
-            if data.record.monitor.is_none() {
+            let Some(monitor) = data.record.monitor.as_ref() else {
                 return Err(TerminalError::Invalid(format!("job {id} isn't a monitor")));
-            }
+            };
             if data.monitor.is_none() || !data.running() {
                 return Err(TerminalError::Finished);
+            }
+            if !monitor.lifetime.expires() {
+                return Err(TerminalError::Invalid(format!(
+                    "monitor {id} doesn't expire and needs no rearm"
+                )));
             }
             // Saved first, so a rearm that fails changes nothing.
             let expires_at = SystemTime::now() + lasts;
@@ -238,7 +245,7 @@ impl TerminalManager {
             persist(&self.config, &record)?;
             data.record = record;
             if let Some(arming) = data.monitor.as_mut() {
-                arming.expires = Instant::now() + lasts;
+                arming.expires = Some(Instant::now() + lasts);
                 arming.lasts = lasts;
                 arming.warned = false;
                 arming.held = false;

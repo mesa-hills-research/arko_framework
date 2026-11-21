@@ -82,11 +82,11 @@ impl Tool for MonitorTool {
             Operation::Start => (
                 Self::NAMES[0],
                 format!(
-                    "Watches a command and sends alert notes (at most {interval}) without polling. Without every_seconds, runs continuously and alerts on lines matching pattern. With every_seconds, runs periodically as a check and alerts on state changes. Lasts expires_minutes ({longest} at most), extendable with monitor_control rearm. Set once for one-shot events.{} Use terminal_status for full output.",
+                    "Watches a command and sends alert notes (at most {interval}) without polling. Without every_seconds, runs continuously and alerts on lines matching pattern. With every_seconds, runs periodically as a check and alerts on state changes. Lasts expires_minutes ({longest} at most), extendable with monitor_control rearm. Set once for one-shot events. {} Use terminal_status for full output.",
                     if workers {
-                        " Set lasts to while_workers_run to keep watching until your workers finish."
+                        "Set lasts to while_workers_run (until your workers finish), standing (pauses when no workers run and resumes when one starts, for the whole session), or session (for the whole session)."
                     } else {
-                        ""
+                        "Set lasts to session to run until stopped or the session ends."
                     }
                 ),
                 vec![
@@ -119,10 +119,12 @@ impl Tool for MonitorTool {
                         "expires_minutes",
                         &if workers {
                             format!(
-                                "Duration in minutes, 1 to {longest} (default {longest}, minimum when lasts is set)."
+                                "Duration in minutes, 1 to {longest} (default {longest}, minimum for while_workers_run, unused for standing or session)."
                             )
                         } else {
-                            format!("Duration in minutes, 1 to {longest} (default {longest}).")
+                            format!(
+                                "Duration in minutes, 1 to {longest} (default {longest}, unused for session)."
+                            )
                         },
                         false,
                     ),
@@ -131,26 +133,31 @@ impl Tool for MonitorTool {
                         "End after the first alert (or immediately if a success/failure check already matches).",
                         false,
                     ),
-                ]
-                .into_iter()
-                .chain(workers.then(|| {
-                    parameter(
-                        "lasts",
-                        "Set to while_workers_run to continue past expires_minutes until your last worker finishes.",
-                        false,
-                    )
-                    .with_enum(["while_workers_run"])
-                }))
-                .collect(),
+                    if workers {
+                        parameter(
+                            "lasts",
+                            "while_workers_run continues past expires_minutes until your last worker finishes. standing pauses when no workers run and resumes when one starts, with no expiry. session lasts until stopped or the session ends, with no expiry.",
+                            false,
+                        )
+                        .with_enum(["while_workers_run", "standing", "session"])
+                    } else {
+                        parameter(
+                            "lasts",
+                            "Set to session to last until stopped or the session ends, with no expiry.",
+                            false,
+                        )
+                        .with_enum(["session"])
+                    },
+                ],
             ),
             Operation::Control => (
                 Self::NAMES[1],
                 format!(
-                    "Lists your monitors (action list), keeps one going for longer (rearm), or stops one and its command (stop). rearm sets its end to minutes from now.{}",
+                    "Lists your monitors (action list), keeps a timed one going for longer (rearm), or stops one and its command (stop). rearm sets its end to minutes from now.{}",
                     if workers {
-                        " A monitor that lasts while your workers run goes on past that while they do."
+                        " A monitor that lasts while your workers run goes on past that while they do. Standing and session monitors don't expire."
                     } else {
-                        ""
+                        " Session monitors don't expire."
                     }
                 ),
                 vec![
@@ -246,14 +253,16 @@ impl Tool for MonitorTool {
                         MonitorOptions::lines(pattern.map(str::to_string))
                     }
                 };
-                options = options.with_expiry(
-                    minutes(&params, "expires_minutes", longest)?.unwrap_or(limits.longest),
-                );
                 if super::tools::boolean(&params, "once", false)? {
                     options = options.once();
                 }
                 if let Some(lasts) = optional_string(&params, "lasts")? {
                     options = options.with_lifetime(self.lifetime(lasts)?);
+                }
+                if options.lifetime.expires() {
+                    options = options.with_expiry(
+                        minutes(&params, "expires_minutes", longest)?.unwrap_or(limits.longest),
+                    );
                 }
                 Ok(self
                     .manager
@@ -270,6 +279,37 @@ impl Tool for MonitorTool {
                 let id = Uuid::parse_str(string(&params, "job_id")?).map_err(tool_error)?;
                 match action {
                     "rearm" => {
+                        let (once, lifetime) = {
+                            let job = self
+                                .manager
+                                .owned(context.task_id, id)
+                                .map_err(tool_error)?;
+                            let data = job.data.lock().unwrap();
+                            match data.record.monitor.as_ref() {
+                                None => {
+                                    return Err(tool_error(format!("job {id} isn't a monitor")));
+                                }
+                                Some(_) if !data.running() => {
+                                    return Err(tool_error(format!(
+                                        "monitor {id} has ended. monitor_start starts a new one"
+                                    )));
+                                }
+                                Some(monitor) => (monitor.once, monitor.lifetime),
+                            }
+                        };
+                        match lifetime {
+                            MonitorLifetime::Session => {
+                                return Ok(format!(
+                                    "Monitor {id} lasts for this session, so it doesn't expire and needs no rearm."
+                                ));
+                            }
+                            MonitorLifetime::Standing => {
+                                return Ok(format!(
+                                    "Monitor {id} is a standing monitor, so it doesn't expire and needs no rearm."
+                                ));
+                            }
+                            MonitorLifetime::Timed | MonitorLifetime::WhileWorkersRun => {}
+                        }
                         let lasts = minutes(&params, "minutes", longest)?.unwrap_or(limits.longest);
                         let ends =
                             self.manager
@@ -280,16 +320,6 @@ impl Tool for MonitorTool {
                                     )),
                                     error => tool_error(error),
                                 })?;
-                        let (once, lifetime) = self
-                            .manager
-                            .owned(context.task_id, id)
-                            .ok()
-                            .and_then(|job| {
-                                let data = job.data.lock().unwrap();
-                                let monitor = data.record.monitor.as_ref()?;
-                                Some((monitor.once, monitor.lifetime))
-                            })
-                            .unwrap_or_default();
                         Ok(format!(
                             "Monitor {id} now ends at {}, in {}{}.{}",
                             clock(ends),
@@ -342,29 +372,39 @@ impl Tool for MonitorTool {
 }
 
 impl MonitorTool {
-    /// The lifetime `lasts` names. `while_workers_run` (with spaces or
-    /// hyphens too) is the only one, and only where the host says whether
-    /// workers run.
+    /// The lifetime `lasts` names (`session`, or where the host reports worker
+    /// liveness, `while_workers_run` and `standing` too, with spaces or hyphens
+    /// accepted).
     fn lifetime(&self, lasts: &str) -> std::result::Result<MonitorLifetime, ToolError> {
         let name = lasts.trim().to_ascii_lowercase().replace([' ', '-'], "_");
-        if name != "while_workers_run" {
-            return Err(ToolError::ParameterValidation {
+        match name.as_str() {
+            "session" => Ok(MonitorLifetime::Session),
+            "while_workers_run" | "standing" => {
+                if !self.manager.has_worker_liveness() {
+                    return Err(ToolError::ParameterValidation {
+                        param_name: "lasts".into(),
+                        message: "you have no workers here, so use session or leave out lasts"
+                            .into(),
+                    });
+                }
+                Ok(if name == "standing" {
+                    MonitorLifetime::Standing
+                } else {
+                    MonitorLifetime::WhileWorkersRun
+                })
+            }
+            _ => Err(ToolError::ParameterValidation {
                 param_name: "lasts".into(),
-                message: "lasts takes while_workers_run, or leave it out".into(),
-            });
+                message: if self.manager.has_worker_liveness() {
+                    "lasts takes while_workers_run, standing or session, or leave it out".into()
+                } else {
+                    "lasts takes session, or leave it out".into()
+                },
+            }),
         }
-        if !self.manager.has_worker_liveness() {
-            return Err(ToolError::ParameterValidation {
-                param_name: "lasts".into(),
-                message: "you have no workers here, so leave out lasts".into(),
-            });
-        }
-        Ok(MonitorLifetime::WhileWorkersRun)
     }
 
-    /// `owner`'s running monitors, as `monitor_control list` gives them. A
-    /// monitor that alerts once says so, and one that lasts while workers
-    /// run says that too, and after its time, while they do, when it ends.
+    /// `owner`'s running monitors, as `monitor_control list` gives them.
     fn list(&self, owner: Uuid) -> Vec<Value> {
         let now = SystemTime::now();
         let workers = self.manager.workers_running(owner);
@@ -380,26 +420,45 @@ impl MonitorTool {
                         "watching": info.trigger.watching(),
                         "alerts": info.alerts,
                     });
-                    let left = info.expires_at.duration_since(now).unwrap_or_default();
-                    let while_workers = info.lifetime == MonitorLifetime::WhileWorkersRun;
-                    // Past its time, by the clock its timing goes by.
-                    let past = || {
-                        self.manager.owned(owner, job.job_id).is_ok_and(|job| {
-                            job.data
-                                .lock()
-                                .unwrap()
-                                .monitor
-                                .as_ref()
-                                .is_some_and(|arming| arming.expires <= tokio::time::Instant::now())
-                        })
-                    };
-                    if while_workers && workers && past() {
-                        entry["ends"] = json!("after your last worker finishes");
-                    } else {
-                        entry["ends_in_minutes"] = json!((left.as_secs() + 30) / 60);
-                    }
-                    if while_workers {
-                        entry["lasts"] = json!("while_workers_run");
+                    match info.lifetime {
+                        MonitorLifetime::Timed => {
+                            let left = info.expires_at.duration_since(now).unwrap_or_default();
+                            entry["ends_in_minutes"] = json!((left.as_secs() + 30) / 60);
+                        }
+                        MonitorLifetime::WhileWorkersRun => {
+                            // Past its time, by the clock its timing goes by.
+                            let past =
+                                self.manager.owned(owner, job.job_id).is_ok_and(|job| {
+                                    job.data.lock().unwrap().monitor.as_ref().is_some_and(
+                                        |arming| {
+                                            arming.expires.is_some_and(|expires| {
+                                                expires <= tokio::time::Instant::now()
+                                            })
+                                        },
+                                    )
+                                });
+                            if workers && past {
+                                entry["ends"] = json!("after your last worker finishes");
+                            } else {
+                                let left = info.expires_at.duration_since(now).unwrap_or_default();
+                                entry["ends_in_minutes"] = json!((left.as_secs() + 30) / 60);
+                            }
+                            entry["lasts"] = json!("while_workers_run");
+                        }
+                        MonitorLifetime::Session => {
+                            entry["lasts"] = json!("session");
+                            entry["ends"] = json!("when stopped or this session ends");
+                        }
+                        MonitorLifetime::Standing => {
+                            entry["lasts"] = json!("standing");
+                            entry["paused"] = json!(info.paused);
+                            entry["status"] = json!(if info.paused {
+                                "paused until a worker starts"
+                            } else {
+                                "active"
+                            });
+                            entry["ends"] = json!("when stopped or this session ends");
+                        }
                     }
                     if info.once {
                         entry["once"] = json!(true);

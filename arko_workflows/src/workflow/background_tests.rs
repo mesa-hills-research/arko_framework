@@ -343,30 +343,33 @@ async fn ended_after_workers(jobs: &TerminalManager, lead: uuid::Uuid, id: uuid:
     );
 }
 
-/// Whether `monitor_start` offers `lasts`.
+/// Whether `monitor_start` offers worker-dependent lifetimes
+/// (`while_workers_run` and `standing`) on `lasts`.
 #[cfg(unix)]
-fn offers_lasts(jobs: &Arc<TerminalManager>) -> bool {
-    arko_agents::terminal::MonitorTool::all(jobs.clone())[0]
+fn offers_worker_lasts(jobs: &Arc<TerminalManager>) -> bool {
+    let schema = arko_agents::terminal::MonitorTool::all(jobs.clone())[0]
         .definition()
-        .parameters
-        .iter()
-        .any(|param| param.name == "lasts")
+        .to_json_schema();
+    let values = schema["properties"]["lasts"]["enum"]
+        .as_array()
+        .expect("lasts enum");
+    values.iter().any(|v| v == "while_workers_run") && values.iter().any(|v| v == "standing")
 }
 
 /// With subagents, the manager learns whether an agent's workers run. A
 /// monitor of a lead that lasts while they do goes on past its time while
 /// its worker runs, and ends when the worker finishes. `monitor_start`
-/// offers that lifetime.
+/// offers the worker lifetimes.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_leads_monitor_lasts_while_its_worker_runs() {
     let workspace = Workspace::new();
     let server = slow_worker_server().await;
     let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
-    assert!(!offers_lasts(&jobs));
+    assert!(!offers_worker_lasts(&jobs));
     let slow = Arc::new(Slow::default());
     let workflow = lead_and_worker(&server, &workspace, &slow, &jobs, true);
-    assert!(offers_lasts(&jobs));
+    assert!(offers_worker_lasts(&jobs));
     let lead = uuid::Uuid::new_v4();
     start_worker(&workflow, &workspace, &slow, lead).await;
     let monitor = kept_monitor(&jobs, &workspace, lead).await;
@@ -402,7 +405,7 @@ async fn a_dropped_workflows_workers_keep_no_monitor() {
     let context = workflow.context().clone();
     drop(workflow);
     ended_after_workers(&jobs, lead, monitor).await;
-    assert!(!offers_lasts(&jobs));
+    assert!(!offers_worker_lasts(&jobs));
     drop(context);
 }
 
@@ -434,7 +437,74 @@ async fn workflows_that_share_a_manager_keep_their_own_monitors() {
         jobs.status(lead, monitor, None).unwrap().state,
         JobState::Running
     );
-    assert!(offers_lasts(&jobs));
+    assert!(offers_worker_lasts(&jobs));
     first_slow.release.notify_one();
     ended_after_workers(&jobs, lead, monitor).await;
+}
+
+/// A lead's standing monitor starts paused before any worker runs, becomes
+/// active when a first worker runs, pauses again when that worker finishes,
+/// and automatically resumes when a second worker starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_leads_standing_monitor_pauses_and_resumes_across_workers() {
+    use arko_agents::terminal::{JobKind, MonitorLifetime, MonitorOptions};
+    let workspace = Workspace::new();
+    let server = slow_worker_server().await;
+    let jobs = TerminalManager::new(TerminalConfig::new(workspace.0.join(".jobs"))).unwrap();
+    let slow = Arc::new(Slow::default());
+    let workflow = lead_and_worker(&server, &workspace, &slow, &jobs, true);
+    let lead = uuid::Uuid::new_v4();
+    let context = TaskContext::new(lead, "lead", "Lead it.", &workspace.0);
+    let monitor = jobs
+        .start_monitor(
+            &context,
+            "sleep 60",
+            MonitorOptions::lines(None).with_lifetime(MonitorLifetime::Standing),
+        )
+        .await
+        .unwrap()
+        .job_id;
+    let is_paused = |jobs: &Arc<TerminalManager>| {
+        jobs.jobs()
+            .into_iter()
+            .find_map(|job| match (job.job_id == monitor, job.kind) {
+                (true, JobKind::Monitor(info)) => Some(info.paused),
+                _ => None,
+            })
+            .expect("standing monitor listed")
+    };
+    let wait_paused = |jobs: Arc<TerminalManager>, expected: bool| async move {
+        within(async {
+            loop {
+                if is_paused(&jobs) == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+    };
+    assert!(is_paused(&jobs));
+
+    // Worker 1 starts and the monitor becomes active.
+    start_worker(&workflow, &workspace, &slow, lead).await;
+    wait_paused(jobs.clone(), false).await;
+
+    // Worker 1 finishes and the monitor pauses cleanly instead of ending.
+    slow.release.notify_one();
+    wait_paused(jobs.clone(), true).await;
+    assert_eq!(
+        jobs.status(lead, monitor, None).unwrap().state,
+        JobState::Running
+    );
+
+    // Worker 2 starts and the monitor automatically resumes.
+    start_worker(&workflow, &workspace, &slow, lead).await;
+    wait_paused(jobs.clone(), false).await;
+    slow.release.notify_one();
+    wait_paused(jobs.clone(), true).await;
+
+    jobs.cancel(lead, monitor).unwrap();
+    jobs.shutdown().await;
 }

@@ -448,8 +448,10 @@ impl TerminalManager {
             .values()
             .filter_map(|job| {
                 let data = job.data.lock().unwrap();
-                (data.record.state == JobState::Running && !data.record.held)
-                    .then(|| info(&data.record, job.command.clone(), job.started))
+                (data.record.state == JobState::Running && !data.record.held).then(|| {
+                    let paused = data.monitor.as_ref().is_some_and(|arming| arming.paused);
+                    info(&data.record, job.command.clone(), job.started, paused)
+                })
             })
             .collect();
         running.sort_by_key(|job| job.started);
@@ -560,7 +562,7 @@ impl TerminalManager {
 }
 
 /// A job as [`JobInfo`] gives it.
-pub(super) fn info(record: &Record, label: String, started: Instant) -> JobInfo {
+pub(super) fn info(record: &Record, label: String, started: Instant, paused: bool) -> JobInfo {
     JobInfo {
         owner: record.owner,
         job_id: record.job_id,
@@ -576,6 +578,7 @@ pub(super) fn info(record: &Record, label: String, started: Instant) -> JobInfo 
                 alerts: monitor.alerts,
                 once: monitor.once,
                 lifetime: monitor.lifetime,
+                paused,
             }),
             (None, None) => JobKind::Command,
         },

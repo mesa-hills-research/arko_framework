@@ -326,9 +326,24 @@ pub(super) async fn run(
         .upgrade()
         .map(|manager| manager.watch_monitor_timing());
     let mut workers = runner::workers_watch(&manager, Some(&running));
+    let standing = running.lifetime == monitor::MonitorLifetime::Standing;
+    let mut paused = false;
     let stop = loop {
+        if *cancellation.borrow() {
+            break JobState::Cancelled;
+        }
+        if standing && first.is_none() {
+            let active = running.workers_active(&manager);
+            if active && paused {
+                monitor::set_paused(&data, &mut paused, false);
+                next = Instant::now();
+            } else if !active && !paused {
+                current = None;
+                monitor::set_paused(&data, &mut paused, true);
+            }
+        }
         let event = runner::until(running.next_event(&manager, &data));
-        let idle = current.is_none();
+        let idle = current.is_none() && !paused;
         let check = async {
             match current.as_mut() {
                 // A checker that overstays its limit counts as timed out,
@@ -361,10 +376,10 @@ pub(super) async fn run(
                     failure = Some(error.to_string());
                     break JobState::Failed;
                 }
-                if let Some(first) = first.take() {
+                if let Some(first_tx) = first.take() {
                     let couldnt_run = run.error.is_some();
-                    let delivered = first.send(run.clone()).is_ok();
                     if couldnt_run {
+                        let _ = first_tx.send(run.clone());
                         told = true;
                         failure = run.error.clone();
                         break JobState::Failed;
@@ -372,6 +387,7 @@ pub(super) async fn run(
                     if running.once && awaited(when, run.success) {
                         // The start says so when it had the result in
                         // time. Otherwise the result is the alert.
+                        let delivered = first_tx.send(run.clone()).is_ok();
                         told = delivered;
                         if !delivered {
                             running.tell(
@@ -386,8 +402,15 @@ pub(super) async fn run(
                         done = Some(Done::Alerted);
                         break JobState::Succeeded;
                     }
-                }
-                if let Some(news) = state.observe(run.result()) {
+                    let _ = state.observe(run.result());
+                    // Sync standing pause before waking start_check, so
+                    // MonitorInfo.paused is settled when start_monitor returns.
+                    if standing {
+                        let active = running.workers_active(&manager);
+                        monitor::set_paused(&data, &mut paused, !active);
+                    }
+                    let _ = first_tx.send(run);
+                } else if let Some(news) = state.observe(run.result()) {
                     let alerts = matches!(news, News::Check { alerts: true, .. });
                     running.tell(&manager, news);
                     if alerts && running.once {
@@ -396,17 +419,17 @@ pub(super) async fn run(
                     }
                 }
             }
-            _ = sleep_until(next), if idle => {
-                let started = Instant::now();
-                next = started + every;
-                current = Some((checker(limit), started));
-            }
             // Planned again.
             () = runner::retimed(&mut timing) => {
                 workers = runner::workers_watch(&manager, Some(&running));
             }
             // Workers started or ended.
             () = runner::workers_changed(&mut workers) => {}
+            _ = sleep_until(next), if idle => {
+                let started = Instant::now();
+                next = started + every;
+                current = Some((checker(limit), started));
+            }
             () = event => {
                 if let Some(ended) = running.timed_event(&manager, &data, &config) {
                     done = Some(ended);

@@ -360,8 +360,9 @@ pub(super) struct Standing {
     pub(super) alerts: u32,
     /// It ends after its first alert.
     pub(super) once: bool,
-    /// It lasts while its owner's workers run, and one does.
-    pub(super) kept: bool,
+    pub(super) lifetime: MonitorLifetime,
+    /// Its owner currently has workers running.
+    pub(super) workers: bool,
 }
 
 /// The note for `parts`. `monitors` gives each monitor as it stands.
@@ -375,12 +376,20 @@ pub(super) fn note(parts: &[Part], monitors: &HashMap<Uuid, Standing>, now: Syst
 
 /// What an alert says of when its monitor ends, unless the note says that
 /// it ended or ends soon. A monitor that alerts once ends with its alert,
-/// and one whose owner's workers keep it lasts while they run. One
-/// forgotten before its note went ends now.
+/// session and standing monitors don't expire, and one whose owner's workers
+/// keep it lasts while they run. One forgotten before its note went ends now.
 fn ends_line(standing: Option<&Standing>, now: SystemTime) -> Option<String> {
     let expires_at = match standing {
         Some(standing) if standing.once => return None,
-        Some(standing) if standing.kept => {
+        Some(standing) if standing.lifetime == MonitorLifetime::Session => {
+            return Some("\nIt lasts for this session.".to_string());
+        }
+        Some(standing) if standing.lifetime == MonitorLifetime::Standing => {
+            return Some("\nIt runs whenever your workers run.".to_string());
+        }
+        Some(standing)
+            if standing.lifetime == MonitorLifetime::WhileWorkersRun && standing.workers =>
+        {
             return Some("\nIt lasts while your workers run.".to_string());
         }
         Some(standing) => standing.expires_at,
@@ -761,7 +770,8 @@ impl TerminalManager {
                     expires_at: monitor.expires_at,
                     alerts: monitor.alerts,
                     once: monitor.once,
-                    kept: workers && monitor.lifetime == MonitorLifetime::WhileWorkersRun,
+                    lifetime: monitor.lifetime,
+                    workers,
                 },
             );
             // An ended job's record is final, and may be forgotten.
@@ -939,7 +949,8 @@ mod tests {
             expires_at,
             alerts,
             once: false,
-            kept: false,
+            lifetime: MonitorLifetime::Timed,
+            workers: false,
         }
     }
 
@@ -1080,6 +1091,37 @@ mod tests {
                 ),
             "{text}"
         );
+        // Session and standing monitors omit any countdown.
+        for (lifetime, footer) in [
+            (MonitorLifetime::Session, "\nIt lasts for this session."),
+            (
+                MonitorLifetime::Standing,
+                "\nIt runs whenever your workers run.",
+            ),
+        ] {
+            let mut outbox = Outbox::default();
+            outbox.add(
+                tests::header(id, Some("error")),
+                lines(&["boom"], 0),
+                &limits,
+                now,
+            );
+            let monitors = HashMap::from([(
+                id,
+                Standing {
+                    expires_at: at(0),
+                    alerts: 1,
+                    once: false,
+                    lifetime,
+                    workers: true,
+                },
+            )]);
+            let text = note(&outbox.take(now), &monitors, at(10 * 3600));
+            assert!(
+                text.ends_with(footer) && !text.contains("It ends in"),
+                "{text}"
+            );
+        }
     }
 
     fn check_header(id: Uuid, when: CheckChange) -> Header {

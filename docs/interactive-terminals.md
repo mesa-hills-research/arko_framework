@@ -186,7 +186,7 @@ left out.
 
 A monitor watches a command for its agent and alerts it, so the agent doesn't
 poll. It is a job of the manager, listed with `JobKind::Monitor(MonitorInfo {
-trigger, expires_at, alerts, once, lifetime })`, and `terminal_status` reads its output.
+trigger, expires_at, alerts, once, lifetime, paused })`, and `terminal_status` reads its output.
 
 - `MonitorOptions::lines(pattern)` runs the command in a terminal (a PTY) until
   it exits or the monitor ends, and each output line that matches `pattern`, a
@@ -206,9 +206,9 @@ trigger, expires_at, alerts, once, lifetime })`, and `terminal_status` reads its
   output.
 
 `start_monitor(context, command, options)` starts one for the context's task,
-after the command guard checks the command. `with_expiry` sets how long it lasts
-(30 minutes by default and at most) and `with_label` what lists show instead of
-the command. Two options suit watches of other lengths.
+after the command guard checks the command. `with_expiry` sets how long a timed
+monitor lasts (30 minutes by default and at most) and `with_label` what lists
+show instead of the command. Other options suit watches of different lengths.
 
 - `once()` ends the monitor after its first alert, which stops its command or
   its checks (its job ends `succeeded`). It suits an event that happens once,
@@ -219,19 +219,30 @@ the command. Two options suit watches of other lengths.
 - `with_lifetime(MonitorLifetime::WhileWorkersRun)` keeps the monitor past its
   time while any of its owner's workers (subagents) run, with no warning, and
   ends it when the last one finishes (`timed_out`, with the error `ended after
-  its agent's workers finished`). It suits a watch that matters while workers
-  work, such as disk space or memory during their builds, or a dev server's
-  errors. With no worker running it ends at its time, as other monitors do, and a
-  worker that starts before then keeps it. A host says whether workers run
-  with `add_worker_liveness(weak)`, a `WorkerLiveness` that answers
-  `has_running_workers(owner)` and gives a `watch` channel that changes as
-  workers start and end. The manager holds it weakly, so it counts while its
-  host holds it, and a host that drops it changes or closes its channel so the
-  monitors look again. Several hosts can share a manager, and a monitor is kept
-  while any of them says its owner has workers running. Monitors also ask
-  again each minute (`WORKERS_RECHECK`) while workers keep them. Each workflow
-  with subagents and `WorkflowBuilder::background_jobs` adds its own, which
-  counts while the workflow lives.
+  its agent's workers finished`). It suits a watch that matters for one batch of
+  workers, such as a dev server's errors. With no worker running it ends at its
+  time, as other monitors do, and a worker that starts before then keeps it. A
+  host says whether workers run with `add_worker_liveness(weak)`, a
+  `WorkerLiveness` that answers `has_running_workers(owner)` and gives a `watch`
+  channel that changes as workers start and end. The manager holds it weakly, so
+  it counts while its host holds it, and a host that drops it changes or closes
+  its channel so the monitors look again. Several hosts can share a manager, and
+  a monitor is kept while any of them says its owner has workers running.
+  Monitors also ask again each minute (`WORKERS_RECHECK`). Each workflow with
+  subagents and `WorkflowBuilder::background_jobs` adds its own, which counts
+  while the workflow lives.
+- `with_lifetime(MonitorLifetime::Standing)` lasts the whole session with no
+  expiry or rearm warnings, pausing whenever no worker of its owner runs
+  (`MonitorInfo::paused` is `true`) and resuming automatically whenever a worker
+  starts. It suits cheap session-wide guards such as free disk space or memory
+  during builds. A standing check runs one baseline check at start and then
+  pauses until a worker starts, keeping its baseline state across pauses. A
+  standing line monitor terminates its child cleanly while paused (without
+  sending an exit alert) and respawns it when a worker starts.
+- `with_lifetime(MonitorLifetime::Session)` lasts the whole session until
+  stopped, its first alert with `once`, its command exits, or the manager shuts
+  down, with no expiry or rearm warnings. It is available even without
+  `WorkerLiveness`.
 
 It returns `MonitorStarted { job_id, expires_at, summary }`, where
 `summary` is what the `monitor_start` tool returns. A monitor of lines waits a
@@ -348,8 +359,8 @@ allowlist names them.
 
 | Tool | Behavior |
 | --- | --- |
-| `monitor_start` | Watch `command`'s lines that match `pattern`, or with `every_seconds` run it as a check and alert as `alert_when` says (`success`, `failure`, `change` or `output`), for `expires_minutes` (1 to 30). `once: true` ends it after its first alert. `lasts: "while_workers_run"` keeps it while the agent's workers run, and is offered only while a `WorkerLiveness` counts. Returns what the monitor watches until when, with its output so far or its first check's result. |
-| `monitor_control` | `list` the agent's monitors (with `job_id`, `command`, `watching`, `alerts` and `ends_in_minutes`, plus `once` and `lasts` when set, and `ends` in place of `ends_in_minutes` once only its workers keep it), `rearm` one for `minutes` from now (30 by default), or `stop` one. |
+| `monitor_start` | Watch `command`'s lines that match `pattern`, or with `every_seconds` run it as a check and alert as `alert_when` says (`success`, `failure`, `change` or `output`), for `expires_minutes` (1 to 30). `once: true` ends it after its first alert. `lasts` accepts `"session"` (always offered, no expiry), and when a `WorkerLiveness` counts also `"while_workers_run"` (continues past `expires_minutes` until the last worker finishes) and `"standing"` (pauses with no workers and resumes when one starts, no expiry). Returns what the monitor watches, with its output so far or its first check's result. |
+| `monitor_control` | `list` the agent's monitors (with `job_id`, `command`, `watching`, `alerts`, and `ends_in_minutes` for timed monitors, plus `once` and `lasts` when set, `ends` when no countdown applies, and `paused` and `status` for standing monitors), `rearm` a timed monitor for `minutes` from now (30 by default, while session and standing monitors report that they need no rearm), or `stop` one. |
 
 A Claude Code agent's monitors run in the runtime's manager like the native
 loop's. Their notes reach it with its next tool call's result (the

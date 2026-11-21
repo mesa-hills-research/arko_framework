@@ -475,6 +475,9 @@ impl JobData {
     ) -> TerminalSnapshot {
         debug_assert!(!self.record.state.is_terminal(), "a job ends once");
         self.ending = None;
+        if let Some(arming) = self.monitor.as_mut() {
+            arming.paused = false;
+        }
         self.record.state = state;
         self.record.error = error;
         self.record.input = None;
@@ -735,6 +738,7 @@ impl TerminalManager {
                     &record,
                     record.label.clone().unwrap_or_default(),
                     std::time::Instant::now(),
+                    false,
                 ));
             }
             // Only a record this open changes is saved again.
@@ -975,6 +979,11 @@ impl TerminalManager {
         }
         self.check_command(command, context.current_working_directory)?;
         io::prepare_memory_limit_sync(&self.config);
+        // Asked before the jobs' lock is taken, as WorkerLiveness may take its own locks.
+        let standing = monitor
+            .as_ref()
+            .is_some_and(|watching| watching.record.lifetime == MonitorLifetime::Standing);
+        let start_paused = standing && !self.workers_running(context.task_id);
         let mut jobs = self.jobs.lock().unwrap();
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TerminalError::Invalid(
@@ -985,7 +994,8 @@ impl TerminalManager {
             monitor::check_room(&jobs, context.task_id, &watching.limits)?;
         }
         let id = Uuid::new_v4();
-        std::fs::create_dir(self.config.directory.join(id.to_string()))?;
+        let directory = self.config.directory.join(id.to_string());
+        std::fs::create_dir(&directory)?;
         let label = options.label.clone().unwrap_or_else(|| command.to_string());
         let record = Record {
             job_id: id,
@@ -1007,49 +1017,55 @@ impl TerminalManager {
             monitor: monitor.as_ref().map(|watching| watching.record.clone()),
         };
         let mut data = JobData::new(record);
-        data.monitor = monitor.as_ref().map(|watching| watching.arming.clone());
+        data.monitor = monitor.as_ref().map(|watching| {
+            let mut arming = watching.arming.clone();
+            arming.paused = start_paused;
+            arming
+        });
         let data = Arc::new(Mutex::new(data));
         let watch = monitor.map(|watching| watching.watch(id, label.clone(), context.task_id));
-        let mut log = std::fs::File::create(
-            self.config
-                .directory
-                .join(id.to_string())
-                .join("output.log"),
-        )?;
-        let own_args;
-        let config = match &options.shell_args {
-            Some(args) => {
-                own_args = TerminalConfig {
-                    shell_args: args.clone(),
-                    ..self.config.clone()
-                };
-                &own_args
-            }
-            None => &self.config,
+        let mut log = std::fs::File::create(directory.join("output.log"))?;
+        let spawn_config = match &options.shell_args {
+            Some(args) => TerminalConfig {
+                shell_args: args.clone(),
+                ..self.config.clone()
+            },
+            None => self.config.clone(),
         };
-        let process = match io::spawn(
-            config,
-            command,
-            context.current_working_directory,
-            options.terminal,
-            &self.config.directory.join(id.to_string()),
-        ) {
-            Ok(process) => process,
-            Err(error) => {
-                {
-                    let mut data = data.lock().unwrap();
-                    data.record.state = JobState::Failed;
-                    data.record.error = Some(error.to_string());
-                    persist(&self.config, &data.record)?;
+        let process = if start_paused {
+            None
+        } else {
+            match io::spawn(
+                &spawn_config,
+                command,
+                context.current_working_directory,
+                options.terminal,
+                &directory,
+            ) {
+                Ok(process) => Some(process),
+                Err(error) => {
+                    {
+                        let mut data = data.lock().unwrap();
+                        data.record.state = JobState::Failed;
+                        data.record.error = Some(error.to_string());
+                        persist(&self.config, &data.record)?;
+                    }
+                    jobs.insert(id, completed_job(data));
+                    return Err(TerminalError::Invalid(format!(
+                        "could not start job {id}: {error}"
+                    )));
                 }
-                jobs.insert(id, completed_job(data));
-                return Err(TerminalError::Invalid(format!(
-                    "could not start job {id}: {error}"
-                )));
             }
         };
         // ProcessGroup and Child guards clean up if persistence fails here.
         persist(&self.config, &data.lock().unwrap().record)?;
+        let spawner = standing.then(|| runner::LineSpawner {
+            config: spawn_config,
+            command: command.to_string(),
+            cwd: context.current_working_directory.to_path_buf(),
+            terminal: options.terminal,
+            directory,
+        });
         let (controls, receiver) = mpsc::channel(16);
         let (cancel, cancellation) = watch::channel(false);
         let (changed, changes) = watch::channel(0);
@@ -1082,6 +1098,7 @@ impl TerminalManager {
                 detector,
                 data,
                 process,
+                spawner,
                 &mut log,
                 options,
                 receiver,

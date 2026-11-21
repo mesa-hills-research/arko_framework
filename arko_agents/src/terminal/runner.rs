@@ -161,13 +161,106 @@ fn declaration(bytes: &[u8], data: &mut JobData, seen: &mut HashSet<String>) -> 
     Ok(true)
 }
 
+struct ActiveProcess {
+    process: io::Process,
+    readers: JoinSet<()>,
+    requests_task: tokio::task::JoinHandle<()>,
+    incoming: mpsc::Receiver<ReadEvent>,
+}
+
+impl ActiveProcess {
+    fn from_process(mut process: io::Process) -> Self {
+        let (sender, incoming) = mpsc::channel(32);
+        let (readers, requests_task) = readers(&mut process, sender);
+        Self {
+            process,
+            readers,
+            requests_task,
+            incoming,
+        }
+    }
+}
+
+/// Parameters to respawn a standing line monitor's command when a worker
+/// starts.
+pub(super) struct LineSpawner {
+    pub(super) config: TerminalConfig,
+    pub(super) command: String,
+    pub(super) cwd: PathBuf,
+    pub(super) terminal: bool,
+    pub(super) directory: PathBuf,
+}
+
+impl LineSpawner {
+    fn spawn(&self) -> std::io::Result<ActiveProcess> {
+        let process = io::respawn(
+            &self.config,
+            &self.command,
+            &self.cwd,
+            self.terminal,
+            &self.directory,
+        )?;
+        Ok(ActiveProcess::from_process(process))
+    }
+}
+
+/// Terminates a standing line monitor's child process for a pause, draining
+/// any buffered output without ending the monitor or sending an exit alert.
+#[allow(clippy::too_many_arguments)]
+async fn pause_process(
+    mut active: ActiveProcess,
+    manager: &Weak<TerminalManager>,
+    config: &TerminalConfig,
+    data: &Arc<Mutex<JobData>>,
+    log: &mut std::fs::File,
+    logged: &mut u64,
+    monitor: &mut Option<monitor::LineWatch>,
+    changed: &watch::Sender<u64>,
+) -> Option<String> {
+    active.requests_task.abort();
+    let _ = active.requests_task.await;
+    active.process.group.kill();
+    let _ = active.process.child.wait().await;
+    let mut failure = None;
+    let mut wrote = false;
+    let drain = async {
+        while let Some(item) = active.incoming.recv().await {
+            if let ReadEvent::Output(bytes) = item {
+                let (offset, result) = {
+                    let mut data = data.lock().unwrap();
+                    let offset = data.record.output_end;
+                    (offset, output(&mut data, &bytes, log, logged, config))
+                };
+                wrote = true;
+                if let Err(error) = result {
+                    failure = Some(error.to_string());
+                }
+                if let Some(watch) = monitor {
+                    watch.output(manager, &bytes, offset);
+                }
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
+    active.readers.abort_all();
+    while active.readers.join_next().await.is_some() {}
+    if let Some(watch) = monitor {
+        watch.flush(manager);
+    }
+    if wrote {
+        changed.send_replace(data.lock().unwrap().record.revision);
+    }
+    failure
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
     manager: Weak<TerminalManager>,
     config: TerminalConfig,
     detector: Arc<Detector>,
     data: Arc<Mutex<JobData>>,
-    mut process: io::Process,
+    process: Option<io::Process>,
+    spawner: Option<LineSpawner>,
     log: &mut std::fs::File,
     options: StartOptions,
     mut controls: mpsc::Receiver<Control>,
@@ -175,8 +268,7 @@ pub(super) async fn run(
     changed: watch::Sender<u64>,
     mut monitor: Option<monitor::LineWatch>,
 ) {
-    let (sender, mut incoming) = mpsc::channel(32);
-    let (mut readers, requests_task) = readers(&mut process, sender);
+    let mut active_proc = process.map(ActiveProcess::from_process);
     // A monitor's end is its only time limit.
     let timeout = match monitor {
         Some(_) => options.timeout,
@@ -198,7 +290,63 @@ pub(super) async fn run(
         .and(manager.upgrade())
         .map(|manager| manager.watch_monitor_timing());
     let mut workers = workers_watch(&manager, monitor.as_ref().map(|watch| &watch.running));
+    let standing = monitor
+        .as_ref()
+        .is_some_and(|watch| watch.running.lifetime == monitor::MonitorLifetime::Standing);
+    let mut paused = active_proc.is_none();
     while stop.is_none() {
+        if *cancellation.borrow() {
+            stop = Some(JobState::Cancelled);
+            break;
+        }
+        if standing {
+            let active = monitor
+                .as_ref()
+                .is_some_and(|watch| watch.running.workers_active(&manager));
+            if active && active_proc.is_none() {
+                match spawner
+                    .as_ref()
+                    .expect("standing line monitor has a spawner")
+                    .spawn()
+                {
+                    Ok(spawned) => {
+                        active_proc = Some(spawned);
+                        monitor::set_paused(&data, &mut paused, false);
+                    }
+                    Err(error) => {
+                        failure = Some(format!("could not resume monitor: {error}"));
+                        stop = Some(JobState::Failed);
+                        break;
+                    }
+                }
+            } else if !active && active_proc.is_some() {
+                if let Some(proc) = active_proc.take()
+                    && let Some(err) = pause_process(
+                        proc,
+                        &manager,
+                        &config,
+                        &data,
+                        log,
+                        &mut logged,
+                        &mut monitor,
+                        &changed,
+                    )
+                    .await
+                {
+                    failure = Some(err);
+                    stop = Some(JobState::Failed);
+                    break;
+                }
+                check_prompt = false;
+                if monitor.as_ref().is_some_and(monitor::LineWatch::is_done) {
+                    done = Some(monitor::Done::Alerted);
+                    stop = Some(JobState::Succeeded);
+                    break;
+                }
+                monitor::set_paused(&data, &mut paused, true);
+                continue;
+            }
+        }
         let wait_deadline = async {
             match deadline {
                 Some(deadline) => sleep_until(deadline).await,
@@ -211,16 +359,40 @@ pub(super) async fn run(
                 .and_then(|watch| watch.running.next_event(&manager, &data)),
         );
         let partial_line = until(monitor.as_ref().and_then(|watch| watch.partial_due()));
+        let (child, incoming, input, replies) = match active_proc.as_mut() {
+            Some(active) => (
+                Some(&mut active.process.child),
+                Some(&mut active.incoming),
+                Some(&mut active.process.input),
+                Some(&mut active.process.replies),
+            ),
+            None => (None, None, None, None),
+        };
+        let has_incoming = incoming
+            .as_ref()
+            .is_some_and(|rx| !rx.is_closed() || !rx.is_empty());
+        let wait_child = async {
+            match child {
+                Some(child) => child.wait().await,
+                None => std::future::pending().await,
+            }
+        };
+        let recv_incoming = async {
+            match incoming {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = cancellation.changed() => { stop = Some(JobState::Cancelled); }
             _ = wait_deadline => { stop = Some(JobState::TimedOut); }
-            result = process.child.wait() => {
+            result = wait_child => {
                 match result {
                     Ok(status) => { exit_code = status.code(); stop = Some(if status.success() { JobState::Succeeded } else { JobState::Failed }); }
                     Err(error) => { failure = Some(error.to_string()); stop = Some(JobState::Failed); }
                 }
             }
-            item = incoming.recv(), if !incoming.is_closed() || !incoming.is_empty() => {
+            item = recv_incoming, if has_incoming => {
                 match item {
                     Some(ReadEvent::Output(bytes)) => {
                         let (offset, result) = {
@@ -301,6 +473,12 @@ pub(super) async fn run(
             control = controls.recv() => {
                 match control {
                     Some(Control::Input { revision, text, response }) => {
+                        let (Some(input), Some(replies)) = (input, replies) else {
+                            let _ = response.send(Err(TerminalError::Invalid(
+                                "this monitor is paused while no workers run".into(),
+                            )));
+                            continue;
+                        };
                         let (stale, request_id) = {
                             let mut data = data.lock().unwrap();
                             if revision != data.record.revision { (true, None) } else {
@@ -320,8 +498,8 @@ pub(super) async fn run(
                             payload.push(b'\n'); payload
                         });
                         let result = match &payload {
-                            Some(bytes) => tokio::time::timeout(Duration::from_secs(2), process.replies.write_all(bytes)).await,
-                            None => tokio::time::timeout(Duration::from_secs(2), process.input.write_all(text.as_bytes())).await,
+                            Some(bytes) => tokio::time::timeout(Duration::from_secs(2), replies.write_all(bytes)).await,
+                            None => tokio::time::timeout(Duration::from_secs(2), input.write_all(text.as_bytes())).await,
                         };
                         match result {
                             Ok(Ok(())) => { let _ = response.send(Ok(())); }
@@ -348,36 +526,38 @@ pub(super) async fn run(
     if let Some(barrier) = barrier {
         barrier.hold().await;
     }
-    requests_task.abort();
-    let _ = requests_task.await;
-    process.group.kill();
-    let _ = process.child.wait().await;
-    // Drain final bytes after process exit, but descendants cannot hold us open.
-    let drain = async {
-        while let Some(item) = incoming.recv().await {
-            if let ReadEvent::Output(bytes) = item {
-                let (offset, result) = {
-                    let mut data = data.lock().unwrap();
-                    let offset = data.record.output_end;
-                    (offset, output(&mut data, &bytes, log, &mut logged, &config))
-                };
-                if let Err(error) = result {
-                    failure = Some(error.to_string());
-                }
-                if let Some(watch) = &mut monitor {
-                    watch.output(&manager, &bytes, offset);
+    if let Some(mut active) = active_proc.take() {
+        active.requests_task.abort();
+        let _ = active.requests_task.await;
+        active.process.group.kill();
+        let _ = active.process.child.wait().await;
+        // Drain final bytes after process exit, but descendants cannot hold us open.
+        let drain = async {
+            while let Some(item) = active.incoming.recv().await {
+                if let ReadEvent::Output(bytes) = item {
+                    let (offset, result) = {
+                        let mut data = data.lock().unwrap();
+                        let offset = data.record.output_end;
+                        (offset, output(&mut data, &bytes, log, &mut logged, &config))
+                    };
+                    if let Err(error) = result {
+                        failure = Some(error.to_string());
+                    }
+                    if let Some(watch) = &mut monitor {
+                        watch.output(&manager, &bytes, offset);
+                    }
                 }
             }
+        };
+        if tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .is_err()
+        {
+            failure = Some("output drain did not complete. Output may be incomplete".into());
         }
-    };
-    if tokio::time::timeout(Duration::from_secs(1), drain)
-        .await
-        .is_err()
-    {
-        failure = Some("output drain did not complete. Output may be incomplete".into());
+        active.readers.abort_all();
+        while active.readers.join_next().await.is_some() {}
     }
-    readers.abort_all();
-    while readers.join_next().await.is_some() {}
     if let Some(watch) = &mut monitor {
         watch.flush(&manager);
     }
@@ -480,7 +660,7 @@ pub(super) async fn retimed(timing: &mut Option<watch::Receiver<u64>>) {
     std::future::pending().await
 }
 
-/// What tells a monitor that lasts while its owner's workers run that they
+/// What tells a monitor that follows its owner's workers that they
 /// started or ended, one for each [`WorkerLiveness`](monitor::WorkerLiveness),
 /// or none for another monitor.
 pub(super) fn workers_watch(
@@ -488,7 +668,7 @@ pub(super) fn workers_watch(
     running: Option<&monitor::Running>,
 ) -> Vec<watch::Receiver<u64>> {
     running
-        .filter(|running| running.lifetime == monitor::MonitorLifetime::WhileWorkersRun)
+        .filter(|running| running.lifetime.watches_workers())
         .and(manager.upgrade())
         .map(|manager| manager.worker_changes())
         .unwrap_or_default()
