@@ -1,12 +1,14 @@
 //! Models that run through the installed Antigravity CLI on the user's plan.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 mod acp;
+mod locate;
 mod profile;
 mod relay;
+mod usage;
 
 pub use acp::{
     ARKO_TOOL_PREFIX, AcpClient, AcpError, AcpEvent, AcpOptions, ArkoToolsOnly, ClientInfo,
@@ -15,11 +17,13 @@ pub use acp::{
     SessionUpdate, ToolCall, WIRE_LOG, agent_fell_back, config_values, image_block,
     log_shows_fallback, text_block, turn_failure,
 };
+pub use locate::{check_sign_in, cli_version, find_agy, version_at_least};
 pub use profile::{
     AGENT_NAME, HelperCommand, MCP_SERVER_NAME, Profile, ProfileSpec, qualified_tool_name,
     run_gate, run_tripwire,
 };
 pub use relay::{RELAY_TOKEN_ENV, RelayHost, run_relay, write_address_file};
+pub use usage::{parse_usage, plan_usage, plan_usage_report};
 
 /// The usage windows Antigravity reports for a set of models.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,12 +126,4 @@ pub enum SignInProblem {
     SignedOut,
     #[error("Could not check the Antigravity CLI. {0}")]
     Failed(String),
-}
-
-pub fn find_agy() -> Option<PathBuf> {
-    None
-}
-
-pub async fn check_sign_in(_cli: Option<&Path>) -> Result<SignIn, SignInProblem> {
-    Err(SignInProblem::Missing)
 }
