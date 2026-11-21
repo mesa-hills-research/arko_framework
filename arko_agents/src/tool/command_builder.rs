@@ -368,9 +368,9 @@ mod tests {
             run_with_path("echo", " . ", &workspace).await.unwrap(),
             ".\n"
         );
-        // `link/..` is the workspace lexically, which the check judged, but the
-        // kernel would follow the link to `outside` first.
-        assert!(crate::utils::is_path_in_workspace("link/../x", &workspace).unwrap());
+        // The command receives a lexical path, but admission also checks
+        // the path a CLI could open directly through the link.
+        assert!(crate::utils::is_path_in_workspace("link/../x", &workspace).is_err());
         assert_eq!(
             run_with_path("cat", "link/../x", &workspace).await.unwrap(),
             "INSIDE"

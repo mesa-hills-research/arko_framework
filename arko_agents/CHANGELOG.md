@@ -2,6 +2,13 @@
 
 ## 0.10.0 (2026-11-18)
 
+### Workspace paths
+
+- The workspace check resolves symbolic links before it decides. A path that leaves the
+  workspace through a link inside it, such as `link/../x` where `link` points outside, is refused.
+  For a path that doesn't exist yet, its deepest existing parent is resolved. Before, the check
+  compared the path's text only, so a link could take a read or write outside the workspace.
+
 ### apply_diff
 
 - `apply_diff` applies every block of a call or none. A block not found, found more than once
