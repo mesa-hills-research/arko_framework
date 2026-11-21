@@ -4,9 +4,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod acp;
 mod profile;
 mod relay;
 
+pub use acp::{
+    ARKO_TOOL_PREFIX, AcpClient, AcpError, AcpEvent, AcpOptions, ArkoToolsOnly, ClientInfo,
+    ConfigOption, ConfigValue, MAX_FRAME, NO_AUTO_UPDATE, NewSession, PermissionDecision,
+    PermissionOption, PermissionPolicy, PermissionRequest, PromptResult, PromptUsage, RpcError,
+    SessionUpdate, ToolCall, WIRE_LOG, agent_fell_back, config_values, image_block,
+    log_shows_fallback, text_block, turn_failure,
+};
 pub use profile::{
     AGENT_NAME, HelperCommand, MCP_SERVER_NAME, Profile, ProfileSpec, qualified_tool_name,
     run_gate, run_tripwire,

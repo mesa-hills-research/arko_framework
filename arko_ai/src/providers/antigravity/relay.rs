@@ -652,6 +652,7 @@ mod tests {
         assert_eq!(started["id"], 2);
         assert_eq!(started["result"]["protocolVersion"], "2025-11-25");
         assert_eq!(started["result"]["serverInfo"]["name"], "arko");
+        assert_eq!(started["result"]["capabilities"], json!({"tools": {}}));
         assert_eq!(listed["id"], 3);
         let names: Vec<&str> = listed["result"]["tools"]
             .as_array()
