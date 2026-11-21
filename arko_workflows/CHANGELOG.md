@@ -9,6 +9,13 @@
   native loop and in Claude Code. Before, they waited for the next turn boundary, up to 270 s.
 - `wait_for_agents` with `runs` still ignores mail from other runs.
 
+### Workspaces through links
+
+- `start_agent`'s `workspace` is judged as arko_agents' workspace check judges a path, with
+  symbolic links resolved. Before, it was compared by name only, so a link inside the caller's
+  directory could start a run outside it with `workspaces_anywhere` off. Such a workspace is now
+  refused with the reason.
+
 ### Tools reached only from inside a call
 
 - An agent tool listed in the agent's `nested_only_tool_names` isn't offered to its runs. A saved

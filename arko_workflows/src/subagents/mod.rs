@@ -140,7 +140,8 @@ pub struct SubagentsConfig {
     /// A copy doesn't end its waits or start a turn of it. Default off.
     pub copy_peer_messages_to_lead: bool,
     /// `start_agent`'s `workspace` may name any directory. By default it must
-    /// be inside the caller's own working directory.
+    /// be inside the caller's own working directory, as
+    /// [`arko_agents::utils::is_path_in_workspace`] judges it.
     pub workspaces_anywhere: bool,
     /// Callers are offered `run_workflow_agent` too (it runs an agent to
     /// completion inside the call). Default on.

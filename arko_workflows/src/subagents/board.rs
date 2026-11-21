@@ -886,11 +886,24 @@ impl Board {
             (Some(path), false) => {
                 let resolved = crate::workflow::options::run_workspace(caller_dir, Path::new(path))
                     .map_err(|error| error.to_string())?;
-                if !config.workspaces_anywhere && !resolved.starts_with(caller_dir) {
-                    return Err(format!(
-                        "the workspace must be inside your working directory {}",
-                        caller_dir.display()
-                    ));
+                // Judged as the agents' path check judges a path, so a link
+                // inside the caller's directory can't lead the run outside.
+                if !config.workspaces_anywhere {
+                    match arko_agents::utils::is_path_in_workspace(path, caller_dir) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(format!(
+                                "the workspace must be inside your working directory {}",
+                                caller_dir.display()
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "the workspace must be inside your working directory {} ({error})",
+                                caller_dir.display()
+                            ));
+                        }
+                    }
                 }
                 (resolved, None)
             }
