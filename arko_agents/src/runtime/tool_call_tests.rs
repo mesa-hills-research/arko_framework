@@ -386,6 +386,77 @@ async fn native_write_file_calls_through_links_are_refused_under_every_policy() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// On Windows a junction, which needs no privilege, is followed as a link
+/// is. `write_file` through a junction out of the workspace, or through one
+/// whose target is gone, is refused under every policy, while a plain
+/// outside path follows the policy.
+#[cfg(windows)]
+#[tokio::test]
+async fn native_write_file_calls_through_junctions_are_refused_under_every_policy() {
+    use crate::utils::junction;
+    let root = std::env::temp_dir().join(format!("arko-junction-writes-{}", Uuid::new_v4()));
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(root.join(r"outside\deep")).unwrap();
+    std::fs::create_dir_all(root.join(r"outside\gone")).unwrap();
+    junction(&root.join("alias"), &real);
+    junction(&real.join("out"), &root.join(r"outside\deep"));
+    junction(&real.join("dangling"), &root.join(r"outside\gone"));
+    std::fs::remove_dir(root.join(r"outside\gone")).unwrap();
+    let workspace = root.join("alias");
+    let through_target = real.join(r"out\new-file").display().to_string();
+    for policy in [PathSafetyPolicy::AutoReject, PathSafetyPolicy::AutoApprove] {
+        let mut config = config(ToolCallingMode::Native, &["write_file"]);
+        config.tool_config.default_out_of_workspace_path_policy = policy.clone();
+        let (mut agent, _events, _commands) = agent(config, ToolRegistry::new(), &workspace);
+        let write = |id: &str, path: &str| {
+            native_call(
+                id,
+                crate::tool::builtins::WRITE_FILE_TOOL_NAME,
+                serde_json::json!({"path": path, "content": "ESCAPED"}),
+            )
+        };
+        agent.scripted_responses.get_mut().unwrap().extend([
+            turn(vec![write("slash", r"dangling\")]),
+            turn(vec![write("bare", "dangling")]),
+            turn(vec![write("out", r"out\new-file")]),
+            turn(vec![write("target", &through_target)]),
+            turn(vec![write("plain", r"..\outside\plain.txt")]),
+            complete(),
+        ]);
+        let task = timeout(Duration::from_secs(5), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        for (id, reason) in [
+            ("slash", "target doesn't exist"),
+            ("bare", "target doesn't exist"),
+            ("out", "symbolic link outside"),
+            ("target", "symbolic link outside"),
+        ] {
+            let result = result_for(&task.conversation, id);
+            assert!(
+                result[0].is_error && result[0].output.contains(reason),
+                "{policy:?} {id}: {}",
+                result[0].output
+            );
+        }
+        assert!(!root.join(r"outside\deep\new-file").exists(), "{policy:?}");
+        let plain = result_for(&task.conversation, "plain");
+        assert_eq!(
+            plain[0].is_error,
+            policy == PathSafetyPolicy::AutoReject,
+            "{policy:?}: {}",
+            plain[0].output
+        );
+        assert_eq!(
+            root.join(r"outside\plain.txt").exists(),
+            policy == PathSafetyPolicy::AutoApprove
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// `edit_file`'s path is checked as `write_file`'s. Outside the workspace
 /// the path-safety policy decides, by default refusing the call, which
 /// changes nothing. A policy that allows it lets the edit through.

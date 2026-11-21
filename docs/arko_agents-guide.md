@@ -481,6 +481,10 @@ of them are. These paths are rejected under every policy, as one that cannot be 
 - A path through a link whose target doesn't exist.
 - A path that some readings find inside and others outside, such as ` ../x`, which names a
   directory ` ..` when it isn't trimmed.
+- On Windows, a `\\?\` path holding `/`, which Win32 takes as part of a name and other tools as
+  a separator, and a name with `:`, which opens a stream of a file. A name Win32 rejects is
+  refused too, unless it holds a control character, such as a line break, which no file can
+  have. Such a name is judged by the directory it would be in.
 
 The check isn't a sandbox. It judges a path when the call is admitted, and the tool opens it
 later, so a link created or changed in between isn't seen. A wait for approval can make that
