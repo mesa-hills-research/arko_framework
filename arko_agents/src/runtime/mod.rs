@@ -129,6 +129,7 @@ pub struct AgentRuntime {
     handover_threshold: HandoverThreshold,
     task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
     stop_signal: StopSignal,
+    context_source: Option<crate::tool::ContextSource>,
     image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     #[cfg(any(unix, windows))]
     background_jobs: Option<Arc<crate::terminal::TerminalManager>>,
@@ -145,6 +146,7 @@ impl AgentRuntime {
             handover_threshold: HandoverThreshold::default(),
             task_snapshots: None,
             stop_signal: StopSignal::never(),
+            context_source: None,
             image_sink: None,
             #[cfg(any(unix, windows))]
             background_jobs: None,
@@ -228,6 +230,17 @@ impl AgentRuntime {
     /// at the start of its wrap-up, and cancels its agents afterwards).
     pub fn with_stop_signal(mut self, signal: StopSignal) -> Self {
         self.stop_signal = signal;
+        self
+    }
+
+    /// Shares `source` with the task this runtime runs so host-side waits
+    /// (such as a question or tool-approval handler) can observe the same
+    /// context arrivals its tool calls see
+    /// ([`ContextSource::call_signal`](crate::tool::ContextSource::call_signal)).
+    /// Without it, each task makes a source of its own. Give each task a
+    /// fresh source so one task's arrivals don't wake another.
+    pub fn with_context_source(mut self, source: crate::tool::ContextSource) -> Self {
+        self.context_source = Some(source);
         self
     }
 
@@ -341,6 +354,9 @@ impl AgentRuntime {
             run.handover_threshold = self.handover_threshold.clone();
             run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
             run.host_stop = self.stop_signal.clone();
+            if let Some(source) = &self.context_source {
+                run.context_arrivals = source.clone();
+            }
             run.image_sink = self.image_sink.clone();
             #[cfg(any(unix, windows))]
             {
@@ -368,6 +384,9 @@ impl AgentRuntime {
         agent_loop.handover_threshold = self.handover_threshold.clone();
         agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
         agent_loop.host_stop = self.stop_signal.clone();
+        if let Some(source) = &self.context_source {
+            agent_loop.context_arrivals = source.clone();
+        }
         agent_loop.image_sink = self.image_sink.clone();
         #[cfg(any(unix, windows))]
         {

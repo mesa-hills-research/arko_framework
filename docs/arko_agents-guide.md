@@ -717,14 +717,18 @@ A host can also hold context in its turn context source and give it in the next 
 as a workflow does with its notes and its agents' mail. The runtime learns of that context
 only when it asks for the update, so the source says what it holds.
 `TurnContextSource::has_waking_update(task_id)` tells whether the next update holds context
-a waiting call should return for. It must take nothing. `update_changed(task_id)` returns a
-future that resolves when that answer may have changed, subscribed before it returns. The
-signal of every call counts as fired for as long as the source says so, and the update
-still gives the context at the boundary (or, in Claude Code, at the next call's hook). A host
-that runs tools itself adds this with `ContextSignal::with_updates`, which holds the source
-weakly. A call that takes that context itself, as `wait_for_agents` takes its mail, uses
-`without_updates()`. A call made from inside a call (`NestedCalls`) gets a signal that never
-fires, so the outer call decides when to return.
+a waiting call should return for. `has_waking_note(task_id)` tells whether a note waits
+there, so `ContextSignal::note_waits()` reports it too. Both must take nothing.
+`update_changed(task_id)` returns a future that resolves when that answer may have changed,
+subscribed before it returns. The signal of every call counts as fired for as long as the
+source says so, and the update still gives the context at the boundary (or, in Claude Code,
+at the next call's hook). A host that shares a `ContextSource` with
+`AgentRuntime::with_context_source` gets the same signal for its own waits (question or
+tool-approval handlers) from `ContextSource::call_signal`, adding turn-context updates with
+`ContextSignal::with_updates`, which holds the source weakly. A call that takes that
+context itself, as `wait_for_agents` takes its mail, uses `without_updates()`. A call made
+from inside a call (`NestedCalls`) gets a signal that never fires, so the outer call
+decides when to return.
 
 A Claude Code agent reads a note the user typed, sent as their message, only after every
 call of the response it came in. So a call that starts while such a note waits (a wait the

@@ -14,9 +14,9 @@ use uuid::Uuid;
 use arko_agents::{AgentConfig, Holding, Task};
 
 use super::{
-    MailItem, MailKind, MailSender, PendingLaunch, StartRequest, SubagentEvent, SubagentEventKind,
-    SubagentHook, SubagentRecord, SubagentState, SubagentsConfig, SubagentsSnapshot,
-    UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
+    MailItem, MailKind, MailSender, PendingLaunch, StartCall, StartOutcome, StartRequest,
+    SubagentEvent, SubagentEventKind, SubagentHook, SubagentRecord, SubagentState, SubagentsConfig,
+    SubagentsSnapshot, UPDATE_MAX_MAIL_BYTES, WorkspaceRequest,
 };
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
@@ -745,6 +745,7 @@ impl Board {
     /// Starts a subagent for caller run `caller` (of `caller_agent`, at
     /// `caller_depth`, working in `caller_dir`), returning the tool's result, or why
     /// it can't.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start(
         &self,
@@ -760,6 +761,43 @@ impl Board {
         peers: Option<&str>,
         group: Option<&str>,
         parameters: BTreeMap<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        self.start_with_call(
+            ctx,
+            caller,
+            caller_agent,
+            caller_depth,
+            caller_dir,
+            agent,
+            task,
+            workspace,
+            isolated,
+            peers,
+            group,
+            parameters,
+            &StartCall::default(),
+        )
+        .await
+    }
+
+    /// [`start`](Self::start) with `call`, the live `start_agent` call's
+    /// identifiers and signals for [`SubagentHook::prepare_start`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_with_call(
+        &self,
+        ctx: &Arc<SharedContext>,
+        caller: Uuid,
+        caller_agent: &str,
+        caller_depth: u32,
+        caller_dir: &Path,
+        agent: &str,
+        task: &str,
+        workspace: Option<&str>,
+        isolated: bool,
+        peers: Option<&str>,
+        group: Option<&str>,
+        parameters: BTreeMap<String, serde_json::Value>,
+        call: &StartCall,
     ) -> Result<String, String> {
         let config = self.config.as_ref().ok_or("subagents are off")?;
         let task = task.trim();
@@ -849,7 +887,10 @@ impl Board {
         };
         // The host's changes are checked before a workspace is made for the
         // run, or the run is recorded.
-        let prepared = self.prepared_config(ctx, &record)?;
+        let prepared = match self.prepare_start_config(ctx, &record, call).await? {
+            PreparedStart::Ready(config) => *config,
+            PreparedStart::NotStarted(message) => return Ok(message),
+        };
         let base = match workspace.map(str::trim).filter(|w| !w.is_empty()) {
             Some(path) => {
                 let resolved = crate::workflow::options::run_workspace(caller_dir, Path::new(path))
@@ -999,7 +1040,8 @@ impl Board {
     }
 
     /// The configuration `record`'s run starts with, its agent's, as the
-    /// host's hook changes it.
+    /// host's hook changes it synchronously (for resume, relaunch and
+    /// handover).
     pub(crate) fn prepared_config(
         &self,
         ctx: &SharedContext,
@@ -1012,6 +1054,34 @@ impl Board {
             hook.prepare(&start_request(self.workflow_run_id, record), &mut config)?;
         }
         Ok(config)
+    }
+
+    /// The configuration `record`'s run starts with for a live `start_agent`
+    /// call (`call`), letting [`SubagentHook::prepare_start`] wait
+    /// asynchronously and return [`StartOutcome::NotStarted`].
+    async fn prepare_start_config(
+        &self,
+        ctx: &SharedContext,
+        record: &SubagentRecord,
+        call: &StartCall,
+    ) -> Result<PreparedStart, String> {
+        let mut config = ctx
+            .registered_config(&record.agent)
+            .ok_or_else(|| format!("there is no agent `{}`", record.agent))?;
+        if let Some(hook) = self.config.as_ref().and_then(|config| config.hook.as_ref()) {
+            match hook
+                .prepare_start(
+                    &start_request(self.workflow_run_id, record),
+                    &mut config,
+                    call,
+                )
+                .await?
+            {
+                StartOutcome::Start => {}
+                StartOutcome::NotStarted(message) => return Ok(PreparedStart::NotStarted(message)),
+            }
+        }
+        Ok(PreparedStart::Ready(Box::new(config)))
     }
 
     /// How many subagents hold a place under
@@ -2118,12 +2188,15 @@ impl Board {
     }
 
     /// Subagent `me`'s question goes to its lead, and its lead's next
-    /// message is the answer.
+    /// message is the answer. A note, host/peer message or other waking
+    /// context (`context_arrived`) also ends the wait so the subagent reads
+    /// it at its next step.
     pub(crate) async fn ask(
         &self,
         ctx: &Arc<SharedContext>,
         me: Uuid,
         questions: &str,
+        context_arrived: &arko_agents::ContextSignal,
     ) -> Result<(String, Vec<String>), WorkflowError> {
         let Some(record) = self.record(me) else {
             return Err(WorkflowError::Channel("not a subagent".to_string()));
@@ -2195,12 +2268,21 @@ impl Board {
                 self.delivered(me, std::slice::from_ref(&answer));
                 return Ok((answer.text(), vec![format!("mail:{}", answer.id)]));
             }
+            if context_arrived.has_arrived() {
+                let message = if context_arrived.note_waits() {
+                    "A note for you arrived while you waited for your lead's answer. It follows. Ask again if you still need their answer."
+                } else {
+                    "An update for you arrived while you waited for your lead's answer. It follows. Ask again if you still need their answer."
+                };
+                return Ok((message.to_string(), Vec::new()));
+            }
             tokio::select! {
                 biased;
                 _ = ctx.run_control.stopped() => {
                     return Err(ctx.run_control.error().unwrap_or(WorkflowError::Cancelled));
                 }
                 _ = version.changed() => {}
+                () = context_arrived.arrived() => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     return Ok((
                         format!(
@@ -3394,6 +3476,12 @@ fn task_holds(task: &Task, item: &MailItem) -> bool {
                     .filter_map(arko_ai::Content::as_text)
                     .any(|text| item.held_in(text))
         })
+}
+
+/// Outcome of preparing a live `start_agent` configuration.
+enum PreparedStart {
+    Ready(Box<AgentConfig>),
+    NotStarted(String),
 }
 
 /// The request [`SubagentHook::prepare`](super::SubagentHook::prepare) and

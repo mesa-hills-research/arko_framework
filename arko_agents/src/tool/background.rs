@@ -211,14 +211,21 @@ impl ContextSignal {
             .is_some_and(|source| *source.borrow() != self.start)
     }
 
-    /// Whether a note the user typed waits for the model now, for a call
-    /// that says what ended its wait. A Claude Code agent reads such a note
-    /// only after every call of the response it is in, so a call that
-    /// starts while one waits counts it as arrived.
+    /// Whether a note waits for the model now, either a typed note held by
+    /// the runtime or a note in the turn context source
+    /// ([`TurnContextSource::has_waking_note`]), for a wait that says what
+    /// ended it. A Claude Code agent reads a typed note only after every
+    /// call of the response it is in, so a call that starts while one waits
+    /// counts it as arrived.
     pub fn note_waits(&self) -> bool {
         self.note
             .as_ref()
             .is_some_and(|note| note.load(Ordering::Acquire))
+            || self.updates.as_ref().is_some_and(|(source, task_id)| {
+                source
+                    .upgrade()
+                    .is_some_and(|source| source.has_waking_note(*task_id))
+            })
     }
 
     /// Resolves once context arrives (at once if some arrived since the
@@ -315,10 +322,14 @@ impl ContextSource {
         }
     }
 
-    /// A signal for a call starting now. Context taken since the model's
-    /// request (or Claude Code's latest hand-over) fires it at once, since
-    /// the model made the call without reading it.
-    pub(crate) fn call_signal(&self) -> ContextSignal {
+    /// A signal for a wait starting now. Context taken since the model's
+    /// latest request (or Claude Code's latest hand-over) fires it at once,
+    /// since the model started the wait without reading it. A host that
+    /// shares this source with
+    /// [`AgentRuntime::with_context_source`](crate::runtime::AgentRuntime::with_context_source)
+    /// calls this to give its own waits the same signal the task's tool
+    /// calls get.
+    pub fn call_signal(&self) -> ContextSignal {
         ContextSignal {
             source: Some(self.arrivals.subscribe()),
             start: self.caught_up.load(Ordering::Acquire),
@@ -458,6 +469,7 @@ mod tests {
     #[derive(Default)]
     struct Held {
         waiting: AtomicBool,
+        note: AtomicBool,
         post_after_check: AtomicBool,
         changes: watch::Sender<u64>,
     }
@@ -466,6 +478,11 @@ mod tests {
         fn post(&self) {
             self.waiting.store(true, Ordering::SeqCst);
             self.changes.send_modify(|count| *count += 1);
+        }
+
+        fn post_note(&self) {
+            self.note.store(true, Ordering::SeqCst);
+            self.post();
         }
     }
 
@@ -480,6 +497,10 @@ mod tests {
                 self.post();
             }
             waiting
+        }
+
+        fn has_waking_note(&self, _task_id: uuid::Uuid) -> bool {
+            self.note.load(Ordering::SeqCst)
         }
 
         fn update_changed(
@@ -572,5 +593,86 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// `note_waits` reports a note held by the turn context source too,
+    /// without counting other waking updates as notes.
+    #[tokio::test]
+    async fn a_signal_reports_a_note_held_by_the_turn_context_source() {
+        let held = Arc::new(Held::default());
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let arrivals = ContextSource::new();
+        let signal = arrivals
+            .call_signal()
+            .with_updates(&source, uuid::Uuid::new_v4());
+        assert!(!signal.has_arrived() && !signal.note_waits());
+        // A non-note waking update fires `has_arrived`, not `note_waits`.
+        held.post();
+        assert!(signal.has_arrived());
+        assert!(!signal.note_waits());
+        // A note held by the source sets both, and `arrived()` resolves at once.
+        held.post_note();
+        assert!(signal.has_arrived() && signal.note_waits());
+        timeout(Duration::from_secs(5), signal.arrived())
+            .await
+            .expect("pre-held note resolves at once");
+        assert!(!signal.without_updates().note_waits());
+        // Once read, both clear.
+        held.note.store(false, Ordering::SeqCst);
+        held.waiting.store(false, Ordering::SeqCst);
+        assert!(!signal.has_arrived() && !signal.note_waits());
+        // Dropping the source leaves the runtime's own typed-note flag intact.
+        held.post_note();
+        assert!(signal.note_waits());
+        drop((held, source));
+        assert!(!signal.note_waits());
+        arrivals.set_note_waits(true);
+        assert!(signal.note_waits());
+    }
+
+    /// Concurrent waiters and posters never stall or miss an arrival.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_posts_and_waits_all_make_progress() {
+        let held = Arc::new(Held::default());
+        let source: Arc<dyn TurnContextSource> = held.clone();
+        let arrivals = ContextSource::new();
+        let task_id = uuid::Uuid::new_v4();
+        let done = Arc::new(AtomicBool::new(false));
+        let poster = tokio::spawn({
+            let held = held.clone();
+            let arrivals = arrivals.clone();
+            let done = done.clone();
+            async move {
+                while !done.load(Ordering::Relaxed) {
+                    held.post_note();
+                    tokio::task::yield_now().await;
+                    held.note.store(false, Ordering::SeqCst);
+                    held.waiting.store(false, Ordering::SeqCst);
+                    arrivals.notify();
+                    arrivals.caught_up();
+                    tokio::task::yield_now().await;
+                }
+                held.post_note();
+                arrivals.notify();
+            }
+        });
+        let mut waiters = Vec::new();
+        for _ in 0..3 {
+            let signal = arrivals.call_signal().with_updates(&source, task_id);
+            waiters.push(tokio::spawn(async move {
+                for _ in 0..500 {
+                    let _ = signal.has_arrived();
+                    let _ = signal.note_waits();
+                    timeout(Duration::from_secs(5), signal.arrived())
+                        .await
+                        .expect("wait made progress under concurrency");
+                }
+            }));
+        }
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+        done.store(true, Ordering::Relaxed);
+        poster.await.unwrap();
     }
 }

@@ -3208,3 +3208,205 @@ async fn message_parameters_appear_on_message_agent_definition() {
             .any(|p| p.name == "confirm_uncached" && !p.required)
     );
 }
+
+/// A note posted while a subagent waits for its lead to answer `ask_user`
+/// ends the wait promptly, and the subagent reads the note in its next
+/// request without waiting for the question timeout.
+#[tokio::test]
+async fn a_note_ends_a_subagents_question_wait() {
+    let server = ResponsesServer::start(|_, body| {
+        if role(body) == "r1" {
+            let turn = body.matches("\"function_call_output\"").count();
+            return Some(match turn {
+                0 => tool_call_turn(
+                    "q0",
+                    "ask_user",
+                    json!({ "questions": "May I delete the cache?" }),
+                ),
+                _ => complete_turn("done", "read the note"),
+            });
+        }
+        None
+    })
+    .await;
+    let workspace = Workspace::new();
+    let mut worker = agent_config("Worker");
+    worker
+        .tool_config
+        .available_tool_names
+        .push("ask_user".to_string());
+    let workflow = builder_with(&server, &workspace, SubagentsConfig::default(), worker)
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Check the cache.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    until(|| workflow.subagents().iter().any(|run| run.asking)).await;
+    let run_id = workflow.subagents()[0].run_id;
+    workflow
+        .post_note(crate::notes::Note::new("Keep the cache.").for_run(run_id))
+        .unwrap();
+    until(|| {
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    let worker_bodies = bodies_of(&server, "r1");
+    let last = worker_bodies.last().unwrap();
+    assert!(
+        last.contains("A note for you arrived while you waited for your lead's answer"),
+        "{last}"
+    );
+    assert!(last.contains("Keep the cache."), "{last}");
+}
+
+/// A direct host message sent while a subagent waits for its lead to answer
+/// `ask_user` ends the wait promptly, and the subagent reads the message in
+/// its next request.
+#[tokio::test]
+async fn a_host_message_ends_a_subagents_question_wait() {
+    let server = ResponsesServer::start(|_, body| {
+        if role(body) == "r1" {
+            let turn = body.matches("\"function_call_output\"").count();
+            return Some(match turn {
+                0 => tool_call_turn(
+                    "q0",
+                    "ask_user",
+                    json!({ "questions": "May I delete the cache?" }),
+                ),
+                _ => complete_turn("done", "read the host message"),
+            });
+        }
+        None
+    })
+    .await;
+    let workspace = Workspace::new();
+    let mut worker = agent_config("Worker");
+    worker
+        .tool_config
+        .available_tool_names
+        .push("ask_user".to_string());
+    let workflow = builder_with(&server, &workspace, SubagentsConfig::default(), worker)
+        .build()
+        .unwrap();
+    let ctx = workflow.context();
+    let lead = uuid::Uuid::new_v4();
+    ctx.subagents
+        .start(
+            ctx,
+            lead,
+            "lead",
+            0,
+            &workspace.0,
+            "worker",
+            "Check the cache.",
+            None,
+            false,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    until(|| workflow.subagents().iter().any(|run| run.asking)).await;
+    let run_id = workflow.subagents()[0].run_id;
+    ctx.subagents.host_mail(
+        ctx,
+        run_id,
+        "worker",
+        "The user sent you a message directly:".into(),
+        "Leave the cache alone.".into(),
+    );
+    until(|| {
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    let worker_bodies = bodies_of(&server, "r1");
+    let last = worker_bodies.last().unwrap();
+    assert!(
+        last.contains("An update for you arrived while you waited for your lead's answer"),
+        "{last}"
+    );
+    assert!(last.contains("Leave the cache alone."), "{last}");
+}
+
+/// Cancelling a workflow while `SubagentHook::prepare_start` waits fires
+/// `StartCall::stop` so the hook winds down instead of hanging.
+#[tokio::test]
+async fn a_stop_fires_the_start_hook_stop_signal() {
+    struct StopHook {
+        waiting: tokio::sync::watch::Sender<bool>,
+        saw_stop: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl SubagentHook for StopHook {
+        fn prepare(&self, _: &StartRequest, _: &mut AgentConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn prepare_start(
+            &self,
+            _: &StartRequest,
+            _: &mut AgentConfig,
+            call: &StartCall,
+        ) -> Result<StartOutcome, String> {
+            let _ = self.waiting.send(true);
+            call.stop.stopping().await;
+            self.saw_stop
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(StartOutcome::NotStarted("stopped".into()))
+        }
+    }
+
+    let server = serve(vec![("lead", vec![start("Never starts.")])]).await;
+    let workspace = Workspace::new();
+    let (waiting_tx, mut waiting_rx) = tokio::sync::watch::channel(false);
+    let hook = Arc::new(StopHook {
+        waiting: waiting_tx,
+        saw_stop: std::sync::atomic::AtomicBool::new(false),
+    });
+    let workflow = Arc::new(
+        builder(
+            &server,
+            &workspace,
+            SubagentsConfig::default().hook(hook.clone()),
+        )
+        .build()
+        .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Start worker.").await }
+    });
+    within(waiting_rx.wait_for(|waiting| *waiting))
+        .await
+        .unwrap();
+    workflow.cancel();
+    let outcome = within(run).await.unwrap();
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert!(
+        hook.saw_stop.load(std::sync::atomic::Ordering::SeqCst) || workflow.subagents().is_empty()
+    );
+}

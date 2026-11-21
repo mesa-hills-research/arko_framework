@@ -610,16 +610,20 @@ fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> Wo
 /// approved call's approval reason is kept for the tool hooks until it has
 /// run.
 async fn decide_tool_calls(
-    agent_name: &str,
-    agent_run_id: uuid::Uuid,
+    drive: &Drive<'_>,
     calls: &[PendingToolCallInfo],
-    nested: bool,
-    ctx: &Arc<SharedContext>,
 ) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
+    let Drive {
+        agent_name,
+        agent_run_id,
+        nested,
+        ctx,
+        ..
+    } = *drive;
     let decisions = if nested && matches!(ctx.approval_policy, ApprovalPolicy::RespectAgentConfig) {
         approve_nested_completions(calls)
     } else {
-        decide_tool_calls_by_policy(agent_name, agent_run_id, calls, ctx).await?
+        decide_tool_calls_by_policy(drive, calls).await?
     };
     let Some(decisions) = decisions else {
         if nested {
@@ -666,11 +670,15 @@ fn approve_nested_completions(
 
 /// [`decide_tool_calls`] by the policy alone.
 async fn decide_tool_calls_by_policy(
-    agent_name: &str,
-    agent_run_id: uuid::Uuid,
+    drive: &Drive<'_>,
     calls: &[PendingToolCallInfo],
-    ctx: &Arc<SharedContext>,
 ) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
+    let Drive {
+        agent_name,
+        agent_run_id,
+        ctx,
+        ..
+    } = *drive;
     let approve = || ToolApprovalDecision::Approve {
         custom_tool_output: None,
         message_to_agent: None,
@@ -698,6 +706,7 @@ async fn decide_tool_calls_by_policy(
                     parameters: call.parameters.clone(),
                     tool_description: call.tool_description.clone(),
                     reason: call.approval_reason.clone(),
+                    context_arrived: drive.context_signal(),
                 };
                 // The handler may wait on a person, but a stop doesn't.
                 let outcome = tokio::select! {
@@ -1279,6 +1288,7 @@ pub(crate) async fn drive_event_loop(
     batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
     nested: bool,
     paused: Option<(arko_agents::ErrorRecoveryCause, Option<arko_ai::ErrorKind>)>,
+    wake: Option<&RunWake>,
 ) -> Result<(), WorkflowError> {
     let drive = Drive {
         agent_name,
@@ -1286,6 +1296,7 @@ pub(crate) async fn drive_event_loop(
         nested,
         ctx,
         persistence,
+        wake,
     };
     let mut recovery = RecoveryState {
         pause: paused.map_or(Pause::None, |(cause, kind)| {
@@ -1329,6 +1340,18 @@ struct Drive<'a> {
     nested: bool,
     ctx: &'a Arc<SharedContext>,
     persistence: Option<&'a Arc<PersistenceManager>>,
+    wake: Option<&'a RunWake>,
+}
+
+impl Drive<'_> {
+    /// Context signal for a wait the driver holds open for this run, matching
+    /// the signal its tool calls get (`TaskContext::context_arrived`).
+    fn context_signal(&self) -> arko_agents::ContextSignal {
+        self.wake
+            .map_or_else(arko_agents::ContextSignal::never, |wake| {
+                wake.signal(self.agent_run_id)
+            })
+    }
 }
 
 /// [`drive_event_loop`] without a batch stop.
@@ -1344,6 +1367,7 @@ async fn drive_events(
         nested,
         ctx,
         persistence,
+        ..
     } = *drive;
     loop {
         let event = tokio::select! {
@@ -1395,7 +1419,7 @@ async fn drive_events(
                     tool_description,
                     approval_reason,
                 }];
-                match decide_tool_calls(agent_name, agent_run_id, &calls, nested, ctx).await? {
+                match decide_tool_calls(drive, &calls).await? {
                     Some(decisions) => send_tool_decisions(cmd_tx, None, decisions).await,
                     None => {
                         return pause_for_caller(
@@ -1414,9 +1438,7 @@ async fn drive_events(
             AgentEvent::BatchToolCallAwaitingApproval {
                 batch_id,
                 pending_calls,
-            } => match decide_tool_calls(agent_name, agent_run_id, &pending_calls, nested, ctx)
-                .await?
-            {
+            } => match decide_tool_calls(drive, &pending_calls).await? {
                 Some(decisions) => send_tool_decisions(cmd_tx, Some(batch_id), decisions).await,
                 None => {
                     return pause_for_caller(
@@ -1645,7 +1667,11 @@ async fn answer_questions(
         .is_some_and(|config| config.questions_to_lead)
         && ctx.subagents.is_subagent(agent_run_id)
     {
-        let (response, ids) = ctx.subagents.ask(ctx, agent_run_id, &questions).await?;
+        let signal = drive.context_signal();
+        let (response, ids) = ctx
+            .subagents
+            .ask(ctx, agent_run_id, &questions, &signal)
+            .await?;
         return cmd_tx
             .send(UserCommand::SubmitUserResponse { response, ids })
             .await
@@ -1659,6 +1685,7 @@ async fn answer_questions(
             questions: questions.clone(),
             asked,
             wait: true,
+            context_arrived: drive.context_signal(),
         };
         // The handler may wait on a person, but a stop doesn't.
         let response = tokio::select! {
@@ -1737,6 +1764,7 @@ fn ask_later(
         questions,
         asked,
         wait: false,
+        context_arrived: arko_agents::ContextSignal::never(),
     };
     tokio::spawn(async move {
         let answer = tokio::select! {
@@ -1787,7 +1815,7 @@ async fn answer_saved_wait(
                 TaskState::AwaitingBatchToolApproval { batch_id, .. } => Some(*batch_id),
                 _ => None,
             };
-            match decide_tool_calls(agent_name, agent_run_id, &calls, nested, ctx).await? {
+            match decide_tool_calls(drive, &calls).await? {
                 Some(decisions) => {
                     send_tool_decisions(cmd_tx, batch_id, decisions).await;
                     Ok(())
@@ -2520,6 +2548,23 @@ impl HandoverHook for WorkflowHandover {
     }
 }
 
+/// The run's context source and turn context source, shared with its runtime
+/// so driver-side waits (questions, tool approvals) see the same arrivals
+/// its tool calls see.
+#[derive(Clone)]
+pub(crate) struct RunWake {
+    context: arko_agents::ContextSource,
+    updates: Arc<dyn arko_agents::TurnContextSource>,
+}
+
+impl RunWake {
+    fn signal(&self, task_id: uuid::Uuid) -> arko_agents::ContextSignal {
+        self.context
+            .call_signal()
+            .with_updates(&self.updates, task_id)
+    }
+}
+
 /// An agent run the engine started, to be driven to its result.
 pub(crate) struct StartedRun {
     pub agent_name: String,
@@ -2554,6 +2599,8 @@ pub(crate) struct StartedRun {
     pub journal: Option<Arc<PersistenceManager>>,
     /// This launch of the run (see `RunControl::begin_run`).
     pub launch: u64,
+    /// Shared with the runtime so driver-side waits see context arrivals.
+    pub wake: RunWake,
 }
 
 /// What an agent runtime's task returned.
@@ -2704,6 +2751,7 @@ async fn drive_run_to_result(
         recovered,
         journal,
         launch,
+        wake,
     } = run;
     host_decisions.set(true);
     // Until the end is recorded below, if this future is dropped (and with
@@ -2723,6 +2771,7 @@ async fn drive_run_to_result(
             nested: depth > 0,
             ctx,
             persistence,
+            wake: Some(&wake),
         };
         // The run's own stop ends the wait (an automatic recovery's can last
         // until a usage limit resets), as it ends the event loop's.
@@ -2759,6 +2808,7 @@ async fn drive_run_to_result(
                 batch_stop,
                 depth > 0,
                 paused,
+                Some(&wake),
             )
             .await
         }
@@ -3879,8 +3929,8 @@ impl WorkflowEngine {
             task.parent.map(|parent| parent.task_id),
         );
         ctx.subagents.registered(ctx, agent_run_id);
-        let mut runtime = AgentRuntime::new(self.llm_client.clone())
-            .with_turn_context(Arc::new(crate::notes::WithNotes {
+        let turn_context: Arc<dyn arko_agents::TurnContextSource> =
+            Arc::new(crate::notes::WithNotes {
                 inner: ActivityNotices {
                     context: ctx.clone(),
                     agent_name: agent_name.to_string(),
@@ -3889,7 +3939,15 @@ impl WorkflowEngine {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
                 review,
-            }))
+            });
+        let context_source = arko_agents::ContextSource::new();
+        let wake = RunWake {
+            context: context_source.clone(),
+            updates: turn_context.clone(),
+        };
+        let mut runtime = AgentRuntime::new(self.llm_client.clone())
+            .with_turn_context(turn_context)
+            .with_context_source(context_source)
             .with_host_decisions(host_decisions.clone())
             .with_stop_signal(stop_signal)
             .with_handover_hook(Arc::new(WorkflowHandover {
@@ -3963,6 +4021,7 @@ impl WorkflowEngine {
             recovered: false,
             journal,
             launch,
+            wake,
         }
     }
 
@@ -5954,6 +6013,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
             ),
         )
         .await
@@ -6026,6 +6086,7 @@ mod tests {
                     None,
                     false,
                     paused.map(|cause| (cause, None)),
+                    None,
                 )
                 .await;
                 assert!(driven.is_ok(), "{driven:?}");

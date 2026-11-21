@@ -134,6 +134,15 @@ pub trait TurnContextSource: Send + Sync {
         false
     }
 
+    /// Whether a note for task `task_id` waits in the source's next update,
+    /// so [`ContextSignal::note_waits`](crate::tool::ContextSignal::note_waits)
+    /// reports it for waits that say why they ended. Asking takes nothing,
+    /// and it follows the same lock and speed rules as
+    /// [`has_waking_update`](Self::has_waking_update). `false` (the default).
+    fn has_waking_note(&self, _task_id: Uuid) -> bool {
+        false
+    }
+
     /// A future that resolves once what
     /// [`has_waking_update`](Self::has_waking_update) says of task `task_id`
     /// may have changed since this call. The source subscribes to its

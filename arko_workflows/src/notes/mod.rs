@@ -1554,6 +1554,15 @@ impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithN
             || self.inner.has_waking_update(task_id)
     }
 
+    /// A note the run receives and hasn't been given, or what the inner
+    /// source holds as a note.
+    fn has_waking_note(&self, task_id: Uuid) -> bool {
+        self.context
+            .notes
+            .has_update(&self.agent_name, task_id, self.review)
+            || self.inner.has_waking_note(task_id)
+    }
+
     /// The next note posted, the next change of the mailbox, or the inner
     /// source's next change.
     fn update_changed(

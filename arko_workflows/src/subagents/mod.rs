@@ -74,12 +74,13 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use arko_agents::{AgentConfig, ToolParameterDefinition};
+use arko_agents::{AgentConfig, ContextSignal, StopSignal, TaskContext, ToolParameterDefinition};
 
 use crate::workflow::result::AgentResult;
 
@@ -385,20 +386,82 @@ pub struct StartRequest {
     pub parameters: BTreeMap<String, Value>,
 }
 
+/// The live `start_agent` call that starts a subagent, passed to
+/// [`SubagentHook::prepare_start`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct StartCall {
+    /// The runtime's ID of the `start_agent` call, if known.
+    pub tool_call_id: Option<Uuid>,
+    /// The model's ID of the `start_agent` call, if it gave one
+    /// ([`TaskContext::call_id`]).
+    pub call_id: Option<String>,
+    /// Fires when the caller's run is stopping ([`TaskContext::stop`]).
+    pub stop: StopSignal,
+    /// Fires when a note, waking mail or other context arrives for the
+    /// caller's run while the hook waits ([`TaskContext::context_arrived`]).
+    pub context_arrived: ContextSignal,
+}
+
+impl StartCall {
+    /// Builds the call context from `context`, the running `start_agent`
+    /// call's [`TaskContext`].
+    pub fn from_task_context(context: &TaskContext<'_>) -> Self {
+        Self {
+            tool_call_id: context.tool_call_id,
+            call_id: context.call_id.clone(),
+            stop: context.stop.clone(),
+            context_arrived: context.context_arrived.clone(),
+        }
+    }
+}
+
+/// What [`SubagentHook::prepare_start`] decided for a live `start_agent`
+/// call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// Start the subagent with the prepared configuration.
+    Start,
+    /// Don't start the subagent, and return this text as the `start_agent`
+    /// call's result instead of a tool error (for example when a note
+    /// arrived while the hook waited for approval, so the agent reads it
+    /// without failing the call).
+    NotStarted(String),
+}
+
 /// Adjusts a subagent's configuration as it starts, such as its prompt
 /// cache from a host parameter of `start_agent`. Set with
 /// [`SubagentsConfig::hook`]. A closure
 /// `Fn(&StartRequest, &mut AgentConfig) -> Result<(), String>` is one.
+#[async_trait]
 pub trait SubagentHook: Send + Sync {
     /// Changes `config`, the registered configuration of `request.agent`,
     /// for the run `request` starts. An error refuses the start, and the
     /// caller is told why.
     ///
-    /// When a workflow resumes from a checkpoint, the hook is called again
-    /// for each saved subagent run, so that its saved configuration can be
-    /// checked against the registered one with the same changes. It should
-    /// make the same changes for the same request.
+    /// When a workflow resumes from a checkpoint or prepares a handover,
+    /// `prepare` is called again for each saved subagent run, so that its
+    /// saved configuration can be checked against the registered one with
+    /// the same changes. It should make the same changes for the same
+    /// request and never wait on a person.
     fn prepare(&self, request: &StartRequest, config: &mut AgentConfig) -> Result<(), String>;
+
+    /// Async counterpart to [`prepare`](Self::prepare), called only for a
+    /// live `start_agent` call, with `call`'s stop and context-arrival
+    /// signals so a host can wait on user approval asynchronously and wake
+    /// on a stop or a note. Returning [`StartOutcome::NotStarted`] returns
+    /// its text as the `start_agent` tool result without starting the
+    /// subagent or failing the call, and returning `Err` refuses the start
+    /// as a tool error. The default delegates to [`prepare`](Self::prepare).
+    async fn prepare_start(
+        &self,
+        request: &StartRequest,
+        config: &mut AgentConfig,
+        call: &StartCall,
+    ) -> Result<StartOutcome, String> {
+        let _ = call;
+        self.prepare(request, config).map(|()| StartOutcome::Start)
+    }
 
     /// A few words about `record`'s run that its lead is told more of, such
     /// as the model it runs on and what it costs so far, or `None` (the

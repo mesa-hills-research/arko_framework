@@ -1136,7 +1136,7 @@ pub(super) struct ClaudeCodeRun {
     calls_stop: crate::stop::StopSource,
     /// Notified as context arrives, for the arko tool calls running. See
     /// [`TaskContext::context_arrived`](crate::tool::TaskContext::context_arrived).
-    context_arrivals: crate::tool::ContextSource,
+    pub(super) context_arrivals: crate::tool::ContextSource,
     /// The terminal manager arko tool calls move to the background with.
     /// See [`AgentRuntime::with_background_jobs`](super::AgentRuntime::with_background_jobs).
     #[cfg(any(unix, windows))]

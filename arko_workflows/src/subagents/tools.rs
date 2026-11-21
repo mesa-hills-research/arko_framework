@@ -214,6 +214,12 @@ impl Tool for StartAgentTool {
         )
     }
 
+    /// A host's start hook may wait for user approval (for example on
+    /// billing), so the default host tool timeout doesn't cut it short.
+    fn uses_host_timeout(&self) -> bool {
+        false
+    }
+
     async fn execute(
         &self,
         context: &TaskContext<'_>,
@@ -254,9 +260,10 @@ impl Tool for StartAgentTool {
         let workspace = text(&params, "workspace");
         let peers = text(&params, "peers");
         let group = text(&params, "group");
+        let call = super::StartCall::from_task_context(context);
         self.context
             .subagents
-            .start(
+            .start_with_call(
                 &self.context,
                 context.task_id,
                 &self.caller,
@@ -269,6 +276,7 @@ impl Tool for StartAgentTool {
                 peers.as_deref(),
                 group.as_deref(),
                 parameters,
+                &call,
             )
             .await
             .map_err(failed)

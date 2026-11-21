@@ -1405,3 +1405,75 @@ async fn a_long_terminal_wait_ends_when_context_arrives() {
     assert!(result.get("note").is_none(), "{result}");
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A host that shares a `ContextSource` with `AgentRuntime::with_context_source`
+/// sees `InjectContext` fire its signal while the task waits in
+/// `AwaitingUserResponse`, just as a running tool call does.
+#[tokio::test]
+async fn with_context_source_wakes_a_host_wait_on_injected_context() {
+    let workspace = workspace();
+    let shared = crate::tool::ContextSource::new();
+    let config = config(ToolCallingMode::Native, &["ask_user"]);
+    let task = Task::new(config, "Ask the user.".into(), workspace.clone(), None);
+    let (mut agent, mut events, commands) = super::tool_call_tests::agent_for(
+        task,
+        ToolRegistry::new(),
+        Arc::new(ai::LLMClient::new()),
+    );
+    agent.context_arrivals = shared.clone();
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "ask",
+            "ask_user",
+            serde_json::json!({"questions": "Tabs or spaces?"}),
+        )]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    wait_for(&mut events, &mut seen, |event| {
+        matches!(event, AgentEvent::UserQuestionsAsked { wait: true, .. }).then_some(())
+    })
+    .await;
+    let signal = shared.call_signal();
+    assert!(!signal.has_arrived());
+    let waiting = tokio::spawn({
+        let signal = signal.clone();
+        async move { signal.arrived().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiting.is_finished());
+    commands
+        .send(UserCommand::InjectContext {
+            content: "Job finished while you asked.".into(),
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("injected context woke the shared signal")
+        .unwrap();
+    assert!(signal.has_arrived());
+    commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "An update arrived.".into(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        task.conversation
+            .messages
+            .iter()
+            .any(|msg| format!("{msg:?}").contains("Job finished while you asked.")),
+        "{:?}",
+        task.conversation.messages
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}

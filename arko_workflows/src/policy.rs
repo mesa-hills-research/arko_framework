@@ -87,6 +87,11 @@ pub struct ToolApprovalRequest {
     pub tool_description: String,
     /// Why the call awaits approval.
     pub reason: ApprovalReason,
+    /// Fires when a note, waking mail or other context arrives for the run
+    /// while [`ToolApprovalHandler::decide`] waits, so the handler can
+    /// return and let the agent read it. Context that arrived before the
+    /// wait started fires it at once.
+    pub context_arrived: arko_agents::ContextSignal,
 }
 
 /// A [`ToolApprovalHandler`]'s decision.

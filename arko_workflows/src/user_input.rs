@@ -20,6 +20,12 @@ pub struct UserInputRequest {
     /// that passed `wait: false`), the agent goes on, and the answers reach
     /// it later.
     pub wait: bool,
+    /// Fires when a note, waking mail or other context arrives for the run
+    /// while [`UserInputHandler::respond`] waits (`wait` is true), so the
+    /// handler can return and let the agent read it. Context that arrived
+    /// before the wait started fires it at once. Never fires when `wait` is
+    /// false.
+    pub context_arrived: arko_agents::ContextSignal,
 }
 
 #[async_trait]

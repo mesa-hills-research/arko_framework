@@ -534,8 +534,11 @@ or shared automatically:
 
 A note steers the agents while the workflow runs, with a correction, a workaround found
 meanwhile, or a change of priority. Running agents get it at their next turn boundary,
-in a context update labelled with its source. A call of theirs that waits
-(`terminal_control wait`, `wait_for_message`, `wait_for_agents`) ends for it. Every later
+in a context update labelled with its source. Any wait the run is in gets the same
+`ContextSignal` (`terminal_control wait`, `wait_for_message`, `wait_for_agents`, custom
+async tools, `SubagentHook::prepare_start`, `UserInputHandler::respond`,
+`ToolApprovalHandler::decide`, and a subagent's `ask_user` wait for its lead), so a note
+can end it right away. Every later
 run of its audience gets it in its initial prompt (newest first, capped). Agents are told
 that a note refines their task and doesn't change their role's rules. A note never touches
 an agent's `AgentConfig`, so a resume still accepts the agents' saved tasks. Notes are the

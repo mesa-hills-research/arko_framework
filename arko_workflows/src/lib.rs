@@ -99,9 +99,9 @@ pub mod prelude {
     };
     pub use crate::services::{WorkflowServices, WorkflowServicesConfig};
     pub use crate::subagents::{
-        GitWorktreeProvider, IsolatedWorkspace, MailItem, MailKind, MailSender, StartRequest,
-        SubagentEvent, SubagentEventKind, SubagentHook, SubagentRecord, SubagentState,
-        SubagentsConfig, WorkspaceProvider, WorkspaceRequest,
+        GitWorktreeProvider, IsolatedWorkspace, MailItem, MailKind, MailSender, StartCall,
+        StartOutcome, StartRequest, SubagentEvent, SubagentEventKind, SubagentHook, SubagentRecord,
+        SubagentState, SubagentsConfig, WorkspaceProvider, WorkspaceRequest,
     };
     pub use crate::user_input::{UserInputHandler, UserInputRequest};
     pub use crate::verification::{
