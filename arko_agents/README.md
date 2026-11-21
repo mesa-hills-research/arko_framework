@@ -18,7 +18,7 @@ updates, cancellation and suspension.
 - Conversation handover, which continues a long task in a fresh conversation that starts
   from the agent's own report
 - Snapshots of running tasks, and saved tasks that can be resumed
-- Claude models run through an installed Claude Code CLI
+- Models run through installed Claude Code and Antigravity CLIs
 
 ## Install
 

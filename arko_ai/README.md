@@ -15,6 +15,7 @@ and refusals, token usage and cost.
 - Errors sorted into kinds (rate limits, capacity, authentication, context overflow and more)
   with retry hints
 - Claude Code as a provider, with in-process tools, hooks and resumable sessions
+- Antigravity as a provider, with a private profile and the host’s tools over MCP
 - Voyage embeddings, with tokens counted locally
 
 ## Install

@@ -31,6 +31,8 @@ mod retry;
 mod tool_run;
 pub mod turn_context;
 
+#[cfg(all(test, unix))]
+mod antigravity_tests;
 #[cfg(test)]
 mod keep_warm_live_tests;
 
@@ -270,6 +272,11 @@ impl AgentRuntime {
         tool_registry: Arc<ToolRegistry>,
         skill_prompt_context: Option<SkillPromptContext>,
     ) -> Result<CacheRefresh, ArkoAgentsError> {
+        if task.agent_config.runs_in_antigravity() {
+            return Err(ArkoAgentsError::LLM(arko_ai::Error::UnsupportedFeature(
+                "Antigravity does not support prompt cache refresh.".into(),
+            )));
+        }
         let (event_sender, _events) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (_commands, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
         let refresh = if task.agent_config.runs_in_claude_code() {
@@ -338,7 +345,7 @@ impl AgentRuntime {
         let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (command_sender, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
 
-        if task.agent_config.runs_in_claude_code() {
+        if task.agent_config.runs_in_claude_code() || task.agent_config.runs_in_antigravity() {
             let mut run = claude_code::ClaudeCodeRun::new(
                 task,
                 tool_registry,

@@ -22,7 +22,7 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   sends a message either way.
 - `AgentToolConfig::text_reply_ends_task` (`false`) makes that reply the agent's final
   reply instead. It completes the task with the text as the summary, and the agent isn't
-  offered `complete_task`. It works in native mode and on Claude Code models, and is
+  offered `complete_task`. It works in native mode and on Claude Code and Antigravity models, and is
   refused together with `text_reply_as_message` and on agents a completion verifier
   reviews or runs on. See [Tools](reference-map.md#tools-arko_agents).
 - Such an agent's response with neither text nor a tool call gets a note asking for a
@@ -59,6 +59,12 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   `load_skill`. `load_skill` reads the skill sources at each call, and a missing
   `SkillSource` directory warns unless it is `optional`. See
   [Skills](arko_agents-guide.md#skills).
+
+Antigravity models use an installed and signed-in `agy` CLI, version 1.5.14 or later.
+They use the Google plan, with list prices retained for estimates. Each run starts its own
+private profile, and the profile keeps Arko’s system prompt and tool list for the session.
+A resumed task starts a fresh session from Arko’s conversation record. Prompt cache refresh
+is unsupported. See [`AntigravitySettings`](../arko_agents/src/antigravity.rs).
 
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
 installs an ordered list. The list fails over only when the backend refuses an account (a usage limit, or

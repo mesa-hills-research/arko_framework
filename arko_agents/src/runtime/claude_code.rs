@@ -55,6 +55,10 @@ use crate::tool::{
 use arko_ai::claude_code as cc;
 use arko_ai::{self as ai};
 
+#[path = "antigravity.rs"]
+mod antigravity;
+use antigravity::{AntigravityRun, AntigravityTurn, CliError, CliEvent, CliSession};
+
 /// The in-process MCP server serving the agent's arko tools.
 pub const ARKO_TOOL_SERVER: &str = "arko";
 
@@ -255,6 +259,11 @@ enum HostRequest {
         tool_name: String,
         response: Value,
         reply: oneshot::Sender<Value>,
+    },
+    AntigravityResult {
+        call_id: String,
+        output: cc::ToolOutput,
+        recorded: oneshot::Sender<()>,
     },
 }
 
@@ -580,7 +589,7 @@ impl ToolHost {
         })
     }
 
-    async fn call(&self, name: &str, arguments: Value) -> cc::ToolOutput {
+    async fn call(&self, name: &str, arguments: Value, call_id: Option<&str>) -> cc::ToolOutput {
         let Some(tool) = self.registry.get(name) else {
             return cc::ToolOutput::error(format!("Tool '{name}' is not available."));
         };
@@ -589,7 +598,15 @@ impl ToolHost {
             .lock()
             .unwrap()
             .get_mut(&input_key(name, &arguments))
-            .and_then(VecDeque::pop_front);
+            .and_then(|calls| match call_id {
+                Some(id) => {
+                    let index = calls
+                        .iter()
+                        .position(|call| call.call_id.as_deref() == Some(id))?;
+                    calls.remove(index)
+                }
+                None => calls.pop_front(),
+            });
         let Some(admitted) = admitted else {
             // Every call passes the gate first, and one that didn't isn't run.
             return cc::ToolOutput::error(format!(
@@ -772,7 +789,7 @@ impl cc::ClaudeTool for ServedTool {
         self.read_only
     }
     async fn call(&self, arguments: Value) -> cc::ToolOutput {
-        self.host.call(&self.name, arguments).await
+        self.host.call(&self.name, arguments, None).await
     }
 }
 
@@ -818,6 +835,7 @@ struct Call {
     /// The arko tool's name, or the built-in's.
     name: String,
     built_in: bool,
+    approval_path: Option<String>,
     record: ai::ToolCall,
     input: Value,
 }
@@ -1051,6 +1069,8 @@ pub(super) struct ClaudeCodeRun {
     /// The refusal fallback model answers this turn. The configured model
     /// takes over again when it ends.
     fallback_turn: bool,
+    /// Whether a failed Antigravity turn has already been tried in a fresh session.
+    agy_retried: bool,
     /// The input of the current conversation's latest and first requests
     /// (the first also when an earlier run made it). A conversation is
     /// current from its start, its handover or its latest compaction.
@@ -1206,6 +1226,7 @@ impl ClaudeCodeRun {
             refused: None,
             refusal_details: None,
             fallback_turn: false,
+            agy_retried: false,
             context_size: None,
             first_context_size,
             open_turns: 0,
@@ -1420,7 +1441,11 @@ impl ClaudeCodeRun {
         )
         .tools_offered(offers_tools);
         let mut prompt = builder.build_system_prompt(&self.task)?;
-        if offers_tools && self.task.agent_config.tool_config.ends_task_with_text() {
+        if self.task.agent_config.runs_in_antigravity() {
+            if offers_tools {
+                prompt.push_str("\n## Tool names\nUse the Arko tools named `mcp_arko_<name>`.\n");
+            }
+        } else if offers_tools && self.task.agent_config.tool_config.ends_task_with_text() {
             prompt.push_str(&format!(
                 "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`.\n"
             ));
@@ -1457,7 +1482,10 @@ impl ClaudeCodeRun {
     /// set), and its result is reported. Any other call's outcome is
     /// unknown.
     async fn recover_open_calls(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.task.claude_code_session.is_none() || self.task.current_state.is_terminal() {
+        if (!self.task.agent_config.runs_in_antigravity()
+            && self.task.claude_code_session.is_none())
+            || self.task.current_state.is_terminal()
+        {
             // No session to tell (a new one starts from the conversation).
             self.task.running_tool_calls.clear();
             return Ok(());
@@ -1662,6 +1690,11 @@ impl ClaudeCodeRun {
             }
             let session = match self.start_session().await {
                 Ok(session) => session,
+                Err(error) if self.task.agent_config.runs_in_antigravity() => {
+                    self.antigravity_setup_failed(format!("Could not start Antigravity. {error}"))
+                        .await?;
+                    return Ok(());
+                }
                 Err(error) => {
                     self.pause_on_error(
                         format!("Claude Code could not start: {error}"),
@@ -1938,11 +1971,13 @@ impl ClaudeCodeRun {
     /// Whether the agent compacts its conversation in Claude Code instead of
     /// handing it over.
     fn compacts(&self) -> bool {
-        self.task
-            .agent_config
-            .handover
-            .as_ref()
-            .is_some_and(|handover| handover.compact_in_claude_code)
+        self.task.agent_config.runs_in_claude_code()
+            && self
+                .task
+                .agent_config
+                .handover
+                .as_ref()
+                .is_some_and(|handover| handover.compact_in_claude_code)
     }
 
     /// The input of the conversation's latest request (this run's, else as
@@ -2249,17 +2284,7 @@ impl ClaudeCodeRun {
             .unwrap_or_default();
         let host = self.tool_host();
         let mut server = cc::ToolServer::new(ARKO_TOOL_SERVER);
-        let mut names = self.registry.list_tool_names();
-        names.sort();
-        let mut served = Vec::new();
-        for name in names {
-            let Some(tool) = self.registry.get(&name) else {
-                continue;
-            };
-            let offered = config.offered_definition_of(tool.as_ref());
-            let read_only = offered.read_only;
-            let definition = offered.to_arko_ai_tool_definition();
-            served.push(definition.clone());
+        for (definition, read_only) in self.served_definitions() {
             server = server.tool(Arc::new(ServedTool {
                 name: definition.name,
                 description: definition.description,
@@ -2268,7 +2293,6 @@ impl ClaudeCodeRun {
                 host: host.clone(),
             }));
         }
-        self.served_tools = Some(ai::ToolConfig::new(served));
         // A cut back resumes at the entry the task recorded, and a branch
         // first copies the session it was branched from into its own. Both hold
         // until the session has the task's first new message (see
@@ -2374,6 +2398,27 @@ impl ClaudeCodeRun {
         }
     }
 
+    fn served_definitions(&mut self) -> Vec<(ai::ToolDefinition, bool)> {
+        let mut names = self.registry.list_tool_names();
+        names.sort();
+        let config = &self.task.agent_config;
+        let tools = names
+            .iter()
+            .filter_map(|name| self.registry.get(name))
+            .map(|tool| {
+                let offered = config.offered_definition_of(tool.as_ref());
+                (offered.to_arko_ai_tool_definition(), offered.read_only)
+            })
+            .collect::<Vec<_>>();
+        self.served_tools = Some(ai::ToolConfig::new(
+            tools
+                .iter()
+                .map(|(definition, _)| definition.clone())
+                .collect(),
+        ));
+        tools
+    }
+
     fn tool_host(&mut self) -> Arc<ToolHost> {
         if let Some(host) = &self.host {
             return host.clone();
@@ -2421,14 +2466,18 @@ impl ClaudeCodeRun {
 
     async fn start_session(
         &mut self,
-    ) -> Result<(cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>), cc::ClaudeError> {
+    ) -> Result<(CliSession, mpsc::UnboundedReceiver<HostRequest>), CliError> {
         let (requests, receiver) = mpsc::unbounded_channel();
+        if self.task.agent_config.runs_in_antigravity() {
+            let session = AntigravityRun::start(self, requests).await?;
+            return Ok((CliSession::Antigravity(Box::new(session)), receiver));
+        }
         let options = self.session_options(&requests);
         let session = cc::ClaudeSession::start(options).await?;
         if let Some(tools) = session.initialization().get("tools") {
             log::debug!("Task {}: Claude Code tools: {tools}", self.task.id);
         }
-        Ok((session, receiver))
+        Ok((CliSession::Claude(session), receiver))
     }
 
     /// The task's input the session hasn't received, namely user messages added
@@ -2490,11 +2539,7 @@ impl ClaudeCodeRun {
     }
 
     /// Sends a user message to the running session and records it.
-    async fn send(
-        &mut self,
-        session: &cc::ClaudeSession,
-        text: &str,
-    ) -> Result<(), cc::ClaudeError> {
+    async fn send(&mut self, session: &CliSession, text: &str) -> Result<(), CliError> {
         self.send_with_images(session, text, Vec::new()).await
     }
 
@@ -2502,10 +2547,10 @@ impl ClaudeCodeRun {
     /// label.
     async fn send_with_images(
         &mut self,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
         text: &str,
         images: Vec<ContextImage>,
-    ) -> Result<(), cc::ClaudeError> {
+    ) -> Result<(), CliError> {
         self.add_user_message(text).ok();
         self.task.claude_code_synced = self.task.conversation.messages.len();
         let Some(message) = self.task.conversation.messages.last_mut() else {
@@ -2544,7 +2589,7 @@ impl ClaudeCodeRun {
 
     async fn drive_session(
         &mut self,
-        (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
+        (mut session, mut requests): (CliSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
         self.retrying_since = None;
         // A pause belongs to the turn that asked for it.
@@ -2603,6 +2648,11 @@ impl ClaudeCodeRun {
         let synced_before = self.task.claude_code_synced;
         let resuming_a_cut =
             self.task.claude_code_resume_at.is_some() || self.task.claude_code_fork_of.is_some();
+        let agy = self.task.agent_config.runs_in_antigravity();
+        let seed_transcript = agy && self.task.conversation.messages.len() > 1;
+        if agy {
+            self.task.claude_code_synced = 0;
+        }
         let input = if self.compaction == Some(Compaction::Due) {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
@@ -2635,6 +2685,11 @@ impl ClaudeCodeRun {
         } else {
             self.unsent_input()?
         };
+        let input = if seed_transcript && !(chat_reports && self.handover_due()) {
+            self.antigravity_seed().unwrap_or(input)
+        } else {
+            input
+        };
         if resuming_a_cut {
             self.synced_on_send = Some(self.task.claude_code_synced);
             self.task.claude_code_synced = synced_before;
@@ -2648,12 +2703,13 @@ impl ClaudeCodeRun {
         // The session is between turns, so this input starts the next
         // request, and the moment is read before it is sent.
         self.hand_offs.input(Stamp::now());
-        let sent = match input {
-            Value::String(text) => session.send(text).await,
-            content => session.send_content(content).await,
-        };
+        if self.task.agent_config.runs_in_antigravity() {
+            self.request_started(&Value::Null, &None).await?;
+        }
+        let sent = session.send_content(input).await;
         match sent {
-            Ok(uuid) => self.record_sent(uuid),
+            Ok(uuid) if !self.task.agent_config.runs_in_antigravity() => self.record_sent(uuid),
+            Ok(_) => {}
             Err(error) => {
                 let end = self.session_failed(error.to_string()).await?;
                 let _ = session.close().await;
@@ -2666,6 +2722,7 @@ impl ClaudeCodeRun {
         self.questions = None;
         // Claude Code exited on its own, so it may not have saved every call.
         let mut cli_exited = false;
+        let mut agy_turn = AntigravityTurn::default();
         let end = loop {
             let approval_deadline = self
                 .approvals
@@ -2674,7 +2731,7 @@ impl ClaudeCodeRun {
                 .min();
             tokio::select! {
                 biased;
-                command = self.commands.recv() => {
+                command = self.commands.recv(), if self.stopping.is_none() => {
                     self.handle_command(command, &session).await?;
                     if self.ending() {
                         // Calls held by the SlowDown don't run.
@@ -2711,14 +2768,19 @@ impl ClaudeCodeRun {
                         if self.ending() {
                             break SessionEnd::Stop;
                         }
-                        break self.session_failed("Claude Code exited during the turn.".into()).await?;
+                        break self.session_failed(format!("{} exited during the turn.", session.name())).await?;
                     }
-                    Some(cc::Message::Result(result)) => {
+                    Some(CliEvent::Claude(cc::Message::Result(result))) => {
                         if let Some(end) = self.turn_ended(&result, &mut session).await? {
                             break end;
                         }
                     }
-                    Some(message) => self.handle_message(message, &session).await?,
+                    Some(CliEvent::Claude(message)) => self.handle_message(message, &session).await?,
+                    Some(CliEvent::Antigravity(event)) => {
+                        if let Some(end) = self.antigravity_event(event, &mut agy_turn, &mut session).await? {
+                            break end;
+                        }
+                    }
                 },
             }
         };
@@ -2744,12 +2806,13 @@ impl ClaudeCodeRun {
         // The hooks Claude Code didn't acknowledge are dropped, and every
         // item they carried waits where it is for the next input.
         self.delivery.settle();
+        let name = session.name();
         match session.close().await {
             // Claude Code saved the session as it closed, so its transcript
             // holds every call's outcome.
-            Ok(_) if !cli_exited => self.task.running_tool_calls.clear(),
+            Ok(_) if !cli_exited && !agy => self.task.running_tool_calls.clear(),
             Ok(_) => {}
-            Err(error) => log::warn!("Task {}: closing Claude Code: {error}", self.task.id),
+            Err(error) => log::warn!("Task {}: Could not close {name}. {error}", self.task.id),
         }
         self.report(false).await;
         Ok(end)
@@ -2758,7 +2821,7 @@ impl ClaudeCodeRun {
     async fn handle_command(
         &mut self,
         command: Option<UserCommand>,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         let stop = |this: &mut Self, stopping| {
             if this.stopping.is_none() {
@@ -2773,7 +2836,12 @@ impl ClaudeCodeRun {
             };
         };
         match command {
-            Some(UserCommand::InjectContext { content }) => self.queue_context(content, true),
+            Some(UserCommand::InjectContext { content }) => {
+                self.queue_context(content, true);
+                if self.task.agent_config.runs_in_antigravity() {
+                    self.send_antigravity_context(session).await?;
+                }
+            }
             Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
             Some(UserCommand::HostDeciding) => {
                 for approval in &mut self.approvals {
@@ -2865,7 +2933,7 @@ impl ClaudeCodeRun {
     async fn handle_request(
         &mut self,
         request: HostRequest,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         match request {
             HostRequest::PreToolUse {
@@ -2890,6 +2958,13 @@ impl ClaudeCodeRun {
                             .unwrap_or_default(),
                     );
                 }
+                if self.task.agent_config.runs_in_antigravity()
+                    && let Some(call) = tool_use_id.as_ref().and_then(|id| self.calls.get(id))
+                {
+                    let mut message = ai::Message::new_assistant("");
+                    message.tool_calls.push(call.record.clone());
+                    self.commit(message);
+                }
                 let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
                 if allowed {
                     if let Some(moved) = self.input_in_task_directory(&tool_name, &input) {
@@ -2909,6 +2984,14 @@ impl ClaudeCodeRun {
             }
             HostRequest::Permission { request, reply } => {
                 self.permission(request, reply).await?;
+            }
+            HostRequest::AntigravityResult {
+                call_id,
+                output,
+                recorded,
+            } => {
+                self.antigravity_result(call_id, output, session).await?;
+                let _ = recorded.send(());
             }
             HostRequest::PostToolUse {
                 tool_use_id,
@@ -2935,7 +3018,7 @@ impl ClaudeCodeRun {
         tool_use_id: Option<String>,
         served: &str,
         input: Value,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<Value, ArkoAgentsError> {
         let (name, built_in) = match arko_name(served) {
             Some(name) => (name.to_string(), false),
@@ -2958,6 +3041,7 @@ impl ClaudeCodeRun {
                     id,
                     name: name.clone(),
                     built_in,
+                    approval_path: None,
                     record,
                     input: input.clone(),
                 },
@@ -3037,28 +3121,53 @@ impl ClaudeCodeRun {
                 return self.reject_call(id, &name, refusal.message).await;
             }
         }
-        // The workspace path policy.
-        let path_params: Vec<String> = if built_in {
-            built_in_path_parameters(&name)
-                .iter()
-                .map(|param| param.to_string())
-                .collect()
-        } else {
-            self.registry
-                .get(&name)
-                .map(|tool| {
-                    tool.definition()
-                        .parameters
-                        .into_iter()
-                        .filter(|param| param.is_path)
-                        .map(|param| param.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        // Arko tools use the same workspace check as the native runtime.
+        if !built_in {
+            let tool = self.registry.get(&name).expect("offered tool");
+            let definition = tool.definition();
+            let workspace = self.task.current_working_directory.clone();
+            let config = self.task.agent_config.tool_config.clone();
+            let tool_name = name.clone();
+            use super::admission::{PathVerdict, path_verdict};
+            let verdict = tokio::task::spawn_blocking(move || {
+                path_verdict(&config, &tool_name, &definition, &params, &workspace)
+            })
+            .await?;
+            match verdict {
+                PathVerdict::Outside(param) => {
+                    return self
+                        .reject_call(
+                            id,
+                            &name,
+                            format!("Path for parameter '{param}' is outside the workspace."),
+                        )
+                        .await;
+                }
+                PathVerdict::Invalid(reason) => return self.reject_call(id, &name, reason).await,
+                PathVerdict::NeedsApproval(param) => {
+                    if let Some(call) = tool_use_id.as_ref().and_then(|id| self.calls.get_mut(id)) {
+                        call.approval_path = Some(param);
+                    }
+                    return Ok(ask_tool());
+                }
+                PathVerdict::Allowed => {}
+            }
+            if !self.task.agent_config.should_auto_approve_tool(&name) {
+                return Ok(ask_tool());
+            }
+            let call = Admitted {
+                id,
+                call_id: tool_use_id,
+                custom_output: None,
+                reply: None,
+            };
+            return self.admit(&name, false, call, &input, session).await;
+        }
+        // Claude Code built-ins have their own schemas.
+        let path_params = built_in_path_parameters(&name);
         let mut outside = None;
-        for param in path_params {
-            let Some(path) = params.get(&param).and_then(Value::as_str) else {
+        for &param in path_params {
+            let Some(path) = params.get(param).and_then(Value::as_str) else {
                 continue;
             };
             if path.is_empty() {
@@ -3216,7 +3325,7 @@ impl ClaudeCodeRun {
         built_in: bool,
         mut call: Admitted,
         input: &Value,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<Value, ArkoAgentsError> {
         if !built_in {
             self.take_question_call(name, input, &mut call);
@@ -3320,8 +3429,15 @@ impl ClaudeCodeRun {
             .tool_use_id
             .as_ref()
             .and_then(|tool_use_id| self.calls.get(tool_use_id))
-            .map(|call| (call.id, call.name.clone(), call.built_in));
-        let Some((id, name, built_in)) = known else {
+            .map(|call| {
+                (
+                    call.id,
+                    call.name.clone(),
+                    call.built_in,
+                    call.approval_path.clone(),
+                )
+            });
+        let Some((id, name, built_in, approval_path)) = known else {
             // Not gated (an unexpected request), so refused.
             let reason = self
                 .hook_text(
@@ -3364,7 +3480,7 @@ impl ClaudeCodeRun {
                 })
                 .map(|param| param.to_string())
         } else {
-            None
+            approval_path
         };
         let reason = ApprovalReason {
             tool_not_auto_approved: !config.should_auto_approve_tool(&name),
@@ -3614,7 +3730,7 @@ impl ClaudeCodeRun {
         tool_use_id: Option<String>,
         _served: &str,
         response: Value,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<Value, ArkoAgentsError> {
         let call = tool_use_id.as_ref().and_then(|id| self.calls.get(id));
         if let (Some(call), Some(middleware)) = (call, self.middleware.clone())
@@ -3738,13 +3854,13 @@ impl ClaudeCodeRun {
     /// with the next input.
     async fn await_note_verdicts(
         &mut self,
-        session: &mut cc::ClaudeSession,
+        session: &mut CliSession,
     ) -> Result<(), ArkoAgentsError> {
         while self.delivery.notes_unsettled()
             && let Ok(Some(message)) =
                 tokio::time::timeout(NOTE_VERDICT_WAIT, session.next_message()).await
         {
-            if let cc::Message::Other(raw) = message {
+            if let CliEvent::Claude(cc::Message::Other(raw)) = message {
                 self.note_settled(&raw).await?;
             }
         }
@@ -3774,7 +3890,7 @@ impl ClaudeCodeRun {
     async fn handle_message(
         &mut self,
         message: cc::Message,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         let result = self.handle_message_inner(message, session).await;
         if std::mem::take(&mut self.cache_interrupt) {
@@ -3797,7 +3913,7 @@ impl ClaudeCodeRun {
     async fn handle_message_inner(
         &mut self,
         message: cc::Message,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         // Any message of the turn but Claude Code's status. The turn runs,
         // so Claude Code has the input.
@@ -4305,7 +4421,7 @@ impl ClaudeCodeRun {
         arguments: &Value,
         text: &str,
         is_error: bool,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         let outcome = self
             .host
@@ -4718,6 +4834,7 @@ impl ClaudeCodeRun {
                     HostRequest::PostToolUse { reply, .. } => {
                         let _ = reply.send(cc::Hook::proceed());
                     }
+                    HostRequest::AntigravityResult { .. } => unreachable!(),
                 },
             }
         };
@@ -4833,18 +4950,29 @@ impl ClaudeCodeRun {
     /// usage, when this run last asked more than [`USAGE_READ_EVERY`] ago (a
     /// run asks when its turn starts, and an event asks again when due). The
     /// answer comes in the turn's messages, so nothing waits for it.
-    async fn ask_usage_if_due(&mut self, session: &cc::ClaudeSession) {
+    async fn ask_usage_if_due(&mut self, session: &CliSession) {
+        let interval = if self.task.agent_config.runs_in_antigravity() {
+            Duration::from_secs(60)
+        } else {
+            USAGE_READ_EVERY
+        };
         if self
             .usage_asked
-            .is_some_and(|asked| asked.elapsed() < USAGE_READ_EVERY)
+            .is_some_and(|asked| asked.elapsed() < interval)
         {
             return;
         }
         self.ask_usage(session).await;
     }
 
-    async fn ask_usage(&mut self, session: &cc::ClaudeSession) {
+    async fn ask_usage(&mut self, session: &CliSession) {
         self.usage_asked = Some(std::time::Instant::now());
+        let CliSession::Claude(session) = session else {
+            if let CliSession::Antigravity(session) = session {
+                self.usage_reply = Some(session.plan_usage());
+            }
+            return;
+        };
         self.usage_reply = match session.request_usage().await {
             Ok(reply) => Some(reply),
             Err(error) => {
@@ -4864,7 +4992,12 @@ impl ClaudeCodeRun {
         let Some(reply) = self.usage_reply.take() else {
             return Ok(());
         };
-        let answer = tokio::time::timeout(USAGE_END_WAIT, reply)
+        let wait = if self.task.agent_config.runs_in_antigravity() {
+            Duration::from_secs(3)
+        } else {
+            USAGE_END_WAIT
+        };
+        let answer = tokio::time::timeout(wait, reply)
             .await
             .ok()
             .and_then(Result::ok);
@@ -4891,6 +5024,18 @@ impl ClaudeCodeRun {
         let Some(answer) = answer else {
             return Ok(());
         };
+        if self.task.agent_config.runs_in_antigravity() {
+            match answer.and_then(|value| {
+                serde_json::from_value::<ai::PlanUsage>(value).map_err(|error| error.to_string())
+            }) {
+                Ok(usage) => {
+                    self.plan_usage = Some(usage.clone());
+                    self.emit(AgentEvent::PlanUsageReported(usage)).await?;
+                }
+                Err(error) => log::debug!("Could not read Antigravity plan usage. {error}"),
+            }
+            return Ok(());
+        }
         self.usage_read = answer.ok().as_ref().and_then(extra_usage_read);
         if self.usage_read.is_none() {
             return Ok(());
@@ -4909,7 +5054,7 @@ impl ClaudeCodeRun {
     async fn plan_usage_reported(
         &mut self,
         info: &Value,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<(), ArkoAgentsError> {
         let mut usage = plan_usage_of(info);
         self.show_extra_usage(&mut usage);
@@ -4986,7 +5131,8 @@ impl ClaudeCodeRun {
         let settings = &config.llm_config.generation_config;
         let reported =
             ai::prompt_cache::prompt_cache_lifetime(&config.llm_config.model, settings, false);
-        if reported == ai::PromptCacheLifetime::Disabled
+        if config.runs_in_antigravity()
+            || reported == ai::PromptCacheLifetime::Disabled
             || settings.prompt_cache_lifetime_seconds.is_some()
         {
             return reported;
@@ -5016,8 +5162,8 @@ impl ClaudeCodeRun {
     /// ([`TaskContext::prompt_cache`](crate::tool::TaskContext::prompt_cache)).
     fn publish_prompt_cache(&self, last_used: Option<tokio::time::Instant>) {
         if let Some(host) = &self.host {
-            *host.environment.prompt_cache.lock().unwrap() =
-                crate::tool::PromptCacheWindow::new(self.cache_lifetime(), last_used);
+            let window = crate::tool::PromptCacheWindow::new(self.cache_lifetime(), last_used);
+            *host.environment.prompt_cache.lock().unwrap() = window;
         }
     }
 
@@ -5154,18 +5300,22 @@ impl ClaudeCodeRun {
     async fn turn_ended(
         &mut self,
         result: &cc::ResultMessage,
-        session: &mut cc::ClaudeSession,
+        session: &mut CliSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         // The next turn's responses are its own.
         let latest_response = std::mem::take(&mut self.latest_response);
         self.flush_usage().await?;
+        if self.task.agent_config.runs_in_antigravity() {
+            self.take_usage_answer().await?;
+        }
         // The CLI's word on the notes sent may follow the result.
         self.await_note_verdicts(session).await?;
         // The amounts of extra usage after this turn are asked for as it
         // ends, so the plan usage is current once the turn is over. A task
         // that already ended has no reader for a report, and without a plan
         // usage there is nothing to add the amounts to.
-        if self.stopping.is_none()
+        if self.task.agent_config.runs_in_claude_code()
+            && self.stopping.is_none()
             && !self.task.current_state.is_terminal()
             && self.plan_usage.is_some()
         {
@@ -5724,7 +5874,7 @@ impl ClaudeCodeRun {
     /// Sends `/compact` into the session between turns.
     async fn compact_now(
         &mut self,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.compaction = Some(Compaction::Sent { compacted: false });
         if let Err(error) = session.send(COMPACT_COMMAND).await {
@@ -5736,20 +5886,24 @@ impl ClaudeCodeRun {
     /// Sends the session the task's input it hasn't received, as a turn.
     async fn send_unsent(
         &mut self,
-        session: &cc::ClaudeSession,
+        session: &CliSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         let input = self.unsent_input()?;
         // After a turn ended, so it starts the next request.
         self.hand_offs.input(Stamp::now());
-        let sent = match input {
-            Value::String(text) => session.send(text).await,
-            content => session.send_content(content).await,
-        };
+        if self.task.agent_config.runs_in_antigravity() {
+            self.request_started(&Value::Null, &None).await?;
+        }
+        let sent = session.send_content(input).await;
         match sent {
-            Ok(uuid) => self.record_sent(uuid),
+            Ok(uuid) if !self.task.agent_config.runs_in_antigravity() => self.record_sent(uuid),
+            Ok(_) => {}
             Err(error) => return self.session_failed(error.to_string()).await.map(Some),
         }
         self.emit_context_receipts().await?;
+        if self.task.agent_config.runs_in_antigravity() {
+            self.ask_usage_if_due(session).await;
+        }
         Ok(None)
     }
 

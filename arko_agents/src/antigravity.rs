@@ -1,4 +1,17 @@
-//! Settings for agents whose models run through the Antigravity CLI.
+//! Settings for agents whose models run through the installed Antigravity CLI.
+//! Wrap a base model with [`arko_ai::Model::antigravity`], or look it up
+//! with [`arko_ai::Provider::Antigravity`]. Run `agy` once to sign in.
+//!
+//! Arko supplies the prompt and tools through a private profile. Set
+//! [`AntigravitySettings::helper_command`] to a program and arguments that
+//! call the [`arko_ai::antigravity`] relay and hook helpers.
+//!
+//! Antigravity 1.5.14 still exposes `list_resources`, `read_resource` and
+//! `manage_task`. Arko’s MCP relay offers no resources, and this setup
+//! starts no Antigravity tasks for `manage_task` to manage.
+//!
+//! Usage is billed to the Google plan. A resumed task starts a fresh
+//! CLI session with the saved transcript.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
