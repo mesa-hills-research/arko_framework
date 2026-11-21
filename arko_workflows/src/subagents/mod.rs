@@ -162,6 +162,9 @@ pub struct SubagentsConfig {
     /// The host's own `start_agent` parameters, whose values the
     /// [hook](Self::hook) receives.
     pub start_parameters: Vec<ToolParameterDefinition>,
+    /// The host's own `message_agent` parameters, added to `message_agent`'s
+    /// tool definition.
+    pub message_parameters: Vec<ToolParameterDefinition>,
     /// A subagent fails as soon as this many of its model requests have
     /// failed in a row. The agent's own retries count, and so do its waits
     /// for rate limits and overloaded errors. A model response resets the
@@ -188,6 +191,7 @@ impl Default for SubagentsConfig {
             hook: None,
             start_context: None,
             start_parameters: Vec::new(),
+            message_parameters: Vec::new(),
             max_failed_requests: None,
         }
     }
@@ -215,6 +219,14 @@ impl std::fmt::Debug for SubagentsConfig {
                 "start_parameters",
                 &self
                     .start_parameters
+                    .iter()
+                    .map(|parameter| &parameter.name)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "message_parameters",
+                &self
+                    .message_parameters
                     .iter()
                     .map(|parameter| &parameter.name)
                     .collect::<Vec<_>>(),
@@ -313,21 +325,39 @@ impl SubagentsConfig {
         self
     }
 
+    /// Adds a parameter of the host's own to `message_agent`.
+    pub fn message_parameter(mut self, parameter: ToolParameterDefinition) -> Self {
+        self.message_parameters.push(parameter);
+        self
+    }
+
     pub(crate) fn validate(&self) -> Result<(), crate::WorkflowError> {
-        let reserved = tools::START_PARAMETERS;
-        let mut seen = std::collections::HashSet::new();
-        for parameter in &self.start_parameters {
-            if reserved.contains(&parameter.name.as_str()) {
-                return Err(crate::WorkflowError::BuilderInvalid(format!(
-                    "start_agent already has a parameter '{}'",
-                    parameter.name
-                )));
-            }
-            if !seen.insert(parameter.name.as_str()) {
-                return Err(crate::WorkflowError::BuilderInvalid(format!(
-                    "start_agent parameter '{}' is added twice",
-                    parameter.name
-                )));
+        for (tool_name, reserved, extra) in [
+            (
+                "start_agent",
+                tools::START_PARAMETERS,
+                &self.start_parameters,
+            ),
+            (
+                "message_agent",
+                tools::MESSAGE_PARAMETERS,
+                &self.message_parameters,
+            ),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for parameter in extra {
+                if reserved.contains(&parameter.name.as_str()) {
+                    return Err(crate::WorkflowError::BuilderInvalid(format!(
+                        "{tool_name} already has a parameter '{}'",
+                        parameter.name
+                    )));
+                }
+                if !seen.insert(parameter.name.as_str()) {
+                    return Err(crate::WorkflowError::BuilderInvalid(format!(
+                        "{tool_name} parameter '{}' is added twice",
+                        parameter.name
+                    )));
+                }
             }
         }
         Ok(())

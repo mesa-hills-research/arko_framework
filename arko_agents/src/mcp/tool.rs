@@ -128,6 +128,7 @@ fn extract_parameters_from_schema(schema: &Value) -> Vec<ToolParameterDefinition
             is_path: false,
             flag: None,
             default_value: None,
+            enum_values: None,
         });
     }
 

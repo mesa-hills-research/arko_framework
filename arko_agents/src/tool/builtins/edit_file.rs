@@ -1,14 +1,14 @@
-//! `edit_file` replaces one exact piece of text in a file, or every
-//! occurrence of it.
+//! `edit_file` replaces one exact piece of text in a file, or a list of
+//! exact edits applied in order.
 //!
-//! The match is exact, on the file's whole content, with no fuzzy matching and
+//! Each match is exact, on the file's whole content, with no fuzzy matching and
 //! no whitespace tolerance. The one adjustment is for a file with CRLF line
 //! breaks, where the `\n` line breaks of `old_string` and `new_string` are
 //! written as `\r\n` before matching, since `read_file` shows the file's
 //! lines without them. Everything outside the match is kept byte for byte,
 //! a byte-order mark and the last line break included. A call applies in
-//! full or not at all. It reads the file, checks the match and writes the
-//! file once, and any error leaves the file as it was.
+//! full or not at all. It reads the file, applies all edits in memory, and
+//! writes the file once, so any error leaves the file as it was.
 //!
 //! Its output carries a receipt of what it changed
 //! ([`EditReceipt`](crate::tool::EditReceipt)), made
@@ -20,7 +20,7 @@ use crate::tool::{
     ToolParameterType, ToolReceipt, ToolTypeDetails,
 };
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 pub const EDIT_FILE_TOOL_NAME: &str = "edit_file";
@@ -28,6 +28,7 @@ const PATH_PARAM_NAME: &str = "path";
 const OLD_STRING_PARAM_NAME: &str = "old_string";
 const NEW_STRING_PARAM_NAME: &str = "new_string";
 const REPLACE_ALL_PARAM_NAME: &str = "replace_all";
+const EDITS_PARAM_NAME: &str = "edits";
 
 pub(super) const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 /// The lines around a change that its result shows, on each side.
@@ -72,23 +73,272 @@ pub(super) fn text_param<'a>(
 /// `replace_all` is a boolean, or the text `true` or `false`. Absent or null
 /// is `false`.
 pub(super) fn replace_all_param(params: &HashMap<String, Value>) -> Result<bool, ToolError> {
-    match params.get(REPLACE_ALL_PARAM_NAME) {
+    parse_replace_all(params.get(REPLACE_ALL_PARAM_NAME), REPLACE_ALL_PARAM_NAME)
+}
+
+fn parse_replace_all(value: Option<&Value>, param_name: &str) -> Result<bool, ToolError> {
+    match value {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
         Some(Value::String(text)) if text.trim().is_empty() => Ok(false),
         Some(Value::String(text)) => {
             crate::tool::definition::parse_bool_text(text).ok_or_else(|| {
                 ToolError::ParameterValidation {
-                    param_name: REPLACE_ALL_PARAM_NAME.to_string(),
+                    param_name: param_name.to_string(),
                     message: "Parameter 'replace_all' must be true or false.".to_string(),
                 }
             })
         }
         Some(_) => Err(ToolError::ParameterValidation {
-            param_name: REPLACE_ALL_PARAM_NAME.to_string(),
+            param_name: param_name.to_string(),
             message: "Parameter 'replace_all' must be true or false.".to_string(),
         }),
     }
+}
+
+struct EditSpec {
+    /// 1-based position in `edits` (1 for a single edit).
+    index: usize,
+    old: String,
+    new: String,
+    replace_all: bool,
+}
+
+/// Parses either `edits` (an array of edit objects) or single-edit parameters
+/// (`old_string`, `new_string`, optional `replace_all`). Returns the specs and
+/// whether `edits` was used.
+fn parse_edits(params: &HashMap<String, Value>) -> Result<(Vec<EditSpec>, bool), ToolError> {
+    let edits_value = params.get(EDITS_PARAM_NAME).filter(|v| !v.is_null());
+    let Some(edits_value) = edits_value else {
+        let old = text_param(params, OLD_STRING_PARAM_NAME)?;
+        let new = text_param(params, NEW_STRING_PARAM_NAME)?;
+        let replace_all = replace_all_param(params)?;
+        if old.is_empty() {
+            return Err(ToolError::ParameterValidation {
+                param_name: OLD_STRING_PARAM_NAME.to_string(),
+                message:
+                    "old_string is empty. To create a file or replace all of it, use write_file."
+                        .to_string(),
+            });
+        }
+        if old == new {
+            return Err(ToolError::ParameterValidation {
+                param_name: NEW_STRING_PARAM_NAME.to_string(),
+                message: "new_string is the same as old_string, so there is nothing to change."
+                    .to_string(),
+            });
+        }
+        return Ok((
+            vec![EditSpec {
+                index: 1,
+                old: old.to_string(),
+                new: new.to_string(),
+                replace_all,
+            }],
+            false,
+        ));
+    };
+
+    let has_single = [
+        OLD_STRING_PARAM_NAME,
+        NEW_STRING_PARAM_NAME,
+        REPLACE_ALL_PARAM_NAME,
+    ]
+    .iter()
+    .any(|name| params.get(*name).is_some_and(|v| !v.is_null()));
+    if has_single {
+        return Err(ToolError::ParameterValidation {
+            param_name: EDITS_PARAM_NAME.to_string(),
+            message: "Provide either edits or old_string/new_string, not both.".to_string(),
+        });
+    }
+
+    let parsed_json;
+    let items = match edits_value {
+        Value::Array(items) => items,
+        Value::String(text) => {
+            parsed_json = serde_json::from_str::<Value>(text).map_err(|_| {
+                ToolError::ParameterValidation {
+                    param_name: EDITS_PARAM_NAME.to_string(),
+                    message: "Parameter 'edits' must be a JSON array of edit objects.".to_string(),
+                }
+            })?;
+            parsed_json
+                .as_array()
+                .ok_or_else(|| ToolError::ParameterValidation {
+                    param_name: EDITS_PARAM_NAME.to_string(),
+                    message: "Parameter 'edits' must be an array of edit objects.".to_string(),
+                })?
+        }
+        _ => {
+            return Err(ToolError::ParameterValidation {
+                param_name: EDITS_PARAM_NAME.to_string(),
+                message: "Parameter 'edits' must be an array of edit objects.".to_string(),
+            });
+        }
+    };
+    if items.is_empty() {
+        return Err(ToolError::ParameterValidation {
+            param_name: EDITS_PARAM_NAME.to_string(),
+            message: "Parameter 'edits' cannot be empty.".to_string(),
+        });
+    }
+
+    let mut specs = Vec::with_capacity(items.len());
+    for (offset, item) in items.iter().enumerate() {
+        let index = offset + 1;
+        let Some(object) = item.as_object() else {
+            return Err(ToolError::ParameterValidation {
+                param_name: EDITS_PARAM_NAME.to_string(),
+                message: format!("Edit {index} must be an object with old_string and new_string."),
+            });
+        };
+        let old = object
+            .get(OLD_STRING_PARAM_NAME)
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::ParameterValidation {
+                param_name: EDITS_PARAM_NAME.to_string(),
+                message: format!("Edit {index} is missing a string old_string."),
+            })?;
+        let new = object
+            .get(NEW_STRING_PARAM_NAME)
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::ParameterValidation {
+                param_name: EDITS_PARAM_NAME.to_string(),
+                message: format!("Edit {index} is missing a string new_string."),
+            })?;
+        let replace_all = parse_replace_all(object.get(REPLACE_ALL_PARAM_NAME), EDITS_PARAM_NAME)?;
+        if old.is_empty() {
+            return Err(ToolError::ParameterValidation {
+                param_name: EDITS_PARAM_NAME.to_string(),
+                message: format!(
+                    "Edit {index} has an empty old_string. To create a file or replace all of it, use write_file."
+                ),
+            });
+        }
+        specs.push(EditSpec {
+            index,
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all,
+        });
+    }
+    Ok((specs, true))
+}
+
+/// Composes `prev` (sorted, non-overlapping replacements from `orig` to `mid`)
+/// with `step` (sorted, non-overlapping replacements from `mid` to `after`)
+/// into sorted, non-overlapping replacements from `orig` to `after`.
+fn compose_replacements(prev: &[Replacement], step: &[Replacement]) -> Vec<Replacement> {
+    if prev.is_empty() {
+        return step.to_vec();
+    }
+    if step.is_empty() {
+        return prev.to_vec();
+    }
+    let mut out = Vec::with_capacity(prev.len() + step.len());
+    let (mut pi, mut si) = (0, 0);
+    let mut orig_delta: isize = 0;
+    let mut after_delta: isize = 0;
+
+    while pi < prev.len() || si < step.len() {
+        let take_p = match (prev.get(pi), step.get(si)) {
+            (Some(p), Some(s)) => p.start <= s.at,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!(),
+        };
+
+        let (mut m_hi, orig_lo, after_lo);
+        if take_p {
+            let p = prev[pi];
+            pi += 1;
+            orig_lo = p.at;
+            after_lo = (p.start as isize + after_delta) as usize;
+            m_hi = p.start + p.new_len;
+            orig_delta = (p.at + p.old_len) as isize - m_hi as isize;
+        } else {
+            let s = step[si];
+            si += 1;
+            orig_lo = (s.at as isize + orig_delta) as usize;
+            after_lo = s.start;
+            m_hi = s.at + s.old_len;
+            after_delta = (s.start + s.new_len) as isize - m_hi as isize;
+        }
+
+        loop {
+            if let Some(p) = prev.get(pi).filter(|p| p.start <= m_hi) {
+                pi += 1;
+                let p_end = p.start + p.new_len;
+                m_hi = m_hi.max(p_end);
+                orig_delta = (p.at + p.old_len) as isize - p_end as isize;
+            } else if let Some(s) = step.get(si).filter(|s| s.at <= m_hi) {
+                si += 1;
+                let s_end = s.at + s.old_len;
+                m_hi = m_hi.max(s_end);
+                after_delta = (s.start + s.new_len) as isize - s_end as isize;
+            } else {
+                break;
+            }
+        }
+
+        let orig_hi = (m_hi as isize + orig_delta) as usize;
+        let after_hi = (m_hi as isize + after_delta) as usize;
+        out.push(Replacement {
+            at: orig_lo,
+            old_len: orig_hi - orig_lo,
+            start: after_lo,
+            new_len: after_hi - after_lo,
+        });
+    }
+    out
+}
+
+fn edit_file_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            PATH_PARAM_NAME: {
+                "type": "string",
+                "description": "The path to the file to edit (relative to the current working directory, e.g. 'src/main.rs').",
+            },
+            OLD_STRING_PARAM_NAME: {
+                "type": "string",
+                "description": "The exact text to replace (for a single edit).",
+            },
+            NEW_STRING_PARAM_NAME: {
+                "type": "string",
+                "description": "The text to put in its place (empty to delete it).",
+            },
+            REPLACE_ALL_PARAM_NAME: {
+                "type": "boolean",
+                "description": "Replace every occurrence of old_string (default false).",
+            },
+            EDITS_PARAM_NAME: {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        OLD_STRING_PARAM_NAME: {
+                            "type": "string",
+                            "description": "The exact text to replace.",
+                        },
+                        NEW_STRING_PARAM_NAME: {
+                            "type": "string",
+                            "description": "The text to put in its place (empty to delete it).",
+                        },
+                        REPLACE_ALL_PARAM_NAME: {
+                            "type": "boolean",
+                            "description": "Replace every occurrence of old_string (default false).",
+                        },
+                    },
+                    "required": [OLD_STRING_PARAM_NAME, NEW_STRING_PARAM_NAME],
+                },
+                "description": "Multiple edits to apply in order, atomically. Use either edits or old_string/new_string.",
+            },
+        },
+        "required": [PATH_PARAM_NAME],
+    })
 }
 
 /// `text` with its `\n` line breaks written as `\r\n` (and those already
@@ -224,7 +474,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: EDIT_FILE_TOOL_NAME.to_string(),
-            description: "Replaces text in an existing file. `old_string` must match the file exactly, including indentation and line breaks, and appear exactly once. Set `replace_all` to change every occurrence. Copy it from `read_file`'s output without the line-number prefix (`12 | `), with enough surrounding lines to make it unique. If it isn't found, or is found more than once, the file is left unchanged and the error says which. For several changes, call it once for each. Calls in one response run in order. Use `write_file` to create a file or replace all of it.".to_string(),
+            description: "Replaces exact text in an existing file. Pass `old_string` and `new_string` for one edit, or `edits` (an array of `{old_string, new_string, replace_all?}`) to apply several in order atomically. Each `old_string` must match the file exactly, including indentation and line breaks, without `read_file`'s line-number prefixes (`12 | `), and appear once unless `replace_all` is true. Any failure leaves the file unchanged. Use `write_file` to create a file or replace all of it.".to_string(),
             output_based_example: Some(
                 "<edit_file>\n\
                 <path>src/config.rs</path>\n\
@@ -242,24 +492,27 @@ impl Tool for EditFileTool {
                     is_path: true,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: OLD_STRING_PARAM_NAME.to_string(),
-                    description: "The exact text to replace.".to_string(),
+                    description: "The exact text to replace (for a single edit).".to_string(),
                     param_type: ToolParameterType::String,
-                    required: true,
+                    required: false,
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: NEW_STRING_PARAM_NAME.to_string(),
                     description: "The text to put in its place (empty to delete it).".to_string(),
                     param_type: ToolParameterType::String,
-                    required: true,
+                    required: false,
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: REPLACE_ALL_PARAM_NAME.to_string(),
@@ -269,12 +522,23 @@ impl Tool for EditFileTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
+                },
+                ToolParameterDefinition {
+                    name: EDITS_PARAM_NAME.to_string(),
+                    description: "JSON array of {old_string, new_string, replace_all?} edits to apply in order, atomically. Use either edits or old_string/new_string.".to_string(),
+                    param_type: ToolParameterType::String,
+                    required: false,
+                    is_path: false,
+                    flag: None,
+                    default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
             read_only: false,
-            raw_json_schema_override: None,
+            raw_json_schema_override: Some(edit_file_schema()),
         }
     }
 
@@ -300,20 +564,23 @@ impl Tool for EditFileTool {
                 message: "File path cannot be empty.".to_string(),
             });
         }
-        let old = text_param(&params, OLD_STRING_PARAM_NAME)?;
-        let new = text_param(&params, NEW_STRING_PARAM_NAME)?;
-        let replace_all = replace_all_param(&params)?;
-        if old.is_empty() {
-            return Err(ToolError::ParameterValidation {
-                param_name: OLD_STRING_PARAM_NAME.to_string(),
-                message:
-                    "old_string is empty. To create a file or replace all of it, use write_file."
-                        .to_string(),
-            });
+        let (specs, is_multi) = parse_edits(&params)?;
+        let mut active = Vec::with_capacity(specs.len());
+        let mut skipped_noops = 0usize;
+        for spec in specs {
+            if spec.old == spec.new {
+                skipped_noops += 1;
+            } else {
+                active.push(spec);
+            }
         }
-        if old == new {
+        if active.is_empty() {
             return Err(ToolError::ParameterValidation {
-                param_name: NEW_STRING_PARAM_NAME.to_string(),
+                param_name: if is_multi {
+                    EDITS_PARAM_NAME.to_string()
+                } else {
+                    NEW_STRING_PARAM_NAME.to_string()
+                },
                 message: "new_string is the same as old_string, so there is nothing to change."
                     .to_string(),
             });
@@ -356,97 +623,144 @@ impl Tool for EditFileTool {
             }
         };
 
-        let (old, new) = if text.contains("\r\n") {
-            (with_crlf(old), with_crlf(new))
-        } else {
-            (old.to_string(), new.to_string())
-        };
-        let found: Vec<usize> = text.match_indices(&old).map(|(at, _)| at).collect();
-        if found.is_empty() {
-            let mut message =
-                format!("old_string wasn't found in {path}, so the file is unchanged.");
-            let mut hinted = false;
-            if starts_with_line_number(&old) {
-                message.push_str(" It starts with a line number from read_file's output (`12 | `). Leave those prefixes out.");
-                hinted = true;
+        let has_crlf = text.contains("\r\n");
+        let mut current = text.to_string();
+        let mut composed: Vec<Replacement> = Vec::new();
+        let mut last_new_len = 0usize;
+        let mut last_starts: Vec<usize> = Vec::new();
+
+        for spec in &active {
+            let (old, new) = if has_crlf {
+                (with_crlf(&spec.old), with_crlf(&spec.new))
+            } else {
+                (spec.old.clone(), spec.new.clone())
+            };
+            let found: Vec<usize> = current.match_indices(&old).map(|(at, _)| at).collect();
+            if found.is_empty() {
+                let mut message = if is_multi {
+                    format!(
+                        "Edit {} failed. old_string wasn't found in {path}, so the file is unchanged.",
+                        spec.index
+                    )
+                } else {
+                    format!("old_string wasn't found in {path}, so the file is unchanged.")
+                };
+                let mut hinted = false;
+                if starts_with_line_number(&old) {
+                    message.push_str(" It starts with a line number from read_file's output (`12 | `). Leave those prefixes out.");
+                    hinted = true;
+                }
+                if let Some((first, last)) = match_apart_from_indentation(&current, &old) {
+                    message.push_str(&format!(
+                        " It matches {} apart from indentation. Copy the indentation exactly as the file has it.",
+                        line_range(first, last)
+                    ));
+                    hinted = true;
+                }
+                if !hinted {
+                    message.push_str(" Read the lines again and copy them exactly.");
+                }
+                return Err(ToolError::ExecutionFailed(message));
             }
-            if let Some((first, last)) = match_apart_from_indentation(text, &old) {
-                message.push_str(&format!(
-                    " It matches {} apart from indentation. Copy the indentation exactly as the file has it.",
-                    line_range(first, last)
-                ));
-                hinted = true;
+            let found_lines = lines_at(&current, &found);
+            if found.len() > 1 && !spec.replace_all {
+                let prefix = if is_multi {
+                    format!("Edit {} failed. ", spec.index)
+                } else {
+                    String::new()
+                };
+                return Err(ToolError::ExecutionFailed(format!(
+                    "{prefix}old_string was found {} times in {path}, at {}, so the file is unchanged. Add surrounding lines to old_string to make it unique, or set replace_all to change every occurrence.",
+                    found.len(),
+                    lines_named(&found_lines)
+                )));
             }
-            if !hinted {
-                message.push_str(" Read the lines again and copy them exactly.");
+
+            let mut next = String::with_capacity(current.len() + found.len() * new.len());
+            let mut starts = Vec::with_capacity(found.len());
+            let mut rest = 0;
+            for at in &found {
+                next.push_str(&current[rest..*at]);
+                starts.push(next.len());
+                next.push_str(&new);
+                rest = at + old.len();
             }
-            return Err(ToolError::ExecutionFailed(message));
-        }
-        let found_lines = lines_at(text, &found);
-        if found.len() > 1 && !replace_all {
-            return Err(ToolError::ExecutionFailed(format!(
-                "old_string was found {} times in {path}, at {}, so the file is unchanged. Add surrounding lines to old_string to make it unique, or set replace_all to change every occurrence.",
-                found.len(),
-                lines_named(&found_lines)
-            )));
+            next.push_str(&current[rest..]);
+
+            let step: Vec<Replacement> = found
+                .iter()
+                .zip(&starts)
+                .map(|(at, start)| Replacement {
+                    at: *at,
+                    old_len: old.len(),
+                    start: *start,
+                    new_len: new.len(),
+                })
+                .collect();
+            composed = compose_replacements(&composed, &step);
+            last_new_len = new.len();
+            last_starts = starts;
+            current = next;
         }
 
-        // The new content, and where each replacement starts in it.
-        let mut edited = String::with_capacity(text.len() + found.len() * new.len());
-        let mut starts = Vec::with_capacity(found.len());
-        let mut rest = 0;
-        for at in &found {
-            edited.push_str(&text[rest..*at]);
-            starts.push(edited.len());
-            edited.push_str(&new);
-            rest = at + old.len();
-        }
-        edited.push_str(&text[rest..]);
-
+        let edited = current;
         let mut contents = Vec::with_capacity(bom.len() + edited.len());
         contents.extend_from_slice(bom);
         contents.extend_from_slice(edited.as_bytes());
         tokio::fs::write(&absolute_path, contents)
             .await
             .map_err(io)?;
-        let replaced: Vec<Replacement> = found
-            .iter()
-            .zip(&starts)
-            .map(|(at, start)| Replacement {
-                at: *at,
-                old_len: old.len(),
-                start: *start,
-                new_len: new.len(),
-            })
-            .collect();
-        let receipt = ToolReceipt::Edit(edit_receipt(text, &edited, &replaced));
+        let receipt = ToolReceipt::Edit(edit_receipt(text, &edited, &composed));
 
-        if replace_all {
-            let lines = lines_at(&edited, &starts);
-            return Ok(ToolOutput::text(format!(
-                "Replaced {} in {path}, at {}.",
-                if starts.len() == 1 {
-                    "1 occurrence".to_string()
-                } else {
-                    format!("{} occurrences", starts.len())
-                },
-                lines_named(&lines)
-            ))
+        if !is_multi {
+            if active[0].replace_all {
+                let lines = lines_at(&edited, &last_starts);
+                return Ok(ToolOutput::text(format!(
+                    "Replaced {} in {path}, at {}.",
+                    if last_starts.len() == 1 {
+                        "1 occurrence".to_string()
+                    } else {
+                        format!("{} occurrences", last_starts.len())
+                    },
+                    lines_named(&lines)
+                ))
+                .with_receipt(receipt));
+            }
+            let start = last_starts[0];
+            let first = line_at(&edited, start);
+            let last = if last_new_len == 0 {
+                first
+            } else {
+                line_at(&edited, start + last_new_len - 1)
+            };
+            let shown = shown_lines(&edited, first, last);
+            return Ok(ToolOutput::text(if shown.is_empty() {
+                format!("Edited {path}. It is now empty.")
+            } else {
+                format!("Edited {path} at {}:\n{shown}", line_range(first, last))
+            })
             .with_receipt(receipt));
         }
-        let start = starts[0];
-        let first = line_at(&edited, start);
-        let last = if new.is_empty() {
-            first
-        } else {
-            line_at(&edited, start + new.len() - 1)
+
+        let skip_note = match skipped_noops {
+            0 => String::new(),
+            1 => " Skipped 1 no-op edit.".to_string(),
+            n => format!(" Skipped {n} no-op edits."),
         };
-        let shown = shown_lines(&edited, first, last);
-        Ok(ToolOutput::text(if shown.is_empty() {
-            format!("Edited {path}. It is now empty.")
-        } else {
-            format!("Edited {path} at {}:\n{shown}", line_range(first, last))
-        })
+        if edited.is_empty() {
+            return Ok(
+                ToolOutput::text(format!("Edited {path}. It is now empty.{skip_note}"))
+                    .with_receipt(receipt),
+            );
+        }
+        let starts: Vec<usize> = composed.iter().map(|r| r.start).collect();
+        let lines = lines_at(&edited, &starts);
+        let applied = active.len();
+        let edit_word = if applied == 1 { "edit" } else { "edits" };
+        Ok(ToolOutput::text(format!(
+            "Applied {applied} {edit_word} to {path}, at {}.{skip_note}",
+            lines_named(&lines)
+        ))
         .with_receipt(receipt))
     }
 }
@@ -872,5 +1186,163 @@ mod tests {
             EditFileTool.recovery_mode(),
             crate::tool::ToolRecovery::InDoubt
         );
+        let schema = definition.to_json_schema();
+        assert_eq!(schema["properties"]["edits"]["type"], "array");
+        assert_eq!(schema["required"], json!(["path"]));
+    }
+
+    #[tokio::test]
+    async fn multi_edit_applies_edits_in_order_and_produces_one_receipt() {
+        let ws = Workspace::new();
+        ws.write(
+            "a.rs",
+            b"const A: i32 = 1;\nconst B: i32 = 2;\nconst C: i32 = 3;\n",
+        );
+        let output = ws
+            .edit_output(json!({
+                "path": "a.rs",
+                "edits": [
+                    {"old_string": "const C: i32 = 3;", "new_string": "const C: i32 = 30;"},
+                    {"old_string": "const A: i32 = 1;", "new_string": "const A: i32 = 10;"},
+                    {"old_string": "const A: i32 = 10;", "new_string": "const A: i32 = 100;"},
+                ]
+            }))
+            .await;
+        assert_eq!(
+            String::from_utf8(ws.read("a.rs")).unwrap(),
+            "const A: i32 = 100;\nconst B: i32 = 2;\nconst C: i32 = 30;\n"
+        );
+        assert_eq!(output.text, "Applied 3 edits to a.rs, at lines 1 and 3.");
+        assert_eq!(
+            diff(&output),
+            [
+                "@1 1",
+                "-const A: i32 = 1;",
+                "+const A: i32 = 100;",
+                " const B: i32 = 2;",
+                "-const C: i32 = 3;",
+                "+const C: i32 = 30;",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_edit_skips_noop_entries_when_other_edits_apply() {
+        let ws = Workspace::new();
+        ws.write("a.txt", b"alpha\nbeta\ngamma\n");
+        let result = ws
+            .edit(json!({
+                "path": "a.txt",
+                "edits": [
+                    {"old_string": "alpha", "new_string": "alpha"},
+                    {"old_string": "beta", "new_string": "BETA"},
+                    {"old_string": "gamma", "new_string": "gamma"},
+                ]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ws.read("a.txt"), b"alpha\nBETA\ngamma\n");
+        assert_eq!(
+            result,
+            "Applied 1 edit to a.txt, at line 2. Skipped 2 no-op edits."
+        );
+
+        // Single no-op entry in a batch still fails.
+        let error = ws
+            .refused(
+                "a.txt",
+                json!({
+                    "path": "a.txt",
+                    "edits": [{"old_string": "alpha", "new_string": "alpha"}]
+                }),
+            )
+            .await;
+        assert!(error.contains("nothing to change"), "{error}");
+
+        // Multiple entries that are all no-ops also fail.
+        let error = ws
+            .refused(
+                "a.txt",
+                json!({
+                    "path": "a.txt",
+                    "edits": [
+                        {"old_string": "alpha", "new_string": "alpha"},
+                        {"old_string": "gamma", "new_string": "gamma"},
+                    ]
+                }),
+            )
+            .await;
+        assert!(error.contains("nothing to change"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn multi_edit_is_atomic_and_rejects_invalid_inputs() {
+        let ws = Workspace::new();
+        ws.write("a.txt", b"one\ntwo\ntwo\n");
+        // Second edit fails -> first edit is not written to disk.
+        let error = ws
+            .refused(
+                "a.txt",
+                json!({
+                    "path": "a.txt",
+                    "edits": [
+                        {"old_string": "one", "new_string": "ONE"},
+                        {"old_string": "missing", "new_string": "X"},
+                    ]
+                }),
+            )
+            .await;
+        assert!(error.contains("Edit 2 failed"), "{error}");
+        assert!(error.contains("wasn't found"), "{error}");
+
+        // Duplicate match without replace_all fails atomically.
+        let error = ws
+            .refused(
+                "a.txt",
+                json!({
+                    "path": "a.txt",
+                    "edits": [
+                        {"old_string": "one", "new_string": "ONE"},
+                        {"old_string": "two", "new_string": "TWO"},
+                    ]
+                }),
+            )
+            .await;
+        assert!(error.contains("Edit 2 failed"), "{error}");
+        assert!(error.contains("found 2 times"), "{error}");
+
+        // replace_all works inside an edits entry.
+        let result = ws
+            .edit(json!({
+                "path": "a.txt",
+                "edits": [
+                    {"old_string": "one", "new_string": "ONE"},
+                    {"old_string": "two", "new_string": "TWO", "replace_all": true},
+                ]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ws.read("a.txt"), b"ONE\nTWO\nTWO\n");
+        assert!(result.contains("Applied 2 edits to a.txt"), "{result}");
+
+        // Cannot combine edits with old_string/new_string.
+        let error = ws
+            .refused(
+                "a.txt",
+                json!({
+                    "path": "a.txt",
+                    "old_string": "ONE",
+                    "new_string": "one",
+                    "edits": [{"old_string": "ONE", "new_string": "one"}],
+                }),
+            )
+            .await;
+        assert!(error.contains("not both"), "{error}");
+
+        // Empty edits array is refused.
+        let error = ws
+            .refused("a.txt", json!({"path": "a.txt", "edits": []}))
+            .await;
+        assert!(error.contains("cannot be empty"), "{error}");
     }
 }

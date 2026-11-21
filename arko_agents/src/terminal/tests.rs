@@ -2056,3 +2056,33 @@ async fn foreground_calls_are_listed_until_they_move() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn heuristic_prompt_match_keeps_revision_so_input_is_not_stale() {
+    let f = Fixture::new(|config| {
+        config.prompt_quiet_ms = 120;
+    });
+    let job = f.python(
+        "print('Continue? [Y/n] ', end='', flush=True); print('ANSWER=' + input())",
+        Default::default(),
+    );
+    // Read the output before prompt_quiet_ms elapses.
+    let seen = f
+        .until(job.job_id, |s| s.output.text.contains("Continue? [Y/n]"))
+        .await;
+    // Wait for the heuristic rule to fire on that already-read output.
+    let prompted = f.until(job.job_id, |s| s.input.is_some()).await;
+    assert!(matches!(
+        prompted.input.as_ref().unwrap().source,
+        InputSource::PromptRule { .. }
+    ));
+    assert_eq!(prompted.revision, seen.revision);
+    // Submitting input with the revision read before the heuristic fired succeeds.
+    f.input(f.owner, job.job_id, seen.revision, "Y\n".into())
+        .await
+        .unwrap();
+    let done = f.finished(job.job_id).await;
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert!(done.output.text.contains("ANSWER=Y"), "{done:?}");
+    f.manager.shutdown().await;
+}

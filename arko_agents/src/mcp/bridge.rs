@@ -820,6 +820,7 @@ impl Tool for McpBridgeTool {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             };
         let mut parameters = vec![parameter("action", ToolParameterType::String, true)];
         let mut names = vec!["server", "tool", "filter", "schema", "arguments"];

@@ -50,6 +50,7 @@ pub(super) fn parameter(name: &str, description: &str, required: bool) -> ToolPa
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     }
 }
 pub(super) fn string<'a>(
@@ -106,15 +107,17 @@ pub(super) fn tool_error(error: impl std::fmt::Display) -> ToolError {
     ToolError::ExecutionFailed(error.to_string())
 }
 
-/// How long `terminal_control wait` lasts without `wait_ms`.
-const DEFAULT_WAIT: Duration = Duration::from_secs(1);
+/// How long `terminal_control wait` lasts without `wait_ms` when the prompt
+/// cache sets no deadline.
+const DEFAULT_WAIT_FALLBACK: Duration = Duration::from_secs(30);
 
 impl TerminalTool {
     /// `terminal_control wait`. It lasts as long as the agent asks, up to
     /// the longest wait that ends before its prompt cache lapses, which a
-    /// longer request is cut to, and the result says so. New output, the
-    /// job's end, context that arrives for the agent and a stop end it
-    /// sooner.
+    /// longer request is cut to, and the result says so. Without `wait_ms`,
+    /// it defaults to the prompt-cache cap (or [`DEFAULT_WAIT_FALLBACK`] if
+    /// no cache deadline is set). New output, the job's end, context that
+    /// arrives for the agent and a stop end it sooner.
     async fn wait(
         &self,
         context: &TaskContext<'_>,
@@ -123,10 +126,24 @@ impl TerminalTool {
     ) -> std::result::Result<Value, ToolError> {
         let started = tokio::time::Instant::now();
         let revision = revision(params)?;
-        let asked = number(params, "wait_ms")?.map_or(DEFAULT_WAIT, Duration::from_millis);
+        let asked = number(params, "wait_ms")?.map(Duration::from_millis);
         // One deadline from the start, down to the manager's timer, so the
         // time the job's lookup and lock take comes out of the wait.
-        let wait = context.prompt_cache.cap(started, asked);
+        let (wait, cut_from) = match asked {
+            Some(asked) => {
+                let wait = context.prompt_cache.cap(started, asked);
+                (wait, (wait < asked).then_some(asked))
+            }
+            None => {
+                let wait = context
+                    .prompt_cache
+                    .deadline(started)
+                    .map_or(DEFAULT_WAIT_FALLBACK, |deadline| {
+                        deadline.saturating_duration_since(started)
+                    });
+                (wait, None)
+            }
+        };
         let deadline = started.checked_add(wait);
         let owner = context.task_id;
         let (snapshot, ran_out) = tokio::select! {
@@ -141,7 +158,7 @@ impl TerminalTool {
         }
         .map_err(tool_error)?;
         let mut result = serde_json::to_value(&snapshot).map_err(tool_error)?;
-        if ran_out && wait < asked {
+        if ran_out && let Some(asked) = cut_from {
             result["note"] = cut_note(asked, wait, &context.prompt_cache).into();
         }
         Ok(result)
@@ -245,9 +262,10 @@ impl Tool for TerminalTool {
             ),
             Operation::Control => (
                 Self::NAMES[3],
-                "Lists your jobs (action `list`), waits until a job changes (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A wait ends when the job prints something new, finishes or asks for input, and when a note or an update reaches you. Without `wait_ms` it lasts 1 second at most. Ask for longer when you expect the job to take longer, up to your prompt cache's lifetime less a margin, counted from your latest request (4 min 30 s for a 5-minute cache, and when the lifetime is unknown). A longer request is cut to that, and the result says so, and when your cache lapses if its lifetime is known. A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
+                "Lists your jobs (`list`), waits until a job changes (`wait`), cancels a job and its child processes (`cancel`), or forgets a finished job while keeping its log (`forget`). A wait ends on new output, completion, an input request, or incoming context, and is bounded by your prompt cache window. Terminal updates already notify you when a job finishes or waits for input, so wait only when you can't go on without it.",
                 vec![
-                    parameter("action", "list, wait, cancel or forget.", true),
+                    parameter("action", "list, wait, cancel or forget.", true)
+                        .with_enum(["list", "wait", "cancel", "forget"]),
                     parameter("job_id", "The job's ID (not for list).", false),
                     parameter(
                         "revision",
@@ -256,7 +274,7 @@ impl Tool for TerminalTool {
                     ),
                     parameter(
                         "wait_ms",
-                        "wait: the most milliseconds to wait (default 1000). Give about how long you expect the job to take.",
+                        "wait: maximum milliseconds to wait (defaults to the prompt-cache cap).",
                         false,
                     ),
                 ],

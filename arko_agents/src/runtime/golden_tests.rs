@@ -176,6 +176,7 @@ impl Tool for Step {
             is_path,
             flag: None,
             default_value: None,
+            enum_values: None,
         };
         ToolDefinition {
             name: self.name.into(),

@@ -449,6 +449,7 @@ impl Tool for ShellTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "timeout_seconds".to_string(),
@@ -461,6 +462,7 @@ impl Tool for ShellTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: true,

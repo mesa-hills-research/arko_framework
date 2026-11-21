@@ -96,7 +96,8 @@ fn note(result: &Value) -> &str {
 }
 
 /// A wait over the old 30 seconds, inside the cache, lasts as long as the
-/// agent asks and says nothing of a cut. Without `wait_ms` it lasts a second.
+/// agent asks and says nothing of a cut. Without `wait_ms`, it defaults to the
+/// prompt-cache cap (or 30 seconds if no cache deadline is set).
 #[tokio::test(start_paused = true)]
 async fn a_wait_inside_the_cache_lasts_as_long_as_asked() {
     let f = Fixture::new(|_| {});
@@ -110,8 +111,24 @@ async fn a_wait_inside_the_cache_lasts_as_long_as_asked() {
         assert_eq!(result["state"], "running");
     }
     let (result, elapsed) = wait(&f, &job, None, used_now(Known(30 * MINUTE))).await;
-    assert_lasted(elapsed, 1);
+    assert_lasted(elapsed, 27 * 60);
     assert!(result.get("note").is_none(), "{result}");
+    let (result, elapsed) = wait(&f, &job, None, used_now(Unknown)).await;
+    assert_lasted(elapsed, 270);
+    assert!(result.get("note").is_none(), "{result}");
+    #[cfg(unix)]
+    {
+        // A lifetime too far to count sets no deadline, falling back to 30 s.
+        let (result, elapsed) = wait(
+            &f,
+            &job,
+            None,
+            used_now(Known(Duration::from_secs(u64::MAX))),
+        )
+        .await;
+        assert_lasted(elapsed, 30);
+        assert!(result.get("note").is_none(), "{result}");
+    }
 }
 
 /// A request above the ceiling is cut to it for each kind of lifetime, and
@@ -455,22 +472,14 @@ async fn context_and_a_stop_end_a_long_wait() {
     stopper.await.unwrap();
 }
 
-/// The description says the agent may ask for a longer wait, and what
-/// bounds it.
+/// The description says waits are bounded by the prompt cache and emits enum
+/// values for `action`.
 #[test]
 fn the_description_says_how_long_a_wait_may_be() {
     let f = Fixture::new(|_| {});
     let definition = control(&f).definition();
     let description = &definition.description;
-    for part in [
-        "`wait_ms`",
-        "Ask for longer",
-        "prompt cache's lifetime less a margin, counted from your latest request (4 min 30 s for a 5-minute cache, and when the lifetime is unknown)",
-        "cut to that",
-        "when your cache lapses if its lifetime is known",
-    ] {
-        assert!(description.contains(part), "{part}: {description}");
-    }
+    assert!(description.contains("prompt cache"), "{description}");
     assert!(!description.contains("30 seconds"), "{description}");
     let wait_ms = definition
         .parameters
@@ -478,6 +487,11 @@ fn the_description_says_how_long_a_wait_may_be() {
         .find(|parameter| parameter.name == "wait_ms")
         .unwrap();
     assert!(!wait_ms.description.contains("30000"), "{wait_ms:?}");
+    let schema = definition.to_json_schema();
+    assert_eq!(
+        schema["properties"]["action"]["enum"],
+        json!(["list", "wait", "cancel", "forget"])
+    );
 }
 
 #[test]

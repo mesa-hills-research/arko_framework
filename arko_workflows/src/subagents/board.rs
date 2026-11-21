@@ -850,40 +850,8 @@ impl Board {
         // The host's changes are checked before a workspace is made for the
         // run, or the run is recorded.
         let prepared = self.prepared_config(ctx, &record)?;
-        let (workspace, isolated) = match (
-            workspace.map(str::trim).filter(|w| !w.is_empty()),
-            isolated,
-        ) {
-            (Some(_), true) => {
-                return Err(
-                    "give either a workspace or isolated, not both: an isolated run gets a workspace of its own"
-                        .to_string(),
-                );
-            }
-            (None, true) => {
-                let provider = config
-                    .workspace_provider
-                    .as_ref()
-                    .ok_or("isolated workspaces are not available in this workflow")?;
-                let request = WorkspaceRequest {
-                    workflow_run_id: ctx.workflow_run_id,
-                    run_id,
-                    handle: handle.clone(),
-                    agent: agent.to_string(),
-                    caller_run_id: caller,
-                    base: caller_dir.to_path_buf(),
-                };
-                let created = provider.create(&request).await?;
-                if !created.path.is_dir() {
-                    let _ = provider.remove(&created).await;
-                    return Err(format!(
-                        "the isolated workspace {} doesn't exist",
-                        created.path.display()
-                    ));
-                }
-                (created.path.clone(), Some(created))
-            }
-            (Some(path), false) => {
+        let base = match workspace.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(path) => {
                 let resolved = crate::workflow::options::run_workspace(caller_dir, Path::new(path))
                     .map_err(|error| error.to_string())?;
                 // Judged as the agents' path check judges a path, so a link
@@ -905,9 +873,34 @@ impl Board {
                         }
                     }
                 }
-                (resolved, None)
+                resolved
             }
-            (None, false) => (caller_dir.to_path_buf(), None),
+            None => caller_dir.to_path_buf(),
+        };
+        let (workspace, isolated) = if isolated {
+            let provider = config
+                .workspace_provider
+                .as_ref()
+                .ok_or("isolated workspaces are not available in this workflow")?;
+            let request = WorkspaceRequest {
+                workflow_run_id: ctx.workflow_run_id,
+                run_id,
+                handle: handle.clone(),
+                agent: agent.to_string(),
+                caller_run_id: caller,
+                base,
+            };
+            let created = provider.create(&request).await?;
+            if !created.path.is_dir() {
+                let _ = provider.remove(&created).await;
+                return Err(format!(
+                    "the isolated workspace {} doesn't exist",
+                    created.path.display()
+                ));
+            }
+            (created.path.clone(), Some(created))
+        } else {
+            (base, None)
         };
         record.workspace = workspace.clone();
         record.isolated = isolated.clone();

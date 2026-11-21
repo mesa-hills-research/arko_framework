@@ -31,6 +31,7 @@ fn parameter(name: &str, description: &str, required: bool) -> ToolParameterDefi
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     }
 }
 

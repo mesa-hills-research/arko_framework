@@ -81,6 +81,7 @@ impl Tool for CloseQuestionsTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: CLOSE_QUESTIONS_WHY_PARAM_NAME.to_string(),
@@ -90,6 +91,7 @@ impl Tool for CloseQuestionsTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,

@@ -17,33 +17,27 @@ pub const ASK_USER_QUESTIONS_PARAM_NAME: &str = "questions";
 pub const ASK_USER_WAIT_PARAM_NAME: &str = "wait";
 
 const DESCRIPTION: &str = "Asks the user and waits for their answer. Ask only what you can't \
-    reasonably decide yourself, and put related questions in one call.";
+    reasonably decide yourself, and group related questions in one call.";
 
-const ASYNC_DESCRIPTION: &str = "Asks the user and, by default, waits for the answer. Ask only \
-    what you can't reasonably decide yourself, and put related questions in one call. Most \
-    questions need the answer before you go on: a preference, a design choice, the scope, which \
-    model or account to use, and anything that writes, changes or deletes files, spends money or \
-    starts workers. Never act on your default while such a question is open. Pass wait false \
-    only when you have work that no answer could change, such as reading and investigating. \
-    Then the call returns the questions' ids (q1, q2, ...) at once, the answers reach you later \
-    as a note, and you do only that work until they come. When a question no longer matters \
-    (you found the answer, or the plan changed), close it with close_questions. When the user \
-    dismisses a question, go on with your default.";
+const ASYNC_DESCRIPTION: &str = "Asks the user and waits for the answer by default. Ask only \
+    what you can't reasonably decide yourself, and group related questions in one call. Wait \
+    before acting on preferences, scope, design choices, or anything that changes files, spends \
+    money or starts workers, and don't act on a default while a question is open. Pass wait \
+    false only when you have independent read-only work. Answers arrive later as notes, \
+    close_questions closes unneeded ones, and a dismissed question lets you use your default.";
 
 /// What both descriptions say of a reply that isn't an answer.
-const NON_ANSWER: &str = "A reply that doesn't answer a question (a new request, or words \
-    about something else) leaves it unanswered. Respond to what the user said, repeat the \
-    question in the same words, and end with a short reminder such as \"The question about the \
-    branch is still waiting for your answer.\"";
+const NON_ANSWER: &str = "If the user replies without answering a question, respond to what \
+    they said, repeat the question verbatim, and remind them it is still waiting for an answer.";
 
+/// Description of `questions` for XML/text mode, where the schema's item fields aren't shown.
 const QUESTIONS_DESCRIPTION: &str = "The questions, as a list. Each has `question` (what you \
     need to know and why it matters) and, when they help, `choices` (up to 6 short suggested \
     answers, shown as buttons), `multiple` (true lets the user pick several choices) and \
     `default` (what you'll assume if the user doesn't answer, shown to them).";
 
-const WAIT_DESCRIPTION: &str = "Optional. Default true, which holds you until the user \
-    answers. Pass false only to go on with work that no answer could change while the question \
-    is open.";
+const WAIT_DESCRIPTION: &str = "Optional. Default true, which waits until the user answers. \
+    Pass false only to continue independent work while the question is open.";
 
 #[derive(Debug, Clone)]
 pub struct AskUserTool;
@@ -94,7 +88,7 @@ fn schema(wait: bool) -> Value {
         json!({
             "type": "array",
             "items": question_schema(),
-            "description": QUESTIONS_DESCRIPTION,
+            "description": "Questions to ask the user.",
         }),
     );
     if wait {
@@ -134,6 +128,7 @@ pub fn offered_definition(
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     });
     definition.raw_json_schema_override = Some(schema(true));
     definition
@@ -195,6 +190,7 @@ impl Tool for AskUserTool {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
@@ -288,10 +284,16 @@ mod tests {
         assert!(
             offered
                 .description
-                .contains("by default, waits for the answer")
+                .contains("waits for the answer by default")
         );
         assert!(offered.description.contains("Pass wait false only"));
         assert!(WAIT_DESCRIPTION.starts_with("Optional. Default true"));
+        // Native JSON schema doesn't repeat QUESTIONS_DESCRIPTION's item fields.
+        let native_desc = plain.to_json_schema()["properties"]["questions"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!native_desc.contains("choices"), "{native_desc}");
         // Both say what to do with a reply that isn't an answer.
         for description in [plain.description, offered.description] {
             assert!(description.ends_with(NON_ANSWER), "{description}");

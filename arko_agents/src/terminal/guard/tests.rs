@@ -1698,3 +1698,30 @@ fn powershell_provider_paths_parse() {
     assert_eq!(parse(r"Environment::PATH"), Some(ProviderPath::NotFile));
     assert_eq!(parse(r"C:\a\b::c"), None);
 }
+
+#[test]
+fn assignments_after_posix_keywords_are_tracked() {
+    let host = linux();
+    expect(
+        &host,
+        ShellDialect::Posix,
+        &[
+            (
+                Allowed,
+                r#"for id in 1 2 3; do d="target/foo/$id"; echo hi > "$d/out.json"; done"#,
+            ),
+            (
+                Allowed,
+                r#"if true; then d="target/bar"; echo hi > "$d/out.json"; fi"#,
+            ),
+            (
+                Protected,
+                r#"for id in 1 2 3; do d="/etc/$id"; echo hi > "$d/out.json"; done"#,
+            ),
+            (
+                Protected,
+                r#"for id in 1 2 3; do d="../$id"; echo hi > "$d/out.json"; done"#,
+            ),
+        ],
+    );
+}

@@ -82,28 +82,28 @@ impl Tool for MonitorTool {
             Operation::Start => (
                 Self::NAMES[0],
                 format!(
-                    "Watches a command for you and alerts you while the monitor lasts, so you don't have to poll. Without every_seconds, the command runs until it exits or the monitor ends (a dev server, a build, `tail -F` on a log), and each output line that matches pattern is an alert. With every_seconds, the command is a check that runs again and again (`curl -sf localhost:3000/health`), and you're alerted when its result changes, not while it stays the same. Alerts reach you as notes while you work, and start a turn when you're idle. To save turns they come at most {interval}, with the lines since the last one. A monitor lasts expires_minutes ({longest} at most). Before it ends you're asked whether to keep it, and monitor_control rearm keeps it longer.{} terminal_status reads its whole output.",
+                    "Watches a command and sends alert notes (at most {interval}) without polling. Without every_seconds, runs continuously and alerts on lines matching pattern. With every_seconds, runs periodically as a check and alerts on state changes. Lasts expires_minutes ({longest} at most), extendable with monitor_control rearm. Set once for one-shot events.{} Use terminal_status for full output.",
                     if workers {
-                        " For an event that happens once, such as a CI run finishing, a file appearing or a server starting to answer, set once, and the monitor ends after its first alert. For a watch you need while your workers run, such as disk space or memory during their builds or a dev server's errors, set lasts to while_workers_run. It then needs no rearm, and ends after the last worker finishes."
+                        " Set lasts to while_workers_run to keep watching until your workers finish."
                     } else {
-                        " For an event that happens once, such as a CI run finishing, a file appearing or a server starting to answer, set once, and the monitor ends after its first alert."
+                        ""
                     }
                 ),
                 vec![
                     parameter(
                         "command",
-                        "The command, for the configured shell (by default `/bin/sh -c` on Unix and `cmd.exe /D /S /C` on Windows). A check should finish within a few seconds.",
+                        "Shell command to run. Checks should finish within a few seconds.",
                         true,
                     ),
                     parameter(
                         "pattern",
-                        "A regular expression. An output line that matches it is an alert. Leave it out to be alerted of every line. Write `(?i)` at its start to ignore case. Not for checks.",
+                        "Regex for line alerts (omit for every line, prefix `(?i)` for case-insensitive). Not for checks.",
                         false,
                     ),
                     parameter(
                         "every_seconds",
                         &format!(
-                            "Makes the command a check that runs this often, from {} to {} seconds.",
+                            "Run as a periodic check every N seconds ({} to {}).",
                             limits.shortest_check.as_secs(),
                             limits.longest_check.as_secs()
                         ),
@@ -111,25 +111,24 @@ impl Tool for MonitorTool {
                     ),
                     parameter(
                         "alert_when",
-                        "For a check, which change alerts you. `success` when it starts succeeding, `failure` when it starts failing, `change` for either (the default), or `output` when its output changes.",
+                        "For checks, which change alerts (success, failure, change by default, or output).",
                         false,
-                    ),
+                    )
+                    .with_enum(["success", "failure", "change", "output"]),
                     parameter(
                         "expires_minutes",
                         &if workers {
                             format!(
-                                "How long the monitor lasts, from 1 to {longest} minutes ({longest} by default). With lasts, at least this long."
+                                "Duration in minutes, 1 to {longest} (default {longest}, minimum when lasts is set)."
                             )
                         } else {
-                            format!(
-                                "How long the monitor lasts, from 1 to {longest} minutes ({longest} by default)."
-                            )
+                            format!("Duration in minutes, 1 to {longest} (default {longest}).")
                         },
                         false,
                     ),
                     parameter(
                         "once",
-                        "true ends the monitor and its command after its first alert. For a check that alerts on success or failure, a first result that is already the one it waits for ends it at once.",
+                        "End after the first alert (or immediately if a success/failure check already matches).",
                         false,
                     ),
                 ]
@@ -137,9 +136,10 @@ impl Tool for MonitorTool {
                 .chain(workers.then(|| {
                     parameter(
                         "lasts",
-                        "while_workers_run keeps the monitor going past expires_minutes while any of your workers run. It ends after the last one finishes, without a warning. Leave it out for a monitor that lasts expires_minutes.",
+                        "Set to while_workers_run to continue past expires_minutes until your last worker finishes.",
                         false,
                     )
+                    .with_enum(["while_workers_run"])
                 }))
                 .collect(),
             ),
@@ -154,7 +154,8 @@ impl Tool for MonitorTool {
                     }
                 ),
                 vec![
-                    parameter("action", "list, rearm or stop.", true),
+                    parameter("action", "list, rearm or stop.", true)
+                        .with_enum(["list", "rearm", "stop"]),
                     parameter("job_id", "The monitor's job ID (not for list).", false),
                     parameter(
                         "minutes",

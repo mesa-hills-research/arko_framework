@@ -405,6 +405,7 @@ pub fn report_tool_definition() -> ToolDefinition {
             is_path: false,
             flag: None,
             default_value: None,
+            enum_values: None,
         }],
         parallel_safe: false,
         tool_type_details: ToolTypeDetails::BuiltIn,

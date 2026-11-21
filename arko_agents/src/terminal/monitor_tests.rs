@@ -2010,9 +2010,8 @@ async fn the_monitor_tools_take_once_and_lasts() {
     assert!(parameter(start, "lasts").is_none());
     let description = start.definition().description;
     assert!(
-        description.contains(
-            "such as a CI run finishing, a file appearing or a server starting to answer, set once"
-        ) && !description.contains("while_workers_run"),
+        description.contains("Set once for one-shot events")
+            && !description.contains("while_workers_run"),
         "{description}"
     );
     let refused = start
@@ -2035,11 +2034,25 @@ async fn the_monitor_tools_take_once_and_lasts() {
     );
     let description = start.definition().description;
     assert!(
-        description.contains("such as disk space or memory during their builds or a dev server's errors, set lasts to while_workers_run")
+        description.contains("Set lasts to while_workers_run")
             && control.definition().description.contains(
                 "A monitor that lasts while your workers run goes on past that while they do."
             ),
         "{description}"
+    );
+    let start_schema = start.definition().to_json_schema();
+    assert_eq!(
+        start_schema["properties"]["alert_when"]["enum"],
+        json!(["success", "failure", "change", "output"])
+    );
+    assert_eq!(
+        start_schema["properties"]["lasts"]["enum"],
+        json!(["while_workers_run"])
+    );
+    let control_schema = control.definition().to_json_schema();
+    assert_eq!(
+        control_schema["properties"]["action"]["enum"],
+        json!(["list", "rearm", "stop"])
     );
     let refused = start
         .execute(

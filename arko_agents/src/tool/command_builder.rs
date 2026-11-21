@@ -246,6 +246,7 @@ mod tests {
             is_path: false,
             flag: Some("--shout".into()),
             default_value: None,
+            enum_values: None,
         }];
         let run = |value: Value| {
             let definitions = definitions.clone();
@@ -280,6 +281,7 @@ mod tests {
             is_path: false,
             flag: Some("-n".into()),
             default_value: None,
+            enum_values: None,
         }];
         let run = |value: Value| {
             let definitions = definitions.clone();
@@ -329,6 +331,7 @@ mod tests {
             is_path: true,
             flag: None,
             default_value: None,
+            enum_values: None,
         }]
     }
 

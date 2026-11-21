@@ -55,7 +55,7 @@ impl Tool for ReadMemoryTool {
             parameters: vec![
                 ToolParameterDefinition {
                     name: "full".into(), description: "Return the full current snapshot instead of a diff.".into(),
-                    param_type: ToolParameterType::Bool, required: false, is_path: false, flag: None, default_value: None,
+                    param_type: ToolParameterType::Bool, required: false, is_path: false, flag: None, default_value: None, enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "tier".to_string(),
@@ -65,6 +65,7 @@ impl Tool for ReadMemoryTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "max_chars".to_string(),
@@ -74,6 +75,7 @@ impl Tool for ReadMemoryTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: true,
@@ -182,6 +184,7 @@ impl Tool for WriteMemoryTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "content".to_string(),
@@ -191,6 +194,7 @@ impl Tool for WriteMemoryTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,

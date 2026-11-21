@@ -226,6 +226,7 @@ impl Tool for CastVoteTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "option".to_string(),
@@ -235,6 +236,7 @@ impl Tool for CastVoteTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "reasoning".to_string(),
@@ -244,6 +246,7 @@ impl Tool for CastVoteTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,

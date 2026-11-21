@@ -90,6 +90,7 @@ impl Tool for WriteFileTool {
                     is_path: true,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: CONTENT_PARAM_NAME.to_string(),
@@ -99,6 +100,7 @@ impl Tool for WriteFileTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,

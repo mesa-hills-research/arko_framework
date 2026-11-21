@@ -68,6 +68,19 @@ pub struct ToolParameterDefinition {
     pub flag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_value: Option<Value>,
+    /// Allowed values for a string parameter, emitted as JSON Schema `"enum"`
+    /// and checked by [`ToolDefinition::validate_params`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
+}
+
+impl ToolParameterDefinition {
+    /// Restricts a string parameter to `values`, emitted as `"enum"` in the
+    /// JSON schema and checked by [`ToolDefinition::validate_params`].
+    pub fn with_enum(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.enum_values = Some(values.into_iter().map(Into::into).collect());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,10 +181,23 @@ impl ToolDefinition {
             match params.get(&def.name) {
                 Some(value) => match def.param_type {
                     ToolParameterType::String => {
-                        if !value.is_string() {
+                        let Some(text) = value.as_str() else {
                             return Err(super::error::ToolError::ParameterValidation {
                                 param_name: def.name.clone(),
                                 message: format!("Expected a string value, got {:?}", value),
+                            });
+                        };
+                        if let Some(allowed) = &def.enum_values
+                            && !allowed.is_empty()
+                            && !allowed.iter().any(|choice| choice == text)
+                        {
+                            return Err(super::error::ToolError::ParameterValidation {
+                                param_name: def.name.clone(),
+                                message: format!(
+                                    "Expected one of {}, got {:?}",
+                                    allowed.join(", "),
+                                    text
+                                ),
                             });
                         }
                     }
@@ -226,10 +252,15 @@ impl ToolDefinition {
                 ToolParameterType::Bool => "boolean",
                 ToolParameterType::Integer => "integer",
             };
-            let prop = serde_json::json!({
+            let mut prop = serde_json::json!({
                 "type": type_str,
                 "description": param.description,
             });
+            if let Some(values) = &param.enum_values
+                && !values.is_empty()
+            {
+                prop["enum"] = serde_json::json!(values);
+            }
             properties.insert(param.name.clone(), prop);
             if param.required {
                 required.push(serde_json::Value::String(param.name.clone()));
@@ -272,6 +303,7 @@ mod tests {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "section".into(),
@@ -281,6 +313,7 @@ mod tests {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: true,
@@ -309,6 +342,7 @@ mod tests {
             is_path: false,
             flag: None,
             default_value: None,
+            enum_values: None,
         };
         let definition = ToolDefinition {
             name: "fixture".into(),
@@ -359,6 +393,7 @@ mod tests {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
@@ -396,5 +431,74 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(saved.param_type, ToolParameterType::Integer);
+        assert_eq!(saved.enum_values, None);
+    }
+
+    #[test]
+    fn enum_values_are_emitted_in_schema_and_validated() {
+        let definition = ToolDefinition {
+            name: "fixture".into(),
+            description: "Fixture".into(),
+            output_based_example: None,
+            parameters: vec![
+                ToolParameterDefinition {
+                    name: "action".into(),
+                    description: "What to do".into(),
+                    param_type: ToolParameterType::String,
+                    required: true,
+                    is_path: false,
+                    flag: None,
+                    default_value: None,
+                    enum_values: None,
+                }
+                .with_enum(["list", "wait", "cancel"]),
+                ToolParameterDefinition {
+                    name: "label".into(),
+                    description: "Free text".into(),
+                    param_type: ToolParameterType::String,
+                    required: false,
+                    is_path: false,
+                    flag: None,
+                    default_value: None,
+                    enum_values: None,
+                },
+            ],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            read_only: false,
+            raw_json_schema_override: None,
+        };
+
+        let schema = definition.to_json_schema();
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            serde_json::json!(["list", "wait", "cancel"])
+        );
+        assert!(schema["properties"]["label"].get("enum").is_none());
+
+        definition
+            .validate_params(&HashMap::from([(
+                "action".into(),
+                serde_json::json!("wait"),
+            )]))
+            .unwrap();
+        let error = definition
+            .validate_params(&HashMap::from([(
+                "action".into(),
+                serde_json::json!("restart"),
+            )]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("list, wait, cancel"), "{error}");
+
+        // Serialization omits enum_values when None, and round-trips when Some.
+        let encoded = serde_json::to_value(&definition.parameters[1]).unwrap();
+        assert!(encoded.get("enum_values").is_none());
+        let encoded = serde_json::to_value(&definition.parameters[0]).unwrap();
+        let decoded: ToolParameterDefinition = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.enum_values,
+            Some(vec!["list".into(), "wait".into(), "cancel".into()])
+        );
     }
 }

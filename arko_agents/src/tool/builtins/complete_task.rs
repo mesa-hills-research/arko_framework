@@ -49,6 +49,7 @@ impl Tool for CompleteTaskTool {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,

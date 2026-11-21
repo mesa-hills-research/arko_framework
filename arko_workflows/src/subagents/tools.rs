@@ -39,6 +39,10 @@ pub const SUBAGENT_TOOL_NAMES: &[&str] = &[
 pub(crate) const START_PARAMETERS: &[&str] =
     &["agent", "task", "workspace", "isolated", "peers", "group"];
 
+/// `message_agent`'s own parameters. A host parameter may not take one of
+/// these names.
+pub(crate) const MESSAGE_PARAMETERS: &[&str] = &["to", "message"];
+
 fn param(
     name: &str,
     description: impl Into<String>,
@@ -53,6 +57,7 @@ fn param(
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     }
 }
 
@@ -179,7 +184,7 @@ impl Tool for StartAgentTool {
         if config.is_some_and(|config| config.workspace_provider.is_some()) {
             parameters.push(param(
                 "isolated",
-                "true: it works in a workspace of its own (a copy of your workspace that its changes stay in until they are merged). Use it for runs that change files while others do. Default false.",
+                "true: it works in a workspace of its own (a copy of your workspace, or of workspace when given, that its changes stay in until they are merged). Use it for runs that change files while others do. Default false.",
                 ToolParameterType::Bool,
                 false,
             ));
@@ -300,13 +305,17 @@ impl Tool for MessageAgentTool {
         } else {
             "`lead` for the agent that started you, or the run id of another agent run your lead linked you with."
         };
+        let mut parameters = vec![
+            param("to", to, ToolParameterType::String, true),
+            param("message", "The message.", ToolParameterType::String, true),
+        ];
+        if let Some(config) = self.context.subagents.config() {
+            parameters.extend(config.message_parameters.iter().cloned());
+        }
         definition(
             MESSAGE_AGENT_TOOL_NAME,
             "Sends a message to an agent run without waiting. A running one reads it at its next step. One that finished continues its task with it, with its context, and one that was stopped restarts where it stopped.",
-            vec![
-                param("to", to, ToolParameterType::String, true),
-                param("message", "The message.", ToolParameterType::String, true),
-            ],
+            parameters,
             true,
         )
     }

@@ -254,6 +254,7 @@ fn param(name: &str, description: &str, required: bool) -> ToolParameterDefiniti
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     }
 }
 

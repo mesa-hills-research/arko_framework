@@ -73,6 +73,7 @@ impl Tool for LoadSkillTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: RESOURCE_PARAM.to_string(),
@@ -86,6 +87,7 @@ impl Tool for LoadSkillTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: true,

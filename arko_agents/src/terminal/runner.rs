@@ -267,8 +267,11 @@ pub(super) async fn run(
                                 while !prompt.is_char_boundary(start) { start += 1; }
                                 prompt = prompt[start..].to_string();
                             }
+                            // Heuristic prompt matches inspect already-received output, so
+                            // don't bump revision and invalidate terminal_input calls using
+                            // the revision the caller already read.
                             data.record.input = Some(InputNotice { source: InputSource::PromptRule { rule }, prompt, prompt_truncated });
-                            data.record.revision += 1; true
+                            true
                         } else { false }
                     } else { false }
                 };

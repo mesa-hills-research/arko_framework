@@ -1618,6 +1618,7 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
             is_path: false,
             flag: None,
             default_value: None,
+            enum_values: None,
         })
         .hook(Arc::new({
             let hooked = hooked.clone();
@@ -2420,6 +2421,7 @@ fn the_builder_checks_the_subagents_configuration() {
         is_path: false,
         flag: None,
         default_value: None,
+        enum_values: None,
     };
     let error = build(
         base()
@@ -2428,11 +2430,53 @@ fn the_builder_checks_the_subagents_configuration() {
     )
     .unwrap();
     assert!(error.contains("already has a parameter 'task'"), "{error}");
+    let message_clash = arko_agents::ToolParameterDefinition {
+        name: "to".to_string(),
+        description: String::new(),
+        param_type: arko_agents::ToolParameterType::String,
+        required: false,
+        is_path: false,
+        flag: None,
+        default_value: None,
+        enum_values: None,
+    };
+    let error = build(
+        base()
+            .workflow_services(services())
+            .subagents(SubagentsConfig::default().message_parameter(message_clash)),
+    )
+    .unwrap();
+    assert!(
+        error.contains("message_agent already has a parameter 'to'"),
+        "{error}"
+    );
+    let confirm = arko_agents::ToolParameterDefinition {
+        name: "confirm_uncached".to_string(),
+        description: "Continue even if the cache expired.".to_string(),
+        param_type: arko_agents::ToolParameterType::Bool,
+        required: false,
+        is_path: false,
+        flag: None,
+        default_value: None,
+        enum_values: None,
+    };
+    let error = build(
+        base().workflow_services(services()).subagents(
+            SubagentsConfig::default()
+                .message_parameter(confirm.clone())
+                .message_parameter(confirm.clone()),
+        ),
+    )
+    .unwrap();
+    assert!(
+        error.contains("message_agent parameter 'confirm_uncached' is added twice"),
+        "{error}"
+    );
     assert!(
         build(
             base()
                 .workflow_services(services())
-                .subagents(SubagentsConfig::default())
+                .subagents(SubagentsConfig::default().message_parameter(confirm))
         )
         .is_none()
     );
@@ -3045,4 +3089,122 @@ async fn a_stop_dropped_while_the_provider_removes_leaves_the_run_closed() {
     assert_eq!(workflow.subagents()[0].state, SubagentState::Closed);
     let continued = within(workflow.continue_agent(&previous, "More.")).await;
     assert!(continued.is_err(), "a run being removed was continued");
+}
+
+/// Combining `workspace` and `isolated: true` resolves `workspace` (still
+/// enforcing workspace boundaries) and passes it as `WorkspaceRequest::base`
+/// so the provider isolates from that directory.
+#[tokio::test]
+async fn workspace_and_isolated_creates_worktree_from_resolved_workspace() {
+    let workspace = Workspace::new();
+    let repo = workspace.0.join("nested-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(repo.join("hello.txt"), "hi").unwrap();
+    run_git(&["add", "."]);
+    run_git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                (
+                    "start_agent",
+                    json!({
+                        "agent": "worker",
+                        "task": "Check nested repo.",
+                        "workspace": "nested-repo",
+                        "isolated": true,
+                    }),
+                ),
+                wait(),
+                (
+                    "start_agent",
+                    json!({
+                        "agent": "worker",
+                        "task": "Escape.",
+                        "workspace": "..",
+                        "isolated": true,
+                    }),
+                ),
+            ],
+        ),
+        ("r1", vec![("where", json!({}))]),
+    ])
+    .await;
+
+    let provider = Arc::new(GitWorktreeProvider::new(workspace.0.join("worktrees")));
+    let config = SubagentsConfig::default().workspace_provider(provider);
+    let workflow = builder(&server, &workspace, config).build().unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+
+    let runs = workflow.subagents();
+    assert_eq!(runs.len(), 1);
+    let isolated = runs[0].isolated.as_ref().expect("isolated workspace");
+    assert_eq!(
+        std::fs::canonicalize(isolated.repository.as_ref().unwrap()).unwrap(),
+        std::fs::canonicalize(&repo).unwrap()
+    );
+    assert!(runs[0].workspace.join("hello.txt").is_file());
+
+    // Outside workspace is still rejected even with isolated: true.
+    let lead = bodies_of(&server, "lead");
+    assert!(
+        result_of(&lead[3], "lead", 2).contains("must be inside your working directory"),
+        "{}",
+        result_of(&lead[3], "lead", 2)
+    );
+}
+
+/// Host parameters added via `SubagentsConfig::message_parameter` appear on
+/// `message_agent`'s tool definition and JSON schema.
+#[tokio::test]
+async fn message_parameters_appear_on_message_agent_definition() {
+    let workspace = Workspace::new();
+    let server = serve(vec![("lead", vec![])]).await;
+    let config =
+        SubagentsConfig::default().message_parameter(arko_agents::ToolParameterDefinition {
+            name: "confirm_uncached".to_string(),
+            description: "Continue a finished run even when its cache expired.".to_string(),
+            param_type: arko_agents::ToolParameterType::Bool,
+            required: false,
+            is_path: false,
+            flag: None,
+            default_value: None,
+            enum_values: None,
+        });
+    let workflow = builder(&server, &workspace, config).build().unwrap();
+    let tool = super::MessageAgentTool::new(workflow.context().clone(), true);
+    let def = arko_agents::Tool::definition(&tool);
+    let schema = def.to_json_schema();
+    assert_eq!(schema["properties"]["confirm_uncached"]["type"], "boolean");
+    assert!(
+        def.parameters
+            .iter()
+            .any(|p| p.name == "confirm_uncached" && !p.required)
+    );
 }

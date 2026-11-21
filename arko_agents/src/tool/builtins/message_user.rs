@@ -79,6 +79,7 @@ impl Tool for MessageUserTool {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::BuiltIn,

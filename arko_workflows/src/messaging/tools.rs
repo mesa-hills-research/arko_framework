@@ -63,6 +63,7 @@ impl Tool for SendMessageTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "attachments_json".to_string(),
@@ -72,6 +73,7 @@ impl Tool for SendMessageTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
                 ToolParameterDefinition {
                     name: "content".to_string(),
@@ -81,6 +83,7 @@ impl Tool for SendMessageTool {
                     is_path: false,
                     flag: None,
                     default_value: None,
+                    enum_values: None,
                 },
             ],
             parallel_safe: false,

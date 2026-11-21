@@ -608,6 +608,9 @@ impl Finding {
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
     Known(String),
+    /// Resolved text that contains at least one known character alongside an
+    /// unknown placeholder (such as `target/foo/\u{1}` from `d="target/foo/$id"`).
+    Partial(String),
     Unknown,
 }
 
@@ -776,6 +779,12 @@ impl Analysis<'_> {
         let mut words: &[Word] = &command.words;
         match dialect {
             ShellDialect::Posix => {
+                while words.first().is_some_and(is_posix_keyword) {
+                    words = &words[1..];
+                }
+                if words.is_empty() {
+                    return;
+                }
                 let assignments = words.iter().take_while(|w| assignment(w).is_some()).count();
                 if assignments == words.len() {
                     for word in words {
@@ -855,6 +864,12 @@ impl Analysis<'_> {
     fn check_rules(&mut self, dialect: ShellDialect, words: &[Word], scope: &Scope) {
         if self.rules.is_empty() || self.refusal.is_some() {
             return;
+        }
+        let mut words = words;
+        if dialect == ShellDialect::Posix {
+            while words.first().is_some_and(is_posix_keyword) {
+                words = &words[1..];
+            }
         }
         let assignments = match dialect {
             ShellDialect::Posix => words.iter().take_while(|w| assignment(w).is_some()).count(),
@@ -1262,6 +1277,14 @@ impl Analysis<'_> {
                             }
                             resolved.text.push_str(&value);
                         }
+                        (VarForm::Transform, Value::Partial(_)) => {
+                            resolved.text.push(MAYBE_EMPTY);
+                            resolved.unknown = true;
+                        }
+                        (_, Value::Partial(value)) => {
+                            resolved.text.push_str(&value);
+                            resolved.unknown = true;
+                        }
                         (VarForm::Required, Value::Unknown) => {
                             resolved.text.push(NONEMPTY);
                             resolved.unknown = true;
@@ -1351,8 +1374,14 @@ impl Analysis<'_> {
 
     fn value(&self, dialect: ShellDialect, scope: &Scope, word: &Word) -> Value {
         let resolved = self.resolve(dialect, scope, word);
-        if resolved.unknown || resolved.aborts {
+        if resolved.aborts {
             Value::Unknown
+        } else if resolved.unknown {
+            if resolved.text.chars().all(|c| c == MAYBE_EMPTY) {
+                Value::Unknown
+            } else {
+                Value::Partial(resolved.text)
+            }
         } else {
             Value::Known(resolved.text)
         }
@@ -2285,6 +2314,28 @@ fn strip_word_prefix(word: &Word, prefix: &str) -> Option<Word> {
         pieces,
         quoted: word.quoted,
     })
+}
+
+/// POSIX shell keywords that can precede an assignment or command without
+/// starting a new command of their own.
+fn is_posix_keyword(word: &Word) -> bool {
+    !word.quoted
+        && matches!(
+            word.literal().as_deref(),
+            Some(
+                "if" | "then"
+                    | "else"
+                    | "elif"
+                    | "fi"
+                    | "do"
+                    | "done"
+                    | "while"
+                    | "until"
+                    | "!"
+                    | "{"
+                    | "}"
+            )
+        )
 }
 
 /// `NAME=value` split into the name and the value (`None` for `NAME+=value`).

@@ -99,6 +99,7 @@ impl Tool for Probe {
                 is_path: false,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: self.parallel_safe,
             tool_type_details: ToolTypeDetails::DeveloperDefined,

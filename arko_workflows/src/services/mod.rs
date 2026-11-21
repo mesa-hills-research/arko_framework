@@ -729,9 +729,9 @@ impl Tool for RunWorkflowAgentTool {
             description: "Run another configured workflow agent for a bounded subtask and return its verified completion summary. Use only when delegation is materially useful. When a result names an agent run that did not finish and says you can resume it, pass its id as `resume_run` (with the same `agent`) to continue that run's own task instead of starting over; `prompt` is then your message to it.".to_string(),
             output_based_example: None,
             parameters: vec![
-                ToolParameterDefinition { name: "agent".to_string(), description: target_guidance, param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
-                ToolParameterDefinition { name: "prompt".to_string(), description: "Concrete bounded task for that agent; with `resume_run`, your message to the resumed run: what happened and what to do next.".to_string(), param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
-                ToolParameterDefinition { name: RESUME_RUN_PARAMETER.to_string(), description: "Optional: the id of an unfinished run of `agent` to resume (one a result told you can be resumed), instead of starting a new run.".to_string(), param_type: ToolParameterType::String, required: false, is_path: false, flag: None, default_value: None },
+                ToolParameterDefinition { name: "agent".to_string(), description: target_guidance, param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None, enum_values: None },
+                ToolParameterDefinition { name: "prompt".to_string(), description: "Concrete bounded task for that agent; with `resume_run`, your message to the resumed run: what happened and what to do next.".to_string(), param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None, enum_values: None },
+                ToolParameterDefinition { name: RESUME_RUN_PARAMETER.to_string(), description: "Optional: the id of an unfinished run of `agent` to resume (one a result told you can be resumed), instead of starting a new run.".to_string(), param_type: ToolParameterType::String, required: false, is_path: false, flag: None, default_value: None, enum_values: None },
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,

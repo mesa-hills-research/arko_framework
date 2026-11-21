@@ -29,6 +29,7 @@ impl Tool for Counter {
                 is_path: true,
                 flag: None,
                 default_value: None,
+                enum_values: None,
             }],
             parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
@@ -2285,6 +2286,7 @@ async fn output_based_end_user_tools_receive_boolean_parameters() {
         is_path: false,
         flag: flag.map(Into::into),
         default_value: None,
+        enum_values: None,
     };
     let mut registry = ToolRegistry::new();
     registry
