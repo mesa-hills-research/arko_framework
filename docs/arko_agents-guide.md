@@ -456,9 +456,9 @@ dropped, and a verbatim `\\?\` path is kept as written. A custom tool with an `i
 parameter should open the path `resolve_path` returns. End-user command tools receive
 that path. A non-string value for an `is_path` parameter is rejected.
 
-A path that starts with `~` (`~` alone, `~/...`, and `~\...` on Windows) is always outside,
+A path that starts with `~` (`~` alone, `~/...`, and `~\...` on Windows) counts as outside,
 because Claude Code's search tools and programs a tool starts may expand it to the home
-directory.
+directory. A link named `~` in the workspace that leads outside is still refused, as below.
 
 The check resolves symbolic links in the working directory and in the path, and on
 Windows junctions, case and short 8.3 names too. It compares the two in canonical form,
@@ -468,11 +468,12 @@ spelling it was given in all get the same answer. On macOS, for example, `/var` 
 deepest existing parent is resolved and the missing names are added to it. A trailing
 separator or a final `.` doesn't change the answer, so `link/` is judged as `link`.
 
-Tools don't all read a path alike. `resolve_path` trims it and resolves `..` by name, while
-a program, such as one behind Claude Code's built-in tools, may take it untrimmed, or leave
-`..` to the operating system, which follows a link before going up. The check judges each
-of these readings, and a path is inside only when all of them are. These paths are rejected
-under every policy, as one that cannot be resolved is:
+Tools don't all read a path alike. `resolve_path` trims it and resolves `..` by name from
+the working directory as given. A program, such as one behind Claude Code's built-in tools,
+may take it untrimmed, resolve `..` by name from its current directory, which the operating
+system reports in canonical form, or leave `..` to the operating system, which follows a link
+before going up. The check judges each of these readings, and a path is inside only when all
+of them are. These paths are rejected under every policy, as one that cannot be resolved is:
 
 - A path that enters the working directory and leaves it through a symbolic link, such as
   `link/x` or `link/../x` where `link` points outside, however the path and the working
