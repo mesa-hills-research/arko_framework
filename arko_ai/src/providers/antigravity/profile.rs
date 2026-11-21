@@ -34,6 +34,10 @@ pub const MCP_SERVER_NAME: &str = "arko";
 /// How long agy waits for each hook, in seconds.
 const HOOK_TIMEOUT_SECONDS: u64 = 10;
 
+// Give approvals and long calls time to finish. Arko sets the shorter limits
+// on its own tools.
+const MCP_TIMEOUT_SECONDS: u64 = 604_800;
+
 /// The most hook input the gate reads, in bytes.
 const MAX_HOOK_INPUT: u64 = 64 * 1024 * 1024;
 
@@ -270,6 +274,7 @@ fn mcp_config(spec: &ProfileSpec<'_>, relay_file: &Path) -> io::Result<Value> {
         MCP_SERVER_NAME.to_string(),
         json!({
             "command": utf8(&spec.helper.program)?,
+            "timeoutSeconds": MCP_TIMEOUT_SECONDS,
             "args": spec.helper.args_for("relay", relay_file)?,
             "tools": tools,
         }),
@@ -393,6 +398,7 @@ mod tests {
             json_file(&dir.join("config/mcp_config.json")),
             json!({"mcpServers": {"arko": {
                 "command": "/opt/example/arko",
+                "timeoutSeconds": 604800,
                 "args": ["agy-helper", "relay", relay_file.to_str().unwrap()],
                 "tools": {"shell": {"eager": true}, "read_file": {"eager": true}},
             }}})

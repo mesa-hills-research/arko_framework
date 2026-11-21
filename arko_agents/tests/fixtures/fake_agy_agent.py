@@ -57,8 +57,8 @@ from the setup below answers session/new with the error
   - The frontmatter has exactly name (NAME), description (not empty),
     excludeDefaultComponents: true, inheritCustomizations: false,
     mainAgent: true and subagent: false, and the body isn't empty.
-  - mcp_config.json has exactly {"mcpServers": {"arko": {"command": ...,
-    "args": [...], "tools": {...}}}} (args may be left out), and "tools" names
+  - mcp_config.json has only server "arko" with command, optional args,
+    timeoutSeconds and tools. The timeout is 604800 seconds. "tools" names
     every tool the server lists, each {"eager": true}, and no other.
 
 Script
@@ -69,7 +69,7 @@ these keys.
     "fallback": true       act as though the agent file were broken, with the
                            log line ("silent" leaves the line out)
     "signed_out": true     session/new fails with -32000 "Authentication
-                           required" (the shape is assumed, not seen)
+                           required"
     "version": "1.5.14"    the version, unless FAKE_AGY_VERSION is set
     "version_output": "…"  the whole text `--version` prints
     "tier": "Google AI Pro" the plan session/new reports (null for none)
@@ -520,8 +520,10 @@ def mcp_config_problems(config):
     problems = []
     if not isinstance(server, dict):
         return ["the arko server isn't an object"]
-    for key in sorted(set(server) - {"command", "args", "tools"}):
+    for key in sorted(set(server) - {"command", "args", "tools", "timeoutSeconds"}):
         problems.append("the arko server has an unexpected key %s" % key)
+    if server.get("timeoutSeconds") != 604800:
+        problems.append("MCP timeoutSeconds must allow seven days")
     if not isinstance(server.get("command"), str) or not server.get("command"):
         problems.append("the arko server has no command")
     args = server.get("args", [])
@@ -1530,7 +1532,7 @@ class Checks:
                                    "subagent: false\n")
             (profile / "config" / "agents" / "arko.md").write_text(
                 "---\n%s---\n\nYou are a test agent.\n" % keys)
-        server = {"command": sys.executable,
+        server = {"command": sys.executable, "timeoutSeconds": 604800,
                   "args": [os.path.abspath(__file__), "--self-check-mcp"],
                   "tools": {name: {"eager": True} for name in eager}}
         server.update(config_extra or {})
