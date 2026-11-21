@@ -413,8 +413,13 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
 
 /// The stderr lines of an embedding run.
 fn print_embed_stats(s: &EmbedStats) {
+    let borrowed = if s.borrowed > 0 {
+        format!(", {} borrowed", s.borrowed)
+    } else {
+        String::new()
+    };
     eprintln!(
-        "arko_index: embeddings {}, {} chunks, {} distinct texts ({} from the cache, {} embedded now in {} requests, {} tokens)",
+        "arko_index: embeddings {}, {} chunks, {} distinct texts ({} from the cache{borrowed}, {} embedded now in {} requests, {} tokens)",
         s.embedder.display(),
         s.docs,
         s.texts,
@@ -766,7 +771,7 @@ impl Keeper<'_> {
                 "arko_index: index rebuilt with {} chunks, {} have vectors, {} distinct texts to embed",
                 s.docs,
                 d.embedded_docs,
-                d.texts - d.cached
+                d.texts.saturating_sub(d.cached + d.borrowed)
             ),
             None => eprintln!("arko_index: index rebuilt: {} chunks", s.docs),
         }
@@ -1030,7 +1035,7 @@ fn run() -> Result<(), Error> {
                     "arko_index: lexical search is ready. {} of {} chunks have vectors, {} of {} distinct texts to embed ({} in the cache)",
                     d.embedded_docs,
                     d.docs,
-                    d.texts - d.cached,
+                    d.texts.saturating_sub(d.cached + d.borrowed),
                     d.texts,
                     d.cached
                 );

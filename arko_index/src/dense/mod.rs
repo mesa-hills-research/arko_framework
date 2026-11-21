@@ -27,7 +27,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -440,6 +440,9 @@ pub struct DenseBuild<'a> {
     /// reason. The vectors paid for are kept, and a later run continues. A run with
     /// nothing left to send finishes.
     pub stop: Option<&'a StopSignal>,
+    /// Other index state directories whose embedding caches a build or run may read
+    /// to copy vectors for matching rendered texts.
+    pub borrow_caches: Vec<PathBuf>,
 }
 impl<'a> DenseBuild<'a> {
     pub fn new(embedder: &'a dyn Embedder) -> Self {
@@ -452,6 +455,7 @@ impl<'a> DenseBuild<'a> {
             progress: None,
             embed_later: false,
             stop: None,
+            borrow_caches: Vec::new(),
         }
     }
     /// The settings of a saved config (quantization, vector index, cap and embedded
@@ -491,6 +495,10 @@ impl<'a> DenseBuild<'a> {
     }
     pub fn with_stop(mut self, stop: &'a StopSignal) -> Self {
         self.stop = Some(stop);
+        self
+    }
+    pub fn with_borrow_caches(mut self, state_dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.borrow_caches = state_dirs.into_iter().collect();
         self
     }
 }
@@ -536,7 +544,7 @@ impl StopSignal {
 pub struct EmbedProgress {
     /// Texts embedded so far by this run.
     pub texts: u64,
-    /// Texts this run has to embed (not in the cache).
+    /// Texts this run has to embed (not in the cache or borrowed).
     pub total: u64,
     /// Tokens billed so far by this run.
     pub tokens: u64,
@@ -552,7 +560,7 @@ pub struct EmbedProgress {
 /// What an index build's embedding did ([`BuildStats::dense`](crate::index2::BuildStats::dense)),
 /// or one embedding run ([`index2::embed`](crate::index2::embed)). A build with
 /// [`DenseBuild::embed_later`] reports the generation it published, including its chunks, those
-/// with a vector already, and its texts, of which `texts - cached` are left to embed.
+/// with a vector already, and its texts, of which `texts - cached - borrowed` are left to embed.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct EmbedStats {
@@ -567,6 +575,8 @@ pub struct EmbedStats {
     pub texts: u64,
     /// Distinct texts found in the cache, so not embedded again.
     pub cached: u64,
+    /// Distinct texts copied from other state directories' caches ([`DenseBuild::borrow_caches`]).
+    pub borrowed: u64,
     /// Texts embedded by this run.
     pub new: u64,
     /// Embedding requests sent.
@@ -612,6 +622,7 @@ impl EmbedStats {
             embedded_docs: 0,
             texts: 0,
             cached: 0,
+            borrowed: 0,
             new: 0,
             requests: 0,
             tokens: 0,

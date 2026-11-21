@@ -465,10 +465,11 @@ pub fn index_with(
 }
 
 /// Builds a new generation and publishes it. With [`BuildOptions::dense`] the chunks
-/// are also embedded. These are texts the state's embedding cache holds for the embedder's
-/// model are reused, the others are embedded (stopping cleanly at the token cap), the
-/// vector store of the model and settings is brought up to date, and the settings are
-/// saved as the index's [`DenseConfig`]. Without it, a saved config is left as it is.
+/// are also embedded. Texts the state's embedding cache holds for the embedder's model
+/// are reused, missing texts are copied from any [`DenseBuild::borrow_caches`] that hold
+/// them, the rest are embedded (stopping cleanly at the token cap), the vector store of
+/// the model and settings is brought up to date, and the settings are saved as the
+/// index's [`DenseConfig`]. Without it, a saved config is left as it is.
 pub fn build(
     root: &Path,
     state_dir: &Path,
@@ -538,7 +539,14 @@ pub fn build(
         None => None,
     };
     let mut spool = match dense {
-        Some(_) => Some(run::Spool::create(&dir.join(SPOOL))?),
+        Some(d) => {
+            let name = if d.borrow_caches.is_empty() {
+                SPOOL
+            } else {
+                SPOOL_RAW
+            };
+            Some(run::Spool::create(&dir.join(name))?)
+        }
         None => None,
     };
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
@@ -750,14 +758,19 @@ pub fn build(
     for p in &runs {
         std::fs::remove_file(p)?;
     }
-    // For embeddings, this gathers every doc's vector key, and the coverage the store already gives
-    // this generation. The store is only read here, because embedding runs write it.
+    // For embeddings, this gathers every doc's vector key, borrows any missing texts
+    // from donor caches when no embedding run holds the lock, and records the coverage
+    // the store gives this generation.
     let mut dense_stats = None;
+    let mut pre_embed = PreEmbed::default();
+    let mut build_embed_lock: Option<File> = None;
+    let mut build_cache: Option<Cache> = None;
+    let mut build_store_cleanup: Option<(String, Vec<VectorId>)> = None;
     if let (Some(d), Some(cached), Some(vhash), Some(spool)) =
         (dense, cached.as_ref(), vhash.take(), spool.take())
     {
         vhash.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        spool.finish()?;
+        let (spool_path, _) = spool.finish()?;
         let descriptor = d.embedder.descriptor();
         let keys = vector_keys(&File::open(dir.join(VHASH))?, next_doc, &file_table)?;
         write_vector_keys(&dir, &keys)?;
@@ -767,8 +780,70 @@ pub fn build(
         )
         .with_quantization(d.quantization)
         .with_index(d.vector_index);
-        let store = config.dir_name()?;
-        let embedded = stored_count(&state_dir.join(&store), &config, &keys);
+        let store_name = config.dir_name()?;
+        let store_dir = state_dir.join(&store_name);
+        let mut own_cached = (seen.len() - pending.len()) as u64;
+        let mut cache_records = cached.len() as u64;
+        let mut embedded = None;
+        if !d.borrow_caches.is_empty() {
+            if pending.is_empty() {
+                std::fs::rename(&spool_path, dir.join(SPOOL))?;
+            } else {
+                let embed_lock = lock_file(&state_dir, EMBED_LOCK)?;
+                if embed_lock.try_lock_exclusive().is_ok() {
+                    let mut cache = Cache::open(&state_dir, &descriptor)?;
+                    let need: HashSet<[u8; 32]> = pending
+                        .iter()
+                        .copied()
+                        .filter(|h| !cache.contains(h))
+                        .collect();
+                    own_cached = (seen.len() - need.len()) as u64;
+                    let borrowed = cache.borrow_from(&state_dir, &d.borrow_caches, &need)?;
+                    if borrowed.is_empty() && need.len() == pending.len() {
+                        std::fs::rename(&spool_path, dir.join(SPOOL))?;
+                    } else {
+                        run::filter_spool(&spool_path, &dir.join(SPOOL), |h| !cache.contains(h))?;
+                        std::fs::remove_file(&spool_path)?;
+                    }
+                    cache_records = cache.records();
+                    pre_embed.borrowed = borrowed.len() as u64;
+                    if !borrowed.is_empty() {
+                        let doc_hashes = read_hashes(&dir)?;
+                        let (mut store, created) = vector::open_or_create(&store_dir, &config)?;
+                        let (missing_ids, stale_ids) = diff_ids(&keys, &store.ids()?);
+                        let refill: Vec<(VectorId, u32)> = missing_ids
+                            .iter()
+                            .copied()
+                            .filter(|&(_, doc)| cache.contains(&doc_hashes[doc as usize]))
+                            .collect();
+                        for part in refill.chunks(REFILL_COMMIT) {
+                            upsert_from_cache(&mut store, &cache, &doc_hashes, &file_table, part)?;
+                            store.persist()?;
+                        }
+                        let now_embedded = (keys.len() - missing_ids.len() + refill.len()) as u64;
+                        if created && now_embedded == n {
+                            store.compact()?;
+                            store.persist()?;
+                        } else if created && refill.is_empty() {
+                            store.persist()?;
+                        }
+                        embedded = Some(now_embedded);
+                        pre_embed.vectors_added = refill.len() as u64;
+                        pre_embed.store_created = created;
+                        pre_embed.needs_compact = created && now_embedded < n;
+                        if d.embed_later && (!stale_ids.is_empty() || now_embedded == n) {
+                            build_store_cleanup = Some((store_name.clone(), stale_ids));
+                        }
+                    }
+                    build_cache = Some(cache);
+                    build_embed_lock = Some(embed_lock);
+                } else {
+                    // An embedding run holds the lock, so leave the full spool for the next run.
+                    std::fs::rename(&spool_path, dir.join(SPOOL))?;
+                }
+            }
+        }
+        let embedded = embedded.unwrap_or_else(|| stored_count(&store_dir, &config, &keys));
         let info = DenseIndexInfo {
             version: DenseIndexInfo::VERSION,
             embedder: descriptor.clone(),
@@ -776,7 +851,7 @@ pub fn build(
             embed_text: d.embed_text,
             quantization: d.quantization,
             vector_index: d.vector_index,
-            store,
+            store: store_name,
             docs: n,
             embedded,
             state: if embedded == n {
@@ -790,8 +865,11 @@ pub fn build(
         stats.docs = n;
         stats.embedded_docs = embedded;
         stats.texts = seen.len() as u64;
-        stats.cached = (seen.len() - pending.len()) as u64;
-        stats.cache_records = cached.len() as u64;
+        stats.cached = own_cached;
+        stats.borrowed = pre_embed.borrowed;
+        stats.cache_records = cache_records;
+        stats.vectors_added = pre_embed.vectors_added;
+        stats.store_created = pre_embed.store_created;
         dense_stats = Some(stats);
         phases.push(("vector_keys_s", clock.elapsed().as_secs_f64()));
     }
@@ -840,18 +918,50 @@ pub fn build(
     // one holds the index lock) and no run writing it. A run in progress keeps it as
     // it is, and a later build compacts it.
     if let (Some(d), Some(stats)) = (dense, dense_stats.as_mut()) {
-        let embed_lock = lock_file(&state_dir, EMBED_LOCK)?;
-        if embed_lock.try_lock_exclusive().is_ok() {
-            let mut cache = Cache::open(&state_dir, &d.embedder.descriptor())?;
+        if let Some((store_name, stale_ids)) = build_store_cleanup.take() {
+            if !stale_ids.is_empty() {
+                let config = StoreConfig::new(
+                    d.embedder.descriptor(),
+                    text_format(RENDER_VERSION, d.embed_text),
+                )
+                .with_quantization(d.quantization)
+                .with_index(d.vector_index);
+                let (mut store, _) = vector::open_or_create(&state_dir.join(&store_name), &config)?;
+                for batch in stale_ids.chunks(UPSERT_BATCH) {
+                    store.delete(batch)?;
+                }
+                store.persist()?;
+                stats.vectors_removed = stale_ids.len() as u64;
+            }
+            remove_other_stores(&state_dir, Some(&store_name))?;
+            if stats.embedded_docs == stats.docs {
+                let _ = std::fs::remove_file(dir.join(SPOOL));
+            }
+        }
+        if let Some(mut cache) = build_cache.take() {
             cache.compact_if_sparse(&seen)?;
             stats.cache_records = cache.records();
+        } else {
+            let embed_lock = lock_file(&state_dir, EMBED_LOCK)?;
+            if embed_lock.try_lock_exclusive().is_ok() {
+                let mut cache = Cache::open(&state_dir, &d.embedder.descriptor())?;
+                cache.compact_if_sparse(&seen)?;
+                stats.cache_records = cache.records();
+            }
         }
     }
+    drop(build_embed_lock);
     // Another build may start while this one's embedding runs.
     drop(lock);
     let dense_stats = match (dense, dense_stats) {
         (Some(d), Some(published)) if !d.embed_later => {
-            let run = embed_run(&state_dir, d, Some(&generation)).map_err(|e| {
+            let mut run = embed_run(
+                &state_dir,
+                d,
+                Some(&generation),
+                pre_embed.needs_compact,
+            )
+            .map_err(|e| {
                 format!(
                     "{e} (the build published its generation, so lexical search works, and a later embedding run continues where this one stopped)"
                 )
@@ -863,6 +973,10 @@ pub fn build(
                     ..published
                 }
             } else {
+                run.cached = run.cached.saturating_sub(pre_embed.borrowed);
+                run.borrowed += pre_embed.borrowed;
+                run.vectors_added += pre_embed.vectors_added;
+                run.store_created |= pre_embed.store_created;
                 run
             })
         }
@@ -897,8 +1011,19 @@ const PROGRESS: &str = "embed-progress.json";
 /// cache.
 const VHASH: &str = "vhash.dat";
 const SPOOL: &str = "embed.spool";
+/// Temporary spool written during a build before donor caches are checked.
+const SPOOL_RAW: &str = "embed.spool.raw";
 /// Vectors a run adds from the cache between commits of the store.
 const REFILL_COMMIT: usize = 16 * 1024;
+
+/// Borrowing and vector-store work done during `build` before publishing `CURRENT2`.
+#[derive(Default)]
+struct PreEmbed {
+    borrowed: u64,
+    vectors_added: u64,
+    store_created: bool,
+    needs_compact: bool,
+}
 
 fn lock_file(state_dir: &Path, name: &str) -> Result<File, Error> {
     Ok(OpenOptions::new()
@@ -1005,11 +1130,11 @@ fn stored_count(dir: &Path, config: &StoreConfig, keys: &[(VectorId, u32)]) -> u
 /// set while texts are left to send ([`EmbedStats::stopped`]), or when a newer
 /// generation is published ([`EmbedStats::superseded`]). What it embedded stays in
 /// the cache, so a later run continues without paying for it again. Only the
-/// embedder, the cap, the progress callback and the stop flag of `dense` apply. The
+/// embedder, borrow caches, cap, progress callback and stop flag of `dense` apply. The
 /// quantization, vector index and embedded text are the generation's. An error when
 /// the generation has no embeddings or embeds with another model.
 pub fn embed(state_dir: &Path, dense: &DenseBuild<'_>) -> Result<EmbedStats, Error> {
-    embed_run(state_dir, dense, None)
+    embed_run(state_dir, dense, None, false)
 }
 
 /// [`embed`], or with `expect` only that generation, superseded when another is current.
@@ -1017,6 +1142,7 @@ fn embed_run(
     state_dir: &Path,
     d: &DenseBuild<'_>,
     expect: Option<&str>,
+    pre_needs_compact: bool,
 ) -> Result<EmbedStats, Error> {
     let descriptor = d.embedder.descriptor();
     let mut stats = EmbedStats::new(descriptor.clone(), d.embed_text, d.max_tokens);
@@ -1090,8 +1216,18 @@ fn embed_run(
     stats.vectors_removed = stale.len() as u64;
     remove_other_stores(state_dir, Some(&info.store))?;
 
-    // The docs without a vector. Those whose text the cache holds get it now, the
-    // others when their text is embedded.
+    if !d.borrow_caches.is_empty() {
+        let need: HashSet<[u8; 32]> = live
+            .iter()
+            .copied()
+            .filter(|h| !cache.contains(h))
+            .collect();
+        let borrowed = cache.borrow_from(state_dir, &d.borrow_caches, &need)?;
+        stats.borrowed = borrowed.len() as u64;
+    }
+
+    // The docs without a vector. Those whose text the cache holds (already cached
+    // or just borrowed) get it now, the others when their text is embedded.
     let mut refill = Vec::new();
     let mut by_hash: HashMap<[u8; 32], Vec<(VectorId, u32)>> = HashMap::new();
     for &(id, doc) in &missing {
@@ -1117,7 +1253,6 @@ fn embed_run(
     write_progress(state_dir, &name, working, &progress, None)?;
     let (mut was_superseded, mut stopped) = (false, false);
     let stop_requested = || d.stop.is_some_and(|s| s.is_stopped());
-    let mut vector = Vec::new();
     for part in refill.chunks(REFILL_COMMIT) {
         if stop_requested() {
             stopped = true;
@@ -1127,21 +1262,7 @@ fn embed_run(
             was_superseded = true;
             break;
         }
-        for batch in part.chunks(UPSERT_BATCH) {
-            let mut vectors = Vec::with_capacity(batch.len());
-            for &(_, doc) in batch {
-                if !cache.get(&hashes[doc as usize], &mut vector)? {
-                    return Err("an embedding left the cache during the run".into());
-                }
-                vectors.push(std::mem::take(&mut vector));
-            }
-            let records: Vec<VectorRecord<'_>> = batch
-                .iter()
-                .zip(&vectors)
-                .map(|(&(id, doc), v)| record(&files, id, doc, v))
-                .collect();
-            store.upsert(&records)?;
-        }
+        upsert_from_cache(&mut store, &cache, &hashes, &files, part)?;
         store.persist()?;
         embedded += part.len() as u64;
         stats.vectors_added += part.len() as u64;
@@ -1228,7 +1349,7 @@ fn embed_run(
         stats.not_embedded += (by_hash.len() as u64).saturating_sub(totals.too_long);
         EmbedState::Complete
     };
-    if created && state != EmbedState::Embedding {
+    if (created || pre_needs_compact) && state != EmbedState::Embedding {
         store.compact()?;
         store.persist()?;
     }
@@ -1245,6 +1366,33 @@ fn embed_run(
     }
     stats.cache_records = cache.records();
     Ok(stats)
+}
+
+/// Upserts `items` into `store` by reading each doc's vector from `cache`.
+fn upsert_from_cache(
+    store: &mut CaprockStore,
+    cache: &Cache,
+    hashes: &[[u8; 32]],
+    files: &[(u32, String)],
+    items: &[(VectorId, u32)],
+) -> Result<(), Error> {
+    let mut vector = Vec::new();
+    for batch in items.chunks(UPSERT_BATCH) {
+        let mut vectors = Vec::with_capacity(batch.len());
+        for &(_, doc) in batch {
+            if !cache.get(&hashes[doc as usize], &mut vector)? {
+                return Err("an embedding left the cache during the run".into());
+            }
+            vectors.push(std::mem::take(&mut vector));
+        }
+        let records: Vec<VectorRecord<'_>> = batch
+            .iter()
+            .zip(&vectors)
+            .map(|(&(id, doc), v)| record(files, id, doc, v))
+            .collect();
+        store.upsert(&records)?;
+    }
+    Ok(())
 }
 
 /// The store record of `doc`'s vector.

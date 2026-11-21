@@ -62,6 +62,24 @@ impl SpoolReader {
     }
 }
 
+/// Copies the entries of `src` whose hashes pass `keep` into a durable spool at `dst`.
+/// Returns how many entries were kept.
+pub(crate) fn filter_spool(
+    src: &Path,
+    dst: &Path,
+    mut keep: impl FnMut(&[u8; 32]) -> bool,
+) -> Result<u64, Error> {
+    let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, File::open(src)?));
+    let mut out = Spool::create(dst)?;
+    while let Some((hash, text)) = reader.next()? {
+        if keep(&hash) {
+            out.push(&hash, &text)?;
+        }
+    }
+    let (_, count) = out.finish()?;
+    Ok(count)
+}
+
 #[derive(Default)]
 pub(crate) struct RunTotals {
     pub new: u64,

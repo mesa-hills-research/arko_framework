@@ -1250,3 +1250,663 @@ fn lexical_scope_indexes_the_scope_words() {
     );
     assert_eq!(paths(described.path(), "quokka"), ["docs/handbook.md"]);
 }
+
+/// Counts calls made to a `HashEmbedder` while keeping its exact descriptor.
+struct CountingHashEmbedder {
+    inner: HashEmbedder,
+    embed_calls: AtomicU64,
+    count_calls: AtomicU64,
+    texts: Mutex<Vec<String>>,
+}
+impl CountingHashEmbedder {
+    fn new(dims: usize) -> Self {
+        Self {
+            inner: HashEmbedder::new(dims),
+            embed_calls: AtomicU64::new(0),
+            count_calls: AtomicU64::new(0),
+            texts: Mutex::new(Vec::new()),
+        }
+    }
+    fn embed_calls(&self) -> u64 {
+        self.embed_calls.load(Ordering::SeqCst)
+    }
+    fn count_calls(&self) -> u64 {
+        self.count_calls.load(Ordering::SeqCst)
+    }
+    fn embedded(&self) -> Vec<String> {
+        self.texts.lock().unwrap().clone()
+    }
+    fn reset(&self) {
+        self.embed_calls.store(0, Ordering::SeqCst);
+        self.count_calls.store(0, Ordering::SeqCst);
+        self.texts.lock().unwrap().clear();
+    }
+}
+impl Embedder for CountingHashEmbedder {
+    fn descriptor(&self) -> ModelDescriptor {
+        self.inner.descriptor()
+    }
+    fn limits(&self) -> EmbedLimits {
+        EmbedLimits::new(4, 400, 300)
+    }
+    fn count_tokens(&self, texts: &[&str]) -> Result<Vec<u64>, Error> {
+        self.count_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.count_tokens(texts)
+    }
+    fn embed(&self, texts: &[&str], kind: InputKind) -> Result<Embedding, Error> {
+        if kind == InputKind::Document {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            self.texts
+                .lock()
+                .unwrap()
+                .extend(texts.iter().map(|t| t.to_string()));
+        }
+        self.inner.embed(texts, kind)
+    }
+}
+
+#[test]
+fn borrowing_all_chunks_avoids_embedder_calls_and_survives_donor_deletion() {
+    let donor_root = tempfile::tempdir().unwrap();
+    let donor_state = tempfile::tempdir().unwrap();
+    let target_root = tempfile::tempdir().unwrap();
+    let target_state = tempfile::tempdir().unwrap();
+    corpus(donor_root.path());
+    corpus(target_root.path());
+    let all = rendered(target_root.path());
+    let n = all.len() as u64;
+
+    let plain = HashEmbedder::new(32);
+    index2::build(
+        donor_root.path(),
+        donor_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&plain)),
+    )
+    .unwrap();
+    let donor_dense = hybrid::search(
+        donor_state.path(),
+        &SearchRequest::new("exponential backoff retry").with_mode(Mode::Dense),
+        Some(&plain),
+    )
+    .unwrap();
+    assert!(!donor_dense.hits.is_empty());
+
+    let counting = CountingHashEmbedder::new(32);
+    let stats = index2::build(
+        target_root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(2).with_dense(
+            DenseBuild::new(&counting).with_borrow_caches(vec![donor_state.path().to_path_buf()]),
+        ),
+    )
+    .unwrap();
+    let d = stats.dense.unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(counting.count_calls(), 0);
+    assert!(counting.embedded().is_empty());
+    assert_eq!((d.texts, d.cached, d.borrowed, d.new), (n, 0, n, 0));
+    assert_eq!((d.requests, d.tokens), (0, 0));
+    assert_eq!(d.embedded_docs, d.docs);
+    assert!(d.store_created);
+    assert_eq!(d.vectors_added, d.docs);
+    assert_eq!(d.cache_records, n);
+
+    // Delete the donor completely so target must stand on its own for search and rebuilds.
+    let donor_path = donor_state.path().to_path_buf();
+    drop(donor_state);
+    assert!(!donor_path.exists());
+
+    let target_dense = hybrid::search(
+        target_state.path(),
+        &SearchRequest::new("exponential backoff retry").with_mode(Mode::Dense),
+        Some(&plain),
+    )
+    .unwrap();
+    assert_eq!(ranked(&target_dense), ranked(&donor_dense));
+    let target_hybrid = hybrid::search(
+        target_state.path(),
+        &SearchRequest::new("replay journal entries").with_mode(Mode::Hybrid),
+        Some(&plain),
+    )
+    .unwrap();
+    assert!(target_hybrid.hits.iter().any(|h| h.dense_rank.is_some()));
+
+    // Rebuilding target without donors hits its own cache.
+    let rebuild = index2::build(
+        target_root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&counting)),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(
+        (rebuild.texts, rebuild.cached, rebuild.borrowed, rebuild.new),
+        (n, n, 0, 0)
+    );
+}
+
+#[test]
+fn borrowing_with_embed_later_searches_unchanged_chunks_immediately() {
+    let donor_root = tempfile::tempdir().unwrap();
+    let donor_state = tempfile::tempdir().unwrap();
+    let wt_root = tempfile::tempdir().unwrap();
+    let wt_state = tempfile::tempdir().unwrap();
+    corpus(donor_root.path());
+    corpus(wt_root.path());
+    let donor_texts = rendered(donor_root.path());
+
+    let plain = HashEmbedder::new(32);
+    index2::build(
+        donor_root.path(),
+        donor_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&plain)),
+    )
+    .unwrap();
+
+    // Edit one file and add a new file in the worktree.
+    write(
+        wt_root.path(),
+        "src/store/journal.rs",
+        "pub fn append_journal_entry(log: &mut Vec<String>, entry: &str) {\n    \
+             log.push(entry.trim().to_owned());\n\
+         }\n\n\
+         pub fn replay_journal(log: &[String]) -> usize {\n    \
+             log.iter().filter(|e| !e.is_empty()).count()\n\
+         }\n",
+    );
+    write(
+        wt_root.path(),
+        "src/net/timeout.rs",
+        "pub fn request_timeout_secs(retries: u32) -> u64 {\n    5 + u64::from(retries) * 2\n}\n",
+    );
+    let wt_texts = rendered(wt_root.path());
+    let unchanged_count = wt_texts.intersection(&donor_texts).count() as u64;
+    let changed_texts: BTreeSet<String> = wt_texts.difference(&donor_texts).cloned().collect();
+    assert!(unchanged_count > 0 && !changed_texts.is_empty());
+
+    // Build worktree with embed_later enabled and the donor cache.
+    let counting = CountingHashEmbedder::new(32);
+    let build = index2::build(
+        wt_root.path(),
+        wt_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(2).with_dense(
+            DenseBuild::new(&counting)
+                .with_embed_later(true)
+                .with_borrow_caches(vec![donor_state.path().to_path_buf()]),
+        ),
+    )
+    .unwrap();
+    let d = build.dense.unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(counting.count_calls(), 0);
+    assert_eq!(
+        (d.texts, d.cached, d.borrowed, d.new, d.tokens),
+        (wt_texts.len() as u64, 0, unchanged_count, 0, 0)
+    );
+    assert!(d.embedded_docs > 0 && d.embedded_docs < d.docs);
+    assert!(d.store_created);
+    assert_eq!(d.vectors_added, d.embedded_docs);
+    assert_eq!(d.cache_records, unchanged_count);
+
+    let status = index2::status(wt_state.path()).unwrap();
+    let info = status.dense.unwrap();
+    assert_eq!(info.state, EmbedState::Embedding);
+    assert_eq!(info.embedded, d.embedded_docs);
+    assert!(!status.embedding);
+
+    // Delete donor before searching and before running index2::embed.
+    drop(donor_state);
+
+    // Unchanged chunks are immediately searchable densely without calling embed().
+    let dense = hybrid::search(
+        wt_state.path(),
+        &SearchRequest::new("exponential backoff retry")
+            .with_mode(Mode::Dense)
+            .with_limit(50),
+        Some(&plain),
+    )
+    .unwrap();
+    assert_eq!(dense.hits.len() as u64, d.embedded_docs);
+    assert!(
+        dense
+            .hits
+            .iter()
+            .any(|h| h.chunk.path == "src/net/retry.rs")
+    );
+    assert!(
+        dense
+            .hits
+            .iter()
+            .all(|h| h.chunk.path != "src/net/timeout.rs")
+    );
+
+    // Running index2::embed embeds only the changed/new chunks left in the spool.
+    let run = index2::embed(wt_state.path(), &DenseBuild::new(&counting)).unwrap();
+    assert_eq!(run.cached, unchanged_count);
+    assert_eq!(run.borrowed, 0);
+    assert_eq!(run.new, changed_texts.len() as u64);
+    assert_eq!(run.embedded_docs, run.docs);
+    assert_eq!(
+        counting.embedded().into_iter().collect::<BTreeSet<_>>(),
+        changed_texts
+    );
+    let final_info = index2::dense_info(wt_state.path()).unwrap().unwrap();
+    assert_eq!(
+        (final_info.state, final_info.embedded),
+        (EmbedState::Complete, final_info.docs)
+    );
+    let after = hybrid::search(
+        wt_state.path(),
+        &SearchRequest::new("request timeout secs retries")
+            .with_mode(Mode::Dense)
+            .with_limit(50),
+        Some(&plain),
+    )
+    .unwrap();
+    assert_eq!(after.hits.len() as u64, final_info.docs);
+    assert_eq!(after.hits[0].chunk.path, "src/net/timeout.rs");
+
+    // When all chunks are borrowed with embed_later enabled, coverage is Complete at once.
+    let clone_state = tempfile::tempdir().unwrap();
+    counting.reset();
+    let full = index2::build(
+        wt_root.path(),
+        clone_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(1).with_dense(
+            DenseBuild::new(&counting)
+                .with_embed_later(true)
+                .with_borrow_caches(vec![wt_state.path().to_path_buf()]),
+        ),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(full.borrowed, wt_texts.len() as u64);
+    assert_eq!(full.embedded_docs, full.docs);
+    let clone_info = index2::dense_info(clone_state.path()).unwrap().unwrap();
+    assert_eq!(
+        (clone_info.state, clone_info.embedded),
+        (EmbedState::Complete, clone_info.docs)
+    );
+    assert!(!generation(clone_state.path()).join("embed.spool").exists());
+}
+
+#[test]
+fn borrowing_during_embed_directly_does_not_consume_max_tokens() {
+    let donor_root = tempfile::tempdir().unwrap();
+    let donor_state = tempfile::tempdir().unwrap();
+    let target_root = tempfile::tempdir().unwrap();
+    let target_state = tempfile::tempdir().unwrap();
+    corpus(donor_root.path());
+    corpus(target_root.path());
+    let donor_texts = rendered(donor_root.path());
+
+    let plain = HashEmbedder::new(32);
+    index2::build(
+        donor_root.path(),
+        donor_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&plain)),
+    )
+    .unwrap();
+
+    // Add two new files so target has both unchanged (borrowable) and new chunks.
+    write(
+        target_root.path(),
+        "src/net/pool.rs",
+        "pub fn acquire_pooled_connection(limit: usize) -> bool {\n    limit > 0\n}\n",
+    );
+    write(
+        target_root.path(),
+        "src/net/keepalive.rs",
+        "pub fn send_keepalive_probe(socket_id: u64) -> bool {\n    socket_id != 0\n}\n",
+    );
+    let target_texts = rendered(target_root.path());
+    let unchanged_count = target_texts.intersection(&donor_texts).count() as u64;
+    let new_texts: Vec<String> = target_texts.difference(&donor_texts).cloned().collect();
+    assert_eq!(new_texts.len(), 2);
+
+    // Build target with embed_later and NO borrow caches so every text goes to the spool.
+    let counting = CountingHashEmbedder::new(32);
+    let built = index2::build(
+        target_root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&counting).with_embed_later(true)),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!(
+        (built.cached, built.borrowed, built.embedded_docs),
+        (0, 0, 0)
+    );
+
+    // Choose a token cap smaller than the borrowed texts alone, enough for one new text.
+    let new_refs: Vec<&str> = new_texts.iter().map(String::as_str).collect();
+    let new_counts = plain.count_tokens(&new_refs).unwrap();
+    let borrowed_refs: Vec<&str> = donor_texts.iter().map(String::as_str).collect();
+    let borrowed_tokens: u64 = plain.count_tokens(&borrowed_refs).unwrap().iter().sum();
+    let cap = new_counts[0].max(new_counts[1]);
+    assert!(cap < borrowed_tokens && cap < new_counts[0] + new_counts[1]);
+
+    // Borrow directly inside index2::embed under that small token cap.
+    let run = index2::embed(
+        target_state.path(),
+        &DenseBuild::new(&counting)
+            .with_borrow_caches(vec![donor_state.path().to_path_buf()])
+            .with_max_tokens(Some(cap)),
+    )
+    .unwrap();
+    assert_eq!(run.cached, 0);
+    assert_eq!(run.borrowed, unchanged_count);
+    assert_eq!(run.new, 1);
+    assert_eq!(run.not_embedded, 1);
+    assert!(run.cap_reached);
+    assert!(run.tokens > 0 && run.tokens <= cap);
+    assert_eq!(
+        run.cached + run.borrowed + run.new + run.not_embedded,
+        run.texts
+    );
+    let embedded = counting.embedded();
+    assert_eq!(embedded.len(), 1);
+    assert!(new_texts.contains(&embedded[0]));
+    assert!(!donor_texts.contains(&embedded[0]));
+    let info = index2::dense_info(target_state.path()).unwrap().unwrap();
+    assert_eq!(info.state, EmbedState::CapReached);
+    assert_eq!(info.embedded, run.embedded_docs);
+
+    // With max_tokens = Some(0) and 100% matching donor, all chunks are borrowed with no cap hit.
+    let zero_cap_state = tempfile::tempdir().unwrap();
+    counting.reset();
+    index2::build(
+        donor_root.path(),
+        zero_cap_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&counting).with_embed_later(true)),
+    )
+    .unwrap();
+    let zero_run = index2::embed(
+        zero_cap_state.path(),
+        &DenseBuild::new(&counting)
+            .with_borrow_caches(vec![donor_state.path().to_path_buf()])
+            .with_max_tokens(Some(0)),
+    )
+    .unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(counting.count_calls(), 0);
+    assert!(!zero_run.cap_reached);
+    assert_eq!(zero_run.borrowed, donor_texts.len() as u64);
+    assert_eq!(
+        (zero_run.new, zero_run.tokens, zero_run.not_embedded),
+        (0, 0, 0)
+    );
+    assert_eq!(zero_run.embedded_docs, zero_run.docs);
+    assert_eq!(
+        index2::dense_info(zero_cap_state.path())
+            .unwrap()
+            .unwrap()
+            .state,
+        EmbedState::Complete
+    );
+}
+
+#[test]
+fn borrowing_ignores_model_mismatch_self_and_damaged_donors() {
+    let root = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let all = rendered(root.path());
+    let n = all.len() as u64;
+
+    // Donor 1 uses different dimensions (64 vs 32).
+    let wrong_dims_state = tempfile::tempdir().unwrap();
+    let e64 = HashEmbedder::new(64);
+    index2::build(
+        root.path(),
+        wrong_dims_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&e64)),
+    )
+    .unwrap();
+
+    // Donor 2 uses a different model name (test/model-b vs hash/hash-v1) with the same dimensions.
+    let wrong_model_state = tempfile::tempdir().unwrap();
+    let other_model = TestEmbedder::new("model-b", 32);
+    index2::build(
+        root.path(),
+        wrong_model_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&other_model)),
+    )
+    .unwrap();
+
+    // Donor 3 holds a forged cache.json under hash/hash-v1's directory with another descriptor.
+    let e32 = HashEmbedder::new(32);
+    let forged_state = tempfile::tempdir().unwrap();
+    let forged_dir = forged_state
+        .path()
+        .join("embed-cache")
+        .join(e32.descriptor().key());
+    fs::create_dir_all(&forged_dir).unwrap();
+    fs::copy(
+        wrong_model_state
+            .path()
+            .join("embed-cache")
+            .join(other_model.descriptor().key())
+            .join("cache.json"),
+        forged_dir.join("cache.json"),
+    )
+    .unwrap();
+
+    // Donors 4, 5 and 6 have corrupt JSON, an empty directory, and a missing path.
+    let corrupt_state = tempfile::tempdir().unwrap();
+    let corrupt_dir = corrupt_state
+        .path()
+        .join("embed-cache")
+        .join(e32.descriptor().key());
+    fs::create_dir_all(&corrupt_dir).unwrap();
+    fs::write(corrupt_dir.join("cache.json"), b"not valid json").unwrap();
+    let empty_state = tempfile::tempdir().unwrap();
+    let missing_path = tempfile::tempdir().unwrap().path().join("absent");
+
+    // Donor 7 has a valid cache whose vectors.0 was truncated to zero bytes.
+    let truncated_state = tempfile::tempdir().unwrap();
+    index2::build(
+        root.path(),
+        truncated_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&e32)),
+    )
+    .unwrap();
+    let trunc_vecs = truncated_state
+        .path()
+        .join("embed-cache")
+        .join(e32.descriptor().key())
+        .join("vectors.0");
+    fs::write(&trunc_vecs, []).unwrap();
+
+    // Pointing at all of those incompatible and damaged donors never fails the build.
+    let target_state = tempfile::tempdir().unwrap();
+    let counting = CountingHashEmbedder::new(32);
+    let d = index2::build(
+        root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(1).with_dense(
+            DenseBuild::new(&counting).with_borrow_caches(vec![
+                target_state.path().to_path_buf(),
+                wrong_dims_state.path().to_path_buf(),
+                wrong_model_state.path().to_path_buf(),
+                forged_state.path().to_path_buf(),
+                corrupt_state.path().to_path_buf(),
+                empty_state.path().to_path_buf(),
+                missing_path.clone(),
+                truncated_state.path().to_path_buf(),
+            ]),
+        ),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!((d.texts, d.cached, d.borrowed, d.new), (n, 0, 0, n));
+    assert_eq!(d.embedded_docs, d.docs);
+
+    // Rebuilding with target's own path (and symlink on unix) in borrow_caches counts as cached, not borrowed.
+    counting.reset();
+    let mut self_donors = vec![target_state.path().to_path_buf()];
+    #[cfg(unix)]
+    let _link_dir = {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("self-link");
+        std::os::unix::fs::symlink(target_state.path(), &link).unwrap();
+        self_donors.push(link);
+        dir
+    };
+    let d2 = index2::build(
+        root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&counting).with_borrow_caches(self_donors)),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!((d2.texts, d2.cached, d2.borrowed, d2.new), (n, n, 0, 0));
+
+    // Partial borrow and partial embed when building synchronously behind damaged donors.
+    let wt_root = tempfile::tempdir().unwrap();
+    let wt_state = tempfile::tempdir().unwrap();
+    corpus(wt_root.path());
+    write(
+        wt_root.path(),
+        "src/extra.rs",
+        "pub fn calibrate_quasar_frequency(quasar_hz: u64) -> u64 {\n    quasar_hz.saturating_mul(3)\n}\n",
+    );
+    counting.reset();
+    let partial = index2::build(
+        wt_root.path(),
+        wt_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(1).with_dense(
+            DenseBuild::new(&counting).with_borrow_caches(vec![
+                corrupt_state.path().to_path_buf(),
+                truncated_state.path().to_path_buf(),
+                target_state.path().to_path_buf(),
+            ]),
+        ),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    assert_eq!(partial.cached, 0);
+    assert_eq!(partial.borrowed, n);
+    assert_eq!(partial.new, 1);
+    assert_eq!(partial.texts, n + 1);
+    assert_eq!(partial.embedded_docs, partial.docs);
+    assert!(partial.store_created);
+    assert_eq!(partial.vectors_added, partial.docs);
+    let search = hybrid::search(
+        wt_state.path(),
+        &SearchRequest::new("calibrate quasar frequency").with_mode(Mode::Dense),
+        Some(&e32),
+    )
+    .unwrap();
+    assert_eq!(search.hits[0].chunk.path, "src/extra.rs");
+}
+
+#[test]
+fn borrowing_falls_back_to_embed_when_embed_lock_is_held_during_build() {
+    use fs2::FileExt;
+    let donor_root = tempfile::tempdir().unwrap();
+    let donor_state = tempfile::tempdir().unwrap();
+    let target_root = tempfile::tempdir().unwrap();
+    let target_state = tempfile::tempdir().unwrap();
+    corpus(donor_root.path());
+    corpus(target_root.path());
+    let all = rendered(target_root.path());
+    let n = all.len() as u64;
+
+    let plain = HashEmbedder::new(32);
+    index2::build(
+        donor_root.path(),
+        donor_state.path(),
+        &Options::default(),
+        &BuildOptions::default()
+            .with_threads(1)
+            .with_dense(DenseBuild::new(&plain)),
+    )
+    .unwrap();
+
+    // Hold target's embedding lock while build runs with embed_later enabled.
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(target_state.path().join(".embed.lock"))
+        .unwrap();
+    held.lock_exclusive().unwrap();
+
+    let counting = CountingHashEmbedder::new(32);
+    let built = index2::build(
+        target_root.path(),
+        target_state.path(),
+        &Options::default(),
+        &BuildOptions::default().with_threads(1).with_dense(
+            DenseBuild::new(&counting)
+                .with_embed_later(true)
+                .with_borrow_caches(vec![donor_state.path().to_path_buf()]),
+        ),
+    )
+    .unwrap()
+    .dense
+    .unwrap();
+    // Build published immediately without blocking and left the full spool for embed.
+    assert_eq!(built.borrowed, 0);
+    assert_eq!(built.embedded_docs, 0);
+    drop(held);
+
+    // Once the lock is released, index2::embed borrows everything with zero embedder calls.
+    let run = index2::embed(
+        target_state.path(),
+        &DenseBuild::new(&counting).with_borrow_caches(vec![donor_state.path().to_path_buf()]),
+    )
+    .unwrap();
+    assert_eq!(counting.embed_calls(), 0);
+    assert_eq!(counting.count_calls(), 0);
+    assert_eq!(
+        (run.cached, run.borrowed, run.new, run.tokens),
+        (0, n, 0, 0)
+    );
+    assert_eq!(run.embedded_docs, run.docs);
+}
