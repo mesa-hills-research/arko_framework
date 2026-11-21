@@ -4,10 +4,21 @@
 
 ### Workspace paths
 
-- The workspace check resolves symbolic links before it decides. A path that leaves the
-  workspace through a link inside it, such as `link/../x` where `link` points outside, is refused.
-  For a path that doesn't exist yet, its deepest existing parent is resolved. Before, the check
-  compared the path's text only, so a link could take a read or write outside the workspace.
+- The workspace check resolves symbolic links before it decides. Before, it compared the path's
+  text only, so a link could take a read or write outside the workspace. The working directory
+  and the path are compared in canonical form, so a link to the working directory, its canonical
+  form and the spelling it was given in all get the same answer. For a path that doesn't exist
+  yet, its deepest existing parent is resolved.
+- A path that enters the workspace and leaves it through a link, such as `link/x` or `link/../x`
+  where `link` points outside, is refused under every path policy, however it's spelled. So is a
+  path through a link whose target doesn't exist, also when it ends in a separator (`link/`).
+- The check judges each way a tool may read the path, trimmed or not and with `..` resolved by
+  name or by the operating system. A path that some readings find inside and others outside is
+  refused.
+- The check judges a path when the call is admitted, so a link created or changed before the tool
+  opens the path isn't seen. It covers `is_path` parameters and the path inputs of Claude Code's
+  file and search tools. Parameters not marked `is_path`, paths inside other arguments, a shell's
+  working directory and what a program does with its paths are outside it.
 
 ### apply_diff
 
