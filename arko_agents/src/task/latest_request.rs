@@ -51,13 +51,17 @@ pub struct LatestRequest {
 }
 
 impl LatestRequest {
-    /// The request sent at `sent_at` that had `usage`.
+    /// The request sent at `sent_at` that had `usage`. Usage that adds up
+    /// several requests (Antigravity's for a turn) gives the conversation's
+    /// size as the input ([`UsageInfo::context_size`]), and its cache counts
+    /// no larger.
     pub fn new(sent_at: DateTime<Utc>, usage: &UsageInfo) -> Self {
+        let input_tokens = usage.context_size();
         Self {
             sent_at,
-            input_tokens: usage.input_tokens,
-            cached_tokens: usage.cached_tokens.unwrap_or(0),
-            cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+            input_tokens,
+            cached_tokens: usage.cached_tokens.unwrap_or(0).min(input_tokens),
+            cache_write_tokens: usage.cache_write_tokens.unwrap_or(0).min(input_tokens),
             cache_lifetime_secs: None,
             sent_instant: None,
         }

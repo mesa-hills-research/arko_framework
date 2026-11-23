@@ -22,6 +22,13 @@ pub struct ModelCallUsage {
     pub model: String,
     pub input_tokens: usize,
     pub output_tokens: usize,
+    /// How much of the context window the conversation takes after the
+    /// call, where that differs from `input_tokens`. A CLI that makes several
+    /// model requests for one prompt (Antigravity) reports their input
+    /// summed, and their context size apart. `None` means `input_tokens` is
+    /// the size. See [`context_size`](Self::context_size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,6 +346,7 @@ impl ModelCallUsage {
             model,
             input_tokens,
             output_tokens,
+            context_tokens: None,
             max_input_tokens: Some(max_input_tokens),
             context_usage_percent,
             input_delta_from_previous_call: None,
@@ -358,6 +366,25 @@ impl ModelCallUsage {
     pub fn with_plan_usage(mut self, plan_usage: Option<PlanUsage>) -> Self {
         self.plan_usage = plan_usage;
         self
+    }
+
+    /// The call with the conversation's context size reported apart from its
+    /// input ([`context_tokens`](Self::context_tokens)). Its share of the
+    /// context window is figured from it.
+    pub fn with_context_tokens(mut self, context_tokens: Option<usize>) -> Self {
+        self.context_tokens = context_tokens;
+        if let (Some(tokens), Some(window)) = (context_tokens, self.max_input_tokens)
+            && window > 0
+        {
+            self.context_usage_percent = Some(tokens as f64 / window as f64 * 100.0);
+        }
+        self
+    }
+
+    /// How much of the context window the conversation takes after the call,
+    /// which is what a host shows as the conversation's size.
+    pub fn context_size(&self) -> usize {
+        self.context_tokens.unwrap_or(self.input_tokens)
     }
 
     /// Whether the provider served a different model than the one requested.
@@ -486,6 +513,9 @@ pub enum BillingKind {
 ///   (`cached_tokens`) and cache writes (`cache_write_tokens`). Usage records
 ///   saved before this definition stored only uncached input for Anthropic.
 /// - `output_tokens` includes reasoning/thinking tokens (`reasoning_tokens`).
+/// - `context_tokens`, when set, is the conversation's size after the call,
+///   for a record whose counts add up several model requests. A sum of
+///   records has none.
 ///
 /// Costs are USD estimates at list prices, for the tier, residency and date
 /// that applied. `total_cost` is their sum. `billed_cost` is what the account
@@ -496,6 +526,10 @@ pub struct UsageInfo {
     pub input_tokens: usize,
     /// Output tokens, including reasoning tokens.
     pub output_tokens: usize,
+    /// The conversation's context size after the call, where it differs from
+    /// `input_tokens` (see [`context_size`](Self::context_size)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<usize>,
     /// Estimated cost of uncached, unwritten input.
     pub input_cost: f64,
     /// Estimated cost of output tokens.
@@ -563,6 +597,19 @@ impl UsageInfo {
     pub fn with_cache_write_tokens(mut self, cache_write_tokens: usize) -> Self {
         self.cache_write_tokens = Some(cache_write_tokens);
         self
+    }
+
+    /// The usage with the conversation's context size after it
+    /// ([`context_tokens`](Self::context_tokens)).
+    pub fn with_context_tokens(mut self, context_tokens: Option<usize>) -> Self {
+        self.context_tokens = context_tokens;
+        self
+    }
+
+    /// The conversation's size after the call, the context it takes in the
+    /// model's window. It is `input_tokens` unless the record says otherwise.
+    pub fn context_size(&self) -> usize {
+        self.context_tokens.unwrap_or(self.input_tokens)
     }
 
     /// What the account was charged. Returns the billed cost, or for records
@@ -750,6 +797,8 @@ impl std::ops::AddAssign<&UsageInfo> for UsageInfo {
     /// billing kind becomes [`BillingKind::Mixed`].
     fn add_assign(&mut self, other: &UsageInfo) {
         let billed = self.billed() + other.billed();
+        // A sum spans calls, so no one context size is its.
+        self.context_tokens = None;
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.input_cost += other.input_cost;
@@ -789,6 +838,7 @@ impl<'a> std::iter::Sum<&'a UsageInfo> for UsageInfo {
             return Self::default();
         };
         let mut total = first.clone();
+        total.context_tokens = None;
         total.billed_cost = Some(first.billed());
         for usage in iter {
             total += usage;
@@ -816,6 +866,44 @@ mod tests {
 
     fn close(actual: f64, expected: f64) -> bool {
         (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_sum_counts_the_input_and_keeps_no_context_size() {
+        let turn = UsageInfo::new(500_000, 50).with_context_tokens(Some(100_000));
+        assert_eq!(turn.context_size(), 100_000);
+        assert_eq!(UsageInfo::new(7, 1).context_size(), 7);
+        let mut total = turn.clone();
+        total += &turn;
+        assert_eq!(total.input_tokens, 1_000_000);
+        assert_eq!(total.context_tokens, None);
+        let summed: UsageInfo = [turn.clone()].iter().sum();
+        assert_eq!(
+            (summed.input_tokens, summed.context_tokens),
+            (500_000, None)
+        );
+        // Records saved before the field load without it, and are their input.
+        let old: UsageInfo = serde_json::from_str(
+            r#"{"input_tokens": 9, "output_tokens": 1, "input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0}"#,
+        )
+        .unwrap();
+        assert_eq!((old.context_tokens, old.context_size()), (None, 9));
+        assert!(
+            !serde_json::to_string(&old)
+                .unwrap()
+                .contains("context_tokens")
+        );
+        let call = ModelCallUsage::new(
+            "c".into(),
+            "antigravity".into(),
+            "m".into(),
+            500_000,
+            5,
+            1_000_000,
+        )
+        .with_context_tokens(Some(100_000));
+        assert_eq!(call.context_size(), 100_000);
+        assert_eq!(call.context_usage_percent, Some(10.0));
     }
 
     #[test]

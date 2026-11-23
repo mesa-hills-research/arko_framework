@@ -56,7 +56,11 @@ struct Fake {
 
 impl Fake {
     fn new(script: Value) -> Self {
-        let dir = std::env::temp_dir().join(format!("arko-fake-agy-{}", uuid::Uuid::new_v4()));
+        Self::in_dir(std::env::temp_dir(), script)
+    }
+
+    fn in_dir(parent: PathBuf, script: Value) -> Self {
+        let dir = parent.join(format!("arko-fake-agy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("work")).unwrap();
         std::fs::write(dir.join("script.json"), script.to_string()).unwrap();
         Self { dir }
@@ -345,7 +349,7 @@ async fn antigravity_keeps_the_workspace_boundary() {
 }
 
 #[tokio::test]
-async fn antigravity_seeds_a_new_session_after_a_blocking_question() {
+async fn antigravity_resumes_its_session_after_a_blocking_question() {
     let fake = Fake::new(json!([
         [{"tool": "ask_user", "input": {"questions": "Which file?"}}],
         [complete("Used the answer")]
@@ -374,11 +378,13 @@ async fn antigravity_seeds_a_new_session_after_a_blocking_question() {
         "{}",
         fake.log()
     );
-    assert!(
-        fake.log()
-            .contains("Continue from this record of the conversation")
-    );
-    assert!(fake.log().contains("Use the example file."));
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts.len(), 2, "{}", fake.log());
+    assert_eq!(prompts[1]["sessionId"], prompts[0]["sessionId"]);
+    assert_eq!(fake.logged("session_resume").len(), 1);
+    let answer = prompts[1]["text"].as_str().unwrap();
+    assert!(answer.contains("Use the example file."), "{answer}");
+    assert!(!answer.contains("Do the example task."), "{answer}");
 }
 
 #[tokio::test]
@@ -648,29 +654,193 @@ async fn antigravity_only_selects_a_thought_level_the_model_offers() {
     assert_eq!(fake.logged("prompt")[0]["model"], "gemini-4-neon-high");
 }
 
-#[tokio::test]
-async fn antigravity_resumes_from_the_saved_transcript() {
-    let fake = Fake::new(json!([
-        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
-    ]));
-    let (task, _) = Run::start(fake.task(chat())).finish().await;
-    let mut task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
-    assert!(task.agent_config.runs_in_antigravity());
-    task.prepare_for_resumption_from_completed("One more example, please.".into())
+/// The task's first turn, then a follow-up in a later run, with the task
+/// saved and loaded between them as a host does across a restart.
+async fn follow_up(fake: &Fake, mut task: Task, follow_up: &str) -> Task {
+    let (task_after, _) = Run::start(task).finish().await;
+    task = serde_json::from_value(serde_json::to_value(task_after).unwrap()).unwrap();
+    task.prepare_for_resumption_from_completed(follow_up.into())
         .unwrap();
     let (task, _) = Run::start(task).finish().await;
     assert!(
-        matches!(task.current_state, TaskState::Completed { summary } if summary == "The follow-up answer.")
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}\n{}",
+        task.current_state,
+        fake.log()
+    );
+    task
+}
+
+#[tokio::test]
+async fn antigravity_follow_up_resumes_its_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = Fake::new(json!([
+        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
+    ]));
+    let task = follow_up(&fake, fake.task(chat()), "One more example, please.").await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "The follow-up answer.")
     );
     let prompts = fake.logged("prompt");
     assert_eq!(prompts.len(), 2);
-    assert_ne!(prompts[0]["sessionId"], prompts[1]["sessionId"]);
-    let replay = prompts[1]["text"].as_str().unwrap();
-    assert!(
-        replay.contains("## assistant\n\nAn example answer."),
-        "{replay}"
+    assert_eq!(fake.logged("session_new").len(), 1, "{}", fake.log());
+    let resumed = fake.logged("session_resume");
+    assert_eq!(resumed.len(), 1, "{}", fake.log());
+    assert_eq!(resumed[0]["params"]["sessionId"], prompts[0]["sessionId"]);
+    assert_eq!(prompts[1]["sessionId"], prompts[0]["sessionId"]);
+    // Only the new message goes, on the task's model and level again.
+    let sent = prompts[1]["text"].as_str().unwrap();
+    assert!(sent.contains("One more example, please."), "{sent}");
+    assert!(!sent.contains("An example answer."), "{sent}");
+    assert_eq!(prompts[1]["model"], prompts[0]["model"]);
+    // The profile that holds the session stays, for the user alone.
+    let profile = fake.dir.join("profiles").join(task.id.to_string());
+    let stored = profile.join(format!(
+        "antigravity-cli/conversations/{}.json",
+        prompts[0]["sessionId"].as_str().unwrap()
+    ));
+    assert!(stored.is_file(), "{}", stored.display());
+    let mode = std::fs::metadata(&profile).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+struct HoldFirstDurableSnapshot(mpsc::UnboundedSender<Vec<u8>>);
+
+#[async_trait::async_trait]
+impl crate::snapshot::TaskSnapshotSink for HoldFirstDurableSnapshot {
+    async fn task_changed(&self, task: &Task, durable: bool) -> Result<(), String> {
+        if durable {
+            self.0.send(serde_json::to_vec(task).unwrap()).unwrap();
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn antigravity_recovers_a_follow_up_from_its_pre_send_snapshot() {
+    const FOLLOW_UP: &str = "Check the other example.";
+    let fake = Fake::new(json!([[{"text": "Ready."}], [{"text": "Checked."}]]));
+    let (mut task, _) = Run::start(fake.task(chat())).finish().await;
+    task.prepare_for_resumption_from_completed(FOLLOW_UP.into())
+        .unwrap();
+    let (captured, mut checkpoint) = mpsc::unbounded_channel();
+    let runtime = AgentRuntime::new(Arc::new(LLMClient::new()))
+        .with_task_snapshots(Arc::new(HoldFirstDurableSnapshot(captured)));
+    let (_events, _commands, handle) = runtime.run_task(
+        task,
+        Arc::new(ToolRegistry::new()),
+        None,
+        false,
+        None,
+        None,
+        None,
     );
-    assert!(replay.contains("One more example, please."), "{replay}");
+    let snapshot = tokio::time::timeout(Duration::from_secs(15), checkpoint.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&snapshot).contains(FOLLOW_UP));
+    assert_eq!(fake.logged("session_resume").len(), 1, "{}", fake.log());
+    assert_eq!(fake.logged("prompt").len(), 1, "{}", fake.log());
+    handle.abort();
+    assert!(handle.await.unwrap_err().is_cancelled());
+
+    let saved: Task = serde_json::from_slice(&snapshot).unwrap();
+    let (finished, _) = Run::start(saved).finish().await;
+    assert!(matches!(
+        finished.current_state,
+        TaskState::Completed { .. }
+    ));
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts.len(), 2, "{}", fake.log());
+    assert!(
+        prompts[1]["text"].as_str().unwrap().contains(FOLLOW_UP),
+        "{prompts:#?}"
+    );
+}
+
+#[tokio::test]
+async fn antigravity_opens_a_relative_profile_root_from_another_working_directory() {
+    let fake = Fake::in_dir(
+        std::env::current_dir().unwrap(),
+        json!([[{"text": "Ready."}], [{"text": "Checked."}]]),
+    );
+    let relative = PathBuf::from(fake.dir.file_name().unwrap()).join("profiles");
+    let mut task = fake.task(chat());
+    task.agent_config.antigravity.as_mut().unwrap().profile_root = Some(relative);
+    let task = follow_up(&fake, task, "Check the other example.").await;
+    assert!(fake.dir.join("profiles").join(task.id.to_string()).is_dir());
+    assert_eq!(fake.logged("session_resume").len(), 1, "{}", fake.log());
+}
+
+#[tokio::test]
+async fn antigravity_keeps_a_saved_session_until_the_user_signs_in_again() {
+    let fake = Fake::new(json!([[{"text": "Ready."}], [{"text": "Checked."}]]));
+    let (mut task, _) = Run::start(fake.task(chat())).finish().await;
+    let saved = task.antigravity_session.as_ref().unwrap();
+    let stored = fake
+        .dir
+        .join("profiles")
+        .join(task.id.to_string())
+        .join(format!("antigravity-cli/conversations/{}.json", saved.id));
+    assert!(stored.is_file());
+    fake.script(&json!({"signed_out": true}));
+    task.prepare_for_resumption_from_completed("Check the other example.".into())
+        .unwrap();
+    let mut run = Run::start(task);
+    let events = run
+        .until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(
+        matches!(events.last(), Some(AgentEvent::ErrorEncountered {
+        error_message, requires_approval_to_retry: true, ..
+    }) if error_message == "Run `agy` to sign in."),
+        "{events:?}"
+    );
+    assert!(
+        stored.is_file(),
+        "the signed-out CLI shouldn't discard the conversation"
+    );
+    fake.script(&json!([[{"text": "Ready."}], [{"text": "Checked."}]]));
+    run.commands
+        .send(UserCommand::ApproveErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts[0]["sessionId"], prompts[1]["sessionId"]);
+    assert!(
+        prompts[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Check the other example.")
+    );
+}
+
+#[tokio::test]
+async fn antigravity_seeds_only_when_resume_fails() {
+    let fake = Fake::new(json!({"resume": "refuse", "turns": [
+        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
+    ]}));
+    follow_up(&fake, fake.task(chat()), "One more example, please.").await;
+    assert_eq!(
+        fake.logged("session_resume_refused").len(),
+        1,
+        "{}",
+        fake.log()
+    );
+    assert_eq!(fake.logged("session_new").len(), 2);
+    let prompts = fake.logged("prompt");
+    assert_ne!(prompts[1]["sessionId"], prompts[0]["sessionId"]);
+    let seed = prompts[1]["text"].as_str().unwrap();
+    assert!(seed.contains("# The conversation so far"), "{seed}");
+    assert!(seed.contains("An example answer."), "{seed}");
+    assert!(
+        seed.ends_with("# The user's new message\n\nOne more example, please."),
+        "{seed}"
+    );
     let text_blocks = prompts[1]["blocks"]
         .as_array()
         .unwrap()
@@ -678,6 +848,192 @@ async fn antigravity_resumes_from_the_saved_transcript() {
         .filter(|block| block["type"] == "text")
         .count();
     assert_eq!(text_blocks, 1);
+}
+
+/// A new session gets each call's result under the call, long output cut,
+/// and the user's new message alone at the end.
+#[tokio::test]
+async fn antigravity_seed_puts_results_under_calls_and_the_new_message_last() {
+    let fake = Fake::new(json!([
+        [{"tool": "read_file", "input": {"path": "example.txt"}}, complete("Read the example.")],
+        [complete("Answered the new question.")]
+    ]));
+    let mut task = fake.task(tools(&["read_file"]));
+    // Without a profile root each run starts a new session.
+    task.agent_config.antigravity.as_mut().unwrap().profile_root = None;
+    let long = format!(
+        "Example first line.\n{}\nExample last line.\n",
+        "x".repeat(6000)
+    );
+    std::fs::write(task.current_working_directory.join("example.txt"), long).unwrap();
+    follow_up(&fake, task, "Is the example still there?").await;
+    let prompts = fake.logged("prompt");
+    assert_eq!(prompts.len(), 2, "{}", fake.log());
+    let seed = prompts[1]["text"].as_str().unwrap();
+    let at = |text: &str| {
+        seed.find(text)
+            .unwrap_or_else(|| panic!("{text:?} isn't in the seed:\n{seed}"))
+    };
+    // The task, then the call with its result right under it.
+    assert!(at("Do the example task.") < at("Called `read_file`"));
+    let result = &seed[at("Called `read_file`")..at("Example last line.")];
+    assert!(result.contains("It returned:"), "{result}");
+    assert!(result.contains("Example first line."), "{result}");
+    assert!(!result.contains("\n## "), "{result}");
+    assert!(seed.contains("characters left out"), "{seed}");
+    assert!(!seed.contains("\n## user"), "{seed}");
+    assert!(!seed.contains("continue the unfinished work"), "{seed}");
+    assert!(
+        seed.ends_with("# The user's new message\n\nIs the example still there?"),
+        "{seed}"
+    );
+}
+
+#[tokio::test]
+async fn antigravity_reports_the_context_not_the_turn_sum() {
+    let step = |n: u32| json!({"thought": format!("Step {n}."), "usage": {"inputTokens": 100000, "outputTokens": 10}});
+    let fake = Fake::new(json!([[
+        step(1), step(2), step(3), step(4), step(5), {"text": "Done."}
+    ]]));
+    let (task, events) = Run::start(fake.task(chat())).finish().await;
+    // Billing counts every request of the turn.
+    assert_eq!(task.usage_history.len(), 1);
+    assert_eq!(task.usage_history[0].input_tokens, 500_000);
+    // The conversation is as large as agy said it is.
+    assert_eq!(task.current_conversation_context_size(), Some(100_010));
+    assert_eq!(task.current_context_size(), Some(100_010));
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ModelCallUsageReported(call) => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(call.input_tokens, 500_000);
+    let call = serde_json::to_value(call).unwrap();
+    assert_eq!(call["context_tokens"], 100_010, "{call}");
+    let latest = serde_json::to_value(&task.latest_request).unwrap();
+    assert_eq!(latest["input_tokens"], 100_010, "{latest}");
+}
+
+/// A handover's fresh conversation starts a new session in a new profile,
+/// and the old session goes.
+#[tokio::test]
+async fn antigravity_hands_over_into_a_new_profile() {
+    let fake = Fake::new(json!([
+        [
+            {"update": {"sessionUpdate": "usage_update", "used": 100, "size": 10000}},
+            {"update": {"sessionUpdate": "usage_update", "used": 2000, "size": 10000}},
+            {"text": "Ready for the handover."}
+        ],
+        [{"text": "Report on the example."}],
+        [complete("Done after handover")]
+    ]));
+    let mut task = fake.task(tools(&[]));
+    task.agent_config.handover = Some(HandoverConfig::at_context_fraction(0.1));
+    let (task, _) = Run::start(task).finish().await;
+    assert_eq!(task.handovers.len(), 1, "{}", fake.log());
+    let prompts = fake.logged("prompt");
+    let (old, new) = (
+        prompts[0]["sessionId"].as_str().unwrap(),
+        prompts.last().unwrap()["sessionId"].as_str().unwrap(),
+    );
+    assert_ne!(old, new);
+    let conversations = fake
+        .dir
+        .join("profiles")
+        .join(task.id.to_string())
+        .join("antigravity-cli/conversations");
+    assert!(conversations.join(format!("{new}.json")).is_file());
+    assert!(!conversations.join(format!("{old}.json")).exists());
+    // The fresh conversation starts from the report, not the old record.
+    let fresh = prompts.last().unwrap()["text"].as_str().unwrap();
+    assert!(!fresh.contains("# The conversation so far"), "{fresh}");
+}
+
+#[tokio::test]
+async fn antigravity_starts_a_new_session_when_the_prompt_changed() {
+    let fake = Fake::new(json!([
+        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
+    ]));
+    let (task, _) = Run::start(fake.task(chat())).finish().await;
+    let mut task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
+    let mut config = task.agent_config.clone();
+    config.instructions = "Read the example twice.".into();
+    task.reconfigure(config).unwrap();
+    task.prepare_for_resumption_from_completed("One more example, please.".into())
+        .unwrap();
+    let (_, _) = Run::start(task).finish().await;
+    assert!(fake.logged("session_resume").is_empty(), "{}", fake.log());
+    assert_eq!(fake.logged("session_new").len(), 2);
+    let seed = fake.logged("prompt")[1]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(seed.contains("# The conversation so far"), "{seed}");
+    assert!(seed.contains("An example answer."), "{seed}");
+}
+
+#[tokio::test]
+async fn antigravity_starts_a_new_session_when_the_profile_is_gone() {
+    let fake = Fake::new(json!([
+        [{"text": "An example answer."}], [{"text": "The follow-up answer."}]
+    ]));
+    let (task, _) = Run::start(fake.task(chat())).finish().await;
+    let mut task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
+    std::fs::remove_dir_all(fake.dir.join("profiles").join(task.id.to_string())).unwrap();
+    task.prepare_for_resumption_from_completed("One more example, please.".into())
+        .unwrap();
+    let (task, _) = Run::start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "The follow-up answer."),
+        "{}",
+        fake.log()
+    );
+    assert_eq!(fake.logged("session_new").len(), 2);
+    let seed = fake.logged("prompt")[1]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(seed.contains("An example answer."), "{seed}");
+}
+
+/// Two conversations at once each keep their own profile and session.
+#[tokio::test]
+async fn antigravity_conversations_at_once_resume_their_own_sessions() {
+    let fake = Fake::new(json!([
+        {"match": "First example", "steps": [{"sleep": 0.2}, {"text": "First answer."}]},
+        {"match": "Second example", "steps": [{"sleep": 0.2}, {"text": "Second answer."}]},
+        {"match": "More of the first", "steps": [{"text": "First again."}]},
+        {"match": "More of the second", "steps": [{"text": "Second again."}]}
+    ]));
+    let task = |prompt: &str| {
+        let mut task = fake.task(chat());
+        task.initial_task_prompt = prompt.into();
+        task
+    };
+    let (first, second) = tokio::join!(
+        follow_up(&fake, task("First example."), "More of the first."),
+        follow_up(&fake, task("Second example."), "More of the second.")
+    );
+    assert!(
+        matches!(&first.current_state, TaskState::Completed { summary } if summary == "First again.")
+    );
+    assert!(
+        matches!(&second.current_state, TaskState::Completed { summary } if summary == "Second again.")
+    );
+    let prompts = fake.logged("prompt");
+    let session = |text: &str| {
+        prompts
+            .iter()
+            .find(|prompt| prompt["text"].as_str().unwrap().contains(text))
+            .unwrap_or_else(|| panic!("no prompt with {text:?}: {prompts:#?}"))["sessionId"]
+            .clone()
+    };
+    assert_eq!(session("First example."), session("More of the first."));
+    assert_eq!(session("Second example."), session("More of the second."));
+    assert_ne!(session("First example."), session("Second example."));
+    assert_eq!(fake.logged("session_resume").len(), 2);
 }
 
 #[tokio::test]
@@ -912,13 +1268,12 @@ async fn a_chat_report_on_antigravity_sees_the_conversation() {
             .unwrap()
             .contains("Reply with that summary")
     );
-    assert!(
-        report_prompt["text"]
-            .as_str()
-            .unwrap()
-            .contains("blue example"),
+    // The session that holds the conversation writes the report.
+    assert_eq!(
+        report_prompt["sessionId"], prompts[0]["sessionId"],
         "the report request went to a new session without the conversation: {prompts:#?}"
     );
+    assert_eq!(fake.logged("session_resume").len(), 1);
 }
 
 /// Antigravity can't start a session (signed out), as against a Claude Code
@@ -1042,5 +1397,178 @@ async fn a_call_running_at_a_cancel_gets_an_outcome() {
     assert!(
         settled,
         "the call has no outcome after the cancel: {events:#?}"
+    );
+}
+
+/// A shell that runs nothing, for the live eval.
+#[derive(Debug)]
+struct NoShell;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for NoShell {
+    fn definition(&self) -> crate::tool::ToolDefinition {
+        crate::tool::ToolDefinition {
+            name: "shell".into(),
+            description: "Runs a shell command in the workspace and returns its output.".into(),
+            output_based_example: None,
+            parameters: vec![crate::tool::ToolParameterDefinition {
+                name: "command".into(),
+                description: "The command.".into(),
+                param_type: crate::tool::ToolParameterType::String,
+                required: true,
+                is_path: false,
+                flag: None,
+                default_value: None,
+                enum_values: None,
+            }],
+            parallel_safe: false,
+            tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
+            read_only: false,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: &crate::tool::TaskContext<'_>,
+        _: std::collections::HashMap<String, Value>,
+    ) -> Result<String, crate::tool::ToolError> {
+        Ok("exit code 0".into())
+    }
+}
+
+/// A conversation of about 250 KB like the one that went wrong: the task, a
+/// box status check that said no box is up, long checks, replies, and a
+/// request about the box that got no answer.
+fn long_record(task: &mut Task) {
+    use arko_ai::{Content, Message, ToolCall, ToolResult};
+    let messages = &mut task.conversation.messages;
+    let call = |messages: &mut Vec<Message>, n: usize, command: &str, output: &str| {
+        let call: ToolCall = serde_json::from_value(json!({
+            "id": format!("call-{n}"), "name": "shell", "arguments": {"command": command}
+        }))
+        .unwrap();
+        let mut asked = Message::new_assistant("");
+        asked.tool_calls.push(call.clone());
+        messages.push(asked);
+        messages.push(Message::new_user_with_contents(vec![Content::ToolResult(
+            ToolResult::from_tool_call(&call, output),
+        )]));
+    };
+    messages.push(Message::new_user(
+        "Feature stamping is committed on feature/stamp at 1a2b3c4d in ~/work/example. Check whether it is merged into release-0.9 and installed as the example command.",
+    ));
+    let filler = |label: &str| {
+        (0..90)
+            .map(|line| format!("{label} {line:03}: commit 1a2b3c4d example log line with some detail about the build\n"))
+            .collect::<String>()
+    };
+    let mut n = 0;
+    for label in ["git log", "git branch", "ls -la", "strings example"] {
+        n += 1;
+        call(messages, n, label, &filler(label));
+    }
+    messages.push(Message::new_assistant(
+        "No to both. feature/stamp is not merged into release-0.9, and the installed example command is older.",
+    ));
+    messages.push(Message::new_user("Please do both"));
+    n += 1;
+    call(
+        messages,
+        n,
+        "boxctl status",
+        "no box is up\nwatch: inactive\n",
+    );
+    for label in [
+        "git merge --ff-only 1a2b3c4d",
+        "cargo build --release",
+        "install -m 755",
+        "example --version",
+        "df -h /",
+        "git reflog",
+    ] {
+        for _ in 0..4 {
+            n += 1;
+            call(messages, n, label, &filler(label));
+        }
+    }
+    messages.push(Message::new_assistant(
+        "Done. release-0.9 is fast-forwarded to 1a2b3c4d, and the example command is built and installed.",
+    ));
+    messages.push(Message::new_user("Alright bring down the build box please"));
+    for label in ["strings example", "git reflog", "example --version"] {
+        for _ in 0..4 {
+            n += 1;
+            call(messages, n, label, &filler(label));
+        }
+    }
+    messages.push(Message::new_assistant("Both are done and verified."));
+    task.claude_code_synced = messages.len();
+    task.set_state(TaskState::Completed {
+        summary: "Both are done and verified.".into(),
+    });
+}
+
+/// Live, on the installed `agy` signed in: Flash at low thought level gets
+/// the record above in a new session and the question that went unanswered.
+/// Run it with `cargo test -p arko_agents --lib live_antigravity -- --ignored`.
+#[tokio::test]
+#[ignore = "runs the installed Antigravity CLI on the user's plan"]
+async fn live_antigravity_answers_the_new_message_after_a_long_record() {
+    let fake = Fake::new(json!([]));
+    let mut task = fake.task(AgentToolConfig {
+        text_reply_ends_task: true,
+        ..tools(&["shell"])
+    });
+    task.agent_config.llm_config.model = Model::antigravity(Model::google_gemini_3_8_flash());
+    let settings = task.agent_config.antigravity.as_mut().unwrap();
+    settings.cli_path = None;
+    settings.env.clear();
+    settings.thought_level = Some("low".into());
+    long_record(&mut task);
+    let record: usize = task
+        .conversation
+        .messages
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap().len())
+        .sum();
+    assert!(record > 200_000, "{record}");
+    task.prepare_for_resumption_from_completed("Is the build box down?".into())
+        .unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NoShell));
+    let runtime = AgentRuntime::new(Arc::new(LLMClient::new()));
+    let (events, commands, handle) =
+        runtime.run_task(task, Arc::new(registry), None, false, None, None, None);
+    let run = Run {
+        events,
+        commands,
+        handle,
+    };
+    let (task, events) = tokio::time::timeout(Duration::from_secs(600), run.finish())
+        .await
+        .expect("the live turn took over ten minutes");
+    let commands: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallFormatted { parameters, .. } => Some(
+                parameters["command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            _ => None,
+        })
+        .collect();
+    let TaskState::Completed { summary } = &task.current_state else {
+        panic!("{:?}", task.current_state)
+    };
+    eprintln!("reply: {summary}\ncommands: {commands:?}");
+    assert!(summary.to_lowercase().contains("box"), "{summary}");
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.contains("git") || command.contains("cargo")),
+        "it redid the old work: {commands:?}"
     );
 }

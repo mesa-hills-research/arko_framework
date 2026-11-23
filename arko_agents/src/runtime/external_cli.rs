@@ -1211,7 +1211,7 @@ impl ExternalCliRun {
         let first_context_size = task
             .usage_history
             .get(task.conversation_usage_start)
-            .map(|usage| usage.input_tokens);
+            .map(ai::UsageInfo::context_size);
         Self {
             task,
             registry,
@@ -1447,8 +1447,13 @@ impl ExternalCliRun {
         self.report(false).await;
         let _ = self.emit(AgentEvent::TaskStreamEnd).await;
         result?;
+        let cli = if self.task.agent_config.runs_in_antigravity() {
+            "Antigravity"
+        } else {
+            "Claude Code"
+        };
         log::info!(
-            "Claude Code agent run finished for task {}: {:?}",
+            "{cli} agent run finished for task {}: {:?}",
             self.task.id,
             self.task.current_state
         );
@@ -2593,6 +2598,7 @@ impl ExternalCliRun {
         text: &str,
         images: Vec<ContextImage>,
     ) -> Result<(), CliError> {
+        let synced = self.task.claude_code_synced;
         self.add_user_message(text).ok();
         self.task.claude_code_synced = self.task.conversation.messages.len();
         let Some(message) = self.task.conversation.messages.last_mut() else {
@@ -2612,6 +2618,10 @@ impl ExternalCliRun {
                 .extend(crate::task::context_image_content(images));
             input_blocks(message.content.iter())
         };
+        if self.task.agent_config.runs_in_antigravity() {
+            self.mark_antigravity_turn(synced);
+            self.report(true).await;
+        }
         // Sent between turns, as input that starts the next request.
         self.hand_offs.input(Stamp::now());
         let uuid = session.send_content(sent).await?;
@@ -2691,10 +2701,11 @@ impl ExternalCliRun {
         let resuming_a_cut =
             self.task.claude_code_resume_at.is_some() || self.task.claude_code_fork_of.is_some();
         let agy = self.task.agent_config.runs_in_antigravity();
-        let seed_transcript = agy && self.task.conversation.messages.len() > 1;
-        if agy {
-            self.task.claude_code_synced = 0;
-        }
+        // A resumed Antigravity session has the conversation, as Claude
+        // Code's does. A new one starts from a record of what the last one
+        // had, with the new input after it.
+        let seed_from = matches!(&session, CliSession::Antigravity(run) if !run.resumed())
+            .then_some(synced_before);
         let input = if self.compaction == Some(Compaction::Due) {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
@@ -2727,10 +2738,16 @@ impl ExternalCliRun {
         } else {
             self.unsent_input()?
         };
-        let input = if seed_transcript {
-            self.antigravity_seed().unwrap_or(input)
-        } else {
-            input
+        let input = match seed_from.and_then(|synced| self.antigravity_seed(synced)) {
+            Some(seed) => {
+                log::info!(
+                    "Task {}: A new Antigravity session starts from a record of the conversation's {} messages.",
+                    self.task.id,
+                    self.task.conversation.messages.len()
+                );
+                seed
+            }
+            None => input,
         };
         if resuming_a_cut {
             self.synced_on_send = Some(self.task.claude_code_synced);
@@ -2740,7 +2757,11 @@ impl ExternalCliRun {
         self.error_kind = None;
         // A session that ended before its turn did. It is reported now.
         self.report_tool_errors().await?;
-        // The session (and what it was sent) is saved before it runs.
+        // Save the input before sending it. Antigravity's next snapshot can
+        // trust the CLI's copy only once the turn finishes.
+        if agy {
+            self.mark_antigravity_turn(synced_before);
+        }
         self.report(true).await;
         // The session is between turns, so this input starts the next
         // request, and the moment is read before it is sent.
@@ -2876,12 +2897,27 @@ impl ExternalCliRun {
         // item they carried waits where it is for the next input.
         self.delivery.settle();
         let name = session.name();
+        let kept_profile = match &session {
+            CliSession::Antigravity(run) => run.kept_profile(),
+            CliSession::Claude(_) => None,
+        };
         match session.close().await {
             // Claude Code saved the session as it closed, so its transcript
             // holds every call's outcome.
             Ok(_) if !cli_exited && !agy => self.task.running_tool_calls.clear(),
             Ok(_) => {}
             Err(error) => log::warn!("Task {}: Could not close {name}. {error}", self.task.id),
+        }
+        // A session the task no longer keeps (handed over, or failed) goes
+        // with the CLI's copy of its conversation.
+        if let Some(dir) = kept_profile
+            && self.task.antigravity_session.is_none()
+            && let Err(error) = antigravity::remove_profile(dir).await
+        {
+            log::warn!(
+                "Task {}: Could not remove the Antigravity profile. {error}",
+                self.task.id
+            );
         }
         if agy && let Some(reply) = self.usage_reply.as_mut() {
             match reply.try_recv() {
@@ -6010,7 +6046,12 @@ impl ExternalCliRun {
         &mut self,
         session: &CliSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        let synced = self.task.claude_code_synced;
         let input = self.unsent_input()?;
+        if self.task.agent_config.runs_in_antigravity() {
+            self.mark_antigravity_turn(synced);
+            self.report(true).await;
+        }
         // After a turn ended, so it starts the next request.
         self.hand_offs.input(Stamp::now());
         if self.task.agent_config.runs_in_antigravity() {
@@ -6362,6 +6403,8 @@ impl ExternalCliRun {
         self.task.claude_code_entries.clear();
         self.task.claude_code_resume_at = None;
         self.task.claude_code_fork_of = None;
+        // And a new Antigravity session, in a new profile.
+        self.task.antigravity_session = None;
         for name in self.runnable_tools.list_tool_names() {
             if let Some(tool) = self.runnable_tools.get(&name) {
                 tool.reset_context(self.task.id);

@@ -160,10 +160,18 @@ pub enum AcpError {
 }
 
 impl AcpError {
-    /// Whether `session/new` refused to start without a sign-in.
+    /// Whether the CLI refused to open a session without a sign-in.
     pub fn requires_sign_in(&self) -> bool {
         matches!(self, Self::Rpc { method, error }
-            if method == "session/new" && error.code == -32000 && error.message == "Authentication required")
+            if matches!(method.as_str(), "session/new" | "session/resume")
+                && error.code == -32000 && error.message == "Authentication required")
+    }
+
+    /// Whether the CLI could not read this saved session from the profile.
+    pub fn cannot_read_session(&self, id: &str) -> bool {
+        matches!(self, Self::Rpc { method, error }
+            if method == "session/resume" && error.code == -32603
+                && error.message == format!("Failed to read session {id}; retry, or load it with session/load"))
     }
 }
 
@@ -764,6 +772,38 @@ impl AcpClient {
                 SESSION_TIMEOUT,
             )
             .await?;
+        NewSession::parse(reply)
+    }
+
+    /// Opens the session `session_id` that an earlier process of the same
+    /// profile made (`session/resume`), with what it held. agy sends no
+    /// updates of the old turns. The session is back on the account's
+    /// default model and thought level, so set them again. It keeps the
+    /// agent and system prompt it was made with, and reads the profile's MCP
+    /// tools again. agy refuses a session its profile doesn't hold.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+    ) -> Result<NewSession, AcpError> {
+        let cwd = cwd.to_str().ok_or_else(|| {
+            AcpError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The session's folder needs a UTF-8 path.",
+            ))
+        })?;
+        let mut reply = self
+            .request(
+                "session/resume",
+                json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+                SESSION_TIMEOUT,
+            )
+            .await?;
+        if let Some(fields) = reply.as_object_mut() {
+            fields
+                .entry("sessionId")
+                .or_insert_with(|| Value::String(session_id.to_string()));
+        }
         NewSession::parse(reply)
     }
 

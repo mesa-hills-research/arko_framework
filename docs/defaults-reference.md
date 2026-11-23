@@ -61,10 +61,11 @@ These defaults change what an agent sees of its tool results, in arko's own runt
   [Skills](arko_agents-guide.md#skills).
 
 Antigravity models use an installed and signed-in `agy` CLI, version 1.5.14 or later.
-They use the Google plan, with list prices retained for estimates. Each run starts its own
-private profile, and the profile keeps Arko’s system prompt and tool list for the session.
-A resumed task starts a fresh session from Arko’s conversation record. Prompt cache refresh
-is unsupported. See [`AntigravitySettings`](../arko_agents/src/antigravity.rs).
+They use the Google plan, with list prices retained for estimates. A private profile
+holds the system prompt, tools and Antigravity's copy of the conversation. With a
+profile root, the next run resumes that session. Without one, or when the session
+can't be resumed, the next run starts from Arko's conversation record. Prompt cache
+refresh is unsupported. See [`AntigravitySettings`](../arko_agents/src/antigravity.rs).
 
 A client signs in to one ChatGPT account unless `LLMClient::with_chatgpt_accounts`
 installs an ordered list. The list fails over only when the backend refuses an account (a usage limit, or

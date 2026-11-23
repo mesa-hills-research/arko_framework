@@ -128,8 +128,10 @@ impl Task {
     /// ([`claude_code_resume_at`](Self::claude_code_resume_at)). A cut that
     /// would leave the model's work without its entry (a task recorded
     /// before entries were, or a compaction in between) is refused with
-    /// `InvalidTaskState`, as is an index that isn't a user turn. The host
-    /// cuts back a task its runtime isn't running.
+    /// `InvalidTaskState`, as is an index that isn't a user turn. An
+    /// Antigravity task's next run starts a new session from the record
+    /// ([`antigravity_session`](Self::antigravity_session)). The host cuts
+    /// back a task its runtime isn't running.
     pub fn cut_back(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
         if index == 0 && self.conversation.messages.is_empty() {
             return self.cut_at(0);
@@ -247,6 +249,9 @@ impl Task {
     fn cut_at(&mut self, index: usize) -> Result<(), ArkoAgentsError> {
         // First, as it can refuse, and nothing changes then.
         self.cut_claude_code_session(index)?;
+        // An Antigravity session can't be cut, and a branch has a profile of
+        // its own, so either starts a new session from the record.
+        self.antigravity_session = None;
         let messages = &mut self.conversation.messages;
         messages.truncate(index);
         self.conversation.openai_turn_state = None;
@@ -644,6 +649,25 @@ mod tests {
         assert!(branch.running_tool_calls.is_empty());
         // The original is as it was.
         assert_eq!(task.conversation.messages.len(), 2);
+    }
+
+    /// An Antigravity session can't be cut or shared, so a cut back and a
+    /// branch both start a new one, and the original keeps its own.
+    #[test]
+    fn a_cut_back_and_a_branch_drop_the_antigravity_session() {
+        let saved = crate::AntigravitySession {
+            id: "agy-1".into(),
+            prompt: "digest".into(),
+            pending_from: None,
+        };
+        let mut task = task();
+        conversation(&mut task);
+        task.antigravity_session = Some(saved.clone());
+        let branch = task.branch(2).unwrap();
+        assert_eq!(branch.antigravity_session, None);
+        assert_eq!(task.antigravity_session, Some(saved));
+        task.cut_back(2).unwrap();
+        assert_eq!(task.antigravity_session, None);
     }
 
     /// A branch is a new task with the conversation up to the message, no

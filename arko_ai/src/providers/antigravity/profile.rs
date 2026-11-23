@@ -103,7 +103,12 @@ impl Profile {
     pub fn write(dir: impl Into<PathBuf>, spec: &ProfileSpec<'_>) -> io::Result<Self> {
         let dir = dir.into();
         if let Some(parent) = dir.parent() {
-            fs::create_dir_all(parent)?;
+            // Folders made here are the user's alone too.
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(parent)?;
         }
         private_dir(&dir)?;
         let profile = Self { dir };
@@ -114,11 +119,34 @@ impl Profile {
         Ok(profile)
     }
 
+    /// Writes the profile's files again in the profile `dir` that
+    /// [`write`](Self::write) made, keeping what agy keeps there (its
+    /// sessions), so a session of an earlier process can be resumed with the
+    /// current tools. The folder is made the user's alone again. On an error
+    /// the profile may be left part old and part new.
+    pub fn update(dir: impl Into<PathBuf>, spec: &ProfileSpec<'_>) -> io::Result<Self> {
+        let profile = Self { dir: dir.into() };
+        let metadata = fs::symlink_metadata(&profile.dir)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} isn't a folder.", profile.dir.display()),
+            ));
+        }
+        #[cfg(unix)]
+        fs::set_permissions(
+            &profile.dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        profile.fill(spec)?;
+        Ok(profile)
+    }
+
     fn fill(&self, spec: &ProfileSpec<'_>) -> io::Result<()> {
         let config = self.dir.join("config");
         let agents = config.join("agents");
-        private_dir(&config)?;
-        private_dir(&agents)?;
+        ensure_private_dir(&config)?;
+        ensure_private_dir(&agents)?;
         write_private(
             &agents.join(format!("{AGENT_NAME}.md")),
             agent_file(spec.system_prompt).as_bytes(),
@@ -326,6 +354,33 @@ fn private_dir(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
+/// Makes the directory `path` for the user alone, or makes the folder that
+/// is there the user's alone.
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    match private_dir(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(path)?.is_dir() {
+                return Err(error);
+            }
+            #[cfg(unix)]
+            fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// A digest of `system_prompt`, which a saved session records. A resumed
+/// session keeps the prompt it was made with, so a session whose prompt
+/// changed since is started again instead.
+pub fn prompt_digest(system_prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(system_prompt.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Writes `contents` to a new file beside `path` that only the user can
 /// read, then renames it to `path`, so a reader finds the old file or the
 /// whole new one.
@@ -438,6 +493,61 @@ mod tests {
         .map(PathBuf::from)
         .collect();
         assert_eq!(names, expected);
+    }
+
+    /// A profile written again keeps the sessions agy keeps in it and takes
+    /// the current tools, and the folder is the user's alone again.
+    #[cfg(unix)]
+    #[test]
+    fn an_updated_profile_keeps_agys_files_and_takes_the_new_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("profiles").join("task");
+        write(&dir).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root.path().join("profiles")), 0o700);
+        let session = dir.join("antigravity-cli/conversations/one.db");
+        fs::create_dir_all(session.parent().unwrap()).unwrap();
+        fs::write(&session, "agy's session").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = vec!["shell".to_string(), "write_file".to_string()];
+        let profile = Profile::update(
+            &dir,
+            &ProfileSpec {
+                system_prompt: "You are Arko.",
+                tools: &tools,
+                helper: &helper(),
+            },
+        )
+        .unwrap();
+        assert_eq!(profile.dir(), dir.as_path());
+        assert_eq!(fs::read_to_string(&session).unwrap(), "agy's session");
+        assert_eq!(
+            json_file(&dir.join("config/mcp_config.json"))["mcpServers"]["arko"]["tools"],
+            json!({"shell": {"eager": true}, "write_file": {"eager": true}})
+        );
+        assert_eq!(mode(&dir), 0o700);
+        // A profile that isn't there can't be updated.
+        assert!(
+            Profile::update(
+                root.path().join("none"),
+                &ProfileSpec {
+                    system_prompt: "You are Arko.",
+                    tools: &tools,
+                    helper: &helper(),
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_prompt_digest_is_the_prompts_sha_256() {
+        assert_eq!(
+            prompt_digest("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(prompt_digest("abc"), prompt_digest("abd"));
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {

@@ -42,7 +42,7 @@ pub use agent_config::{
     PlanUsageAction, PlanUsageThreshold, ReminderInjectionFrequency, ToolCallingMode,
     ToolErrorPolicy, ToolResultLimits, UsageLimitPolicy, UserReminder,
 };
-pub use antigravity::AntigravitySettings;
+pub use antigravity::{AntigravitySession, AntigravitySettings};
 pub use claude_code::{ClaudeCodeSettings, ClaudeCodeTools};
 pub use error::ArkoAgentsError;
 pub use handover::{

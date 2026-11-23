@@ -567,6 +567,12 @@ pub struct Task {
     /// a task made by [`Task::branch`]. The original is left unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_fork_of: Option<String>,
+    /// The Antigravity session holding the conversation of a task whose
+    /// model runs in Antigravity with a profile root, resumed when the task
+    /// runs again. A handover, a cut back, a branch and a failed turn drop
+    /// it, and the next run starts a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_session: Option<crate::AntigravitySession>,
     /// The task runs with a configuration its host gave it after it started
     /// ([`Task::reconfigure`]), or at its start in place of its agent's
     /// registered one (an arko_workflows `RunOptions::config`). A workflow
@@ -863,6 +869,7 @@ impl Task {
             claude_code_entries: BTreeMap::new(),
             claude_code_resume_at: None,
             claude_code_fork_of: None,
+            antigravity_session: None,
             reconfigured: false,
             reply_optional: false,
             running_tool_calls: Vec::new(),
@@ -891,7 +898,9 @@ impl Task {
                     .find(|call| call.subagent == usage.subagent)
             });
         if let Some(previous) = previous {
-            let delta = usage.input_tokens as isize - previous.input_tokens as isize;
+            // How the conversation's size changed, which is the input's change
+            // where each call is one request.
+            let delta = usage.context_size() as isize - previous.context_size() as isize;
             usage = usage.with_input_delta(delta);
         }
         self.model_call_usage_history.push(usage.clone());
@@ -1345,10 +1354,14 @@ impl Task {
         self.total_usage().output_tokens
     }
 
-    /// Returns the total input tokens of the most recent LLM call, including
-    /// cached input, if available.
+    /// The context size after the most recent model call
+    /// ([`UsageInfo::context_size`](arko_ai::UsageInfo::context_size)), its
+    /// whole input with cached input unless the call reported a context of
+    /// its own, if available.
     pub fn current_context_size(&self) -> Option<usize> {
-        self.usage_history.last().map(|u| u.input_tokens)
+        self.usage_history
+            .last()
+            .map(arko_ai::UsageInfo::context_size)
     }
 
     /// The context size of the current conversation's latest model call.
@@ -1356,7 +1369,7 @@ impl Task {
     /// after a handover or cut back until the next model call.
     pub fn current_conversation_context_size(&self) -> Option<usize> {
         self.latest_conversation_usage()
-            .map(|usage| usage.input_tokens)
+            .map(arko_ai::UsageInfo::context_size)
     }
 
     /// The usage of the current conversation's latest model call, or `None`
@@ -1440,6 +1453,9 @@ impl Task {
             claude_code_entries: _,
             claude_code_resume_at: _,
             claude_code_fork_of: _,
+            // Antigravity's session, which its runtime drops after the
+            // handover.
+            antigravity_session: _,
             // A fresh conversation keeps these as they are.
             running_tool_calls: _,
             pending_native_tool_results: _,

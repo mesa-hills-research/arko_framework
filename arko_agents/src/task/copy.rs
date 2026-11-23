@@ -67,6 +67,7 @@ impl Task {
             claude_code_entries,
             claude_code_resume_at,
             claude_code_fork_of,
+            antigravity_session,
             reconfigured,
             reply_optional,
             running_tool_calls,
@@ -130,6 +131,7 @@ impl Task {
         copy.claude_code_entries.clone_from(claude_code_entries);
         copy.claude_code_resume_at.clone_from(claude_code_resume_at);
         copy.claude_code_fork_of.clone_from(claude_code_fork_of);
+        copy.antigravity_session.clone_from(antigravity_session);
         copy.reconfigured = *reconfigured;
         copy.reply_optional = *reply_optional;
         same(&mut copy.running_tool_calls, running_tool_calls);

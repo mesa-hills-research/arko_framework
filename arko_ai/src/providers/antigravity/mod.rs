@@ -19,8 +19,8 @@ pub use acp::{
 };
 pub use locate::{check_sign_in, cli_version, find_agy, version_at_least};
 pub use profile::{
-    AGENT_NAME, HelperCommand, MCP_SERVER_NAME, Profile, ProfileSpec, qualified_tool_name,
-    run_gate, run_tripwire,
+    AGENT_NAME, HelperCommand, MCP_SERVER_NAME, Profile, ProfileSpec, prompt_digest,
+    qualified_tool_name, run_gate, run_tripwire,
 };
 pub use relay::{RELAY_TOKEN_ENV, RelayHost, run_relay, write_address_file};
 pub use usage::{parse_usage, plan_usage, plan_usage_report};

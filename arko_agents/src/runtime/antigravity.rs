@@ -3,7 +3,7 @@
 use super::*;
 use arko_ai::antigravity as agy;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,6 +17,8 @@ pub(super) enum CliError {
     Setup(String),
     #[error("{0}")]
     BrokenSetup(String),
+    #[error("The Antigravity profile is missing.")]
+    MissingProfile,
 }
 
 pub(super) const UNTRUSTED_AGENT: &str = "Antigravity didn't load Arko's agent.";
@@ -123,12 +125,20 @@ fn antigravity_blocks(blocks: &[Value]) -> Vec<Value> {
     prompt
 }
 
-/// The lifetime of one private profile. Clean up only after dropping the CLI.
-struct ProfileCleanup(agy::Profile);
+/// A private profile. One a task keeps holds the CLI's copy of the
+/// conversation and outlives the run. Any other is removed when the run ends,
+/// after the CLI is dropped.
+struct ProfileCleanup {
+    profile: agy::Profile,
+    kept: bool,
+}
 
 impl Drop for ProfileCleanup {
     fn drop(&mut self) {
-        let dir = self.0.dir().to_path_buf();
+        if self.kept {
+            return;
+        }
+        let dir = self.profile.dir().to_path_buf();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn_blocking(move || {
                 if let Err(error) = std::fs::remove_dir_all(&dir) {
@@ -140,6 +150,28 @@ impl Drop for ProfileCleanup {
             });
         }
     }
+}
+
+/// What every launch of a run's CLI shares.
+struct Launch {
+    cli: PathBuf,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    family: String,
+    thought_level: Option<String>,
+    system_prompt: String,
+    tools: Vec<String>,
+    helper: agy::HelperCommand,
+    relay: agy::RelayHost,
+}
+
+/// A started CLI with its session set to the task's model.
+struct Opened {
+    client: agy::AcpClient,
+    profile: ProfileCleanup,
+    id: String,
+    tier: Option<String>,
+    display_name: Option<String>,
 }
 
 /// The CLI, profile and relay of a single run. The host's gate and tool
@@ -154,9 +186,15 @@ pub(super) struct AntigravityRun {
     env: Vec<(String, String)>,
     tier: Option<String>,
     display_name: Option<String>,
+    resumed: bool,
 }
 
 impl AntigravityRun {
+    /// Starts the CLI. With a profile root, a task keeps its profile in
+    /// `ROOT/<task id>` and its session ([`Task::antigravity_session`]), and
+    /// the run resumes the session the task saved when the system prompt is
+    /// the same. Otherwise, or when agy can't resume it, the profile is
+    /// written afresh and a new session starts.
     pub(super) async fn start(
         run: &mut ExternalCliRun,
         requests: mpsc::UnboundedSender<HostRequest>,
@@ -174,105 +212,130 @@ impl AntigravityRun {
             .system_message
             .clone()
             .unwrap_or_default();
-        let env: Vec<_> = settings.env.into_iter().collect();
-        let program = settings.cli_path;
         let helper = settings.helper_command.ok_or_else(|| {
             CliError::Setup(
                 "Set AntigravitySettings.helper_command to run an Antigravity agent.".into(),
             )
         })?;
-        let profile_root = settings.profile_root.unwrap_or_else(std::env::temp_dir);
-        let (server, tools) = run.antigravity_tool_server(requests);
-        let relay = agy::RelayHost::bind(Arc::new(server))
-            .await
-            .map_err(io_error)?;
-        let address = relay.address();
-        let (profile, cli) = tokio::task::spawn_blocking(move || {
+        let program = settings.cli_path;
+        let cli = tokio::task::spawn_blocking(move || {
             let cli = program.or_else(agy::find_agy).ok_or_else(|| {
                 CliError::Setup(
                     "Install the Antigravity CLI and sign in by running `agy` once.".into(),
                 )
             })?;
-            let cli = std::fs::canonicalize(cli).map_err(io_error)?;
-            let dir = std::path::absolute(profile_root)
-                .map_err(io_error)?
-                .join(format!("arko-agy-{}", Uuid::new_v4()));
-            let profile = ProfileCleanup(
-                agy::Profile::write(
-                    &dir,
-                    &agy::ProfileSpec {
-                        system_prompt: &system_prompt,
-                        tools: &tools,
-                        helper: &helper,
-                    },
-                )
-                .map_err(io_error)?,
-            );
-            agy::write_address_file(profile.0.relay_file(), address).map_err(io_error)?;
-            Ok::<_, CliError>((profile, cli))
+            std::fs::canonicalize(cli).map_err(io_error)
         })
         .await
         .map_err(|error| CliError::Setup(error.to_string()))??;
-        let mut options =
-            agy::AcpOptions::new(cli.clone(), profile.0.dir().to_path_buf(), cwd.clone());
-        options.agent = Some(agy::AGENT_NAME.into());
-        options.client_info = agy::ClientInfo {
-            name: "arko_agents".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-        };
-        options.log_file = Some(profile.0.log_file());
-        options.env.clone_from(&env);
-        let (key, token) = relay.env();
-        options.env.push((key.into(), token.into()));
-        let client = agy::AcpClient::start(options, Arc::new(agy::ArkoToolsOnly)).await?;
-        let version = client.version().unwrap_or("unknown");
-        if !agy::version_at_least(version, agy::MINIMUM_VERSION) {
-            return Err(CliError::Setup(format!(
-                "Antigravity {version} is not supported. Install {} or later.",
-                agy::MINIMUM_VERSION
-            )));
-        }
-        let session = client.new_session(&cwd).await?;
-        check_profile(&profile.0).await?;
-        let display_name = session
-            .config_options
-            .iter()
-            .find(|o| o.id == "model")
-            .and_then(|o| {
-                o.options
-                    .iter()
-                    .find(|option| option.value == family)
-                    .map(|option| option.name.clone())
-            });
-        if display_name.is_none() {
-            return Err(CliError::Setup(format!(
-                "Antigravity does not offer '{family}' under this sign-in."
-            )));
-        }
-        let config = client
-            .set_config_option(&session.session_id, "model", family)
-            .await?;
-        let levels = agy::config_values(&config, "thought_level");
-        if let Some(level) = settings
-            .thought_level
-            .as_deref()
-            .and_then(|wanted| thought_level(wanted, &levels))
-        {
-            client
-                .set_config_option(&session.session_id, "thought_level", level)
-                .await?;
-        }
-        Ok(Self {
-            client,
-            _relay: relay,
-            profile,
-            id: session.session_id,
-            latest_prompt: AtomicU64::new(0),
+        let (server, tools) = run.antigravity_tool_server(requests);
+        let relay = agy::RelayHost::bind(Arc::new(server))
+            .await
+            .map_err(io_error)?;
+        let launch = Launch {
             cli,
-            env,
-            tier: session.tier,
-            display_name,
-        })
+            cwd,
+            env: settings.env.into_iter().collect(),
+            family: family.to_string(),
+            thought_level: settings.thought_level,
+            system_prompt,
+            tools,
+            helper,
+            relay,
+        };
+        let digest = agy::prompt_digest(&launch.system_prompt);
+        let task = run.task.id;
+        let kept = settings
+            .profile_root
+            .map(std::path::absolute)
+            .transpose()
+            .map_err(io_error)?
+            .map(|root| root.join(task.to_string()));
+        if run
+            .task
+            .antigravity_session
+            .as_ref()
+            .is_some_and(|saved| saved.pending_from.is_some())
+        {
+            run.discard_antigravity_session();
+        }
+        let saved = run.task.antigravity_session.take().filter(|saved| {
+            let same = saved.prompt == digest;
+            if !same {
+                log::info!(
+                    "Task {task}: The system prompt changed since the Antigravity session started, so a new one starts from the conversation's record."
+                );
+            }
+            same && kept.is_some()
+        });
+        if let (Some(dir), Some(saved)) = (&kept, saved) {
+            match launch.open(dir, Some(&saved.id), true).await {
+                Ok(opened) => {
+                    run.task.antigravity_session = Some(saved);
+                    return Ok(Self::new(launch, opened, true));
+                }
+                Err(error)
+                    if matches!(&error, CliError::MissingProfile)
+                        || matches!(&error, CliError::Antigravity(error) if error.cannot_read_session(&saved.id)) =>
+                {
+                    log::info!(
+                        "Task {task}: Antigravity couldn't read the saved session. Starting from the conversation record. {error}"
+                    );
+                }
+                Err(error) => {
+                    run.task.antigravity_session = Some(saved);
+                    return Err(error);
+                }
+            }
+        }
+        let opened = match &kept {
+            Some(dir) => {
+                remove_profile(dir.clone()).await?;
+                launch.open(dir, None, true).await?
+            }
+            None => {
+                let dir = std::path::absolute(std::env::temp_dir())
+                    .map_err(io_error)?
+                    .join(format!("arko-agy-{}", Uuid::new_v4()));
+                launch.open(&dir, None, false).await?
+            }
+        };
+        if kept.is_some() {
+            run.task.antigravity_session = Some(crate::AntigravitySession {
+                id: opened.id.clone(),
+                prompt: digest,
+                pending_from: None,
+            });
+        }
+        Ok(Self::new(launch, opened, false))
+    }
+
+    fn new(launch: Launch, opened: Opened, resumed: bool) -> Self {
+        Self {
+            client: opened.client,
+            _relay: launch.relay,
+            profile: opened.profile,
+            id: opened.id,
+            latest_prompt: AtomicU64::new(0),
+            cli: launch.cli,
+            env: launch.env,
+            tier: opened.tier,
+            display_name: opened.display_name,
+            resumed,
+        }
+    }
+
+    /// Whether the run resumed the session the task saved, which already
+    /// holds the conversation.
+    pub(super) fn resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// The profile the task keeps after the run, if it keeps one.
+    pub(super) fn kept_profile(&self) -> Option<PathBuf> {
+        self.profile
+            .kept
+            .then(|| self.profile.profile.dir().to_path_buf())
     }
 
     pub(super) fn plan_usage(&self) -> oneshot::Receiver<Result<Value, String>> {
@@ -295,17 +358,147 @@ impl AntigravityRun {
     }
 
     pub(super) async fn tripped(&self) -> bool {
-        profile_tripped(&self.profile.0).await
+        profile_tripped(&self.profile.profile).await
     }
 
     async fn prompt(&self, blocks: Vec<Value>) -> Result<String, CliError> {
         if self.latest_prompt.load(Ordering::Relaxed) == 0 {
-            check_profile(&self.profile.0).await?;
+            check_profile(&self.profile.profile).await?;
         }
         let request = self.client.prompt(&self.id, blocks).await?;
         self.latest_prompt.store(request, Ordering::Relaxed);
         Ok(Uuid::new_v4().to_string())
     }
+}
+
+impl Launch {
+    /// Starts the CLI on the profile `dir`. With `resume`, the profile there
+    /// is written again and its session `resume` resumed. Without, the profile
+    /// is written in `dir`, which must not exist, and a new session starts.
+    /// The session is then set to the task's model and thought level. A
+    /// `kept` profile stays when the run ends. On an error the CLI has exited.
+    async fn open(&self, dir: &Path, resume: Option<&str>, kept: bool) -> Result<Opened, CliError> {
+        let (dir, address, resuming) = (dir.to_path_buf(), self.relay.address(), resume.is_some());
+        let (system_prompt, tools, helper) = (
+            self.system_prompt.clone(),
+            self.tools.clone(),
+            self.helper.clone(),
+        );
+        let profile = tokio::task::spawn_blocking(move || {
+            let spec = agy::ProfileSpec {
+                system_prompt: &system_prompt,
+                tools: &tools,
+                helper: &helper,
+            };
+            let profile = if resuming {
+                agy::Profile::update(&dir, &spec).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        CliError::MissingProfile
+                    } else {
+                        io_error(error)
+                    }
+                })?
+            } else {
+                agy::Profile::write(&dir, &spec).map_err(io_error)?
+            };
+            agy::write_address_file(profile.relay_file(), address).map_err(io_error)?;
+            Ok::<_, CliError>(profile)
+        })
+        .await
+        .map_err(|error| CliError::Setup(error.to_string()))??;
+        let profile = ProfileCleanup { profile, kept };
+        let mut options = agy::AcpOptions::new(
+            self.cli.clone(),
+            profile.profile.dir().to_path_buf(),
+            self.cwd.clone(),
+        );
+        options.agent = Some(agy::AGENT_NAME.into());
+        options.client_info = agy::ClientInfo {
+            name: "arko_agents".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        options.log_file = Some(profile.profile.log_file());
+        options.env.clone_from(&self.env);
+        let (key, token) = self.relay.env();
+        options.env.push((key.into(), token.into()));
+        let client = agy::AcpClient::start(options, Arc::new(agy::ArkoToolsOnly)).await?;
+        match self.prepare(&client, &profile.profile, resume).await {
+            Ok((id, tier, display_name)) => Ok(Opened {
+                client,
+                profile,
+                id,
+                tier,
+                display_name,
+            }),
+            Err(error) => {
+                // So that it writes nothing more in the profile.
+                let _ = client.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Opens the session and sets its model and thought level. Returns its
+    /// ID, its plan and the model's name.
+    async fn prepare(
+        &self,
+        client: &agy::AcpClient,
+        profile: &agy::Profile,
+        resume: Option<&str>,
+    ) -> Result<(String, Option<String>, Option<String>), CliError> {
+        let version = client.version().unwrap_or("unknown");
+        if !agy::version_at_least(version, agy::MINIMUM_VERSION) {
+            return Err(CliError::Setup(format!(
+                "Antigravity {version} is not supported. Install {} or later.",
+                agy::MINIMUM_VERSION
+            )));
+        }
+        let session = match resume {
+            Some(id) => client.resume_session(id, &self.cwd).await?,
+            None => client.new_session(&self.cwd).await?,
+        };
+        check_profile(profile).await?;
+        let display_name = session
+            .config_options
+            .iter()
+            .find(|o| o.id == "model")
+            .and_then(|o| {
+                o.options
+                    .iter()
+                    .find(|option| option.value == self.family)
+                    .map(|option| option.name.clone())
+            });
+        if display_name.is_none() {
+            return Err(CliError::Setup(format!(
+                "Antigravity does not offer '{}' under this sign-in.",
+                self.family
+            )));
+        }
+        let config = client
+            .set_config_option(&session.session_id, "model", &self.family)
+            .await?;
+        let levels = agy::config_values(&config, "thought_level");
+        if let Some(level) = self
+            .thought_level
+            .as_deref()
+            .and_then(|wanted| thought_level(wanted, &levels))
+        {
+            client
+                .set_config_option(&session.session_id, "thought_level", level)
+                .await?;
+        }
+        Ok((session.session_id, session.tier, display_name))
+    }
+}
+
+/// Removes the profile `dir` and what agy kept in it, if it's there.
+pub(super) async fn remove_profile(dir: PathBuf) -> Result<(), CliError> {
+    tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(io_error(error)),
+        _ => Ok(()),
+    })
+    .await
+    .map_err(|error| CliError::Setup(error.to_string()))?
 }
 
 type UsageResult = Result<Vec<agy::UsageGroup>, String>;
@@ -519,6 +712,25 @@ impl AntigravityTurn {
 }
 
 impl ExternalCliRun {
+    /// A saved turn without a result may or may not be in the CLI's copy.
+    /// Keep the host's input and outcomes, and start the next run from them.
+    fn discard_antigravity_session(&mut self) {
+        if let Some(from) = self
+            .task
+            .antigravity_session
+            .take()
+            .and_then(|saved| saved.pending_from)
+        {
+            self.task.claude_code_synced = from;
+        }
+    }
+
+    pub(super) fn mark_antigravity_turn(&mut self, from: usize) {
+        if let Some(saved) = &mut self.task.antigravity_session {
+            saved.pending_from.get_or_insert(from);
+        }
+    }
+
     fn antigravity_tool_server(
         &mut self,
         requests: mpsc::UnboundedSender<HostRequest>,
@@ -545,41 +757,11 @@ impl ExternalCliRun {
         (server, names)
     }
 
-    pub(super) fn antigravity_seed(&self) -> Option<Value> {
-        let messages = &self.task.conversation.messages;
-        if messages.len() < 2 {
-            return None;
-        }
-        let mut content = vec![ai::Content::Text(
-            "Continue from this record of the conversation. Tool calls in the record already happened. Answer the latest request or continue the unfinished work.".into(),
-        )];
-        for message in messages {
-            content.push(ai::Content::Text(format!("\n## {}", message.role)));
-            for item in &message.content {
-                match item {
-                    ai::Content::ToolResult(result) => {
-                        content.push(ai::Content::Text(format!(
-                            "Tool {} returned:\n{}",
-                            result.name, result.output
-                        )));
-                        content.extend(
-                            result
-                                .images
-                                .iter()
-                                .map(|image| ai::Content::Image(image.image.clone())),
-                        );
-                    }
-                    other => content.push(other.clone()),
-                }
-            }
-            for call in &message.tool_calls {
-                content.push(ai::Content::Text(format!(
-                    "Called {} with {}",
-                    call.name, call.arguments
-                )));
-            }
-        }
-        Some(input_blocks(content.iter()))
+    /// The first prompt of a new session for a conversation that went on
+    /// before it, from the messages the last session had (`synced`). `None`
+    /// when nothing came before the new input, which then goes as it is.
+    pub(super) fn antigravity_seed(&self, synced: usize) -> Option<Value> {
+        seed(&self.task.conversation.messages, synced).map(|content| input_blocks(content.iter()))
     }
 
     pub(super) async fn start_antigravity_call(
@@ -703,6 +885,8 @@ impl ExternalCliRun {
         &mut self,
         message: String,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        // A profile agy didn't run as set up isn't resumed.
+        self.task.antigravity_session = None;
         self.emit(AgentEvent::ErrorEncountered {
             error_message: message.clone(),
             requires_approval_to_retry: false,
@@ -828,6 +1012,9 @@ impl ExternalCliRun {
                     return self.antigravity_failed(message).await.map(Some);
                 }
                 self.agy_retried = false;
+                if let Some(saved) = &mut self.task.antigravity_session {
+                    saved.pending_from = None;
+                }
                 let text = turn.text.clone();
                 self.commit_antigravity_text(turn).await?;
                 self.streamed_bytes = (0, 0);
@@ -898,6 +1085,8 @@ impl ExternalCliRun {
             self.add_user_message(
                 "The previous response failed. Continue the task from the conversation record.",
             )?;
+            // The failure may stay with the session, so a new one starts.
+            self.discard_antigravity_session();
             return Ok(SessionEnd::Restart);
         }
         self.session_failed(reason).await
@@ -910,11 +1099,14 @@ impl ExternalCliRun {
         limit: Option<usize>,
     ) -> Result<(), ArkoAgentsError> {
         // ACP reports uncached input separately from cached input. Thought
-        // tokens are part of the output count.
+        // tokens are part of the output count. The counts add up every model
+        // request of the turn, and the conversation's size is the context
+        // agy reported last.
         let input = usage.input_tokens.saturating_add(usage.cached_read_tokens) as usize;
         let output = usage.output_tokens as usize;
-        let mut info =
-            ai::UsageInfo::new(input, output).with_cached_tokens(usage.cached_read_tokens as usize);
+        let mut info = ai::UsageInfo::new(input, output)
+            .with_cached_tokens(usage.cached_read_tokens as usize)
+            .with_context_tokens(self.context_size);
         info.reasoning_tokens = Some(usage.thought_tokens as usize);
         let config = &self.task.agent_config.llm_config;
         let model = &config.model;
@@ -928,10 +1120,8 @@ impl ExternalCliRun {
             output,
             limit.unwrap_or(model.max_input_tokens),
         )
-        .with_plan_usage(self.plan_usage.clone());
-        if let Some((used, size)) = self.context_size.zip(limit.filter(|size| *size > 0)) {
-            call.context_usage_percent = Some(used as f64 / size as f64 * 100.0);
-        }
+        .with_plan_usage(self.plan_usage.clone())
+        .with_context_tokens(self.context_size);
         call.stop_reason = Some(stop.to_string());
         let anchor = self.hand_offs.freeze().unwrap_or_else(Stamp::now);
         self.task.latest_request = crate::task::RequestRecord::Latest(
@@ -944,4 +1134,156 @@ impl ExternalCliRun {
         self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
         self.monitor_cache().await
     }
+}
+
+/// How a new session's first prompt starts, before the record.
+pub(super) const SEED_INTRO: &str = "This conversation goes on in a new session. The record below says what happened so far. Its tool calls already ran, and each result follows its call, so don't run them again to check. Work on the user's new message at the end.";
+
+/// The heading of the record of the conversation so far.
+pub(super) const SEED_RECORD: &str = "# The conversation so far";
+
+/// The heading of what the new session is to work on.
+pub(super) const SEED_NEW: &str = "# The user's new message";
+
+/// The most of a tool's output the record keeps, in characters. The rest
+/// of a longer one is left out from its middle.
+pub(super) const SEED_RESULT_CHARS: usize = 2_000;
+
+/// A new session's first prompt for `messages`, where the last session had
+/// the first `synced`. The record holds the messages up to the later of
+/// `synced` and the model's last message, with each call's result under it
+/// and long outputs cut. The new input (the user's messages after them,
+/// with their images) comes last under a heading of its own. `None` when
+/// the record would be empty.
+pub(super) fn seed(messages: &[ai::Message], synced: usize) -> Option<Vec<ai::Content>> {
+    let after_reply = messages
+        .iter()
+        .rposition(|message| message.role == ai::Role::Assistant)
+        .map_or(0, |last| last + 1);
+    let split = synced.min(messages.len()).max(after_reply);
+    if split == 0 {
+        return None;
+    }
+    let (record, new) = messages.split_at(split);
+    let results: HashMap<&str, &ai::ToolResult> = record
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(ai::Content::as_tool_result)
+        .filter_map(|result| Some((result.call_id.as_deref()?, result)))
+        .collect();
+    let mut text = vec![SEED_INTRO.to_string(), SEED_RECORD.to_string()];
+    for message in record {
+        match message.role {
+            ai::Role::Assistant => {
+                let mut said = vec!["## You".to_string()];
+                said.extend(texts(message));
+                for call in &message.tool_calls {
+                    let result = call.id.as_deref().and_then(|id| results.get(id));
+                    said.push(called(call, result.copied()));
+                }
+                text.push(said.join("\n\n"));
+            }
+            _ => {
+                let said = texts(message);
+                let images = message
+                    .content
+                    .iter()
+                    .filter(|content| content.as_image().is_some())
+                    .count();
+                if said.is_empty() && images == 0 {
+                    // Only tool results, which follow their calls.
+                    continue;
+                }
+                let mut block = vec![if said
+                    .first()
+                    .is_some_and(|first| first.starts_with(CONTEXT_UPDATE))
+                {
+                    "## Context update".to_string()
+                } else {
+                    "## The user".to_string()
+                }];
+                block.extend(said.iter().map(|said| {
+                    said.strip_prefix(CONTEXT_UPDATE)
+                        .map_or(said.as_str(), str::trim_start)
+                        .to_string()
+                }));
+                if images > 0 {
+                    block.push(left_out_images(images));
+                }
+                text.push(block.join("\n\n"));
+            }
+        }
+    }
+    let mut content = vec![ai::Content::Text(text.join("\n\n"))];
+    content.push(ai::Content::Text(SEED_NEW.to_string()));
+    let mut new_input = false;
+    for message in new.iter().filter(|message| message.role == ai::Role::User) {
+        for item in &message.content {
+            match item {
+                ai::Content::Text(said) if !said.trim().is_empty() => {
+                    content.push(item.clone());
+                    new_input |= !said.trim().is_empty();
+                }
+                ai::Content::Image(_) => content.push(item.clone()),
+                _ => {}
+            }
+        }
+    }
+    if !new_input {
+        content.push(ai::Content::Text(CONTINUE.to_string()));
+    }
+    Some(content)
+}
+
+/// The text a message holds, each part with words in it.
+fn texts(message: &ai::Message) -> Vec<String> {
+    message
+        .content
+        .iter()
+        .filter_map(ai::Content::as_text)
+        .map(str::trim)
+        .filter(|said| !said.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A call as the record has it, with its result under it.
+fn called(call: &ai::ToolCall, result: Option<&ai::ToolResult>) -> String {
+    let mut said = format!("Called `{}` with {}", call.name, call.arguments);
+    match result {
+        Some(result) => {
+            said.push_str(if result.is_error {
+                "\nIt failed.\n"
+            } else {
+                "\nIt returned:\n"
+            });
+            said.push_str(&cut_middle(&result.output, SEED_RESULT_CHARS));
+            if !result.images.is_empty() {
+                said.push('\n');
+                said.push_str(&left_out_images(result.images.len()));
+            }
+        }
+        None => said.push_str("\nIts result isn't in the record."),
+    }
+    said
+}
+
+fn left_out_images(count: usize) -> String {
+    match count {
+        1 => "(An image here is left out of the record.)".to_string(),
+        count => format!("({count} images here are left out of the record.)"),
+    }
+}
+
+/// `text` with no more than `most` characters, its middle left out and said
+/// so.
+fn cut_middle(text: &str, most: usize) -> String {
+    let count = text.chars().count();
+    if count <= most {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(most * 3 / 4).collect();
+    let tail: String = text.chars().skip(count - most / 4).collect();
+    let left_out = count - head.chars().count() - tail.chars().count();
+    format!("{head}\n[… {left_out} characters left out …]\n{tail}")
 }

@@ -46,6 +46,12 @@ may fail, initialize, notifications/initialized, tools/list, then
 notifications/roots/list_changed). The model sees `mcp_arko_<tool>` for each
 tool, plus list_resources, read_resource and manage_task.
 
+session/new keeps each session in
+DIR/antigravity-cli/conversations/ID.json, and session/resume (in any process
+with that DIR) opens it again on the default model and level, with the agent
+it started with, or fails with -32603 "Failed to read session ID; retry, or
+load it with session/load", as agy 1.5.14 does.
+
 At the first session/new it reads DIR/config/agents/NAME.md. A missing file, a
 file without frontmatter, frontmatter it can't parse or a `name` other than
 NAME makes agy fall back to its default agent. The line
@@ -70,6 +76,8 @@ these keys.
                            log line ("silent" leaves the line out)
     "signed_out": true     session/new fails with -32000 "Authentication
                            required"
+    "resume": "refuse"     session/resume fails as for a session the profile
+                           doesn't hold
     "version": "1.5.14"    the version, unless FAKE_AGY_VERSION is set
     "version_output": "…"  the whole text `--version` prints
     "tier": "Google AI Pro" the plan session/new reports (null for none)
@@ -149,7 +157,8 @@ notifications/cancelled and its tool_call_update reports "failed".
 Log events (FAKE_AGY_LOG, each line has "event" and "pid")
 
     argv, version, usage_command    a launch and its arguments
-    initialize, session_new, config, prompt   the client's requests
+    initialize, session_new, session_resume, config, prompt   the client's
+                      requests (session_resume_refused for a refusal)
     mcp_started, mcp_discover, mcp_initialize, tools, mcp_message, mcp_exited
     profile           the agent file, system_prompt, mcp_config, tools,
                       visible, default_agent, fallback, hooks and problems
@@ -855,6 +864,7 @@ class Agy:
             handler = {
                 "initialize": self.initialize,
                 "session/new": self.new_session,
+                "session/resume": self.resume_session,
                 "session/set_config_option": self.set_config_option,
                 "session/set_mode": self.set_mode,
                 "session/prompt": self.prompt,
@@ -953,11 +963,56 @@ class Agy:
             self.log_line('W Agent "%s" not found, falling back to default' % self.agent)
         session = Session(str(uuid.uuid4()), params.get("cwd"))
         self.log_line("I session %s created" % session.id)
+        self.open_session(session)
+        stored = self.stored_session(session.id)
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        stored.write_text(json.dumps({"agent": self.agent, "default_agent": self.default_agent,
+                                      "cwd": session.cwd}), encoding="utf-8")
+        self.reply(request_id, self.session_result(session))
+
+    def stored_session(self, session_id):
+        """Where the profile keeps a session, as agy keeps it in conversations/."""
+        return self.gemini_dir / "antigravity-cli" / "conversations" / ("%s.json" % session_id)
+
+    def resume_session(self, request_id, params):
+        log("session_resume", params=params)
+        session_id = str(params.get("sessionId"))
+        stored = self.stored_session(session_id)
+        if self.script.get("resume") == "refuse" or not stored.is_file():
+            log("session_resume_refused", sessionId=session_id)
+            self.error(request_id, -32603,
+                       "Failed to read session %s; retry, or load it with session/load"
+                       % session_id)
+            return
+        if self.script.get("signed_out"):
+            self.error(request_id, -32000, "Authentication required")
+            return
+        if self.profile is None:
+            self.check_profile()
+        if self.profile["problems"]:
+            self.error(request_id, -32603,
+                       "fake agy: profile: %s" % "; ".join(self.profile["problems"]))
+            return
+        # The agent is the one session/new bound, so no fallback shows here.
+        self.default_agent = json.loads(stored.read_text(encoding="utf-8"))["default_agent"]
+        # A resumed session is back on the account's default model and level.
+        session = Session(session_id, params.get("cwd"))
+        self.open_session(session)
+        self.reply(request_id, self.session_result(session))
+        self.update(session, {"sessionUpdate": "available_commands_update",
+                              "availableCommands": COMMANDS})
+        self.update(session, {"sessionUpdate": "session_info_update",
+                              "title": "Fake agy session"})
+
+    def open_session(self, session):
         models = self.script.get("models", MODELS)
         if not self.model(session.model):
             session.model = models[0]["value"]
         self.fit_level(session)
         self.sessions[session.id] = session
+
+    def session_result(self, session):
+        models = self.script.get("models", MODELS)
         available = []
         for model in models:
             if model["levels"]:
@@ -977,7 +1032,7 @@ class Agy:
             result["_meta"] = {"antigravity": {"tier": {
                 "name": tier, "id": "g1-pro-tier",
                 "upgradeUri": "https://antigravity.google/g1-upgrade"}}}
-        self.reply(request_id, result)
+        return result
 
     def model_id(self, session):
         return session.model + ("-" + session.level if session.level else "")
