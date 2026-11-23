@@ -1780,15 +1780,15 @@ fn borrowing_ignores_model_mismatch_self_and_damaged_donors() {
 
     // Rebuilding with target's own path (and symlink on unix) in borrow_caches counts as cached, not borrowed.
     counting.reset();
-    let mut self_donors = vec![target_state.path().to_path_buf()];
     #[cfg(unix)]
-    let _link_dir = {
+    let (_link_dir, self_donors) = {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("self-link");
         std::os::unix::fs::symlink(target_state.path(), &link).unwrap();
-        self_donors.push(link);
-        dir
+        (dir, vec![target_state.path().to_path_buf(), link])
     };
+    #[cfg(not(unix))]
+    let self_donors = vec![target_state.path().to_path_buf()];
     let d2 = index2::build(
         root.path(),
         target_state.path(),
