@@ -170,7 +170,10 @@ struct Run {
 
 impl Run {
     fn start(task: Task) -> Self {
-        let runtime = AgentRuntime::new(Arc::new(LLMClient::new()));
+        Self::with_runtime(task, AgentRuntime::new(Arc::new(LLMClient::new())))
+    }
+
+    fn with_runtime(task: Task, runtime: AgentRuntime) -> Self {
         let (events, commands, handle) = runtime.run_task(
             task,
             Arc::new(ToolRegistry::new()),
@@ -404,37 +407,64 @@ async fn antigravity_asks_without_waiting() {
     );
 }
 
+struct DurableSnapshots(mpsc::UnboundedSender<String>);
+
+#[async_trait::async_trait]
+impl crate::snapshot::TaskSnapshotSink for DurableSnapshots {
+    async fn task_changed(&self, task: &Task, durable: bool) -> Result<(), String> {
+        if durable {
+            self.0.send(serde_json::to_string(task).unwrap()).unwrap();
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test]
-async fn antigravity_puts_a_note_into_the_running_turn() {
-    let fake = Fake::new(json!([[
+async fn antigravity_saves_a_note_before_confirming_it_went_to_the_running_turn() {
+    const NOTE: &str = "A note about the example.";
+    let fake = Fake::new(json!([[]]));
+    let release = fake.dir.join("finish-turn");
+    fake.script(&json!([[
         {"thought": "Waiting for a note.", "usage": {"inputTokens": 200, "outputTokens": 10}},
         {"wait_for": "note"},
+        {"wait_file": release},
         {"text": "Got it.", "usage": {"inputTokens": 150, "outputTokens": 5, "cachedReadTokens": 75}}
     ]]));
-    let mut run = Run::start(fake.task(chat()));
+    let (capture, mut snapshots) = mpsc::unbounded_channel();
+    let runtime = AgentRuntime::new(Arc::new(LLMClient::new()))
+        .with_task_snapshots(Arc::new(DurableSnapshots(capture)));
+    let mut run = Run::with_runtime(fake.task(chat()), runtime);
     run.until(|event| matches!(event, AgentEvent::ReasoningChunk(_)))
         .await;
     run.commands
         .send(UserCommand::InjectContext {
-            content: "A note about the example.".into(),
+            content: NOTE.into(),
         })
         .await
         .unwrap();
-    let (task, events) = run.finish().await;
+    let events = run
+        .until(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::ContextInjected { .. })
+    ));
+    let saved = std::iter::from_fn(|| snapshots.try_recv().ok()).any(|saved| saved.contains(NOTE));
+    assert!(
+        saved,
+        "the note wasn't in a durable snapshot when it was acknowledged"
+    );
+    std::fs::write(release, "finish").unwrap();
+    let (task, _) = run.finish().await;
     assert!(
         matches!(task.current_state, TaskState::Completed { summary } if summary == "Got it."),
         "{}",
         fake.log()
     );
     assert_eq!(task.usage_history.len(), 1);
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::ContextInjected { .. }))
-    );
     assert_eq!(task.usage_history[0].input_tokens, 425);
     assert_eq!(task.usage_history[0].output_tokens, 15);
-    assert!(fake.log().contains("A note about the example."));
+    assert!(fake.log().contains(NOTE));
 }
 
 #[tokio::test]

@@ -16,8 +16,9 @@
 //! which holds the CLI's copy of the conversation, and its next run resumes
 //! the session ([`AntigravitySession`]), also in another process. A new
 //! session starts from a record of the conversation when there is no root,
-//! when the system prompt changed, after a handover, a cut back or a failed
-//! turn, and when the CLI refuses to resume.
+//! when the system prompt changed, after a handover, a cut back or an
+//! interrupted turn, and when the CLI can't read the saved session. The
+//! record leaves out earlier images and shortens long tool outputs.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

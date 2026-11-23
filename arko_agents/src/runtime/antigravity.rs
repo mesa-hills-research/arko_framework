@@ -857,6 +857,9 @@ impl ExternalCliRun {
         {
             return Ok(());
         }
+        // The turn is already pending. Save this note with it before the
+        // model can act on it or the host receives its receipt.
+        self.report(true).await;
         let content = &self
             .task
             .conversation
