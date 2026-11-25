@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.3 (2026-11-18)
+## 0.3.3 (2026-11-25)
 
 ### Borrowed embeddings
 

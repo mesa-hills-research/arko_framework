@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.11.0 (2026-11-18)
+## 0.11.0 (2026-11-25)
 
 ### Waits end for notes and mail
 
