@@ -1,6 +1,6 @@
 [package]
 name = "arko_index"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Indexes source code and searches it by words and by meaning."

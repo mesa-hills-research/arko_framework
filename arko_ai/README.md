@@ -22,7 +22,7 @@ and refusals, token usage and cost.
 
 ```toml
 [dependencies]
-arko_ai = "0.3"
+arko_ai = "0.4"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"    # for consuming response streams
 ```
